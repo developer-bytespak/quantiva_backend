@@ -1,0 +1,4 @@
+q_nest/.env
+q_nest/dist/
+q_python/venv
+q_python/.env
