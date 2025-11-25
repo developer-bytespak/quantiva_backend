@@ -1,0 +1,1 @@
+// jwt.config.ts placeholder

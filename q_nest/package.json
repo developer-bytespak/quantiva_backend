@@ -1,0 +1,9 @@
+{
+  "name": "q_nest",
+  "version": "0.1.0",
+  "scripts": {
+    "start": "node server.js",
+    "start:dev": "node server.js",
+    "dev": "npm run start:dev"
+  }
+}

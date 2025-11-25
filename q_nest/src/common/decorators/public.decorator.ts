@@ -1,0 +1,1 @@
+// public.decorator.ts placeholder

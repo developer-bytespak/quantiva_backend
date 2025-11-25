@@ -1,0 +1,1 @@
+// cors.middleware.ts placeholder
