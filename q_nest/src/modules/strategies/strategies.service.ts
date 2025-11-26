@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { StrategyType, RiskLevel } from '@prisma/client';
 
 @Injectable()
 export class StrategiesService {
@@ -51,14 +52,22 @@ export class StrategiesService {
   async create(data: {
     user_id?: string;
     name?: string;
-    type: string;
+    type: StrategyType;
     description?: string;
-    risk_level: string;
+    risk_level: RiskLevel;
     auto_trade_threshold?: number;
     is_active?: boolean;
   }) {
     return this.prisma.strategies.create({
-      data,
+      data: {
+        user_id: data.user_id,
+        name: data.name,
+        type: data.type,
+        description: data.description,
+        risk_level: data.risk_level,
+        auto_trade_threshold: data.auto_trade_threshold,
+        is_active: data.is_active,
+      },
       include: {
         user: true,
         parameters: true,
@@ -69,7 +78,7 @@ export class StrategiesService {
   async update(id: string, data: {
     name?: string;
     description?: string;
-    risk_level?: string;
+    risk_level?: RiskLevel;
     auto_trade_threshold?: number;
     is_active?: boolean;
   }) {

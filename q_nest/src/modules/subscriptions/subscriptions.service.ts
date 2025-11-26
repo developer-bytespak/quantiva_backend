@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { SubscriptionStatus } from '@prisma/client';
 
 @Injectable()
 export class SubscriptionsService {
@@ -76,13 +77,20 @@ export class SubscriptionsService {
   async createSubscription(data: {
     user_id: string;
     plan_id: string;
-    status?: string;
+    status?: SubscriptionStatus;
     started_at?: Date;
     expires_at?: Date;
     billing_provider?: string;
   }) {
     return this.prisma.user_subscriptions.create({
-      data,
+      data: {
+        user_id: data.user_id,
+        plan_id: data.plan_id,
+        status: data.status,
+        started_at: data.started_at,
+        expires_at: data.expires_at,
+        billing_provider: data.billing_provider,
+      },
       include: {
         user: true,
         plan: true,
@@ -91,7 +99,7 @@ export class SubscriptionsService {
   }
 
   async updateSubscription(id: string, data: {
-    status?: string;
+    status?: SubscriptionStatus;
     expires_at?: Date;
     billing_provider?: string;
   }) {

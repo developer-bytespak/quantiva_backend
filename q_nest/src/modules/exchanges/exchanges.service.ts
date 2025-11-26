@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { ExchangeType, ConnectionStatus } from '@prisma/client';
 
 @Injectable()
 export class ExchangesService {
@@ -18,7 +19,7 @@ export class ExchangesService {
 
   async create(data: {
     name: string;
-    type: string;
+    type: ExchangeType;
     supports_oauth?: boolean;
   }) {
     return this.prisma.exchanges.create({
@@ -28,7 +29,7 @@ export class ExchangesService {
 
   async update(id: string, data: {
     name?: string;
-    type?: string;
+    type?: ExchangeType;
     supports_oauth?: boolean;
   }) {
     return this.prisma.exchanges.update({
@@ -59,10 +60,14 @@ export class ExchangesService {
     oauth_access_token?: string;
     oauth_refresh_token?: string;
     permissions?: any;
-    status?: string;
+    status?: ConnectionStatus;
   }) {
     return this.prisma.user_exchange_connections.create({
-      data,
+      data: {
+        ...data,
+        user_id: data.user_id,
+        exchange_id: data.exchange_id,
+      },
       include: { exchange: true },
     });
   }
@@ -74,7 +79,7 @@ export class ExchangesService {
     oauth_access_token?: string;
     oauth_refresh_token?: string;
     permissions?: any;
-    status?: string;
+    status?: ConnectionStatus;
   }) {
     return this.prisma.user_exchange_connections.update({
       where: { connection_id: id },
