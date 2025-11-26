@@ -1,0 +1,1 @@
+// config.module.ts placeholder
