@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { SignalAction, OrderType } from '@prisma/client';
 
 @Injectable()
 export class SignalsService {
@@ -58,7 +59,7 @@ export class SignalsService {
     asset_id?: string;
     timestamp?: Date;
     final_score?: number;
-    action: string;
+    action: SignalAction;
     confidence?: number;
     sentiment_score?: number;
     trend_score?: number;
@@ -69,7 +70,22 @@ export class SignalsService {
     volatility_score?: number;
   }) {
     return this.prisma.strategy_signals.create({
-      data,
+      data: {
+        strategy_id: data.strategy_id,
+        user_id: data.user_id,
+        asset_id: data.asset_id,
+        timestamp: data.timestamp,
+        final_score: data.final_score,
+        action: data.action,
+        confidence: data.confidence,
+        sentiment_score: data.sentiment_score,
+        trend_score: data.trend_score,
+        fundamental_score: data.fundamental_score,
+        liquidity_score: data.liquidity_score,
+        event_risk_score: data.event_risk_score,
+        macro_score: data.macro_score,
+        volatility_score: data.volatility_score,
+      },
       include: {
         strategy: true,
         user: true,
@@ -80,7 +96,7 @@ export class SignalsService {
 
   async update(id: string, data: {
     final_score?: number;
-    action?: string;
+    action?: SignalAction;
     confidence?: number;
     sentiment_score?: number;
     trend_score?: number;
@@ -110,14 +126,23 @@ export class SignalsService {
     take_profit_1?: number;
     take_profit_2?: number;
     leverage?: number;
-    order_type?: string;
+    order_type?: OrderType;
     time_in_force?: string;
     metadata?: any;
   }) {
     return this.prisma.signal_details.create({
       data: {
         signal_id: signalId,
-        ...data,
+        entry_price: data.entry_price,
+        position_size: data.position_size,
+        position_value: data.position_value,
+        stop_loss: data.stop_loss,
+        take_profit_1: data.take_profit_1,
+        take_profit_2: data.take_profit_2,
+        leverage: data.leverage,
+        order_type: data.order_type,
+        time_in_force: data.time_in_force,
+        metadata: data.metadata,
       },
     });
   }

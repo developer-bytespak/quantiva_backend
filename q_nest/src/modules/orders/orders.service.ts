@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { SignalAction, OrderType, OrderStatus } from '@prisma/client';
 
 @Injectable()
 export class OrdersService {
@@ -40,15 +41,24 @@ export class OrdersService {
   async create(data: {
     portfolio_id: string;
     signal_id?: string;
-    side?: string;
-    order_type?: string;
+    side?: SignalAction;
+    order_type?: OrderType;
     quantity?: number;
     price?: number;
-    status?: string;
+    status?: OrderStatus;
     auto_trade_approved?: boolean;
   }) {
     return this.prisma.orders.create({
-      data,
+      data: {
+        portfolio_id: data.portfolio_id,
+        signal_id: data.signal_id,
+        side: data.side,
+        order_type: data.order_type,
+        quantity: data.quantity,
+        price: data.price,
+        status: data.status,
+        auto_trade_approved: data.auto_trade_approved,
+      },
       include: {
         portfolio: true,
         signal: true,
@@ -57,11 +67,11 @@ export class OrdersService {
   }
 
   async update(id: string, data: {
-    side?: string;
-    order_type?: string;
+    side?: SignalAction;
+    order_type?: OrderType;
     quantity?: number;
     price?: number;
-    status?: string;
+    status?: OrderStatus;
     auto_trade_approved?: boolean;
   }) {
     return this.prisma.orders.update({

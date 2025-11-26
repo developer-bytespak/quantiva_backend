@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { KycStatus } from '@prisma/client';
 
 @Injectable()
 export class KycService {
@@ -39,11 +40,15 @@ export class KycService {
 
   async create(data: {
     user_id: string;
-    status?: string;
+    status?: KycStatus;
     decision_reason?: string;
   }) {
     return this.prisma.kyc_verifications.create({
-      data,
+      data: {
+        user_id: data.user_id,
+        status: data.status,
+        decision_reason: data.decision_reason,
+      },
       include: {
         user: true,
         documents: true,
@@ -53,7 +58,7 @@ export class KycService {
   }
 
   async update(id: string, data: {
-    status?: string;
+    status?: KycStatus;
     decision_reason?: string;
   }) {
     return this.prisma.kyc_verifications.update({

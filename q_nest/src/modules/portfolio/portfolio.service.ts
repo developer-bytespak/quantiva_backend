@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { PortfolioType, PositionSide } from '@prisma/client';
 
 @Injectable()
 export class PortfolioService {
@@ -43,10 +44,14 @@ export class PortfolioService {
   async create(data: {
     user_id: string;
     name?: string;
-    type?: string;
+    type?: PortfolioType;
   }) {
     return this.prisma.portfolios.create({
-      data,
+      data: {
+        user_id: data.user_id,
+        name: data.name,
+        type: data.type,
+      },
       include: {
         user: true,
         positions: true,
@@ -56,7 +61,7 @@ export class PortfolioService {
 
   async update(id: string, data: {
     name?: string;
-    type?: string;
+    type?: PortfolioType;
   }) {
     return this.prisma.portfolios.update({
       where: { portfolio_id: id },
@@ -78,12 +83,19 @@ export class PortfolioService {
     unrealized_pnl?: number;
     realized_pnl?: number;
     leverage?: number;
-    side?: string;
+    side?: PositionSide;
   }) {
     return this.prisma.portfolio_positions.create({
       data: {
         portfolio_id: portfolioId,
-        ...data,
+        asset_id: data.asset_id,
+        quantity: data.quantity,
+        avg_entry_price: data.avg_entry_price,
+        current_price: data.current_price,
+        unrealized_pnl: data.unrealized_pnl,
+        realized_pnl: data.realized_pnl,
+        leverage: data.leverage,
+        side: data.side,
       },
       include: { asset: true },
     });
@@ -96,7 +108,7 @@ export class PortfolioService {
     unrealized_pnl?: number;
     realized_pnl?: number;
     leverage?: number;
-    side?: string;
+    side?: PositionSide;
   }) {
     return this.prisma.portfolio_positions.update({
       where: { position_id: positionId },
