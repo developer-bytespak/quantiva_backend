@@ -1,5 +1,6 @@
 q_nest/.env
 q_nest/dist/
+q_nest/node_modules/
 q_python/venv
 q_python/.venv
 q_python/.env
