@@ -1,0 +1,1 @@
+// aws.config.ts placeholder
