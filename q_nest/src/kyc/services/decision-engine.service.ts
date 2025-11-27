@@ -53,7 +53,10 @@ export class DecisionEngineService {
       };
     }
 
-    if ((verification.liveness_confidence || 0) < this.livenessConfidenceThreshold) {
+    const livenessConfidence = verification.liveness_confidence 
+      ? Number(verification.liveness_confidence) 
+      : 0;
+    if (livenessConfidence < this.livenessConfidenceThreshold) {
       return {
         status: 'review',
         reason: 'Low liveness confidence score',
@@ -61,7 +64,10 @@ export class DecisionEngineService {
     }
 
     // Check face match
-    if ((verification.face_match_score || 0) < this.faceMatchThreshold) {
+    const faceMatchScore = verification.face_match_score 
+      ? Number(verification.face_match_score) 
+      : 0;
+    if (faceMatchScore < this.faceMatchThreshold) {
       return {
         status: 'review',
         reason: 'Face match score below threshold',
@@ -69,7 +75,10 @@ export class DecisionEngineService {
     }
 
     // Check document authenticity
-    if ((verification.doc_authenticity_score || 0) < this.docAuthenticityThreshold) {
+    const docAuthenticityScore = verification.doc_authenticity_score 
+      ? Number(verification.doc_authenticity_score) 
+      : 0;
+    if (docAuthenticityScore < this.docAuthenticityThreshold) {
       return {
         status: 'review',
         reason: 'Document authenticity score below threshold',

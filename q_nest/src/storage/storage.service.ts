@@ -22,7 +22,7 @@ export class StorageService implements IStorageService {
     }
   }
 
-  async saveFile(file: Express.Multer.File | FileLike, subfolder?: string): Promise<string> {
+  async saveFile(file: Express.Multer.File, subfolder?: string): Promise<string> {
     const folder = subfolder ? path.join(this.storageRoot, subfolder) : this.storageRoot;
     await fs.mkdir(folder, { recursive: true });
 
