@@ -4,6 +4,6 @@ import { TokenPayload } from '../../modules/auth/services/token.service';
 export const CurrentUser = createParamDecorator(
   (data: unknown, ctx: ExecutionContext): TokenPayload => {
     const request = ctx.switchToHttp().getRequest();
-    return request.user;
+    return request.user as TokenPayload;
   },
 );

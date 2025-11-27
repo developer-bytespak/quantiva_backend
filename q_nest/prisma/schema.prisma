@@ -154,10 +154,15 @@ model user_settings {
 }
 
 model kyc_verifications {
-  kyc_id          String    @id @default(uuid()) @db.Uuid
-  user_id         String    @db.Uuid
-  status          KycStatus @default(pending)
-  decision_reason String?   @db.Text
+  kyc_id                 String    @id @default(uuid()) @db.Uuid
+  user_id                String    @db.Uuid
+  status                 KycStatus @default(pending)
+  decision_reason        String?   @db.Text
+  liveness_result        String?   @db.VarChar(20)
+  liveness_confidence    Decimal?  @db.Decimal(5, 4)
+  face_match_score       Decimal?  @db.Decimal(5, 4)
+  doc_authenticity_score Decimal?  @db.Decimal(5, 4)
+  mrz_data               Json?     @db.Json
 
   user         users              @relation(fields: [user_id], references: [user_id])
   documents    kyc_documents[]
@@ -168,13 +173,18 @@ model kyc_verifications {
 }
 
 model kyc_documents {
-  document_id    String    @id @default(uuid()) @db.Uuid
-  kyc_id         String    @db.Uuid
-  storage_url    String    @db.Text
-  ocr_name       String?   @db.VarChar(255)
-  ocr_dob        DateTime? @db.Date
-  ocr_confidence Decimal?  @db.Decimal(5, 4)
-  created_at     DateTime  @default(now()) @db.Timestamp(6)
+  document_id        String    @id @default(uuid()) @db.Uuid
+  kyc_id             String    @db.Uuid
+  storage_url        String    @db.Text
+  document_type      String?   @db.VarChar(50)
+  ocr_name           String?   @db.VarChar(255)
+  ocr_dob            DateTime? @db.Date
+  ocr_confidence     Decimal?  @db.Decimal(5, 4)
+  mrz_text           String?   @db.Text
+  authenticity_flags Json?     @db.Json
+  expiration_date    DateTime? @db.Date
+  issuing_country    String?   @db.VarChar(100)
+  created_at         DateTime  @default(now()) @db.Timestamp(6)
 
   kyc_verifications kyc_verifications @relation(fields: [kyc_id], references: [kyc_id])
 
@@ -183,12 +193,16 @@ model kyc_documents {
 }
 
 model kyc_face_matches {
-  match_id   String   @id @default(uuid()) @db.Uuid
-  kyc_id     String   @db.Uuid
-  photo_url  String   @db.Text
-  similarity Decimal? @db.Decimal(5, 4)
-  is_match   Boolean  @default(false)
-  created_at DateTime @default(now()) @db.Timestamp(6)
+  match_id            String   @id @default(uuid()) @db.Uuid
+  kyc_id              String   @db.Uuid
+  photo_url           String   @db.Text
+  similarity          Decimal? @db.Decimal(5, 4)
+  is_match            Boolean  @default(false)
+  liveness_result     String?  @db.VarChar(20)
+  liveness_confidence Decimal? @db.Decimal(5, 4)
+  quality_score       Decimal? @db.Decimal(5, 4)
+  spoof_type          String?  @db.VarChar(50)
+  created_at          DateTime @default(now()) @db.Timestamp(6)
 
   kyc_verifications kyc_verifications @relation(fields: [kyc_id], references: [kyc_id])
 
