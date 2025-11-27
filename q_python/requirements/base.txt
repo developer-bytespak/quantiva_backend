@@ -11,4 +11,7 @@ easyocr>=1.7.0
 deepface>=0.0.79
 # face-recognition>=1.3.0  # Requires dlib which can be difficult to install on Windows
 # MediaPipe for face detection and landmarks
-mediapipe>=0.10.0
+# NOTE: MediaPipe has limited Windows support and may not install on Windows.
+# For Windows, use OpenCV (already included) or DeepFace for face detection instead.
+# Uncomment below for Linux/macOS:
+# mediapipe>=0.10.0
