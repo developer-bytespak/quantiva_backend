@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { KycStatus } from '@prisma/client';
 
 @Injectable()
 export class UsersService {
@@ -26,7 +27,7 @@ export class UsersService {
     username: string;
     password_hash?: string;
     email_verified?: boolean;
-    kyc_status?: string;
+    kyc_status?: KycStatus;
   }) {
     return this.prisma.users.create({
       data,
@@ -38,7 +39,7 @@ export class UsersService {
     username?: string;
     password_hash?: string;
     email_verified?: boolean;
-    kyc_status?: string;
+    kyc_status?: KycStatus;
   }) {
     return this.prisma.users.update({
       where: { user_id: id },
