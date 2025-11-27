@@ -42,8 +42,13 @@ export class TwoFactorService {
 
   async sendCodeByEmail(email: string, code: string): Promise<void> {
     try {
+      const fromEmail = process.env.RESEND_FROM_EMAIL || 'developer@bytesplatform.com';
+      if (!fromEmail) {
+        throw new Error('RESEND_FROM_EMAIL is not set in environment variables');
+      }
+
       await this.resend.emails.send({
-        from: 'noreply@quantiva.com', // Update with your verified domain
+        from: fromEmail, // Update with your verified domain
         to: email,
         subject: 'Your Quantiva 2FA Code',
         html: `
