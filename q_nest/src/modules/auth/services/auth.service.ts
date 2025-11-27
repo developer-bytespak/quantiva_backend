@@ -226,6 +226,28 @@ export class AuthService {
     return { message: 'Logged out successfully' };
   }
 
+  async requestPasswordChangeCode(userId: string) {
+    // Get user
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+
+    // Generate and send 2FA code
+    const code = await this.twoFactorService.generateCode(
+      userId,
+      'password_change',
+    );
+    await this.twoFactorService.sendCodeByEmail(user.email, code);
+
+    return {
+      message: '2FA code sent to your email',
+    };
+  }
+
   async changePassword(userId: string, changePasswordDto: ChangePasswordDto) {
     const { oldPassword, newPassword, twoFactorCode } = changePasswordDto;
 

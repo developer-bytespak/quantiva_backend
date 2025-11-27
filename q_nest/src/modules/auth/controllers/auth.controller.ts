@@ -154,6 +154,13 @@ export class AuthController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Post('request-password-change-code')
+  @HttpCode(HttpStatus.OK)
+  async requestPasswordChangeCode(@CurrentUser() user: TokenPayload) {
+    return this.authService.requestPasswordChangeCode(user.sub);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Post('change-password')
   @HttpCode(HttpStatus.OK)
   async changePassword(
