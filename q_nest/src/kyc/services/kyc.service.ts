@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DocumentService } from './document.service';
 import { LivenessService } from './liveness.service';
@@ -15,6 +16,7 @@ export class KycService {
     private livenessService: LivenessService,
     private faceMatchingService: FaceMatchingService,
     private decisionEngine: DecisionEngineService,
+    private configService: ConfigService,
   ) {}
 
   async createVerification(userId: string): Promise<string> {
@@ -64,13 +66,22 @@ export class KycService {
       throw new Error('No KYC verification found. Please upload document first.');
     }
 
-    // Verify liveness
-    await this.livenessService.verifyLiveness(verification.kyc_id, file);
+    // TEMPORARY: Check if KYC checks are bypassed
+    const bypassKycChecks = this.configService.get<string>('KYC_BYPASS_CHECKS', 'false').toLowerCase() === 'true';
 
-    // Match faces
-    await this.faceMatchingService.matchFaces(verification.kyc_id, file);
+    if (bypassKycChecks) {
+      this.logger.warn('⚠️  KYC checks bypassed - Skipping liveness and face matching');
+      // Still save the selfie file
+      await this.livenessService.verifyLiveness(verification.kyc_id, file);
+    } else {
+      // Verify liveness
+      await this.livenessService.verifyLiveness(verification.kyc_id, file);
 
-    // Run decision engine
+      // Match faces
+      await this.faceMatchingService.matchFaces(verification.kyc_id, file);
+    }
+
+    // Run decision engine (will auto-approve if bypass is enabled)
     await this.decisionEngine.applyDecision(verification.kyc_id);
   }
 

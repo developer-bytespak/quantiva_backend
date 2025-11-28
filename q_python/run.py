@@ -1,4 +1,4 @@
-"""Run helper for the FastAPI app.
+r"""Run helper for the FastAPI app.
 
 Run with:
   python run.py

@@ -40,9 +40,26 @@ export class PythonApiService {
       );
 
       return response.data;
-    } catch (error) {
-      this.logger.error('OCR request failed', error);
-      throw new Error('OCR processing failed');
+    } catch (error: any) {
+      this.logger.error('OCR request failed', {
+        message: error?.message,
+        code: error?.code,
+        response: error?.response?.data,
+        status: error?.response?.status,
+        baseUrl: this.baseUrl,
+      });
+      
+      if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
+        throw new Error(
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+        );
+      }
+      
+      if (error?.response?.data?.detail) {
+        throw new Error(`OCR processing failed: ${error.response.data.detail}`);
+      }
+      
+      throw new Error(`OCR processing failed: ${error?.message || 'Unknown error'}`);
     }
   }
 
@@ -60,9 +77,27 @@ export class PythonApiService {
       );
 
       return response.data;
-    } catch (error) {
-      this.logger.error('Liveness verification failed', error);
-      throw new Error('Liveness verification failed');
+    } catch (error: any) {
+      this.logger.error('Liveness verification failed', {
+        message: error?.message,
+        code: error?.code,
+        response: error?.response?.data,
+        status: error?.response?.status,
+        baseUrl: this.baseUrl,
+      });
+      
+      // Provide more detailed error message
+      if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
+        throw new Error(
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+        );
+      }
+      
+      if (error?.response?.data?.detail) {
+        throw new Error(`Liveness verification failed: ${error.response.data.detail}`);
+      }
+      
+      throw new Error(`Liveness verification failed: ${error?.message || 'Unknown error'}`);
     }
   }
 
@@ -86,9 +121,26 @@ export class PythonApiService {
       );
 
       return response.data;
-    } catch (error) {
-      this.logger.error('Face matching failed', error);
-      throw new Error('Face matching failed');
+    } catch (error: any) {
+      this.logger.error('Face matching failed', {
+        message: error?.message,
+        code: error?.code,
+        response: error?.response?.data,
+        status: error?.response?.status,
+        baseUrl: this.baseUrl,
+      });
+      
+      if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
+        throw new Error(
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+        );
+      }
+      
+      if (error?.response?.data?.detail) {
+        throw new Error(`Face matching failed: ${error.response.data.detail}`);
+      }
+      
+      throw new Error(`Face matching failed: ${error?.message || 'Unknown error'}`);
     }
   }
 
@@ -109,9 +161,26 @@ export class PythonApiService {
       );
 
       return response.data;
-    } catch (error) {
-      this.logger.error('Document authenticity check failed', error);
-      throw new Error('Document authenticity check failed');
+    } catch (error: any) {
+      this.logger.error('Document authenticity check failed', {
+        message: error?.message,
+        code: error?.code,
+        response: error?.response?.data,
+        status: error?.response?.status,
+        baseUrl: this.baseUrl,
+      });
+      
+      if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
+        throw new Error(
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+        );
+      }
+      
+      if (error?.response?.data?.detail) {
+        throw new Error(`Document authenticity check failed: ${error.response.data.detail}`);
+      }
+      
+      throw new Error(`Document authenticity check failed: ${error?.message || 'Unknown error'}`);
     }
   }
 }
