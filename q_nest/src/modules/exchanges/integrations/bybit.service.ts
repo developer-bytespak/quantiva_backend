@@ -1,0 +1,647 @@
+import { Injectable, Logger } from '@nestjs/common';
+import axios, { AxiosInstance } from 'axios';
+import {
+  AccountBalanceDto,
+  AssetBalanceDto,
+  OrderDto,
+  PositionDto,
+  PortfolioDto,
+  TickerPriceDto,
+} from '../dto/binance-data.dto';
+import {
+  BybitApiException,
+  BybitRateLimitException,
+  BybitInvalidApiKeyException,
+} from '../exceptions/bybit.exceptions';
+
+interface BybitAccountInfo {
+  coin: Array<{
+    coin: string;
+    walletBalance: string;
+    availableToWithdraw: string;
+    locked: string;
+  }>;
+}
+
+interface BybitOrder {
+  orderId: string;
+  symbol: string;
+  side: 'Buy' | 'Sell';
+  orderType: string;
+  qty: string;
+  price: string;
+  orderStatus: string;
+  createdTime: string;
+}
+
+interface BybitPosition {
+  symbol: string;
+  side: 'Buy' | 'Sell';
+  size: string;
+  avgPrice: string;
+}
+
+interface BybitTicker {
+  symbol: string;
+  lastPrice: string;
+  prevPrice24h: string;
+  price24hPcnt: string;
+}
+
+@Injectable()
+export class BybitService {
+  private readonly logger = new Logger(BybitService.name);
+  private readonly baseUrl = 'https://api.bybit.com';
+  private readonly apiClient: AxiosInstance;
+  private readonly maxRetries = 3;
+  private readonly retryDelay = 1000; // 1 second base delay
+
+  constructor() {
+    this.apiClient = axios.create({
+      baseURL: this.baseUrl,
+      timeout: 10000,
+    });
+  }
+
+  /**
+   * Creates a signature for Bybit API requests
+   */
+  private createSignature(queryString: string, secret: string): string {
+    const crypto = require('crypto');
+    return crypto.createHmac('sha256', secret).update(queryString).digest('hex');
+  }
+
+  /**
+   * Gets Bybit server time to sync with local time
+   */
+  private async getBybitServerTime(): Promise<number> {
+    try {
+      // Bybit v5 doesn't have a dedicated server time endpoint
+      // We'll use local time but with a larger recvWindow to account for clock drift
+      // Alternatively, we can extract server time from error responses if needed
+      const localTime = Date.now();
+      
+      // Try to get server time from a lightweight public endpoint
+      // If that fails, use local time (the larger recvWindow will help)
+      try {
+        const response = await this.apiClient.get('/v5/market/time');
+        if (response.data?.retCode === 0 && response.data?.result) {
+          const serverTime = response.data.result.timeSecond || response.data.result.time;
+          if (serverTime) {
+            // Convert seconds to milliseconds if needed
+            return typeof serverTime === 'number' 
+              ? (serverTime > 1e12 ? serverTime : serverTime * 1000)
+              : parseInt(String(serverTime), 10) * 1000;
+          }
+        }
+      } catch {
+        // If endpoint doesn't exist or fails, use local time
+      }
+      
+      return localTime;
+    } catch (error) {
+      // Fallback to local time if server time fetch fails
+      this.logger.warn('Failed to fetch Bybit server time, using local time');
+      return Date.now();
+    }
+  }
+
+  /**
+   * Makes a signed request to Bybit API v5 with retry logic
+   */
+  private async makeSignedRequest(
+    endpoint: string,
+    apiKey: string,
+    apiSecret: string,
+    params: Record<string, any> = {},
+    method: 'GET' | 'POST' = 'GET',
+    retryTimestampError: boolean = true,
+  ): Promise<any> {
+    // Use Bybit server time for better synchronization
+    const serverTime = await this.getBybitServerTime();
+    const recvWindow = 60000; // 60 seconds window (increased from default 5 seconds)
+
+    // Build query parameters (apiKey should NOT be in query params for v5)
+    // Filter out any undefined or null values
+    const queryParams: Record<string, string> = {};
+    
+    // Add custom params first
+    Object.keys(params).forEach((key) => {
+      if (params[key] !== undefined && params[key] !== null) {
+        queryParams[key] = String(params[key]);
+      }
+    });
+    
+    // Add required params
+    queryParams.timestamp = serverTime.toString();
+    queryParams.recvWindow = recvWindow.toString();
+
+    // Sort parameters and create query string for signature
+    // Signature is calculated from the sorted query string WITHOUT the sign parameter
+    const sortedKeys = Object.keys(queryParams).sort();
+    const queryStringForSignature = sortedKeys
+      .map((key) => `${key}=${queryParams[key]}`)
+      .join('&');
+
+    // Create signature from the query string (without sign parameter)
+    const signature = this.createSignature(queryStringForSignature, apiSecret);
+    
+    // Append signature to query string
+    const finalQueryString = queryStringForSignature 
+      ? `${queryStringForSignature}&sign=${signature}` 
+      : `sign=${signature}`;
+
+    const url = `${endpoint}?${finalQueryString}`;
+
+    let lastError: any;
+    for (let attempt = 0; attempt < this.maxRetries; attempt++) {
+      try {
+        const config: any = {
+          headers: {
+            'X-BAPI-API-KEY': apiKey,
+            'X-BAPI-TIMESTAMP': serverTime.toString(),
+            'X-BAPI-SIGN': signature,
+            'X-BAPI-RECV-WINDOW': recvWindow.toString(),
+          },
+        };
+
+        let response;
+        if (method === 'POST') {
+          response = await this.apiClient.post(url, {}, config);
+        } else {
+          response = await this.apiClient.get(url, config);
+        }
+
+        // Bybit v5 returns data in result object
+        if (response.data.retCode === 0) {
+          return response.data.result;
+        } else {
+          // Handle Bybit error codes
+          const errorCode = response.data.retCode;
+          const errorMsg = response.data.retMsg || 'Bybit API error';
+
+          if (errorCode === 10003 || errorCode === 10004) {
+            throw new BybitInvalidApiKeyException(errorMsg);
+          }
+
+          if (errorCode === 10006) {
+            throw new BybitRateLimitException(errorMsg);
+          }
+
+          // Handle timestamp synchronization error (10002)
+          if (errorCode === 10002) {
+            if (retryTimestampError && attempt < this.maxRetries - 1) {
+              // Retry with fresh server time (only once to avoid infinite recursion)
+              this.logger.warn('Timestamp synchronization error, retrying with fresh server time');
+              await this.delay(500); // Short delay before retry
+              // Retry with fresh timestamp, but disable further timestamp retries
+              return this.makeSignedRequest(endpoint, apiKey, apiSecret, params, method, false);
+            }
+            throw new BybitApiException(
+              'Timestamp synchronization failed. Please check your system clock.',
+              `BYBIT_${errorCode}`,
+            );
+          }
+
+          // Handle IP whitelist error (10010)
+          if (errorCode === 10010) {
+            throw new BybitApiException(
+              'IP address not whitelisted. Please add your server IP address to your Bybit API key whitelist settings, or remove IP restrictions from your API key.',
+              `BYBIT_${errorCode}`,
+            );
+          }
+
+          throw new BybitApiException(errorMsg, `BYBIT_${errorCode}`);
+        }
+      } catch (error: any) {
+        lastError = error;
+
+        // Re-throw known exceptions
+        if (
+          error instanceof BybitApiException ||
+          error instanceof BybitInvalidApiKeyException ||
+          error instanceof BybitRateLimitException
+        ) {
+          throw error;
+        }
+
+        // Handle rate limiting
+        if (error.response?.status === 429) {
+          const retryAfter = error.response.headers['retry-after'] || 60;
+          this.logger.warn(`Rate limit exceeded, retrying after ${retryAfter} seconds`);
+          await this.delay(retryAfter * 1000);
+          continue;
+        }
+
+        // Exponential backoff for other errors
+        if (attempt < this.maxRetries - 1) {
+          const delay = this.retryDelay * Math.pow(2, attempt);
+          this.logger.warn(`Request failed, retrying in ${delay}ms (attempt ${attempt + 1}/${this.maxRetries})`);
+          await this.delay(delay);
+        }
+      }
+    }
+
+    // If all retries failed
+    if (lastError?.response?.status === 429) {
+      throw new BybitRateLimitException();
+    }
+
+    throw new BybitApiException(
+      lastError?.message || 'Failed to connect to Bybit API',
+    );
+  }
+
+  /**
+   * Makes a public request (no authentication required)
+   */
+  private async makePublicRequest(endpoint: string, params: Record<string, any> = {}): Promise<any> {
+    const queryString = new URLSearchParams(params).toString();
+    const url = queryString ? `${endpoint}?${queryString}` : endpoint;
+
+    try {
+      const response = await this.apiClient.get(url);
+      
+      // Bybit v5 returns data in result object
+      if (response.data.retCode === 0) {
+        return response.data.result;
+      } else {
+        const errorCode = response.data.retCode;
+        const errorMsg = response.data.retMsg || 'Bybit API error';
+        
+        if (errorCode === 10006) {
+          throw new BybitRateLimitException(errorMsg);
+        }
+        
+        throw new BybitApiException(errorMsg, `BYBIT_${errorCode}`);
+      }
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitRateLimitException) {
+        throw error;
+      }
+      if (error.response?.status === 429) {
+        throw new BybitRateLimitException();
+      }
+      throw new BybitApiException(error.message || 'Failed to fetch data from Bybit');
+    }
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Verifies API key by fetching account information
+   */
+  async verifyApiKey(apiKey: string, apiSecret: string): Promise<{
+    valid: boolean;
+    permissions: string[];
+    accountType: string;
+  }> {
+    try {
+      // Use wallet balance endpoint to verify API key
+      const result = await this.makeSignedRequest('/v5/account/wallet-balance', apiKey, apiSecret, {
+        accountType: 'SPOT',
+      });
+      
+      return {
+        valid: true,
+        permissions: ['read'], // Bybit doesn't provide detailed permissions in this endpoint
+        accountType: 'SPOT',
+      };
+    } catch (error: any) {
+      if (error instanceof BybitInvalidApiKeyException || error instanceof BybitApiException) {
+        throw error;
+      }
+      throw new BybitInvalidApiKeyException('Failed to verify API key');
+    }
+  }
+
+  /**
+   * Fetches account info from Bybit (used internally to avoid redundant calls)
+   */
+  async getAccountInfo(apiKey: string, apiSecret: string): Promise<BybitAccountInfo> {
+    const result = await this.makeSignedRequest('/v5/account/wallet-balance', apiKey, apiSecret, {
+      accountType: 'SPOT',
+    });
+    
+    return {
+      coin: result.list?.[0]?.coin || [],
+    };
+  }
+
+  /**
+   * Maps account info to balance DTO (helper to avoid redundant API calls)
+   */
+  mapAccountToBalance(accountInfo: BybitAccountInfo): AccountBalanceDto {
+    const assets: AssetBalanceDto[] = accountInfo.coin
+      .filter((coin) => {
+        const walletBalance = parseFloat(coin.walletBalance || '0');
+        return walletBalance > 0;
+      })
+      .map((coin) => {
+        const free = parseFloat(coin.availableToWithdraw || '0');
+        const locked = parseFloat(coin.locked || '0');
+        const total = parseFloat(coin.walletBalance || '0');
+
+        return {
+          symbol: coin.coin,
+          free: free.toString(),
+          locked: locked.toString(),
+          total: total.toString(),
+        };
+      });
+
+    return {
+      assets,
+      totalValueUSD: 0, // Calculated on frontend with prices
+    };
+  }
+
+  /**
+   * Fetches account balance
+   */
+  async getAccountBalance(apiKey: string, apiSecret: string): Promise<AccountBalanceDto> {
+    try {
+      const accountInfo = await this.getAccountInfo(apiKey, apiSecret);
+      return this.mapAccountToBalance(accountInfo);
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
+        throw error;
+      }
+      throw new BybitApiException('Failed to fetch account balance');
+    }
+  }
+
+  /**
+   * Fetches open orders
+   */
+  async getOpenOrders(apiKey: string, apiSecret: string, symbol?: string): Promise<OrderDto[]> {
+    try {
+      const params: any = {
+        category: 'spot',
+        limit: 50,
+      };
+      
+      if (symbol) {
+        params.symbol = symbol;
+      }
+
+      const result = await this.makeSignedRequest('/v5/order/realtime', apiKey, apiSecret, params);
+      const orders = (result.list || []) as BybitOrder[];
+
+      return orders.map((order) => ({
+        orderId: order.orderId,
+        symbol: order.symbol,
+        side: order.side === 'Buy' ? 'BUY' : 'SELL',
+        type: order.orderType,
+        quantity: parseFloat(order.qty || '0'),
+        price: parseFloat(order.price || '0'),
+        status: order.orderStatus,
+        time: parseInt(order.createdTime || '0', 10),
+      }));
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
+        throw error;
+      }
+      throw new BybitApiException('Failed to fetch open orders');
+    }
+  }
+
+  /**
+   * Fetches current positions from account info (optimized version that reuses account info)
+   */
+  async getPositionsFromAccount(
+    apiKey: string,
+    apiSecret: string,
+    accountInfo: BybitAccountInfo,
+  ): Promise<PositionDto[]> {
+    try {
+      // Get prices for all assets with balances
+      const symbols = accountInfo.coin
+        .filter((c) => parseFloat(c.walletBalance || '0') > 0)
+        .map((c) => `${c.coin}USDT`);
+
+      if (symbols.length === 0) {
+        return [];
+      }
+
+      // Fetch prices for all symbols
+      const prices = await this.getTickerPrices(symbols);
+      const priceMap = new Map(prices.map((p) => [p.symbol.replace('USDT', ''), p.price]));
+
+      const positions: PositionDto[] = accountInfo.coin
+        .filter((coin) => {
+          const total = parseFloat(coin.walletBalance || '0');
+          return total > 0;
+        })
+        .map((coin) => {
+          const quantity = parseFloat(coin.walletBalance || '0');
+          const currentPrice = priceMap.get(coin.coin) || 0;
+          const entryPrice = currentPrice; // Simplified - would need trade history for accurate entry price
+          const unrealizedPnl = (currentPrice - entryPrice) * quantity;
+          const pnlPercent = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
+
+          return {
+            symbol: coin.coin,
+            quantity,
+            entryPrice,
+            currentPrice,
+            unrealizedPnl,
+            pnlPercent,
+          };
+        });
+
+      return positions;
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
+        throw error;
+      }
+      throw new BybitApiException('Failed to fetch positions');
+    }
+  }
+
+  /**
+   * Fetches current positions (spot holdings)
+   */
+  async getPositions(apiKey: string, apiSecret: string): Promise<PositionDto[]> {
+    try {
+      const accountInfo = await this.getAccountInfo(apiKey, apiSecret);
+      return this.getPositionsFromAccount(apiKey, apiSecret, accountInfo);
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
+        throw error;
+      }
+      throw new BybitApiException('Failed to fetch positions');
+    }
+  }
+
+  /**
+   * Calculates portfolio value from positions (pure calculation, no API calls)
+   */
+  calculatePortfolioFromPositions(positions: PositionDto[]): PortfolioDto {
+    let totalValue = 0;
+    let totalCost = 0;
+
+    const assets = positions.map((position) => {
+      const value = position.currentPrice * position.quantity;
+      const cost = position.entryPrice * position.quantity;
+      const pnl = value - cost;
+      const pnlPercent = cost > 0 ? (pnl / cost) * 100 : 0;
+
+      totalValue += value;
+      totalCost += cost;
+
+      return {
+        symbol: position.symbol,
+        quantity: position.quantity,
+        value,
+        cost,
+        pnl,
+        pnlPercent,
+      };
+    });
+
+    const totalPnl = totalValue - totalCost;
+    const pnlPercent = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
+
+    return {
+      totalValue,
+      totalCost,
+      totalPnl,
+      pnlPercent,
+      assets,
+    };
+  }
+
+  /**
+   * Calculates portfolio value from positions (optimized version that reuses account info)
+   */
+  async getPortfolioFromPositions(
+    apiKey: string,
+    apiSecret: string,
+    accountInfo: BybitAccountInfo,
+  ): Promise<PortfolioDto> {
+    try {
+      const positions = await this.getPositionsFromAccount(apiKey, apiSecret, accountInfo);
+      return this.calculatePortfolioFromPositions(positions);
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
+        throw error;
+      }
+      throw new BybitApiException('Failed to calculate portfolio value');
+    }
+  }
+
+  /**
+   * Calculates portfolio value
+   */
+  async getPortfolioValue(apiKey: string, apiSecret: string): Promise<PortfolioDto> {
+    try {
+      const accountInfo = await this.getAccountInfo(apiKey, apiSecret);
+      return this.getPortfolioFromPositions(apiKey, apiSecret, accountInfo);
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
+        throw error;
+      }
+      throw new BybitApiException('Failed to calculate portfolio value');
+    }
+  }
+
+  /**
+   * Fetches real-time ticker prices
+   */
+  async getTickerPrices(symbols: string[]): Promise<TickerPriceDto[]> {
+    try {
+      // Bybit v5 allows fetching multiple tickers
+      const symbolParam = symbols.join(',');
+      const result = await this.makePublicRequest('/v5/market/tickers', {
+        category: 'spot',
+        symbol: symbolParam,
+      });
+
+      const tickers = (result.list || []) as BybitTicker[];
+
+      return tickers.map((ticker) => {
+        const price = parseFloat(String(ticker.lastPrice || '0'));
+        const prevPriceStr = ticker.prevPrice24h 
+          ? String(ticker.prevPrice24h) 
+          : price.toString();
+        const prevPrice = parseFloat(prevPriceStr);
+        const change24h = price - prevPrice;
+        const changePercent24h = prevPrice > 0 ? (change24h / prevPrice) * 100 : 0;
+
+        return {
+          symbol: ticker.symbol,
+          price,
+          change24h,
+          changePercent24h,
+        };
+      });
+    } catch (error: any) {
+      // Fallback: fetch prices one by one if batch fails
+      if (symbols.length === 1) {
+        const result = await this.makePublicRequest('/v5/market/tickers', {
+          category: 'spot',
+          symbol: symbols[0],
+        });
+        
+        const tickers = (result.list || []) as BybitTicker[];
+        if (tickers.length > 0) {
+          const ticker = tickers[0];
+          const price = parseFloat(String(ticker.lastPrice || '0'));
+          const prevPriceStr = ticker.prevPrice24h 
+            ? String(ticker.prevPrice24h) 
+            : price.toString();
+          const prevPrice = parseFloat(prevPriceStr);
+          const change24h = price - prevPrice;
+          const changePercent24h = prevPrice > 0 ? (change24h / prevPrice) * 100 : 0;
+
+          return [{
+            symbol: ticker.symbol,
+            price,
+            change24h,
+            changePercent24h,
+          }];
+        }
+      }
+
+      // For multiple symbols, try individual requests
+      const prices = await Promise.all(
+        symbols.map(async (symbol) => {
+          try {
+            const result = await this.makePublicRequest('/v5/market/tickers', {
+              category: 'spot',
+              symbol,
+            });
+            
+            const tickers = (result.list || []) as BybitTicker[];
+            if (tickers.length > 0) {
+              const ticker = tickers[0];
+              const price = parseFloat(String(ticker.lastPrice || '0'));
+              const prevPriceStr = ticker.prevPrice24h 
+                ? String(ticker.prevPrice24h) 
+                : price.toString();
+              const prevPrice = parseFloat(prevPriceStr);
+              const change24h = price - prevPrice;
+              const changePercent24h = prevPrice > 0 ? (change24h / prevPrice) * 100 : 0;
+
+              return {
+                symbol: ticker.symbol,
+                price,
+                change24h,
+                changePercent24h,
+              };
+            }
+            return null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+
+      return prices.filter((p): p is TickerPriceDto => p !== null);
+    }
+  }
+}
+

@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { ExchangeType, ConnectionStatus } from '@prisma/client';
 import { EncryptionService } from './services/encryption.service';
 import { BinanceService } from './integrations/binance.service';
+import { BybitService } from './integrations/bybit.service';
 import { CacheService } from './services/cache.service';
 import { ConnectionNotFoundException } from './exceptions/binance.exceptions';
 import {
@@ -13,6 +14,9 @@ import {
   TickerPriceDto,
 } from './dto/binance-data.dto';
 
+// Type for exchange services that implement common methods
+type ExchangeService = BinanceService | BybitService;
+
 @Injectable()
 export class ExchangesService {
   private readonly logger = new Logger(ExchangesService.name);
@@ -21,8 +25,25 @@ export class ExchangesService {
     private prisma: PrismaService,
     private encryptionService: EncryptionService,
     private binanceService: BinanceService,
+    private bybitService: BybitService,
     private cacheService: CacheService,
   ) {}
+
+  /**
+   * Gets the appropriate exchange service based on exchange name
+   */
+  private getExchangeService(exchangeName: string): ExchangeService {
+    const normalizedName = exchangeName.toLowerCase();
+    
+    if (normalizedName === 'binance') {
+      return this.binanceService;
+    } else if (normalizedName === 'bybit') {
+      return this.bybitService;
+    } else {
+      this.logger.warn(`Unknown exchange: ${exchangeName}, defaulting to Binance`);
+      return this.binanceService;
+    }
+  }
 
   async findAll() {
     return this.prisma.exchanges.findMany();
@@ -183,7 +204,7 @@ export class ExchangesService {
   }
 
   /**
-   * Verifies a connection by testing the API keys with Binance
+   * Verifies a connection by testing the API keys with the appropriate exchange
    */
   async verifyConnection(connectionId: string): Promise<{
     valid: boolean;
@@ -192,6 +213,7 @@ export class ExchangesService {
   }> {
     const connection = await this.prisma.user_exchange_connections.findUnique({
       where: { connection_id: connectionId },
+      include: { exchange: true },
     });
 
     if (!connection) {
@@ -202,13 +224,20 @@ export class ExchangesService {
       throw new ConnectionNotFoundException('Connection missing API credentials');
     }
 
+    if (!connection.exchange) {
+      throw new ConnectionNotFoundException('Exchange not found for connection');
+    }
+
     try {
       // Decrypt API keys
       const apiKey = this.encryptionService.decryptApiKey(connection.api_key_encrypted);
       const apiSecret = this.encryptionService.decryptApiKey(connection.api_secret_encrypted);
 
-      // Verify with Binance
-      const verification = await this.binanceService.verifyApiKey(apiKey, apiSecret);
+      // Get the appropriate exchange service
+      const exchangeService = this.getExchangeService(connection.exchange.name);
+
+      // Verify with the exchange
+      const verification = await exchangeService.verifyApiKey(apiKey, apiSecret);
 
       // Update connection status and metadata
       await this.prisma.user_exchange_connections.update({
@@ -247,12 +276,13 @@ export class ExchangesService {
   }
 
   /**
-   * Syncs connection data from Binance and caches it
+   * Syncs connection data from the exchange and caches it
    * Optimized to reduce redundant API calls
    */
   async syncConnectionData(connectionId: string): Promise<void> {
     const connection = await this.prisma.user_exchange_connections.findUnique({
       where: { connection_id: connectionId },
+      include: { exchange: true },
     });
 
     if (!connection || connection.status !== ConnectionStatus.active) {
@@ -263,34 +293,60 @@ export class ExchangesService {
       throw new ConnectionNotFoundException('Connection missing API credentials');
     }
 
+    if (!connection.exchange) {
+      throw new ConnectionNotFoundException('Exchange not found for connection');
+    }
+
     // Decrypt API keys
     const apiKey = this.encryptionService.decryptApiKey(connection.api_key_encrypted);
     const apiSecret = this.encryptionService.decryptApiKey(connection.api_secret_encrypted);
 
+    // Get the appropriate exchange service
+    const exchangeName = connection.exchange.name.toLowerCase();
+    const isBinance = exchangeName === 'binance';
+    const isBybit = exchangeName === 'bybit';
+
     try {
-      // OPTIMIZATION: Fetch account info once and reuse it
-      // getPositions and getPortfolioValue both need account info, so fetch it once
-      const accountInfo = await this.binanceService.getAccountInfo(apiKey, apiSecret);
-      
-      // Fetch balance, positions, and orders in parallel
-      // Portfolio depends on positions, so calculate it after
-      const [balance, positions, orders] = await Promise.all([
-        // Balance can be derived from account info
-        Promise.resolve(this.binanceService.mapAccountToBalance(accountInfo)),
-        // Positions uses account info (already fetched)
-        this.binanceService.getPositionsFromAccount(apiKey, apiSecret, accountInfo),
-        // Orders is independent
-        this.binanceService.getOpenOrders(apiKey, apiSecret),
-      ]);
+      let balance: AccountBalanceDto;
+      let positions: PositionDto[];
+      let orders: OrderDto[];
+      let portfolio: PortfolioDto;
 
-      // Portfolio is calculated from positions (no additional API call needed)
-      const portfolio = this.binanceService.calculatePortfolioFromPositions(positions);
+      if (isBinance) {
+        // OPTIMIZATION: Fetch account info once and reuse it
+        const accountInfo = await this.binanceService.getAccountInfo(apiKey, apiSecret);
+        
+        // Fetch balance, positions, and orders in parallel
+        [balance, positions, orders] = await Promise.all([
+          Promise.resolve(this.binanceService.mapAccountToBalance(accountInfo)),
+          this.binanceService.getPositionsFromAccount(apiKey, apiSecret, accountInfo),
+          this.binanceService.getOpenOrders(apiKey, apiSecret),
+        ]);
 
-      // Cache the data
-      this.cacheService.setCached(`binance:${connectionId}:balance`, balance);
-      this.cacheService.setCached(`binance:${connectionId}:positions`, positions);
-      this.cacheService.setCached(`binance:${connectionId}:orders`, orders);
-      this.cacheService.setCached(`binance:${connectionId}:portfolio`, portfolio);
+        // Portfolio is calculated from positions
+        portfolio = this.binanceService.calculatePortfolioFromPositions(positions);
+      } else if (isBybit) {
+        // OPTIMIZATION: Fetch account info once and reuse it
+        const accountInfo = await this.bybitService.getAccountInfo(apiKey, apiSecret);
+        
+        // Fetch balance, positions, and orders in parallel
+        [balance, positions, orders] = await Promise.all([
+          Promise.resolve(this.bybitService.mapAccountToBalance(accountInfo)),
+          this.bybitService.getPositionsFromAccount(apiKey, apiSecret, accountInfo),
+          this.bybitService.getOpenOrders(apiKey, apiSecret),
+        ]);
+
+        // Portfolio is calculated from positions
+        portfolio = this.bybitService.calculatePortfolioFromPositions(positions);
+      } else {
+        throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
+      }
+
+      // Cache the data with exchange-specific keys
+      this.cacheService.setCached(`${exchangeName}:${connectionId}:balance`, balance);
+      this.cacheService.setCached(`${exchangeName}:${connectionId}:positions`, positions);
+      this.cacheService.setCached(`${exchangeName}:${connectionId}:orders`, orders);
+      this.cacheService.setCached(`${exchangeName}:${connectionId}:portfolio`, portfolio);
 
       // Update last_synced_at
       await this.prisma.user_exchange_connections.update({
@@ -312,7 +368,18 @@ export class ExchangesService {
     connectionId: string,
     dataType: 'balance' | 'positions' | 'orders' | 'portfolio',
   ): Promise<AccountBalanceDto | PositionDto[] | OrderDto[] | PortfolioDto> {
-    const cacheKey = `binance:${connectionId}:${dataType}`;
+    // Get connection to determine exchange name
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection || !connection.exchange) {
+      throw new ConnectionNotFoundException('Connection or exchange not found');
+    }
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+    const cacheKey = `${exchangeName}:${connectionId}:${dataType}`;
     
     // Try cache first
     const cached = this.cacheService.getCached(cacheKey);
