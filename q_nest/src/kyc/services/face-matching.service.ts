@@ -1,7 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from '../../storage/storage.service';
 import { PythonApiService } from '../integrations/python-api.service';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 @Injectable()
 export class FaceMatchingService {
@@ -11,6 +14,7 @@ export class FaceMatchingService {
     private prisma: PrismaService,
     private storage: StorageService,
     private pythonApi: PythonApiService,
+    private configService: ConfigService,
   ) {}
 
   async matchFaces(
@@ -24,13 +28,32 @@ export class FaceMatchingService {
     });
 
     if (!document) {
+      this.logger.error(`No document found for KYC verification: ${kycId}`);
       throw new Error('No document found for KYC verification');
     }
+
+    if (!document.storage_url) {
+      this.logger.error(`Document ${document.document_id} has no storage_url`);
+      throw new Error('Document storage URL is missing');
+    }
+
+    this.logger.debug(
+      `Matching faces for KYC ${kycId}, document: ${document.document_id}, storage: ${document.storage_url}`,
+    );
 
     // Read ID photo from storage (assuming document contains photo)
     // For now, we'll use the document image itself
     // In production, you might extract the photo from the document
     const idPhotoBuffer = await this.getDocumentImageBuffer(document.storage_url);
+
+    if (!idPhotoBuffer || idPhotoBuffer.length === 0) {
+      this.logger.error(`ID photo buffer is empty for document: ${document.storage_url}`);
+      throw new Error('Failed to read ID photo from storage');
+    }
+
+    this.logger.debug(
+      `ID photo buffer size: ${idPhotoBuffer.length} bytes, selfie buffer size: ${selfieFile.buffer.length} bytes`,
+    );
 
     // Perform face matching
     const matchResult = await this.pythonApi.matchFaces(
@@ -85,11 +108,37 @@ export class FaceMatchingService {
   }
 
   private async getDocumentImageBuffer(storagePath: string): Promise<Buffer> {
-    const fs = require('fs/promises');
-    const path = require('path');
-    // This is a simplified version - in production, you'd properly read from storage
-    const fullPath = path.join('./storage', storagePath);
-    return fs.readFile(fullPath);
+    // Get storage root from config (same as StorageService uses)
+    const storageRoot = this.configService.get<string>('STORAGE_ROOT', './storage');
+    
+    // Normalize path separators (handle both / and \ for cross-platform compatibility)
+    const normalizedPath = storagePath.replace(/\\/g, '/');
+    const fullPath = path.join(storageRoot, normalizedPath);
+    
+    this.logger.debug(`Reading document from: ${fullPath}`);
+    
+    try {
+      // Check if file exists
+      await fs.access(fullPath);
+      
+      // Read file
+      const buffer = await fs.readFile(fullPath);
+      
+      if (!buffer || buffer.length === 0) {
+        this.logger.error(`File exists but is empty: ${fullPath}`);
+        throw new Error(`Document file is empty: ${storagePath}`);
+      }
+      
+      this.logger.debug(`Successfully read document, size: ${buffer.length} bytes`);
+      return buffer;
+    } catch (error: any) {
+      if (error.code === 'ENOENT') {
+        this.logger.error(`Document file not found: ${fullPath}`);
+        throw new Error(`Document file not found: ${storagePath}`);
+      }
+      this.logger.error(`Failed to read document file: ${fullPath}`, error);
+      throw new Error(`Failed to read document: ${error.message}`);
+    }
   }
 }
 

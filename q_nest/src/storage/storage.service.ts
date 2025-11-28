@@ -23,6 +23,11 @@ export class StorageService implements IStorageService {
   }
 
   async saveFile(file: Express.Multer.File, subfolder?: string): Promise<string> {
+    // Validate file buffer
+    if (!file.buffer || file.buffer.length === 0) {
+      throw new Error(`File buffer is empty for file: ${file.originalname}`);
+    }
+
     const folder = subfolder ? path.join(this.storageRoot, subfolder) : this.storageRoot;
     await fs.mkdir(folder, { recursive: true });
 
@@ -30,9 +35,22 @@ export class StorageService implements IStorageService {
     const fileName = `${uuidv4()}${fileExtension}`;
     const filePath = path.join(folder, fileName);
 
+    // Write file and verify it was written
     await fs.writeFile(filePath, file.buffer);
+    
+    // Verify file was written correctly
+    const stats = await fs.stat(filePath);
+    if (stats.size === 0) {
+      throw new Error(`File was written but is empty: ${filePath}`);
+    }
+    if (stats.size !== file.buffer.length) {
+      throw new Error(
+        `File size mismatch: expected ${file.buffer.length} bytes, got ${stats.size} bytes`,
+      );
+    }
 
-    const relativePath = subfolder ? path.join(subfolder, fileName) : fileName;
+    // Return relative path using forward slashes for consistency (works on all platforms)
+    const relativePath = subfolder ? `${subfolder.replace(/\\/g, '/')}/${fileName}` : fileName;
     return relativePath;
   }
 

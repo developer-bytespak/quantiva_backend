@@ -8,8 +8,22 @@ import {
   Body,
   Param,
   ParseUUIDPipe,
+  BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
+import { memoryStorage } from 'multer';
+
+// Multer configuration for file uploads
+const MAX_FILE_SIZE = parseInt(process.env.KYC_MAX_FILE_SIZE || '10485760', 10); // 10MB default
+
+const fileUploadOptions = {
+  storage: memoryStorage(),
+  limits: {
+    fileSize: MAX_FILE_SIZE,
+  },
+};
 import { KycService } from './services/kyc.service';
 import { ReviewService } from './services/review.service';
 import { UploadDocumentDto } from './dto/upload-document.dto';
@@ -22,20 +36,37 @@ import { TokenPayload } from '../modules/auth/services/token.service';
 @Controller('kyc')
 @UseGuards(JwtAuthGuard)
 export class KycController {
+  private readonly logger = new Logger(KycController.name);
+
   constructor(
     private readonly kycService: KycService,
     private readonly reviewService: ReviewService,
+    private readonly configService: ConfigService,
   ) {}
 
   @Post('documents')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(FileInterceptor('file', fileUploadOptions))
   async uploadDocument(
     @CurrentUser() user: TokenPayload,
     @UploadedFile() file: Express.Multer.File,
     @Body() dto: UploadDocumentDto,
   ) {
+    this.logger.debug(`Upload document request - User: ${user.sub}, File: ${file?.originalname || 'none'}`);
+    
     if (!file) {
-      throw new Error('File is required');
+      this.logger.warn('Upload document: No file provided');
+      throw new BadRequestException('File is required');
+    }
+
+    this.logger.debug(
+      `File received - Name: ${file.originalname}, Size: ${file.size}, Buffer length: ${file.buffer?.length || 0}, MIME: ${file.mimetype}`,
+    );
+
+    if (!file.buffer || file.buffer.length === 0) {
+      this.logger.error(
+        `File buffer is empty - Name: ${file.originalname}, Size: ${file.size}, Buffer: ${file.buffer ? 'exists but empty' : 'null'}`,
+      );
+      throw new BadRequestException('File buffer is empty. Please ensure the file was uploaded correctly.');
     }
 
     const documentId = await this.kycService.uploadDocument(user.sub, file, dto.document_type);
@@ -48,13 +79,27 @@ export class KycController {
   }
 
   @Post('selfie')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(FileInterceptor('file', fileUploadOptions))
   async uploadSelfie(
     @CurrentUser() user: TokenPayload,
     @UploadedFile() file: Express.Multer.File,
   ) {
+    this.logger.debug(`Upload selfie request - User: ${user.sub}, File: ${file?.originalname || 'none'}`);
+    
     if (!file) {
-      throw new Error('File is required');
+      this.logger.warn('Upload selfie: No file provided');
+      throw new BadRequestException('File is required');
+    }
+
+    this.logger.debug(
+      `File received - Name: ${file.originalname}, Size: ${file.size}, Buffer length: ${file.buffer?.length || 0}, MIME: ${file.mimetype}`,
+    );
+
+    if (!file.buffer || file.buffer.length === 0) {
+      this.logger.error(
+        `File buffer is empty - Name: ${file.originalname}, Size: ${file.size}, Buffer: ${file.buffer ? 'exists but empty' : 'null'}`,
+      );
+      throw new BadRequestException('File buffer is empty. Please ensure the file was uploaded correctly.');
     }
 
     await this.kycService.uploadSelfie(user.sub, file);

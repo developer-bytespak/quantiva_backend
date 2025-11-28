@@ -1,13 +1,15 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { KycStatus } from '@prisma/client';
 
 @Injectable()
 export class DecisionEngineService {
+  private readonly logger = new Logger(DecisionEngineService.name);
   private readonly faceMatchThreshold: number;
   private readonly livenessConfidenceThreshold: number;
   private readonly docAuthenticityThreshold: number;
+  private readonly bypassKycChecks: boolean;
 
   constructor(
     private prisma: PrismaService,
@@ -22,9 +24,24 @@ export class DecisionEngineService {
       'KYC_DOC_AUTHENTICITY_THRESHOLD',
       0.75,
     );
+    // TEMPORARY: Bypass KYC checks - set KYC_BYPASS_CHECKS=true to enable
+    this.bypassKycChecks = this.configService.get<string>('KYC_BYPASS_CHECKS', 'false').toLowerCase() === 'true';
+    
+    if (this.bypassKycChecks) {
+      this.logger.warn('⚠️  KYC CHECKS ARE BYPASSED - All verifications will be auto-approved');
+    }
   }
 
   async makeDecision(kycId: string): Promise<{ status: KycStatus; reason?: string }> {
+    // TEMPORARY: Bypass all checks and auto-approve
+    if (this.bypassKycChecks) {
+      this.logger.warn(`KYC bypass enabled - Auto-approving verification ${kycId}`);
+      return {
+        status: 'approved',
+        reason: 'KYC checks bypassed (temporary mode)',
+      };
+    }
+
     const verification = await this.prisma.kyc_verifications.findUnique({
       where: { kyc_id: kycId },
       include: {
