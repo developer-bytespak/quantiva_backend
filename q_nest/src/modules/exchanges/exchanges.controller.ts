@@ -20,13 +20,14 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
 import { CreateConnectionDto } from './dto/create-connection.dto';
 import { BinanceService } from './integrations/binance.service';
+import { BybitService } from './integrations/bybit.service';
 import { CacheService } from './services/cache.service';
 import { ExchangeType } from '@prisma/client';
 
 /**
  * Exchanges Controller
  * 
- * Handles exchange connections and Binance API integration.
+ * Handles exchange connections and exchange API integration (Binance, Bybit).
  * All endpoints require JWT authentication.
  * 
  * @api {post} /exchanges/connections Create Exchange Connection
@@ -44,6 +45,7 @@ export class ExchangesController {
   constructor(
     private readonly exchangesService: ExchangesService,
     private readonly binanceService: BinanceService,
+    private readonly bybitService: BybitService,
     private readonly cacheService: CacheService,
   ) {}
 
@@ -206,7 +208,14 @@ export class ExchangesController {
   @Get('connections/:connectionId/balance')
   @UseGuards(ConnectionOwnerGuard)
   async getBalance(@Param('connectionId') connectionId: string) {
-    const cacheKey = `binance:${connectionId}:balance`;
+    // Get connection to determine exchange name for cache key
+    const connection = await this.exchangesService.getConnectionById(connectionId);
+    if (!connection || !connection.exchange) {
+      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    }
+    
+    const exchangeName = connection.exchange.name.toLowerCase();
+    const cacheKey = `${exchangeName}:${connectionId}:balance`;
     const cached = this.cacheService.getCached(cacheKey);
     
     if (cached) {
@@ -230,7 +239,14 @@ export class ExchangesController {
   @Get('connections/:connectionId/positions')
   @UseGuards(ConnectionOwnerGuard)
   async getPositions(@Param('connectionId') connectionId: string) {
-    const cacheKey = `binance:${connectionId}:positions`;
+    // Get connection to determine exchange name for cache key
+    const connection = await this.exchangesService.getConnectionById(connectionId);
+    if (!connection || !connection.exchange) {
+      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    }
+    
+    const exchangeName = connection.exchange.name.toLowerCase();
+    const cacheKey = `${exchangeName}:${connectionId}:positions`;
     const cached = this.cacheService.getCached(cacheKey);
     
     if (cached) {
@@ -258,7 +274,14 @@ export class ExchangesController {
     @Query('status') status?: string,
     @Query('limit') limit?: string,
   ) {
-    const cacheKey = `binance:${connectionId}:orders`;
+    // Get connection to determine exchange name for cache key
+    const connection = await this.exchangesService.getConnectionById(connectionId);
+    if (!connection || !connection.exchange) {
+      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    }
+    
+    const exchangeName = connection.exchange.name.toLowerCase();
+    const cacheKey = `${exchangeName}:${connectionId}:orders`;
     const cached = this.cacheService.getCached(cacheKey);
     
     if (cached && (!status || status === 'open')) {
@@ -298,7 +321,14 @@ export class ExchangesController {
   @Get('connections/:connectionId/portfolio')
   @UseGuards(ConnectionOwnerGuard)
   async getPortfolio(@Param('connectionId') connectionId: string) {
-    const cacheKey = `binance:${connectionId}:portfolio`;
+    // Get connection to determine exchange name for cache key
+    const connection = await this.exchangesService.getConnectionById(connectionId);
+    if (!connection || !connection.exchange) {
+      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    }
+    
+    const exchangeName = connection.exchange.name.toLowerCase();
+    const cacheKey = `${exchangeName}:${connectionId}:portfolio`;
     const cached = this.cacheService.getCached(cacheKey);
     
     if (cached) {
@@ -325,8 +355,24 @@ export class ExchangesController {
     @Param('connectionId') connectionId: string,
     @Param('symbol') symbol: string,
   ) {
+    // Get connection to determine which exchange service to use
+    const connection = await this.exchangesService.getConnectionById(connectionId);
+    if (!connection || !connection.exchange) {
+      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    }
+
     // Ticker prices are public, no need for API keys
-    const prices = await this.binanceService.getTickerPrices([symbol]);
+    // Route to the correct exchange service
+    const exchangeName = connection.exchange.name.toLowerCase();
+    let prices;
+    
+    if (exchangeName === 'bybit') {
+      prices = await this.bybitService.getTickerPrices([symbol]);
+    } else {
+      // Default to Binance
+      prices = await this.binanceService.getTickerPrices([symbol]);
+    }
+    
     const price = prices[0] || null;
 
     return {
@@ -346,6 +392,12 @@ export class ExchangesController {
   @Get('connections/:connectionId/dashboard')
   @UseGuards(ConnectionOwnerGuard)
   async getDashboard(@Param('connectionId') connectionId: string) {
+    // Get connection to determine exchange
+    const connection = await this.exchangesService.getConnectionById(connectionId);
+    if (!connection || !connection.exchange) {
+      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    }
+
     // Sync all data if cache is empty
     await this.exchangesService.syncConnectionData(connectionId);
 
