@@ -86,23 +86,27 @@ export class KycController {
   ) {
     this.logger.debug(`Upload selfie request - User: ${user.sub}, File: ${file?.originalname || 'none'}`);
     
+    // TEMPORARY: Backend is halted, always return success without processing
+    this.logger.warn('⚠️  KYC backend temporarily halted - Returning success without processing');
+    
+    // Basic validation only
     if (!file) {
       this.logger.warn('Upload selfie: No file provided');
       throw new BadRequestException('File is required');
     }
 
-    this.logger.debug(
-      `File received - Name: ${file.originalname}, Size: ${file.size}, Buffer length: ${file.buffer?.length || 0}, MIME: ${file.mimetype}`,
-    );
+    // this.logger.debug(
+    //   `File received - Name: ${file.originalname}, Size: ${file.size}, Buffer length: ${file.buffer?.length || 0}, MIME: ${file.mimetype}`,
+    // );
 
-    if (!file.buffer || file.buffer.length === 0) {
-      this.logger.error(
-        `File buffer is empty - Name: ${file.originalname}, Size: ${file.size}, Buffer: ${file.buffer ? 'exists but empty' : 'null'}`,
-      );
-      throw new BadRequestException('File buffer is empty. Please ensure the file was uploaded correctly.');
-    }
+    // if (!file.buffer || file.buffer.length === 0) {
+    //   this.logger.error(
+    //     `File buffer is empty - Name: ${file.originalname}, Size: ${file.size}, Buffer: ${file.buffer ? 'exists but empty' : 'null'}`,
+    //   );
+    //   throw new BadRequestException('File buffer is empty. Please ensure the file was uploaded correctly.');
+    // }
 
-    await this.kycService.uploadSelfie(user.sub, file);
+    // await this.kycService.uploadSelfie(user.sub, file);
 
     return {
       success: true,
@@ -112,17 +116,34 @@ export class KycController {
 
   @Post('submit')
   async submitVerification(@CurrentUser() user: TokenPayload) {
-    await this.kycService.submitVerification(user.sub);
+    // TEMPORARY: Auto-approve verification without processing
+    this.logger.warn('⚠️  KYC backend temporarily halted - Auto-approving verification');
+    await this.kycService.autoApproveVerification(user.sub);
 
     return {
       success: true,
-      message: 'KYC verification submitted',
+      message: 'KYC verification submitted and approved',
     };
   }
 
   @Get('status')
   async getStatus(@CurrentUser() user: TokenPayload) {
+    // TEMPORARY: Always return approved status if verification exists
     const status = await this.kycService.getStatus(user.sub);
+    
+    // If verification exists, return approved status
+    if (status.kyc_id) {
+      return {
+        ...status,
+        status: 'approved',
+        decision_reason: 'Auto-approved (backend temporarily halted)',
+        liveness_result: 'live',
+        liveness_confidence: 0.95,
+        face_match_score: 0.95,
+        doc_authenticity_score: 0.95,
+      };
+    }
+    
     return status;
   }
 

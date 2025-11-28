@@ -102,6 +102,47 @@ export class SessionService {
     });
   }
 
+  async revokeSessionByRefreshToken(refreshToken: string): Promise<boolean> {
+    const session = await this.findSessionByRefreshToken(refreshToken);
+    if (session) {
+      await this.revokeSession(session.session_id);
+      return true;
+    }
+    return false;
+  }
+
+  async revokeCurrentUserSession(
+    userId: string,
+    refreshToken?: string,
+  ): Promise<void> {
+    // First try to revoke by refresh token if provided
+    if (refreshToken) {
+      const revoked = await this.revokeSessionByRefreshToken(refreshToken);
+      if (revoked) {
+        return;
+      }
+    }
+
+    // Fallback: revoke the most recent active session for this user
+    const now = new Date();
+    const activeSession = await this.prisma.user_sessions.findFirst({
+      where: {
+        user_id: userId,
+        revoked: false,
+        expires_at: {
+          gt: now,
+        },
+      },
+      orderBy: {
+        issued_at: 'desc',
+      },
+    });
+
+    if (activeSession) {
+      await this.revokeSession(activeSession.session_id);
+    }
+  }
+
   async findSessionByRefreshToken(
     refreshToken: string,
   ): Promise<{ session_id: string; user_id: string } | null> {
