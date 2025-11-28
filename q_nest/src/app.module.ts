@@ -4,9 +4,10 @@ import { ConfigModule } from './config/config.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { KycModule } from './kyc/kyc.module';
 import { ExchangesModule } from './modules/exchanges/exchanges.module';
+import { UsersModule } from './modules/users/users.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, AuthModule, KycModule, ExchangesModule],
+  imports: [ConfigModule, PrismaModule, AuthModule, KycModule, ExchangesModule, UsersModule],
   controllers: [],
   providers: [],
 })

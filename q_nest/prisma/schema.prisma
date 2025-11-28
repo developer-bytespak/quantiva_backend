@@ -92,6 +92,11 @@ model users {
   kyc_status         KycStatus @default(pending)
   two_factor_enabled Boolean   @default(true)
   two_factor_secret  String?   @db.VarChar(255)
+  full_name          String?   @db.VarChar(120)
+  dob                DateTime? @db.Date
+  nationality        String?   @db.VarChar(100)
+  gender             String?   @db.VarChar(50)
+  phone_number       String?   @db.VarChar(20)
   created_at         DateTime  @default(now()) @db.Timestamp(6)
   updated_at         DateTime? @updatedAt @db.Timestamp(6)
 
