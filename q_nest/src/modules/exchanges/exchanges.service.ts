@@ -80,20 +80,20 @@ export class ExchangesService {
       this.logger.debug(`Fetching active connection for user: ${userId}`);
       
       // First, find the connection without include to avoid potential relation issues
-      const connection = await this.prisma.user_exchange_connections.findFirst({
-        where: {
-          user_id: userId,
-          status: ConnectionStatus.active,
-        },
-        orderBy: {
-          created_at: 'desc', // Get most recent active connection
-        },
-      });
+    const connection = await this.prisma.user_exchange_connections.findFirst({
+      where: {
+        user_id: userId,
+        status: ConnectionStatus.active,
+      },
+      orderBy: {
+        created_at: 'desc', // Get most recent active connection
+      },
+    });
 
-      if (!connection) {
+    if (!connection) {
         this.logger.warn(`No active connection found for user: ${userId}`);
-        throw new ConnectionNotFoundException('No active connection found');
-      }
+      throw new ConnectionNotFoundException('No active connection found');
+    }
 
       this.logger.debug(`Found connection: ${connection.connection_id}, Exchange ID: ${connection.exchange_id}`);
 
@@ -114,8 +114,8 @@ export class ExchangesService {
       this.logger.debug(`Found exchange: ${exchange.name} (${exchange.exchange_id})`);
       
       // Return the data in a clean format with proper serialization
-      return {
-        connection_id: connection.connection_id,
+    return {
+      connection_id: connection.connection_id,
         exchange: {
           exchange_id: exchange.exchange_id,
           name: exchange.name,
@@ -123,8 +123,8 @@ export class ExchangesService {
           supports_oauth: exchange.supports_oauth,
           created_at: exchange.created_at?.toISOString() || null,
         },
-        status: connection.status,
-      };
+      status: connection.status,
+    };
     } catch (error: any) {
       // Re-throw known exceptions
       if (error instanceof ConnectionNotFoundException) {
