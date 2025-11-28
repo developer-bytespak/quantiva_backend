@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { KycStatus } from '@prisma/client';
+import { UpdatePersonalInfoDto } from './dto/update-personal-info.dto';
 
 @Injectable()
 export class UsersService {
@@ -50,6 +51,34 @@ export class UsersService {
   async delete(id: string) {
     return this.prisma.users.delete({
       where: { user_id: id },
+    });
+  }
+
+  async updatePersonalInfo(userId: string, data: UpdatePersonalInfoDto) {
+    // Convert dob string to Date object
+    const dobDate = data.dob ? new Date(data.dob) : null;
+
+    return this.prisma.users.update({
+      where: { user_id: userId },
+      data: {
+        full_name: data.fullName,
+        dob: dobDate,
+        nationality: data.nationality,
+        gender: data.gender,
+        phone_number: data.phoneNumber,
+      },
+      select: {
+        user_id: true,
+        email: true,
+        username: true,
+        full_name: true,
+        dob: true,
+        nationality: true,
+        gender: true,
+        phone_number: true,
+        created_at: true,
+        updated_at: true,
+      },
     });
   }
 }

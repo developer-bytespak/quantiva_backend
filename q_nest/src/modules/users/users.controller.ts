@@ -1,5 +1,9 @@
-import { Controller, Get, Post, Put, Delete, Body, Param } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Patch, Body, Param, UseGuards, HttpCode, HttpStatus, HttpException } from '@nestjs/common';
 import { UsersService } from './users.service';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { TokenPayload } from '../auth/services/token.service';
+import { UpdatePersonalInfoDto } from './dto/update-personal-info.dto';
 
 @Controller('users')
 export class UsersController {
@@ -28,6 +32,21 @@ export class UsersController {
   @Delete(':id')
   remove(@Param('id') id: string) {
     return this.usersService.delete(id);
+  }
+
+  @Patch(':id/personal-info')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async updatePersonalInfo(
+    @Param('id') id: string,
+    @Body() updatePersonalInfoDto: UpdatePersonalInfoDto,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    // Ensure user can only update their own personal info
+    if (user.sub !== id) {
+      throw new HttpException('Unauthorized: You can only update your own personal information', HttpStatus.FORBIDDEN);
+    }
+    return this.usersService.updatePersonalInfo(id, updatePersonalInfoDto);
   }
 }
 
