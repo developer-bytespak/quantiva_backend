@@ -7,6 +7,7 @@ import kycConfig from './kyc.config';
   imports: [
     NestConfigModule.forRoot({
       isGlobal: true,
+      envFilePath: '.env',
       load: [jwtConfig, kycConfig],
     }),
   ],

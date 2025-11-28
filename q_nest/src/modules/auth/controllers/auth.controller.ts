@@ -40,25 +40,39 @@ export class AuthController {
     const jwtConfig = this.configService.get('jwt');
     const isProduction = jwtConfig.isProduction;
 
-    res.cookie(name, value, {
+    // For localhost development, use 'lax' sameSite and don't set domain
+    // For production, use 'strict' and set domain if configured
+    const cookieOptions: any = {
       httpOnly: true,
       secure: isProduction,
-      sameSite: 'strict',
+      sameSite: isProduction ? 'strict' : 'lax', // Use 'lax' for localhost development
       maxAge: maxAge * 1000, // Convert to milliseconds
       path: '/',
-      domain: jwtConfig.cookieDomain,
-    });
+    };
+
+    // Only set domain in production if configured
+    if (isProduction && jwtConfig.cookieDomain) {
+      cookieOptions.domain = jwtConfig.cookieDomain;
+    }
+
+    res.cookie(name, value, cookieOptions);
   }
 
   private clearCookie(res: Response, name: string) {
     const jwtConfig = this.configService.get('jwt');
-    res.clearCookie(name, {
+    const cookieOptions: any = {
       httpOnly: true,
       secure: jwtConfig.isProduction,
-      sameSite: 'strict',
+      sameSite: jwtConfig.isProduction ? 'strict' : 'lax',
       path: '/',
-      domain: jwtConfig.cookieDomain,
-    });
+    };
+
+    // Only set domain in production if configured
+    if (jwtConfig.isProduction && jwtConfig.cookieDomain) {
+      cookieOptions.domain = jwtConfig.cookieDomain;
+    }
+
+    res.clearCookie(name, cookieOptions);
   }
 
   @Public()
@@ -138,15 +152,19 @@ export class AuthController {
   ) {
     const refreshToken = req.cookies?.refresh_token;
     
-    if (refreshToken) {
-      // Find session by refresh token and revoke it
-      const session = await this.sessionService.findSessionByRefreshToken(refreshToken);
-      if (session) {
-        await this.sessionService.revokeSession(session.session_id);
-      }
+    // Revoke the current session using user ID from JWT token
+    // This ensures the session is revoked even if refresh token is missing or invalid
+    try {
+      await this.sessionService.revokeCurrentUserSession(
+        user.sub,
+        refreshToken,
+      );
+    } catch (error) {
+      // Log error but continue with logout to clear cookies
+      console.error('Error revoking session during logout:', error);
     }
 
-    // Clear cookies
+    // Clear cookies - always clear even if session revocation failed
     this.clearCookie(res, 'access_token');
     this.clearCookie(res, 'refresh_token');
 
