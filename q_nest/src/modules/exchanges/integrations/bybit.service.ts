@@ -64,11 +64,19 @@ export class BybitService {
   }
 
   /**
-   * Creates a signature for Bybit API requests
+   * Creates a signature for Bybit API requests v5
+   * Format: sha256(timestamp + apiKey + recvWindow + queryString/body)
    */
-  private createSignature(queryString: string, secret: string): string {
+  private createSignature(
+    timestamp: number,
+    apiKey: string,
+    recvWindow: number,
+    queryOrBody: string,
+    secret: string,
+  ): string {
     const crypto = require('crypto');
-    return crypto.createHmac('sha256', secret).update(queryString).digest('hex');
+    const preSign = `${timestamp}${apiKey}${recvWindow}${queryOrBody}`;
+    return crypto.createHmac('sha256', secret).update(preSign).digest('hex');
   }
 
   /**
@@ -119,56 +127,64 @@ export class BybitService {
   ): Promise<any> {
     // Use Bybit server time for better synchronization
     const serverTime = await this.getBybitServerTime();
-    const recvWindow = 60000; // 60 seconds window (increased from default 5 seconds)
+    const recvWindow = 60000; // 60 seconds window
 
-    // Build query parameters (apiKey should NOT be in query params for v5)
     // Filter out any undefined or null values
-    const queryParams: Record<string, string> = {};
-    
-    // Add custom params first
+    const cleanParams: Record<string, string> = {};
     Object.keys(params).forEach((key) => {
       if (params[key] !== undefined && params[key] !== null) {
-        queryParams[key] = String(params[key]);
+        cleanParams[key] = String(params[key]);
       }
     });
-    
-    // Add required params
-    queryParams.timestamp = serverTime.toString();
-    queryParams.recvWindow = recvWindow.toString();
 
-    // Sort parameters and create query string for signature
-    // Signature is calculated from the sorted query string WITHOUT the sign parameter
-    const sortedKeys = Object.keys(queryParams).sort();
-    const queryStringForSignature = sortedKeys
-      .map((key) => `${key}=${queryParams[key]}`)
-      .join('&');
+    let queryOrBody: string;
+    let url: string;
 
-    // Create signature from the query string (without sign parameter)
-    const signature = this.createSignature(queryStringForSignature, apiSecret);
-    
-    // Append signature to query string
-    const finalQueryString = queryStringForSignature 
-      ? `${queryStringForSignature}&sign=${signature}` 
-      : `sign=${signature}`;
+    if (method === 'GET') {
+      // For GET: sort params alphabetically and create query string
+      const sortedKeys = Object.keys(cleanParams).sort();
+      queryOrBody = sortedKeys
+        .map((key) => `${key}=${cleanParams[key]}`)
+        .join('&');
+      url = queryOrBody ? `${endpoint}?${queryOrBody}` : endpoint;
+    } else {
+      // For POST: use JSON body
+      queryOrBody = JSON.stringify(cleanParams);
+      url = endpoint;
+    }
 
-    const url = `${endpoint}?${finalQueryString}`;
+    // Create signature: timestamp + apiKey + recvWindow + queryOrBody
+    const signature = this.createSignature(
+      serverTime,
+      apiKey,
+      recvWindow,
+      queryOrBody,
+      apiSecret,
+    );
+
+    // Build headers - Bybit v5 requires signature ONLY in headers
+    const headers: Record<string, string> = {
+      'X-BAPI-API-KEY': apiKey,
+      'X-BAPI-SIGN': signature,
+      'X-BAPI-SIGN-TYPE': '2',
+      'X-BAPI-TIMESTAMP': serverTime.toString(),
+      'X-BAPI-RECV-WINDOW': recvWindow.toString(),
+      'Content-Type': 'application/json',
+    };
 
     let lastError: any;
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
       try {
         const config: any = {
-          headers: {
-            'X-BAPI-API-KEY': apiKey,
-            'X-BAPI-TIMESTAMP': serverTime.toString(),
-            'X-BAPI-SIGN': signature,
-            'X-BAPI-RECV-WINDOW': recvWindow.toString(),
-          },
+          headers,
         };
 
         let response;
         if (method === 'POST') {
-          response = await this.apiClient.post(url, {}, config);
+          // POST: send params in body, not query
+          response = await this.apiClient.post(url, cleanParams, config);
         } else {
+          // GET: params are already in URL
           response = await this.apiClient.get(url, config);
         }
 
@@ -180,21 +196,21 @@ export class BybitService {
           const errorCode = response.data.retCode;
           const errorMsg = response.data.retMsg || 'Bybit API error';
 
-          if (errorCode === 10003 || errorCode === 10004) {
+          // Invalid API key codes
+          if (errorCode === 10003 || errorCode === 10004 || errorCode === 110001 || errorCode === 110003) {
             throw new BybitInvalidApiKeyException(errorMsg);
           }
 
-          if (errorCode === 10006) {
+          // Rate limit
+          if (errorCode === 10006 || errorCode === 10015) {
             throw new BybitRateLimitException(errorMsg);
           }
 
-          // Handle timestamp synchronization error (10002)
-          if (errorCode === 10002) {
+          // Timestamp sync error (110004)
+          if (errorCode === 10002 || errorCode === 110004) {
             if (retryTimestampError && attempt < this.maxRetries - 1) {
-              // Retry with fresh server time (only once to avoid infinite recursion)
               this.logger.warn('Timestamp synchronization error, retrying with fresh server time');
-              await this.delay(500); // Short delay before retry
-              // Retry with fresh timestamp, but disable further timestamp retries
+              await this.delay(500);
               return this.makeSignedRequest(endpoint, apiKey, apiSecret, params, method, false);
             }
             throw new BybitApiException(
@@ -203,7 +219,7 @@ export class BybitService {
             );
           }
 
-          // Handle IP whitelist error (10010)
+          // IP whitelist error
           if (errorCode === 10010) {
             throw new BybitApiException(
               'IP address not whitelisted. Please add your server IP address to your Bybit API key whitelist settings, or remove IP restrictions from your API key.',
@@ -299,15 +315,13 @@ export class BybitService {
     accountType: string;
   }> {
     try {
-      // Use wallet balance endpoint to verify API key
-      const result = await this.makeSignedRequest('/v5/account/wallet-balance', apiKey, apiSecret, {
-        accountType: 'SPOT',
-      });
+      // Use /v5/user/query-api for better API key verification
+      await this.makeSignedRequest('/v5/user/query-api', apiKey, apiSecret);
       
       return {
         valid: true,
         permissions: ['read'], // Bybit doesn't provide detailed permissions in this endpoint
-        accountType: 'SPOT',
+        accountType: 'UNIFIED',
       };
     } catch (error: any) {
       if (error instanceof BybitInvalidApiKeyException || error instanceof BybitApiException) {
@@ -322,7 +336,7 @@ export class BybitService {
    */
   async getAccountInfo(apiKey: string, apiSecret: string): Promise<BybitAccountInfo> {
     const result = await this.makeSignedRequest('/v5/account/wallet-balance', apiKey, apiSecret, {
-      accountType: 'SPOT',
+      accountType: 'UNIFIED',
     });
     
     return {

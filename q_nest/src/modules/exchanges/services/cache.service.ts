@@ -13,9 +13,10 @@ export class CacheService {
   private readonly defaultTtl: number;
 
   constructor(private configService: ConfigService) {
-    // Default TTL: 8 seconds (configurable via environment)
+    // Default TTL: 30 seconds (configurable via environment)
+    // Increased from 8s to reduce API calls and prevent rate limiting
     this.defaultTtl = parseInt(
-      this.configService.get<string>('BINANCE_CACHE_TTL', '8000'),
+      this.configService.get<string>('BINANCE_CACHE_TTL', '30000'),
       10,
     );
     this.logger.log(`Cache service initialized with TTL: ${this.defaultTtl}ms`);
