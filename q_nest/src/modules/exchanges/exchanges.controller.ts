@@ -398,8 +398,16 @@ export class ExchangesController {
       throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
     }
 
-    // Sync all data if cache is empty
-    await this.exchangesService.syncConnectionData(connectionId);
+    const exchangeName = connection.exchange.name.toLowerCase();
+    
+    // OPTIMIZATION: Check if all data is cached before syncing
+    // This prevents unnecessary API calls to external exchanges
+    const isCached = this.exchangesService.isDashboardDataCached(connectionId, exchangeName);
+    
+    // Only sync if cache is missing (saves external API calls)
+    if (!isCached) {
+      await this.exchangesService.syncConnectionData(connectionId);
+    }
 
     const [balance, positions, orders, portfolio] = await Promise.all([
       this.exchangesService.getConnectionData(connectionId, 'balance'),
@@ -431,7 +439,7 @@ export class ExchangesController {
         prices,
       },
       last_updated: new Date().toISOString(),
-      cached: false,
+      cached: isCached, // Indicate if data came from cache
     };
   }
 }

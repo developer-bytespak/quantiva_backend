@@ -362,6 +362,17 @@ export class ExchangesService {
   }
 
   /**
+   * Checks if all dashboard data is cached (optimization to avoid unnecessary syncs)
+   */
+  isDashboardDataCached(connectionId: string, exchangeName: string): boolean {
+    const requiredKeys = ['balance', 'positions', 'orders', 'portfolio'];
+    return requiredKeys.every((dataType) => {
+      const cacheKey = `${exchangeName}:${connectionId}:${dataType}`;
+      return this.cacheService.getCached(cacheKey) !== null;
+    });
+  }
+
+  /**
    * Gets connection data (from cache or fresh fetch)
    */
   async getConnectionData(
