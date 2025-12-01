@@ -7,6 +7,7 @@ from typing import Dict, Optional
 from PIL import Image
 import easyocr
 import numpy as np
+import cv2
 from logging import getLogger
 
 from src.utils.image_utils import preprocess_image, validate_image
@@ -60,9 +61,20 @@ def extract_text(image: Image.Image, document_type: Optional[str] = None) -> Dic
         # Preprocess image
         img_array = preprocess_image(image, enhance=True)
         
+        # Ensure image is in uint8 format for EasyOCR
+        if img_array.dtype != np.uint8:
+            img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+        
+        # EasyOCR expects BGR format (OpenCV format), but we have RGB
+        # Convert RGB to BGR for EasyOCR
+        if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+            img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        else:
+            img_bgr = img_array
+        
         # Perform OCR
         reader = get_ocr_reader()
-        results = reader.readtext(img_array)
+        results = reader.readtext(img_bgr)
         
         # Extract raw text and calculate average confidence
         raw_text_parts = []
