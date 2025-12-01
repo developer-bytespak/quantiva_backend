@@ -59,10 +59,21 @@ def preprocess_image(image: Image.Image, enhance: bool = True) -> np.ndarray:
         enhance: Whether to apply enhancement
         
     Returns:
-        NumPy array of processed image
+        NumPy array of processed image in uint8 format
     """
-    # Convert PIL to OpenCV format (BGR)
+    # Convert PIL to numpy array
     img_array = np.array(image)
+    
+    # Ensure uint8 format
+    if img_array.dtype != np.uint8:
+        # Normalize to 0-255 range if needed
+        if img_array.dtype == np.float64 or img_array.dtype == np.float32:
+            if img_array.max() <= 1.0:
+                img_array = (img_array * 255).astype(np.uint8)
+            else:
+                img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+        else:
+            img_array = img_array.astype(np.uint8)
     
     if image.mode == 'RGBA':
         # Convert RGBA to RGB
@@ -74,6 +85,10 @@ def preprocess_image(image: Image.Image, enhance: bool = True) -> np.ndarray:
         # Apply basic enhancements
         img_array = enhance_image(img_array)
     
+    # Ensure final output is uint8
+    if img_array.dtype != np.uint8:
+        img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+    
     return img_array
 
 
@@ -82,11 +97,15 @@ def enhance_image(img_array: np.ndarray) -> np.ndarray:
     Enhance image quality (brightness, contrast, sharpness).
     
     Args:
-        img_array: NumPy array of image
+        img_array: NumPy array of image (uint8 format)
         
     Returns:
-        Enhanced image array
+        Enhanced image array in uint8 format
     """
+    # Ensure input is uint8
+    if img_array.dtype != np.uint8:
+        img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+    
     # Convert to LAB color space for better enhancement
     lab = cv2.cvtColor(img_array, cv2.COLOR_RGB2LAB)
     l, a, b = cv2.split(lab)
@@ -99,11 +118,13 @@ def enhance_image(img_array: np.ndarray) -> np.ndarray:
     enhanced = cv2.merge([l, a, b])
     enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2RGB)
     
-    # Apply slight sharpening
+    # Apply slight sharpening (ensure uint8 operations)
     kernel = np.array([[-1, -1, -1],
                        [-1,  9, -1],
-                       [-1, -1, -1]])
-    enhanced = cv2.filter2D(enhanced, -1, kernel * 0.1) + enhanced * 0.9
+                       [-1, -1, -1]], dtype=np.float32)
+    # Use float32 for calculation, then convert back to uint8
+    enhanced_float = cv2.filter2D(enhanced.astype(np.float32), -1, kernel * 0.1) + enhanced.astype(np.float32) * 0.9
+    enhanced = np.clip(enhanced_float, 0, 255).astype(np.uint8)
     
     return enhanced
 

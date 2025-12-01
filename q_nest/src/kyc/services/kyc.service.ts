@@ -2,7 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DocumentService } from './document.service';
-import { LivenessService } from './liveness.service';
 import { FaceMatchingService } from './face-matching.service';
 import { DecisionEngineService } from './decision-engine.service';
 
@@ -13,7 +12,6 @@ export class KycService {
   constructor(
     private prisma: PrismaService,
     private documentService: DocumentService,
-    private livenessService: LivenessService,
     private faceMatchingService: FaceMatchingService,
     private decisionEngine: DecisionEngineService,
     private configService: ConfigService,
@@ -66,23 +64,23 @@ export class KycService {
       throw new Error('No KYC verification found. Please upload document first.');
     }
 
-    // TEMPORARY: Check if KYC checks are bypassed
-    const bypassKycChecks = this.configService.get<string>('KYC_BYPASS_CHECKS', 'false').toLowerCase() === 'true';
-
-    if (bypassKycChecks) {
-      this.logger.warn('⚠️  KYC checks bypassed - Skipping liveness and face matching');
-      // Still save the selfie file
-      await this.livenessService.verifyLiveness(verification.kyc_id, file);
-    } else {
-      // Verify liveness
-      await this.livenessService.verifyLiveness(verification.kyc_id, file);
-
-      // Match faces
+    try {
+      // Match faces using Python API (liveness detection removed)
       await this.faceMatchingService.matchFaces(verification.kyc_id, file);
-    }
 
-    // Run decision engine (will auto-approve if bypass is enabled)
-    await this.decisionEngine.applyDecision(verification.kyc_id);
+      // Run decision engine to evaluate verification
+      await this.decisionEngine.applyDecision(verification.kyc_id);
+    } catch (error: any) {
+      this.logger.error('KYC verification step failed', {
+        kycId: verification.kyc_id,
+        error: error?.message,
+        stack: error?.stack,
+      });
+      // Re-throw with more context
+      throw new Error(
+        `KYC verification failed: ${error?.message || 'Unknown error'}. Please check that your images are clear and contain visible faces.`,
+      );
+    }
   }
 
   async submitVerification(userId: string): Promise<void> {
@@ -95,9 +93,8 @@ export class KycService {
       throw new Error('No KYC verification found');
     }
 
-    // TEMPORARY: Auto-approve without running decision engine
-    this.logger.warn(`⚠️  Auto-approving KYC verification ${verification.kyc_id} (backend temporarily halted)`);
-    await this.autoApproveVerification(userId);
+    // Run decision engine to evaluate verification based on all checks
+    await this.decisionEngine.applyDecision(verification.kyc_id);
   }
 
   async autoApproveVerification(userId: string): Promise<void> {
