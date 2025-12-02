@@ -2,6 +2,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from src.api.v1.kyc import router as kyc_router
+from src.api.v1.strategies import router as strategies_router
+from src.api.v1.signals import router as signals_router
+from src.api.v1.macro import router as macro_router
 
 app = FastAPI(title="Quantiva Python API", version="1.0.0")
 
@@ -16,6 +19,9 @@ app.add_middleware(
 
 # Include routers
 app.include_router(kyc_router, prefix="/api/v1")
+app.include_router(strategies_router, prefix="/api/v1")
+app.include_router(signals_router, prefix="/api/v1")
+app.include_router(macro_router, prefix="/api/v1")
 
 @app.get('/')
 def read_root():

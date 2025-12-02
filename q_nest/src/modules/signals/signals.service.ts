@@ -1,10 +1,16 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SignalAction, OrderType } from '@prisma/client';
+import { PythonApiService } from '../../kyc/integrations/python-api.service';
 
 @Injectable()
 export class SignalsService {
-  constructor(private prisma: PrismaService) {}
+  private readonly logger = new Logger(SignalsService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private pythonApi: PythonApiService,
+  ) {}
 
   async findAll() {
     return this.prisma.strategy_signals.findMany({
@@ -157,6 +163,64 @@ export class SignalsService {
         ...data,
       },
     });
+  }
+
+  async generateSignalFromPython(
+    strategyId: string,
+    assetId: string,
+    strategyData: any,
+    marketData: any,
+    ohlcvData?: any,
+    orderBook?: any,
+    portfolioValue?: number,
+  ) {
+    try {
+      // Call Python API to generate signal
+      const pythonSignal = await this.pythonApi.generateSignal(strategyId, assetId, {
+        strategy_data: strategyData,
+        market_data: marketData,
+        ohlcv_data: ohlcvData,
+        order_book: orderBook,
+        portfolio_value: portfolioValue,
+      });
+
+      // Store signal in database
+      const signal = await this.create({
+        strategy_id: strategyId,
+        user_id: strategyData.user_id,
+        asset_id: assetId,
+        timestamp: new Date(),
+        final_score: pythonSignal.final_score,
+        action: pythonSignal.action as SignalAction,
+        confidence: pythonSignal.confidence,
+        sentiment_score: pythonSignal.engine_scores?.sentiment || 0,
+        trend_score: pythonSignal.engine_scores?.trend || 0,
+        fundamental_score: pythonSignal.engine_scores?.fundamental || 0,
+        liquidity_score: pythonSignal.engine_scores?.liquidity || 0,
+        event_risk_score: pythonSignal.engine_scores?.event_risk || 0,
+      });
+
+      // Store signal details if position sizing is available
+      if (pythonSignal.position_sizing) {
+        await this.createDetail(signal.signal_id, {
+          entry_price: marketData.price,
+          position_size: pythonSignal.position_sizing.position_size,
+          position_value: pythonSignal.position_sizing.position_size * marketData.price,
+          stop_loss: strategyData.stop_loss_value
+            ? marketData.price * (1 - strategyData.stop_loss_value / 100)
+            : undefined,
+          take_profit_1: strategyData.take_profit_value
+            ? marketData.price * (1 + strategyData.take_profit_value / 100)
+            : undefined,
+          metadata: pythonSignal.metadata,
+        });
+      }
+
+      return signal;
+    } catch (error: any) {
+      this.logger.error(`Error generating signal: ${error.message}`);
+      throw error;
+    }
   }
 }
 

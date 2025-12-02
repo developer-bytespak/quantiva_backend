@@ -23,7 +23,7 @@ import { PythonApiService } from './integrations/python-api.service';
     ReviewService,
     PythonApiService,
   ],
-  exports: [KycService],
+  exports: [KycService, PythonApiService],
 })
 export class KycModule {}
 

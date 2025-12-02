@@ -82,6 +82,13 @@ enum SubscriptionStatus {
   expired
 }
 
+enum JobStatus {
+  pending
+  running
+  completed
+  failed
+}
+
 // Models
 model users {
   user_id            String    @id @default(uuid()) @db.Uuid
@@ -384,14 +391,26 @@ model strategies {
   risk_level           RiskLevel
   auto_trade_threshold Decimal?     @db.Decimal(5, 4)
   is_active            Boolean      @default(true)
+  timeframe            String?      @db.VarChar(20)
+  entry_rules          Json?
+  exit_rules           Json?
+  indicators           Json?
+  stop_loss_type       String?      @db.VarChar(20)
+  stop_loss_value      Decimal?     @db.Decimal(10, 4)
+  take_profit_type     String?      @db.VarChar(20)
+  take_profit_value    Decimal?     @db.Decimal(10, 4)
+  schedule_cron        String?      @db.VarChar(100)
+  target_assets        Json?
   created_at           DateTime     @default(now()) @db.Timestamp(6)
   updated_at           DateTime?    @db.Timestamp(6)
 
-  user       users?                @relation(fields: [user_id], references: [user_id])
-  parameters strategy_parameters[]
-  signals    strategy_signals[]
+  user           users?                    @relation(fields: [user_id], references: [user_id])
+  parameters     strategy_parameters[]
+  signals        strategy_signals[]
+  execution_jobs strategy_execution_jobs[]
 
   @@index([user_id])
+  @@index([is_active])
   @@map("strategies")
 }
 
@@ -709,4 +728,21 @@ model user_subscriptions {
   @@index([user_id])
   @@index([plan_id])
   @@map("user_subscriptions")
+}
+
+model strategy_execution_jobs {
+  job_id        String    @id @default(uuid()) @db.Uuid
+  strategy_id   String    @db.Uuid
+  status        JobStatus @default(pending)
+  scheduled_at  DateTime  @db.Timestamp(6)
+  started_at    DateTime? @db.Timestamp(6)
+  completed_at  DateTime? @db.Timestamp(6)
+  error_message String?   @db.Text
+
+  strategy strategies @relation(fields: [strategy_id], references: [strategy_id])
+
+  @@index([strategy_id])
+  @@index([status])
+  @@index([scheduled_at])
+  @@map("strategy_execution_jobs")
 }
