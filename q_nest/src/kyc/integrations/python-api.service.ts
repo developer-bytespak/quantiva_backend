@@ -183,5 +183,67 @@ export class PythonApiService {
       throw new Error(`Document authenticity check failed: ${error?.message || 'Unknown error'}`);
     }
   }
+
+  // Strategy and Signal Generation Methods
+
+  async validateStrategy(strategyRules: any): Promise<{ valid: boolean; errors: string[] }> {
+    try {
+      const response = await this.axiosInstance.post<{ valid: boolean; errors: string[] }>(
+        '/api/v1/strategies/validate',
+        strategyRules,
+      );
+      return response.data;
+    } catch (error: any) {
+      this.logger.error('Strategy validation request failed', {
+        message: error?.message,
+        response: error?.response?.data,
+        status: error?.response?.status,
+      });
+      throw error;
+    }
+  }
+
+  async parseStrategy(strategyRules: any): Promise<any> {
+    try {
+      const response = await this.axiosInstance.post('/api/v1/strategies/parse', strategyRules);
+      return response.data;
+    } catch (error: any) {
+      this.logger.error('Strategy parsing request failed', {
+        message: error?.message,
+        response: error?.response?.data,
+        status: error?.response?.status,
+      });
+      throw error;
+    }
+  }
+
+  async generateSignal(
+    strategyId: string,
+    assetId: string,
+    requestData: {
+      strategy_data: any;
+      market_data: any;
+      ohlcv_data?: any;
+      order_book?: any;
+      portfolio_value?: number;
+    },
+  ): Promise<any> {
+    try {
+      const response = await this.axiosInstance.post('/api/v1/signals/generate', {
+        strategy_id: strategyId,
+        asset_id: assetId,
+        asset_type: requestData.market_data?.asset_type || 'crypto',
+        ...requestData,
+      });
+      return response.data;
+    } catch (error: any) {
+      this.logger.error('Signal generation request failed', {
+        message: error?.message,
+        response: error?.response?.data,
+        status: error?.response?.status,
+      });
+      throw error;
+    }
+  }
 }
 

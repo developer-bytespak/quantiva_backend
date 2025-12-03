@@ -1,5 +1,6 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, Query } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode, HttpStatus } from '@nestjs/common';
 import { StrategiesService } from './strategies.service';
+import { CreateStrategyDto, ValidateStrategyDto } from './dto/create-strategy.dto';
 
 @Controller('strategies')
 export class StrategiesController {
@@ -24,6 +25,33 @@ export class StrategiesController {
   @Post()
   create(@Body() createStrategyDto: any) {
     return this.strategiesService.create(createStrategyDto);
+  }
+
+  @Post('custom')
+  @HttpCode(HttpStatus.CREATED)
+  createCustom(@Body() createStrategyDto: CreateStrategyDto) {
+    return this.strategiesService.createCustomStrategy(createStrategyDto);
+  }
+
+  @Post('validate')
+  @HttpCode(HttpStatus.OK)
+  validate(@Body() validateStrategyDto: ValidateStrategyDto) {
+    return this.strategiesService.validateStrategy(validateStrategyDto);
+  }
+
+  @Get(':id/rules')
+  getRules(@Param('id') id: string) {
+    return this.strategiesService.findOne(id).then((strategy) => {
+      if (!strategy) {
+        return null;
+      }
+      return {
+        entry_rules: strategy.entry_rules,
+        exit_rules: strategy.exit_rules,
+        indicators: strategy.indicators,
+        timeframe: strategy.timeframe,
+      };
+    });
   }
 
   @Put(':id')

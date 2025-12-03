@@ -3,7 +3,11 @@ uvicorn[standard]>=0.23.0
 python-multipart>=0.0.6
 Pillow>=10.0.0
 numpy>=1.24.0
+pandas>=2.0.0
+pandas-ta>=0.3.14b0
 opencv-python>=4.8.0
+requests>=2.31.0
+fredapi>=0.5.1
 # OCR libraries (choose one or both)
 easyocr>=1.7.0
 # pytesseract>=0.3.10  # Requires Tesseract OCR to be installed on system
