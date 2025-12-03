@@ -245,5 +245,14 @@ export class PythonApiService {
       throw error;
     }
   }
+
+  // Public helper methods to allow other services to make HTTP calls
+  public async post<T = any>(path: string, data?: any, config?: any) {
+    return this.axiosInstance.post<T>(path, data, config);
+  }
+
+  public async get<T = any>(path: string, config?: any) {
+    return this.axiosInstance.get<T>(path, config);
+  }
 }
 

@@ -136,8 +136,8 @@ export class StrategiesService {
     return strategy;
   }
 
-  async validateStrategy(dto: CreateStrategyDto) {
-    return this.validationService.validateStrategy(dto);
+  async validateStrategy(dto: CreateStrategyDto | import('./dto/create-strategy.dto').ValidateStrategyDto) {
+    return this.validationService.validateStrategy(dto as any);
   }
 
   async parseStrategyRules(dto: CreateStrategyDto) {
