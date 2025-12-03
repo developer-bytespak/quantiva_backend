@@ -17,8 +17,8 @@ export class MacroService {
    */
   async fetchAndStoreMacroData(): Promise<void> {
     try {
-      // Call Python API to fetch FRED data
-      const response = await this.pythonApi.axiosInstance.post('/api/v1/macro/fetch-all');
+      // Call Python API to fetch FRED data via PythonApiService helper
+      const response = await this.pythonApi.post('/api/v1/macro/fetch-all');
       const indicators = response.data;
 
       // Store each indicator
