@@ -9,6 +9,7 @@ from ..engines.technical_engine import TechnicalEngine
 from ..engines.fundamental_engine import FundamentalEngine
 from ..engines.liquidity_engine import LiquidityEngine
 from ..engines.event_risk_engine import EventRiskEngine
+from ..engines.sentiment_engine import SentimentEngine
 from ..engines.fusion_engine import FusionEngine
 from ..engines.confidence_engine import ConfidenceEngine
 from .custom_strategy_parser import CustomStrategyParser
@@ -31,6 +32,7 @@ class SignalGenerator:
         self.fundamental_engine = FundamentalEngine()
         self.liquidity_engine = LiquidityEngine()
         self.event_risk_engine = EventRiskEngine()
+        self.sentiment_engine = SentimentEngine()
         self.fusion_engine = FusionEngine()
         self.confidence_engine = ConfidenceEngine()
         
@@ -114,6 +116,17 @@ class SignalGenerator:
             )
             engine_scores['event_risk'] = event_risk_result
             
+            # Sentiment Engine
+            # Extract text_data from kwargs if provided
+            text_data = kwargs.get('text_data', None)
+            sentiment_result = self.sentiment_engine.calculate(
+                asset_id=asset_id,
+                asset_type=asset_type,
+                timeframe=timeframe,
+                text_data=text_data
+            )
+            engine_scores['sentiment'] = sentiment_result
+            
             # Fusion Engine (combines all scores)
             fusion_result = self.fusion_engine.calculate(
                 asset_id=asset_id,
@@ -144,10 +157,13 @@ class SignalGenerator:
             # Calculate confidence and position sizing
             confidence_result = None
             if portfolio_value:
+                # Get actual sentiment confidence
+                sentiment_confidence = engine_scores.get('sentiment', {}).get('confidence', 0.5)
+                
                 confidence_result = self.confidence_engine.calculate(
                     asset_id=asset_id,
                     asset_type=asset_type,
-                    sentiment_confidence=0.5,  # Placeholder until Engine 1 is implemented
+                    sentiment_confidence=sentiment_confidence,
                     trend_strength=abs(engine_scores['trend'].get('score', 0.0)),
                     data_freshness=1.0,  # TODO: Calculate from data timestamps
                     diversification_weight=1.0,  # TODO: Calculate from portfolio
@@ -167,7 +183,7 @@ class SignalGenerator:
                 'action': execution_result.get('signal', 'HOLD'),
                 'confidence': fusion_result.get('confidence', 0.0),
                 'engine_scores': {
-                    'sentiment': 0.0,  # Engine 1 not implemented
+                    'sentiment': engine_scores.get('sentiment', {}).get('score', 0.0),
                     'trend': engine_scores['trend'].get('score', 0.0),
                     'fundamental': engine_scores['fundamental'].get('score', 0.0),
                     'liquidity': engine_scores['liquidity'].get('score', 0.0),

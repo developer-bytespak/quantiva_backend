@@ -19,3 +19,12 @@ deepface>=0.0.79
 # For Windows, use OpenCV (already included) or DeepFace for face detection instead.
 # Uncomment below for Linux/macOS:
 # mediapipe>=0.10.0
+
+# FinGPT Model Dependencies
+transformers>=4.32.0
+peft>=0.5.0
+torch>=2.0.0
+accelerate>=0.20.0
+sentencepiece>=0.1.99
+huggingface-hub>=0.16.0
+python-dotenv>=1.0.0

@@ -1,0 +1,603 @@
+[
+  {
+    "id": 1,
+    "text": "Bitcoin reaches new all-time high as institutional investors pour billions into cryptocurrency market",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 2,
+    "text": "Stock market crashes 5% following disappointing quarterly earnings reports from major tech companies",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 3,
+    "text": "Federal Reserve announces interest rate cut, sparking optimism in financial markets",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 4,
+    "text": "Ethereum network upgrade successfully completed, transaction fees drop significantly",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 5,
+    "text": "Apple stock surges 8% after announcing record-breaking iPhone sales and strong Q4 earnings",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 6,
+    "text": "Major bank reports massive data breach affecting millions of customers, stock price plummets",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 7,
+    "text": "Tesla announces new Gigafactory expansion plans, shares jump 12% in after-hours trading",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 8,
+    "text": "Cryptocurrency market remains stable with minimal volatility throughout the trading day",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 9,
+    "text": "Oil prices spike 15% following supply disruptions in Middle East, energy stocks rally",
+    "source": "news",
+    "category": "commodities"
+  },
+  {
+    "id": 10,
+    "text": "Amazon reports weaker-than-expected cloud revenue growth, stock drops 7%",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 11,
+    "text": "Gold prices reach new highs as investors seek safe haven assets amid economic uncertainty",
+    "source": "news",
+    "category": "commodities"
+  },
+  {
+    "id": 12,
+    "text": "Binance exchange faces regulatory scrutiny, cryptocurrency trading volumes decline",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 13,
+    "text": "Microsoft beats earnings expectations with strong Azure cloud performance, shares up 5%",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 14,
+    "text": "DeFi protocol suffers major hack, losing $50 million in user funds, token price crashes 40%",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 15,
+    "text": "Unemployment rate drops to record low, signaling strong labor market recovery",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 16,
+    "text": "NVIDIA stock soars 20% after announcing breakthrough AI chip technology",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 17,
+    "text": "Bitcoin mining difficulty increases, network security strengthens but profitability declines",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 18,
+    "text": "Major pharmaceutical company receives FDA approval for new drug, stock jumps 15%",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 19,
+    "text": "Central banks worldwide coordinate to stabilize currency markets, dollar strengthens",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 20,
+    "text": "Solana blockchain experiences network outage, token price drops 10%",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 21,
+    "text": "Retail giant reports strong holiday sales, beats revenue forecasts by 12%",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 22,
+    "text": "Inflation data comes in lower than expected, bond yields fall, stocks rally",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 23,
+    "text": "Cardano announces major partnership with African governments for blockchain adoption",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 24,
+    "text": "Airline stocks plummet after major safety incident, industry faces regulatory review",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 25,
+    "text": "Renewable energy stocks surge as governments announce new green energy initiatives",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 26,
+    "text": "Stablecoin issuer faces liquidity crisis, causing panic in cryptocurrency markets",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 27,
+    "text": "Tech sector shows mixed results with some companies thriving while others struggle",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 28,
+    "text": "Bitcoin ETF approval rumors circulate, causing increased trading volume and price volatility",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 29,
+    "text": "Manufacturing sector reports strong growth, industrial stocks gain momentum",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 30,
+    "text": "Cryptocurrency exchange launches new trading features, user base grows 30%",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 31,
+    "text": "Major bank announces massive layoffs, cost-cutting measures disappoint investors",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 32,
+    "text": "GDP growth exceeds expectations, economy shows signs of robust recovery",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 33,
+    "text": "Ethereum developers announce successful test of new scaling solution, network capacity increases",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 34,
+    "text": "Automotive company recalls millions of vehicles, stock price drops 8%",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 35,
+    "text": "Cryptocurrency market shows signs of consolidation after recent volatility",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 36,
+    "text": "Healthcare sector receives boost from new government funding, biotech stocks rally",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 37,
+    "text": "Central bank hints at future rate hikes, bond markets react negatively",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 38,
+    "text": "Polygon network upgrade reduces transaction costs by 90%, adoption increases",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 39,
+    "text": "Streaming service loses subscribers for first time, stock crashes 25%",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 40,
+    "text": "Precious metals market remains stable with gold and silver prices holding steady",
+    "source": "news",
+    "category": "commodities"
+  },
+  {
+    "id": 41,
+    "text": "Layer 2 blockchain solutions gain traction, reducing mainnet congestion significantly",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 42,
+    "text": "E-commerce platform reports record-breaking sales, shares hit all-time high",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 43,
+    "text": "Trade tensions escalate between major economies, global markets show concern",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 44,
+    "text": "Decentralized exchange volume reaches new milestone, DeFi sector celebrates",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 45,
+    "text": "Energy company discovers major oil reserve, stock price surges 18%",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 46,
+    "text": "Cryptocurrency regulation framework proposed, industry awaits clarity",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 47,
+    "text": "Semiconductor shortage continues, tech companies face production delays",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 48,
+    "text": "Yield curve inversion signals potential economic slowdown, markets react cautiously",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 49,
+    "text": "NFT marketplace sees record sales volume, digital art market booms",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 50,
+    "text": "Pharmaceutical merger announced, creating industry giant, both stocks rally",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 51,
+    "text": "Bitcoin hash rate reaches new peak, network security at all-time high",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 52,
+    "text": "Retail sector faces headwinds as consumer spending patterns shift",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 53,
+    "text": "Currency markets show stability as central banks coordinate interventions",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 54,
+    "text": "Smart contract platform launches new features, developer activity increases",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 55,
+    "text": "Aerospace company secures major defense contract, shares jump 12%",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 56,
+    "text": "Cryptocurrency mining becomes more energy-efficient with new hardware",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 57,
+    "text": "Consumer confidence index rises, indicating positive economic outlook",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 58,
+    "text": "Social media platform faces regulatory fines, stock drops 6%",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 59,
+    "text": "Cross-chain bridge protocol launches, enabling seamless asset transfers",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 60,
+    "text": "Real estate investment trusts show strong performance, dividend yields attractive",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 61,
+    "text": "Cryptocurrency wallet security improves with new multi-signature features",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 62,
+    "text": "Food and beverage company expands into new markets, revenue grows 15%",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 63,
+    "text": "Monetary policy remains accommodative, supporting economic growth",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 64,
+    "text": "Blockchain gaming platform attracts millions of users, token price surges",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 65,
+    "text": "Telecommunications company invests heavily in 5G infrastructure, future looks bright",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 66,
+    "text": "Cryptocurrency tax regulations clarified, providing certainty for investors",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 67,
+    "text": "Industrial production numbers exceed forecasts, manufacturing sector strong",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 68,
+    "text": "Payment processing company faces data breach, customer trust erodes",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 69,
+    "text": "Staking rewards increase on proof-of-stake networks, attracting more validators",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 70,
+    "text": "Construction materials company benefits from infrastructure spending, profits rise",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 71,
+    "text": "Cryptocurrency market capitalization reaches new milestone, adoption accelerates",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 72,
+    "text": "Banking sector shows resilience despite economic challenges, dividends maintained",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 73,
+    "text": "Fiscal stimulus package announced, markets respond positively to government support",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 74,
+    "text": "Decentralized autonomous organization votes on major protocol upgrade",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 75,
+    "text": "Entertainment company releases blockbuster content, subscriber growth accelerates",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 76,
+    "text": "Cryptocurrency lending platform introduces new products, DeFi ecosystem expands",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 77,
+    "text": "Transportation sector adapts to new regulations, efficiency improves",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 78,
+    "text": "Economic indicators show mixed signals, analysts remain cautious",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 79,
+    "text": "Token burn mechanism reduces supply, creating deflationary pressure on price",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 80,
+    "text": "Insurance sector faces increased claims, profitability under pressure",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 81,
+    "text": "Cryptocurrency derivatives market grows, institutional participation increases",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 82,
+    "text": "Agricultural commodities prices stabilize after recent volatility",
+    "source": "news",
+    "category": "commodities"
+  },
+  {
+    "id": 83,
+    "text": "Software company announces major acquisition, market share expands",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 84,
+    "text": "Blockchain interoperability solutions gain adoption, cross-chain activity rises",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 85,
+    "text": "Housing market shows signs of cooling, mortgage rates impact demand",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 86,
+    "text": "Cryptocurrency custody services expand, institutional adoption continues",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 87,
+    "text": "Logistics company benefits from e-commerce growth, delivery volumes surge",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 88,
+    "text": "Yield farming opportunities attract liquidity, DeFi total value locked increases",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 89,
+    "text": "Consumer goods company faces supply chain disruptions, margins compress",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 90,
+    "text": "Cryptocurrency exchange token launches, trading volume breaks records",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 91,
+    "text": "Energy transition accelerates, renewable stocks outperform traditional energy",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 92,
+    "text": "Stablecoin market cap reaches new high, payment use cases expand",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 93,
+    "text": "Manufacturing PMI indicates expansion, industrial activity picks up",
+    "source": "news",
+    "category": "macro"
+  },
+  {
+    "id": 94,
+    "text": "Cryptocurrency wallet integration improves, user experience enhances",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 95,
+    "text": "Media company diversifies revenue streams, digital transformation succeeds",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 96,
+    "text": "Liquidity mining programs attract capital, DeFi protocols see growth",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 97,
+    "text": "Automotive industry shifts to electric vehicles, traditional manufacturers adapt",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 98,
+    "text": "Cryptocurrency market shows resilience during broader market selloff",
+    "source": "news",
+    "category": "crypto"
+  },
+  {
+    "id": 99,
+    "text": "Financial services sector embraces digital transformation, efficiency gains",
+    "source": "news",
+    "category": "stocks"
+  },
+  {
+    "id": 100,
+    "text": "Blockchain technology adoption accelerates across multiple industries worldwide",
+    "source": "news",
+    "category": "crypto"
+  }
+]
+
