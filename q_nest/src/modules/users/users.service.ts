@@ -62,12 +62,7 @@ export class UsersService {
         email: true,
         username: true,
         full_name: true,
-        dob: true,
-        nationality: true,
-        gender: true,
         phone_number: true,
-        created_at: true,
-        updated_at: true,
       },
     });
   }
