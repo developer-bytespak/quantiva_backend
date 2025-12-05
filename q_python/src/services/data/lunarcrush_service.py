@@ -1,6 +1,6 @@
 """
 LunarCrush Service
-Fetches cryptocurrency news and social metrics from LunarCrush API.
+Fetches cryptocurrency news and social metrics from LunarCrush API v4.
 """
 import logging
 import requests
@@ -13,10 +13,10 @@ logger = logging.getLogger(__name__)
 
 class LunarCrushService:
     """
-    Service for fetching cryptocurrency news and social metrics from LunarCrush API.
+    Service for fetching cryptocurrency news and social metrics from LunarCrush API v4.
     """
     
-    BASE_URL = "https://lunarcrush.com/api3"
+    BASE_URL = "https://lunarcrush.com/api4"
     
     def __init__(self):
         """Initialize LunarCrushService."""
@@ -54,40 +54,34 @@ class LunarCrushService:
             return []
         
         try:
-            # LunarCrush API endpoint for news
-            # Try v3 API format first, fallback to v2 if needed
-            url = f"{self.BASE_URL}/news"
+            # LunarCrush API v4 endpoint for news
+            # Endpoint: /public/topic/:topic/news/v1
+            # Note: API v4 doesn't accept limit parameter - we limit results client-side
+            url = f"{self.BASE_URL}/public/topic/{symbol.upper()}/news/v1"
             
-            params = {
-                'key': self.api_key,
-                'symbol': symbol.upper(),
-                'limit': limit
-            }
+            # LunarCrush API v4 uses Bearer token authentication
+            headers = {}
+            if self.api_key:
+                # Use Bearer token authentication (standard for LunarCrush API v4)
+                headers['Authorization'] = f'Bearer {self.api_key}'
             
-            self.logger.info(f"Fetching news for {symbol} from LunarCrush...")
-            response = requests.get(url, params=params, timeout=30)
+            self.logger.info(f"Fetching news for {symbol} from LunarCrush API v4...")
+            response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             
             data = response.json()
             
-            # Parse response (adjust based on actual API response format)
+            # Parse API v4 response format
             news_items = []
             
-            # LunarCrush v2 API response format - data is typically in 'data' field
-            # Response can be: {'data': [...]} or {'data': {'feeds': [...]}} or direct list
+            # API v4 response structure: {'config': {...}, 'data': [...]}
+            # Actual response has 'data' as a list of news items
             if isinstance(data, dict):
-                # Try different possible response structures
-                if 'data' in data:
-                    data_content = data['data']
-                    if isinstance(data_content, list):
-                        articles = data_content
-                    elif isinstance(data_content, dict):
-                        # Could be {'feeds': [...]} or {'news': [...]}
-                        articles = data_content.get('feeds', data_content.get('news', data_content.get('results', [])))
-                    else:
-                        articles = []
-                else:
-                    articles = data.get('news', data.get('results', data.get('feeds', [])))
+                articles = data.get('data', [])
+                
+                # Ensure articles is a list
+                if not isinstance(articles, list):
+                    articles = []
             elif isinstance(data, list):
                 articles = data
             else:
@@ -97,17 +91,33 @@ class LunarCrushService:
             
             for article in articles[:limit]:
                 try:
-                    # Parse article fields (adjust field names based on actual API)
-                    title = article.get('title', article.get('headline', ''))
-                    text = article.get('text', article.get('description', article.get('summary', article.get('content', ''))))
-                    source = article.get('source', article.get('source_name', article.get('site', 'unknown')))
-                    url = article.get('url', article.get('link', ''))
+                    # Parse API v4 article fields - actual field names from the API
+                    # API returns: post_title, post_link, post_created (Unix timestamp), creator_display_name
+                    title = article.get('post_title', article.get('title', ''))
+                    url = article.get('post_link', article.get('url', article.get('link', '')))
                     
-                    # Parse date
-                    date_str = article.get('date', article.get('published_at', article.get('published_date', article.get('time', ''))))
-                    published_at = self._parse_date(date_str)
+                    # Source is creator_display_name or creator_name
+                    source = article.get('creator_display_name', article.get('creator_name', article.get('source', 'unknown')))
                     
-                    if title or text:
+                    # Description/text - API doesn't provide this, use title as fallback
+                    text = article.get('description', title)
+                    
+                    # Parse date - API returns Unix timestamp in post_created
+                    post_created = article.get('post_created')
+                    published_at = None
+                    if post_created:
+                        try:
+                            # Convert Unix timestamp to datetime
+                            published_at = datetime.fromtimestamp(int(post_created))
+                        except (ValueError, TypeError):
+                            # Fallback to other date fields if timestamp parsing fails
+                            date_str = article.get('date', article.get('published_at', article.get('created_at', '')))
+                            published_at = self._parse_date(date_str)
+                    else:
+                        date_str = article.get('date', article.get('published_at', article.get('created_at', '')))
+                        published_at = self._parse_date(date_str)
+                    
+                    if title:
                         news_items.append({
                             'title': title,
                             'text': text or title,  # Use title if text is empty
@@ -124,6 +134,9 @@ class LunarCrushService:
             
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Error fetching news from LunarCrush: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                self.logger.error(f"Response status: {e.response.status_code}")
+                self.logger.error(f"Response body: {e.response.text[:500]}")
             return []
         except Exception as e:
             self.logger.error(f"Unexpected error fetching news: {str(e)}", exc_info=True)
@@ -152,44 +165,45 @@ class LunarCrushService:
             return {}
         
         try:
-            # LunarCrush API endpoint for coin data
-            # Try v3 API format first, fallback to v2 if needed
-            url = f"{self.BASE_URL}/coins"
+            # LunarCrush API v4 endpoint for coin data
+            # Endpoint: /public/coins/:coin/v1
+            url = f"{self.BASE_URL}/public/coins/{symbol.upper()}/v1"
             
-            params = {
-                'key': self.api_key,
-                'symbol': symbol.upper(),
-                'data_points': 1  # Get latest data point
-            }
+            params = {}
+            # LunarCrush API v4 uses Bearer token authentication
+            headers = {}
+            if self.api_key:
+                headers['Authorization'] = f'Bearer {self.api_key}'
             
-            self.logger.info(f"Fetching social metrics for {symbol} from LunarCrush...")
-            response = requests.get(url, params=params, timeout=30)
+            self.logger.info(f"Fetching social metrics for {symbol} from LunarCrush API v4...")
+            response = requests.get(url, params=params, headers=headers, timeout=30)
             response.raise_for_status()
             
             data = response.json()
             
-            # Parse response (adjust based on actual API response format)
+            # Parse API v4 response format
             metrics = {}
             
-            # LunarCrush v2 API response format for assets
             if isinstance(data, dict):
-                coin_data = data.get('data', data.get('coins', []))
+                # API v4 response structure: {'config': {...}, 'data': {...}}
+                coin_data = data.get('data', data)
+                
+                # Handle case where data might be a list with one item
                 if isinstance(coin_data, list) and len(coin_data) > 0:
                     coin_data = coin_data[0]
-                elif not isinstance(coin_data, dict):
-                    # If data is not a dict or list, try to get it directly
-                    coin_data = data
                 
-                # Extract metrics (adjust field names based on actual API)
-                # LunarCrush v2 API field names may vary
+                # Extract metrics from API v4 response
                 metrics = {
-                    'social_volume': coin_data.get('social_volume', coin_data.get('social_mentions', coin_data.get('social_volume_24h', 0))),
-                    'social_score': float(coin_data.get('social_score', coin_data.get('sentiment', coin_data.get('sentiment_score', 0)))),
+                    'social_volume': coin_data.get('social_volume_24h', coin_data.get('interactions_24h', coin_data.get('social_mentions', coin_data.get('social_volume', 0)))),
+                    'social_score': float(coin_data.get('sentiment', coin_data.get('sentiment_score', coin_data.get('social_score', 0)))),
                     'galaxy_score': float(coin_data.get('galaxy_score', coin_data.get('score', coin_data.get('galaxy', 0)))),
-                    'alt_rank': int(coin_data.get('alt_rank', coin_data.get('rank', coin_data.get('altrank', 999999)))),
-                    'social_dominance': float(coin_data.get('social_dominance', coin_data.get('dominance', coin_data.get('social_dominance_24h', 0)))),
-                    'price_change_24h': float(coin_data.get('price_change_24h', coin_data.get('change_24h', coin_data.get('price_change', 0)))),
-                    'volume_24h': float(coin_data.get('volume_24h', coin_data.get('volume', coin_data.get('volume_24h_usd', 0))))
+                    'alt_rank': int(coin_data.get('alt_rank', coin_data.get('altrank', coin_data.get('rank', 999999)))),
+                    'social_dominance': float(coin_data.get('social_dominance', coin_data.get('social_dominance_24h', coin_data.get('dominance', 0)))),
+                    'price_change_24h': float(coin_data.get('percent_change_24h', coin_data.get('price_change_24h', coin_data.get('change_24h', coin_data.get('price_change', 0))))),
+                    'volume_24h': float(coin_data.get('volume_24h', coin_data.get('volume_24h_usd', coin_data.get('volume', 0)))),
+                    'interactions_24h': coin_data.get('interactions_24h', 0),
+                    'market_cap': float(coin_data.get('market_cap', 0)),
+                    'price': float(coin_data.get('price', coin_data.get('price_usd', 0))),
                 }
             
             self.logger.info(f"Fetched social metrics for {symbol}")
@@ -197,6 +211,9 @@ class LunarCrushService:
             
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Error fetching social metrics from LunarCrush: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                self.logger.error(f"Response status: {e.response.status_code}")
+                self.logger.error(f"Response body: {e.response.text[:500]}")
             return {}
         except Exception as e:
             self.logger.error(f"Unexpected error fetching social metrics: {str(e)}", exc_info=True)

@@ -107,6 +107,8 @@ def test_lunarcrush_news(symbol="BTC", limit=10):
         news_items = service.fetch_coin_news(symbol, limit=limit)
     except Exception as e:
         print(f"❌ ERROR: Failed to fetch news: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
     
     # Check if news was fetched
@@ -215,6 +217,8 @@ def test_lunarcrush_social_metrics(symbol="BTC"):
         metrics = service.fetch_social_metrics(symbol)
     except Exception as e:
         print(f"❌ ERROR: Failed to fetch social metrics: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
     
     # Check if metrics were fetched
