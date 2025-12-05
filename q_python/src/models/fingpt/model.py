@@ -4,6 +4,7 @@ Handles loading of the FinGPT model with 16-bit quantization.
 """
 import os
 import logging
+import time
 import torch
 from typing import Optional
 from transformers import AutoModelForCausalLM
@@ -62,6 +63,7 @@ class FinGPTModel:
     def _detect_device(self) -> str:
         """
         Detect and return the appropriate device (cuda/cpu).
+        Improved logging and fallback handling.
         
         Returns:
             Device string ('cuda' or 'cpu')
@@ -71,13 +73,21 @@ class FinGPTModel:
         if device_config == "auto":
             if torch.cuda.is_available():
                 device = "cuda"
-                self.logger.info("CUDA available, using GPU")
+                device_name = torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "Unknown"
+                self.logger.info(f"CUDA available, using GPU: {device_name}")
             else:
                 device = "cpu"
-                self.logger.info("CUDA not available, using CPU")
+                self.logger.warning("CUDA not available, falling back to CPU (inference will be slower)")
         else:
             device = device_config
-            self.logger.info(f"Using device: {device}")
+            if device == "cuda" and not torch.cuda.is_available():
+                self.logger.warning(f"CUDA requested but not available, falling back to CPU")
+                device = "cpu"
+            elif device == "cuda":
+                device_name = torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "Unknown"
+                self.logger.info(f"Using GPU: {device_name}")
+            else:
+                self.logger.info(f"Using device: {device}")
         
         return device
     
@@ -234,9 +244,35 @@ class FinGPTModel:
     def unload(self):
         """Unload the model to free memory."""
         if self._model is not None:
+            self.logger.info("Unloading model to free memory...")
             del self._model
             self._model = None
             self._is_loaded = False
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                self.logger.info("CUDA cache cleared")
             self.logger.info("Model unloaded and memory freed")
+    
+    def check_idle_timeout(self, last_use_time: Optional[float], idle_timeout: int = 3600) -> bool:
+        """
+        Check if model should be unloaded due to idle timeout.
+        
+        Args:
+            last_use_time: Timestamp of last model use (None if never used)
+            idle_timeout: Idle timeout in seconds (default 1 hour)
+            
+        Returns:
+            True if model should be unloaded, False otherwise
+        """
+        if not FINGPT_CONFIG.get("enable_auto_unload", False):
+            return False
+        
+        if last_use_time is None:
+            return False
+        
+        idle_duration = time.time() - last_use_time
+        if idle_duration > idle_timeout:
+            self.logger.info(f"Model idle for {idle_duration:.0f}s, exceeds timeout of {idle_timeout}s")
+            return True
+        
+        return False

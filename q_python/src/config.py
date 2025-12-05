@@ -64,14 +64,48 @@ FINGPT_CONFIG: Dict[str, Any] = {
     
     # Inference parameters
     "max_sequence_length": int(os.getenv("FINGPT_MAX_SEQUENCE_LENGTH", "512")),
-    "max_new_tokens": int(os.getenv("FINGPT_MAX_NEW_TOKENS", "10")),  # Short output for numerical score
+    "max_new_tokens": int(os.getenv("FINGPT_MAX_NEW_TOKENS", "15")),  # Increased to ensure full sentiment words are generated
     "temperature": float(os.getenv("FINGPT_TEMPERATURE", "0.1")),  # Lower for more deterministic output
     "top_p": float(os.getenv("FINGPT_TOP_P", "0.9")),
     "do_sample": os.getenv("FINGPT_DO_SAMPLE", "true").lower() == "true",  # Enable sampling - model may need it to generate
     
     # Model loading timeout (seconds)
     "loading_timeout": int(os.getenv("FINGPT_LOADING_TIMEOUT", "300")),
+    
+    # Inference timeout (seconds) - prevents hanging requests
+    "inference_timeout": int(os.getenv("FINGPT_INFERENCE_TIMEOUT", "30")),
+    
+    # Memory management
+    "enable_auto_unload": os.getenv("FINGPT_ENABLE_AUTO_UNLOAD", "false").lower() == "true",
+    "idle_timeout": int(os.getenv("FINGPT_IDLE_TIMEOUT", "3600")),  # Unload after 1 hour of inactivity
 }
+
+# FinBERT Model Configuration
+FINBERT_CONFIG: Dict[str, Any] = {
+    # Model path
+    "model_path": os.getenv("FINBERT_MODEL_PATH", "ProsusAI/finbert"),
+    
+    # Device settings
+    "device": os.getenv("FINBERT_DEVICE", "auto"),  # auto, cuda, cpu
+    
+    # Cache directory
+    "cache_dir": os.getenv("FINBERT_CACHE_DIR", os.path.expanduser("~/.cache/huggingface")),
+    
+    # Inference parameters
+    "max_length": int(os.getenv("FINBERT_MAX_LENGTH", "512")),
+    "batch_size": int(os.getenv("FINBERT_BATCH_SIZE", "8")),
+    
+    # Inference timeout (seconds)
+    "inference_timeout": int(os.getenv("FINBERT_INFERENCE_TIMEOUT", "30")),
+    
+    # Memory management
+    "enable_auto_unload": os.getenv("FINBERT_ENABLE_AUTO_UNLOAD", "false").lower() == "true",
+    "idle_timeout": int(os.getenv("FINBERT_IDLE_TIMEOUT", "3600")),  # Unload after 1 hour of inactivity
+}
+
+# API Keys Configuration
+STOCK_NEWS_API_KEY = os.getenv("STOCK_NEWS_API_KEY")
+LUNARCRUSH_API_KEY = os.getenv("LUNARCRUSH_API_KEY")
 
 def get_config(key: str, default: Any = None) -> Any:
     """Get configuration value."""
