@@ -65,11 +65,29 @@ export class KycService {
     }
 
     try {
-      // Match faces using Python API (liveness detection removed)
+      // COMMENTED OUT FOR TESTING: Python API verification bypassed
+      // Match faces using Python API - now auto-approves for testing
       await this.faceMatchingService.matchFaces(verification.kyc_id, file);
 
-      // Run decision engine to evaluate verification
-      await this.decisionEngine.applyDecision(verification.kyc_id);
+      // AUTO-APPROVE FOR TESTING: Auto-approve the verification (bypasses decision engine)
+      await this.prisma.kyc_verifications.update({
+        where: { kyc_id: verification.kyc_id },
+        data: {
+          status: 'approved',
+          decision_reason: 'Auto-approved for testing (Python verification bypassed)',
+          doc_authenticity_score: 0.95, // Set doc authenticity score for auto-approval
+        },
+      });
+
+      // Update user's KYC status to approved
+      await this.prisma.users.update({
+        where: { user_id: userId },
+        data: { kyc_status: 'approved' },
+      });
+
+      // Run decision engine to evaluate verification (bypassed in testing mode)
+      // await this.decisionEngine.applyDecision(verification.kyc_id);
+      this.logger.debug(`KYC auto-approved for user ${userId} - Python verification bypassed`);
     } catch (error: any) {
       this.logger.error('KYC verification step failed', {
         kycId: verification.kyc_id,

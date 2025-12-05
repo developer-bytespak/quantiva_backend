@@ -150,18 +150,24 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const refreshToken = req.cookies?.refresh_token;
-    
-    // Revoke the current session using user ID from JWT token
-    // This ensures the session is revoked even if refresh token is missing or invalid
-    try {
-      await this.sessionService.revokeCurrentUserSession(
-        user.sub,
-        refreshToken,
-      );
-    } catch (error) {
-      // Log error but continue with logout to clear cookies
-      console.error('Error revoking session during logout:', error);
+    // Revoke the specific session directly using session_id from JWT payload
+    // This is much more efficient than matching refresh tokens
+    if (user.session_id) {
+      try {
+        await this.sessionService.revokeSession(user.session_id);
+      } catch (error) {
+        // Log error but continue with logout to clear cookies
+        console.error('Error revoking session during logout:', error);
+      }
+    } else {
+      // Fallback for older tokens that don't have session_id
+      // Try to revoke using refresh token as before
+      const refreshToken = req.cookies?.refresh_token;
+      try {
+        await this.sessionService.revokeCurrentUserSession(user.sub, refreshToken);
+      } catch (error) {
+        console.error('Error revoking session during logout (fallback):', error);
+      }
     }
 
     // Clear cookies - always clear even if session revocation failed

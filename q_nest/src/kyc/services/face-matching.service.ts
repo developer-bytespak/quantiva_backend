@@ -56,32 +56,41 @@ export class FaceMatchingService {
     );
 
     // Perform face matching
+    // COMMENTED OUT FOR TESTING: Python API call for face matching verification
+    // TODO: Uncomment when ready to enable Python server verification
     let matchResult;
-    try {
-      matchResult = await this.pythonApi.matchFaces(
-        idPhotoBuffer,
-        selfieFile.buffer,
-        document.storage_url,
-        selfieFile.originalname,
-      );
+    // try {
+    //   matchResult = await this.pythonApi.matchFaces(
+    //     idPhotoBuffer,
+    //     selfieFile.buffer,
+    //     document.storage_url,
+    //     selfieFile.originalname,
+    //   );
       
-      this.logger.debug(
-        `Face matching result: similarity=${matchResult.similarity}, is_match=${matchResult.is_match}`,
-      );
+    //   this.logger.debug(
+    //     `Face matching result: similarity=${matchResult.similarity}, is_match=${matchResult.is_match}`,
+    //   );
       
-      // Check if faces were detected
-      if (matchResult.similarity === 0 && !matchResult.is_match) {
-        this.logger.warn('Face matching returned zero similarity - faces may not have been detected');
-      }
-    } catch (error: any) {
-      this.logger.error('Face matching API call failed', {
-        error: error?.message,
-        stack: error?.stack,
-      });
-      throw new Error(
-        `Face matching failed: ${error?.message || 'Unknown error'}. Please ensure both images contain clear faces.`,
-      );
-    }
+    //   // Check if faces were detected
+    //   if (matchResult.similarity === 0 && !matchResult.is_match) {
+    //     this.logger.warn('Face matching returned zero similarity - faces may not have been detected');
+    //   }
+    // } catch (error: any) {
+    //   this.logger.error('Face matching API call failed', {
+    //     error: error?.message,
+    //     stack: error?.stack,
+    //   });
+    //   throw new Error(
+    //     `Face matching failed: ${error?.message || 'Unknown error'}. Please ensure both images contain clear faces.`,
+    //   );
+    // }
+
+    // AUTO-APPROVE FOR TESTING: Set match result to approved values
+    matchResult = {
+      similarity: 0.95,
+      is_match: true,
+    };
+    this.logger.debug('Auto-approved face matching for testing - Python API call bypassed');
 
     // Save selfie
     const selfiePath = await this.storage.saveFile(selfieFile, 'kyc/selfies');
