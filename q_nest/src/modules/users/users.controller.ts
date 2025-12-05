@@ -9,6 +9,24 @@ import { UpdatePersonalInfoDto } from './dto/update-personal-info.dto';
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
+  // Specific routes must come before parameterized routes
+  @Get('me')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async getCurrentUser(@CurrentUser() user: TokenPayload) {
+    return this.usersService.getCurrentUserProfile(user.sub);
+  }
+
+  @Patch('me/personal-info')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async updateCurrentUserPersonalInfo(
+    @Body() updatePersonalInfoDto: UpdatePersonalInfoDto,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    return this.usersService.updatePersonalInfo(user.sub, updatePersonalInfoDto);
+  }
+
   @Get()
   findAll() {
     return this.usersService.findAll();

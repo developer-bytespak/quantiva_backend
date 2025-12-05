@@ -54,6 +54,23 @@ export class UsersService {
     });
   }
 
+  async getCurrentUserProfile(userId: string) {
+    return this.prisma.users.findUnique({
+      where: { user_id: userId },
+      select: {
+        user_id: true,
+        email: true,
+        username: true,
+        full_name: true,
+        phone_number: true,
+        dob: true,
+        nationality: true,
+        gender: true,
+        kyc_status: true,
+      },
+    });
+  }
+
   async updatePersonalInfo(userId: string, data: UpdatePersonalInfoDto) {
     // Convert dob string to Date object
     const dobDate = data.dob ? new Date(data.dob) : null;
