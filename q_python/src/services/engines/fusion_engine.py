@@ -1,7 +1,6 @@
 """
 Fusion Engine
 Combines all individual engine scores into a single trading signal.
-Note: Sentiment Engine (Engine 1) is not yet implemented, so sentiment_score = 0.
 """
 from typing import Dict, Any, Optional
 import logging
@@ -17,8 +16,6 @@ class FusionEngine(BaseEngine):
     
     Formula:
     final_score = 0.35*sentiment + 0.25*trend + 0.15*fundamental + 0.15*event_risk + 0.10*liquidity
-    
-    Note: Sentiment score is currently 0 (Engine 1 not implemented yet).
     """
     
     def __init__(self):
@@ -76,10 +73,6 @@ class FusionEngine(BaseEngine):
             event_risk_score = engine_scores.get('event_risk', {}).get('score', 0.0)
             liquidity_score = engine_scores.get('liquidity', {}).get('score', 0.0)
             
-            # Note: Sentiment Engine (Engine 1) is not yet implemented
-            # TODO: Set sentiment_score from Sentiment Engine when implemented
-            sentiment_score = 0.0
-            
             # Calculate weighted final score
             final_score = (
                 self.weights['sentiment'] * sentiment_score +
@@ -116,8 +109,7 @@ class FusionEngine(BaseEngine):
                     'event_risk': event_risk_score,
                     'liquidity': liquidity_score
                 },
-                'weights': self.weights,
-                'note': 'Sentiment Engine (Engine 1) not yet implemented - sentiment_score = 0'
+                'weights': self.weights
             }
             
             return {

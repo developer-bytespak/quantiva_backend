@@ -7,6 +7,7 @@ export interface TokenPayload {
   sub: string; // user_id
   email: string;
   username: string;
+  session_id?: string; // Optional for backward compatibility, but should be included for new tokens
 }
 
 @Injectable()

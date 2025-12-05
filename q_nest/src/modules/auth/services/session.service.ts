@@ -111,19 +111,59 @@ export class SessionService {
     return false;
   }
 
+  async findSessionByRefreshTokenAndUser(
+    refreshToken: string,
+    userId: string,
+  ): Promise<{ session_id: string; user_id: string } | null> {
+    // First, get all active sessions for this user to narrow down the search
+    const now = new Date();
+    const userSessions = await this.prisma.user_sessions.findMany({
+      where: {
+        user_id: userId,
+        revoked: false,
+        expires_at: {
+          gt: now,
+        },
+        refresh_token_hash: {
+          not: null,
+        },
+      },
+    });
+
+    // Check each session's refresh token hash
+    for (const session of userSessions) {
+      if (session.refresh_token_hash) {
+        const isValid = await this.tokenService.verifyRefreshToken(
+          refreshToken,
+          session.refresh_token_hash,
+        );
+        if (isValid) {
+          return {
+            session_id: session.session_id,
+            user_id: session.user_id,
+          };
+        }
+      }
+    }
+
+    return null;
+  }
+
   async revokeCurrentUserSession(
     userId: string,
     refreshToken?: string,
   ): Promise<void> {
-    // First try to revoke by refresh token if provided
+    // First try to find and revoke the session by refresh token (filtered by user_id for efficiency)
     if (refreshToken) {
-      const revoked = await this.revokeSessionByRefreshToken(refreshToken);
-      if (revoked) {
+      const session = await this.findSessionByRefreshTokenAndUser(refreshToken, userId);
+      if (session) {
+        await this.revokeSession(session.session_id);
         return;
       }
     }
 
     // Fallback: revoke the most recent active session for this user
+    // This handles cases where refresh token might be missing or invalid
     const now = new Date();
     const activeSession = await this.prisma.user_sessions.findFirst({
       where: {
@@ -141,6 +181,22 @@ export class SessionService {
     if (activeSession) {
       await this.revokeSession(activeSession.session_id);
     }
+  }
+
+  async revokeAllUserSessions(userId: string): Promise<void> {
+    const now = new Date();
+    await this.prisma.user_sessions.updateMany({
+      where: {
+        user_id: userId,
+        revoked: false,
+        expires_at: {
+          gt: now,
+        },
+      },
+      data: {
+        revoked: true,
+      },
+    });
   }
 
   async findSessionByRefreshToken(

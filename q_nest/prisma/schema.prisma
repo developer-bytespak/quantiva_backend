@@ -104,6 +104,7 @@ model users {
   nationality        String?   @db.VarChar(100)
   gender             String?   @db.VarChar(50)
   phone_number       String?   @db.VarChar(20)
+  profile_pic_url    String?   @db.Text
   created_at         DateTime  @default(now()) @db.Timestamp(6)
   updated_at         DateTime? @updatedAt @db.Timestamp(6)
 

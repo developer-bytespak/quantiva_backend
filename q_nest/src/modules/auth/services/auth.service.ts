@@ -148,23 +148,29 @@ export class AuthService {
       throw new UnauthorizedException('Invalid 2FA code');
     }
 
-    // Generate tokens
-    const payload: TokenPayload = {
+    // Create session first to get session_id
+    const refreshToken = await this.tokenService.generateRefreshToken({
       sub: user.user_id,
       email: user.email,
       username: user.username,
-    };
-
-    const accessToken = await this.tokenService.generateAccessToken(payload);
-    const refreshToken = await this.tokenService.generateRefreshToken(payload);
-
-    // Create session
+    });
+    
     const sessionId = await this.sessionService.createSession(
       user.user_id,
       refreshToken,
       ipAddress,
       deviceId,
     );
+
+    // Generate tokens with session_id included
+    const payload: TokenPayload = {
+      sub: user.user_id,
+      email: user.email,
+      username: user.username,
+      session_id: sessionId,
+    };
+
+    const accessToken = await this.tokenService.generateAccessToken(payload);
 
     return {
       user: {
@@ -199,21 +205,28 @@ export class AuthService {
       throw new UnauthorizedException('User not found');
     }
 
-    // Generate new tokens
-    const payload: TokenPayload = {
+    // Generate new tokens with session_id included
+    const newRefreshToken = await this.tokenService.generateRefreshToken({
       sub: user.user_id,
       email: user.email,
       username: user.username,
-    };
-
-    const newAccessToken = await this.tokenService.generateAccessToken(payload);
-    const newRefreshToken = await this.tokenService.generateRefreshToken(payload);
+    });
 
     // Update session with new refresh token (rotation)
     await this.sessionService.updateSessionRefreshToken(
       session.session_id,
       newRefreshToken,
     );
+
+    // Generate access token with session_id
+    const payload: TokenPayload = {
+      sub: user.user_id,
+      email: user.email,
+      username: user.username,
+      session_id: session.session_id,
+    };
+
+    const newAccessToken = await this.tokenService.generateAccessToken(payload);
 
     return {
       accessToken: newAccessToken,
