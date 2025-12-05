@@ -63,6 +63,10 @@ export class UsersService {
         username: true,
         full_name: true,
         phone_number: true,
+        dob: true,
+        nationality: true,
+        gender: true,
+        kyc_status: true,
       },
     });
   }
