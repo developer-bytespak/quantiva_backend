@@ -1,11 +1,21 @@
-q_nest/.env
-q_nest/dist/
+# Node modules
+node_modules/
 q_nest/node_modules/
+
+# Environment files
+q_nest/.env
+q_python/.env
+
+# Build outputs
+q_nest/dist/
+
+# Storage
 q_nest/storage/
+
+# Python virtual environments
 q_python/venv
 q_python/.venv
 q_python/venv*/
 q_python/.venv*/
-q_python/.env
 q_python/src/__pycache__/
 q_python/v312*/

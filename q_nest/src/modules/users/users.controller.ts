@@ -1,13 +1,19 @@
-import { Controller, Get, Post, Put, Delete, Patch, Body, Param, UseGuards, HttpCode, HttpStatus, HttpException } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Patch, Body, Param, UseGuards, HttpCode, HttpStatus, HttpException, UseInterceptors, UploadedFile, BadRequestException } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
 import { UpdatePersonalInfoDto } from './dto/update-personal-info.dto';
+import { CloudinaryService } from './services/cloudinary.service';
 
 @Controller('users')
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly cloudinaryService: CloudinaryService,
+  ) {}
 
   // Specific routes must come before parameterized routes
   @Get('me')
@@ -25,6 +31,54 @@ export class UsersController {
     @CurrentUser() user: TokenPayload,
   ) {
     return this.usersService.updatePersonalInfo(user.sub, updatePersonalInfoDto);
+  }
+
+  @Post('me/profile-picture')
+  @UseGuards(JwtAuthGuard)
+  @UseInterceptors(FileInterceptor('file', {
+    storage: memoryStorage(),
+    limits: {
+      fileSize: 5 * 1024 * 1024, // 5MB
+    },
+  }))
+  @HttpCode(HttpStatus.OK)
+  async uploadProfilePicture(
+    @UploadedFile() file: Express.Multer.File,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    if (!file) {
+      throw new BadRequestException('No file provided');
+    }
+
+    // Validate file type
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    if (!allowedMimeTypes.includes(file.mimetype)) {
+      throw new BadRequestException('Invalid file type. Only JPEG, PNG, WebP, and GIF images are allowed.');
+    }
+
+    // Validate file size (5MB max)
+    const maxSize = 5 * 1024 * 1024; // 5MB in bytes
+    if (file.size > maxSize) {
+      throw new BadRequestException('File size exceeds 5MB limit.');
+    }
+
+    try {
+      // Upload to Cloudinary
+      const imageUrl = await this.cloudinaryService.uploadImage(file);
+
+      // Update user's profile picture URL in database
+      const updatedUser = await this.usersService.updateProfilePicture(user.sub, imageUrl);
+
+      return {
+        imageUrl,
+        profile_pic_url: updatedUser.profile_pic_url,
+      };
+    } catch (error) {
+      throw new HttpException(
+        'Failed to upload profile picture',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
   }
 
   @Get()

@@ -67,7 +67,8 @@ export class UsersService {
         nationality: true,
         gender: true,
         kyc_status: true,
-      },
+        profile_pic_url: true,
+      } as any,
     });
   }
 
@@ -96,6 +97,24 @@ export class UsersService {
         created_at: true,
         updated_at: true,
       },
+    });
+  }
+
+  async updateProfilePicture(userId: string, imageUrl: string) {
+    return this.prisma.users.update({
+      where: { user_id: userId },
+      data: {
+        profile_pic_url: imageUrl,
+      } as any,
+      select: {
+        user_id: true,
+        email: true,
+        username: true,
+        full_name: true,
+        profile_pic_url: true,
+        created_at: true,
+        updated_at: true,
+      } as any,
     });
   }
 }
