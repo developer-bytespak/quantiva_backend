@@ -5,6 +5,18 @@ import os
 from typing import Dict, Any
 import torch
 
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    # Load .env from project root (q_python directory)
+    env_path = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+    # Also try loading from current directory
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, skip
+
 # ML Model Configuration
 ML_CONFIG: Dict[str, Any] = {
     # DeepFace configuration

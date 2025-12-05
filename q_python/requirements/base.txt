@@ -8,6 +8,14 @@ pandas-ta>=0.3.14b0
 opencv-python>=4.8.0
 requests>=2.31.0
 fredapi>=0.5.1
+
+# News API Endpoint Dependencies (LunarCrush + FinBERT Sentiment Analysis)
+# - requests: For LunarCrush API calls (already listed above)
+# - python-dateutil: For date parsing in news services (LunarCrush, Stock News)
+# - transformers/torch: For FinBERT sentiment analysis (already listed below)
+# - python-dotenv: For loading LUNARCRUSH_API_KEY from .env file (already listed below)
+python-dateutil>=2.8.2
+
 # OCR libraries (choose one or both)
 easyocr>=1.7.0
 # pytesseract>=0.3.10  # Requires Tesseract OCR to be installed on system
