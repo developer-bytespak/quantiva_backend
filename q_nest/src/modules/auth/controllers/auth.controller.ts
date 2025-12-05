@@ -150,27 +150,49 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    // Revoke the specific session directly using session_id from JWT payload
+    let sessionDeleted = false;
+
+    // Delete the specific session directly using session_id from JWT payload
     // This is much more efficient than matching refresh tokens
     if (user.session_id) {
       try {
-        await this.sessionService.revokeSession(user.session_id);
+        sessionDeleted = await this.sessionService.deleteSession(user.session_id);
       } catch (error) {
         // Log error but continue with logout to clear cookies
-        console.error('Error revoking session during logout:', error);
-      }
-    } else {
-      // Fallback for older tokens that don't have session_id
-      // Try to revoke using refresh token as before
-      const refreshToken = req.cookies?.refresh_token;
-      try {
-        await this.sessionService.revokeCurrentUserSession(user.sub, refreshToken);
-      } catch (error) {
-        console.error('Error revoking session during logout (fallback):', error);
+        console.error('Error deleting session during logout:', error);
       }
     }
 
-    // Clear cookies - always clear even if session revocation failed
+    // If session_id delete didn't work, try fallback with refresh token
+    if (!sessionDeleted) {
+      const refreshToken = req.cookies?.refresh_token;
+      if (refreshToken) {
+        try {
+          // Find session by refresh token and delete it
+          const session = await this.sessionService.findSessionByRefreshTokenAndUser(
+            refreshToken,
+            user.sub,
+          );
+          if (session) {
+            sessionDeleted = await this.sessionService.deleteSession(session.session_id);
+          }
+        } catch (error) {
+          console.error('Error deleting session during logout (fallback):', error);
+        }
+      }
+    }
+
+    // If still not deleted, try to revoke the most recent session for this user
+    // (as a fallback, we revoke instead of delete to ensure cleanup)
+    if (!sessionDeleted) {
+      try {
+        await this.sessionService.revokeCurrentUserSession(user.sub);
+      } catch (error) {
+        console.error('Error revoking session during logout (final fallback):', error);
+      }
+    }
+
+    // Clear cookies - always clear even if session deletion failed
     this.clearCookie(res, 'access_token');
     this.clearCookie(res, 'refresh_token');
 
