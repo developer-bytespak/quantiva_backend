@@ -96,10 +96,33 @@ export class SessionService {
   }
 
   async revokeSession(sessionId: string): Promise<void> {
-    await this.prisma.user_sessions.update({
-      where: { session_id: sessionId },
+    // Use updateMany to avoid throwing error if session doesn't exist
+    const result = await this.prisma.user_sessions.updateMany({
+      where: { 
+        session_id: sessionId,
+        revoked: false, // Only revoke if not already revoked
+      },
       data: { revoked: true },
     });
+    
+    // Optionally log if session was not found (but don't throw error)
+    if (result.count === 0) {
+      console.warn(`Session ${sessionId} not found or already revoked`);
+    }
+  }
+
+  async deleteSession(sessionId: string): Promise<boolean> {
+    // Actually delete the session from the database
+    const result = await this.prisma.user_sessions.deleteMany({
+      where: { session_id: sessionId },
+    });
+    
+    if (result.count === 0) {
+      console.warn(`Session ${sessionId} not found for deletion`);
+      return false;
+    }
+    
+    return true;
   }
 
   async revokeSessionByRefreshToken(refreshToken: string): Promise<boolean> {
