@@ -119,6 +119,10 @@ FINBERT_CONFIG: Dict[str, Any] = {
 STOCK_NEWS_API_KEY = os.getenv("STOCK_NEWS_API_KEY")
 LUNARCRUSH_API_KEY = os.getenv("LUNARCRUSH_API_KEY")
 
+# NestJS Backend API Configuration
+NESTJS_API_URL = os.getenv("NESTJS_API_URL", "http://localhost:3000")
+NESTJS_API_TIMEOUT = int(os.getenv("NESTJS_API_TIMEOUT", "10"))
+
 def get_config(key: str, default: Any = None) -> Any:
     """Get configuration value."""
     return ML_CONFIG.get(key, default)

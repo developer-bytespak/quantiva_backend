@@ -1,0 +1,82 @@
+{
+  "positive": {
+    "high_weight": {
+      "moon": 2.0,
+      "ATH": 2.0,
+      "all-time high": 2.0,
+      "breakthrough": 2.0,
+      "rally": 2.0,
+      "surge": 2.0,
+      "soar": 2.0
+    },
+    "medium_weight": {
+      "bullish": 1.5,
+      "pump": 1.5,
+      "airdrop": 1.5,
+      "partnership": 1.5,
+      "adoption": 1.5,
+      "hodl": 1.5,
+      "diamond hands": 1.5,
+      "bull run": 1.5,
+      "green": 1.5,
+      "gains": 1.5
+    },
+    "low_weight": {
+      "institutional": 1.0,
+      "mainstream": 1.0,
+      "profit": 1.0,
+      "growth": 1.0,
+      "uptrend": 1.0,
+      "support": 1.0,
+      "resistance broken": 1.0
+    }
+  },
+  "negative": {
+    "high_weight": {
+      "rug pull": 2.0,
+      "hack": 2.0,
+      "scam": 2.0,
+      "crash": 2.0,
+      "plummet": 2.0,
+      "exploit": 2.0,
+      "collapse": 2.0,
+      "bankruptcy": 2.0
+    },
+    "medium_weight": {
+      "dump": 1.5,
+      "rekt": 1.5,
+      "FUD": 1.5,
+      "bearish": 1.5,
+      "delist": 1.5,
+      "liquidation": 1.5,
+      "bear market": 1.5,
+      "red": 1.5,
+      "losses": 1.5
+    },
+    "low_weight": {
+      "vulnerability": 1.0,
+      "regulation ban": 1.0,
+      "decline": 1.0,
+      "loss": 1.0,
+      "downtrend": 1.0,
+      "correction": 1.0,
+      "sell-off": 1.0
+    }
+  },
+  "neutral": {
+    "consolidation": 0.8,
+    "sideways": 0.8,
+    "range": 0.7,
+    "support": 0.6,
+    "resistance": 0.6,
+    "correction": 0.5,
+    "stable": 0.5
+  },
+  "_metadata": {
+    "version": "1.0",
+    "last_updated": "2025-01-01",
+    "description": "Crypto-specific keyword dictionary for sentiment analysis",
+    "update_instructions": "Edit this JSON file to add/remove keywords. Restart the service to load changes."
+  }
+}
+

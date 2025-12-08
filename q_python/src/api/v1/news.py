@@ -3,7 +3,7 @@ News API endpoints for fetching cryptocurrency news with sentiment analysis.
 """
 from fastapi import APIRouter, HTTPException, Body
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 from src.services.data.lunarcrush_service import LunarCrushService
@@ -17,12 +17,15 @@ router = APIRouter(prefix="/news", tags=["News"])
 @router.post("/crypto")
 async def get_crypto_news_with_sentiment(request_data: Dict[str, Any] = Body(...)):
     """
-    Fetch cryptocurrency news with LunarCrush social metrics and FinBERT sentiment analysis.
+    Fetch cryptocurrency news with LunarCrush social metrics and multi-layer sentiment analysis.
+    Uses Phase 2 + Phase 3: ML (FinBERT) + Crypto Keywords + Market Signals.
     
     Request body:
     {
-        "symbol": "BTC",  # Cryptocurrency symbol (e.g., BTC, ETH, SOL)
-        "limit": 2        # Number of news items to return (default: 2)
+        "symbol": "BTC",           # Cryptocurrency symbol (e.g., BTC, ETH, SOL)
+        "limit": 2,                # Number of news items to return (default: 2)
+        "connection_id": "optional", # Optional: NestJS connection ID for OHLCV market data
+        "exchange": "binance"       # Optional: Exchange name (default: "binance")
     }
     
     Returns:
@@ -77,37 +80,75 @@ async def get_crypto_news_with_sentiment(request_data: Dict[str, Any] = Body(...
             # Return empty structure with metrics still
             news_items_with_sentiment = []
         else:
-            # Analyze sentiment for each news item
+            # Analyze sentiment for each news item using Phase 2 + Phase 3 (ML + Keywords + Market)
             news_items_with_sentiment = []
+            
+            # Get optional connection_id from request for market signals (if available)
+            connection_id = request_data.get('connection_id')
+            exchange = request_data.get('exchange', 'binance')
+            
             for item in news_items:
                 title = item.get('title', '')
                 text = item.get('text', title)
                 combined_text = f"{title}. {text}" if title and text else (text or title)
+                source = item.get('source', 'unknown')
                 
-                # Analyze sentiment using FinBERT
-                sentiment_result = sentiment_engine.analyze_text(combined_text, source=item.get('source'))
+                # Prepare text data for calculate() method
+                text_data = [{
+                    'text': combined_text,
+                    'source': source,
+                    'title': title,
+                    'url': item.get('url', '')
+                }]
                 
-                # Format sentiment result
-                sentiment = {
-                    "label": sentiment_result.get('sentiment', 'neutral'),
-                    "score": float(sentiment_result.get('score', 0.0)),
-                    "confidence": float(sentiment_result.get('confidence', 0.0))
-                }
+                # Use calculate() method for full Phase 2 + Phase 3 pipeline
+                # This includes: ML (FinBERT) + Keywords + Market signals
+                try:
+                    sentiment_result = sentiment_engine.calculate(
+                        asset_id=symbol,
+                        asset_type='crypto',
+                        text_data=text_data,
+                        exchange=exchange,
+                        connection_id=connection_id
+                    )
+                    
+                    # Extract sentiment from result
+                    sentiment = {
+                        "label": sentiment_result.get('metadata', {}).get('overall_sentiment', 'neutral'),
+                        "score": float(sentiment_result.get('score', 0.0)),
+                        "confidence": float(sentiment_result.get('confidence', 0.0))
+                    }
+                    
+                    # Add layer breakdown to metadata (optional, for debugging)
+                    if 'layer_breakdown' in sentiment_result.get('metadata', {}):
+                        sentiment['layer_breakdown'] = sentiment_result['metadata']['layer_breakdown']
+                    
+                except Exception as e:
+                    logger.warning(f"Phase 2+3 sentiment analysis failed for item, falling back to Phase 1: {str(e)}")
+                    # Fallback to Phase 1 (analyze_text) if Phase 2+3 fails
+                    try:
+                        fallback_result = sentiment_engine.analyze_text(combined_text, source=source)
+                        sentiment = {
+                            "label": fallback_result.get('sentiment', 'neutral'),
+                            "score": float(fallback_result.get('score', 0.0)),
+                            "confidence": float(fallback_result.get('confidence', 0.0))
+                        }
+                    except Exception as fallback_error:
+                        logger.error(f"Fallback sentiment analysis also failed: {str(fallback_error)}")
+                        sentiment = {
+                            "label": "neutral",
+                            "score": 0.0,
+                            "confidence": 0.0
+                        }
                 
-                # Format published_at as ISO string
-                published_at = item.get('published_at')
-                if published_at and isinstance(published_at, datetime):
-                    published_at_str = published_at.isoformat() + 'Z'
-                elif published_at:
-                    published_at_str = str(published_at)
-                else:
-                    published_at_str = None
+                # Pass through published_at as-is from LunarCrush
+                published_at_str = item.get('published_at')
                 
                 news_items_with_sentiment.append({
                     "title": title,
                     "description": text,
                     "url": item.get('url', ''),
-                    "source": item.get('source', 'unknown'),
+                    "source": source,
                     "published_at": published_at_str,
                     "sentiment": sentiment
                 })
