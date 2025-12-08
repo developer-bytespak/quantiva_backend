@@ -8,8 +8,10 @@ import numpy as np
 import pandas_ta as ta
 from datetime import datetime, timedelta
 import logging
+import requests
 
 from .base_engine import BaseEngine
+from src.config import NESTJS_API_URL, NESTJS_API_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,8 @@ class TechnicalEngine(BaseEngine):
     
     def __init__(self):
         super().__init__("TechnicalEngine")
+        self.nestjs_api_url = NESTJS_API_URL
+        self.api_timeout = NESTJS_API_TIMEOUT
     
     def calculate(
         self,
@@ -44,7 +48,7 @@ class TechnicalEngine(BaseEngine):
             asset_type: 'crypto' or 'stock'
             timeframe: Primary timeframe (e.g., '1h', '4h', '1d')
             ohlcv_data: DataFrame with OHLCV data (columns: open, high, low, close, volume)
-            **kwargs: Additional parameters
+            **kwargs: Additional parameters (connection_id, exchange for multi-timeframe fetching)
         
         Returns:
             Dictionary with score, confidence, and metadata
@@ -53,26 +57,68 @@ class TechnicalEngine(BaseEngine):
             if not self.validate_inputs(asset_id, asset_type):
                 return self.handle_error(ValueError("Invalid inputs"), "validation")
             
-            if ohlcv_data is None or ohlcv_data.empty:
-                return self.handle_error(ValueError("No OHLCV data provided"), "data")
+            # Try to fetch multi-timeframe data if connection_id provided
+            connection_id = kwargs.get('connection_id')
+            exchange = kwargs.get('exchange', 'binance')
             
-            # Ensure required columns exist
-            required_cols = ['open', 'high', 'low', 'close', 'volume']
-            if not all(col in ohlcv_data.columns for col in required_cols):
-                return self.handle_error(
-                    ValueError(f"Missing required columns. Need: {required_cols}"),
-                    "data"
+            multi_timeframe_data = None
+            if connection_id:
+                try:
+                    multi_timeframe_data = self._fetch_multi_timeframe_ohlcv(
+                        asset_id, exchange, connection_id
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch multi-timeframe data: {str(e)}")
+                    multi_timeframe_data = None
+            
+            # Use multi-timeframe data if available, otherwise fallback to provided ohlcv_data
+            if multi_timeframe_data:
+                ohlcv_1d = multi_timeframe_data.get('1d')
+                ohlcv_4h = multi_timeframe_data.get('4h')
+                ohlcv_1h = multi_timeframe_data.get('1h')
+                
+                # Calculate trend score using multi-timeframe formula
+                trend_score, indicators_by_timeframe = self._calculate_multi_timeframe_trend_score(
+                    ohlcv_1d, ohlcv_4h, ohlcv_1h, ohlcv_data
                 )
+                
+                # Calculate confidence based on data quality
+                data_points = max(
+                    len(ohlcv_1d) if ohlcv_1d is not None else 0,
+                    len(ohlcv_4h) if ohlcv_4h is not None else 0,
+                    len(ohlcv_1h) if ohlcv_1h is not None else 0,
+                    len(ohlcv_data) if ohlcv_data is not None else 0
+                )
+                data_freshness = self._calculate_data_freshness(
+                    ohlcv_1d if ohlcv_1d is not None else (ohlcv_data if ohlcv_data is not None else pd.DataFrame())
+                )
+            else:
+                # Fallback to single timeframe calculation
+                if ohlcv_data is None or ohlcv_data.empty:
+                    return self.handle_error(ValueError("No OHLCV data provided"), "data")
+                
+                # Ensure required columns exist
+                required_cols = ['open', 'high', 'low', 'close', 'volume']
+                if not all(col in ohlcv_data.columns for col in required_cols):
+                    return self.handle_error(
+                        ValueError(f"Missing required columns. Need: {required_cols}"),
+                        "data"
+                    )
+                
+                # Calculate indicators for primary timeframe
+                primary_indicators = self._calculate_indicators(ohlcv_data)
+                
+                # Calculate trend score (single timeframe)
+                trend_score = self._calculate_trend_score(primary_indicators, ohlcv_data)
+                
+                indicators_by_timeframe = {
+                    'primary': primary_indicators
+                }
+                
+                # Calculate confidence based on data quality
+                data_points = len(ohlcv_data)
+                data_freshness = self._calculate_data_freshness(ohlcv_data)
             
-            # Calculate indicators for primary timeframe
-            primary_indicators = self._calculate_indicators(ohlcv_data)
-            
-            # Calculate trend score
-            trend_score = self._calculate_trend_score(primary_indicators, ohlcv_data)
-            
-            # Calculate confidence based on data quality
-            data_points = len(ohlcv_data)
-            data_freshness = self._calculate_data_freshness(ohlcv_data)
             confidence = self.calculate_confidence(
                 data_points,
                 data_freshness,
@@ -81,10 +127,16 @@ class TechnicalEngine(BaseEngine):
             )
             
             metadata = {
-                'indicators': primary_indicators,
+                'indicators': indicators_by_timeframe.get('primary', {}),
+                'timeframes': {
+                    '1d': indicators_by_timeframe.get('1d', {}),
+                    '4h': indicators_by_timeframe.get('4h', {}),
+                    '1h': indicators_by_timeframe.get('1h', {})
+                },
                 'data_points': data_points,
                 'data_freshness_hours': data_freshness,
-                'timeframe': timeframe or 'default'
+                'timeframe': timeframe or 'default',
+                'multi_timeframe': multi_timeframe_data is not None
             }
             
             return self.create_result(trend_score, confidence, metadata)
@@ -268,6 +320,9 @@ class TechnicalEngine(BaseEngine):
             Hours since last data point
         """
         try:
+            if df is None or df.empty:
+                return 24.0  # Assume stale data
+            
             if df.index.dtype == 'datetime64[ns]' or isinstance(df.index[0], datetime):
                 last_timestamp = df.index[-1]
                 if isinstance(last_timestamp, pd.Timestamp):
@@ -280,3 +335,205 @@ class TechnicalEngine(BaseEngine):
         except Exception as e:
             self.logger.warning(f"Could not calculate data freshness: {str(e)}")
             return 24.0  # Assume stale data
+    
+    def _fetch_multi_timeframe_ohlcv(
+        self,
+        symbol: str,
+        exchange: str,
+        connection_id: str
+    ) -> Optional[Dict[str, pd.DataFrame]]:
+        """
+        Fetch OHLCV data for multiple timeframes (1d, 4h, 1h) from NestJS API.
+        
+        Args:
+            symbol: Asset symbol (e.g., 'BTC')
+            exchange: Exchange name ('binance' or 'bybit')
+            connection_id: NestJS connection ID
+        
+        Returns:
+            Dictionary with '1d', '4h', '1h' DataFrames, or None if failed
+        """
+        if not connection_id:
+            return None
+        
+        try:
+            # Convert symbol to trading pair format (e.g., BTC -> BTCUSDT)
+            trading_pair = f"{symbol.upper()}USDT"
+            
+            result = {}
+            
+            # Fetch 1d candles (for MA50 vs MA200)
+            ohlcv_1d = self._fetch_ohlcv_from_api(trading_pair, '1d', 200, connection_id)
+            if ohlcv_1d is not None:
+                result['1d'] = ohlcv_1d
+            
+            # Fetch 4h candles (for MA20 vs MA50)
+            ohlcv_4h = self._fetch_ohlcv_from_api(trading_pair, '4h', 200, connection_id)
+            if ohlcv_4h is not None:
+                result['4h'] = ohlcv_4h
+            
+            # Fetch 1h candles (for ROC)
+            ohlcv_1h = self._fetch_ohlcv_from_api(trading_pair, '1h', 24, connection_id)
+            if ohlcv_1h is not None:
+                result['1h'] = ohlcv_1h
+            
+            return result if result else None
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching multi-timeframe OHLCV: {str(e)}")
+            return None
+    
+    def _fetch_ohlcv_from_api(
+        self,
+        trading_pair: str,
+        interval: str,
+        limit: int,
+        connection_id: str
+    ) -> Optional[pd.DataFrame]:
+        """
+        Fetch OHLCV data from NestJS API and convert to DataFrame.
+        
+        Args:
+            trading_pair: Trading pair (e.g., 'BTCUSDT')
+            interval: Timeframe interval ('1d', '4h', '1h')
+            limit: Number of candles to fetch
+            connection_id: NestJS connection ID
+        
+        Returns:
+            DataFrame with OHLCV data, or None if failed
+        """
+        try:
+            url = f"{self.nestjs_api_url}/exchanges/connections/{connection_id}/candles/{trading_pair}"
+            params = {
+                'interval': interval,
+                'limit': str(limit)
+            }
+            
+            response = requests.get(url, params=params, timeout=self.api_timeout)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if data.get('success') and data.get('data'):
+                candles = data['data']
+                
+                # Convert to DataFrame
+                df_data = []
+                for candle in candles:
+                    df_data.append({
+                        'open': float(candle.get('open', 0)),
+                        'high': float(candle.get('high', 0)),
+                        'low': float(candle.get('low', 0)),
+                        'close': float(candle.get('close', 0)),
+                        'volume': float(candle.get('volume', 0)),
+                        'timestamp': pd.to_datetime(candle.get('openTime', 0), unit='ms')
+                    })
+                
+                df = pd.DataFrame(df_data)
+                if not df.empty:
+                    df.set_index('timestamp', inplace=True)
+                    df.sort_index(inplace=True)
+                
+                return df
+            else:
+                self.logger.warning(f"No OHLCV data returned for {trading_pair} {interval}")
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            self.logger.warning(f"Failed to fetch OHLCV data from NestJS API: {str(e)}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error fetching OHLCV data: {str(e)}")
+            return None
+    
+    def _calculate_multi_timeframe_trend_score(
+        self,
+        ohlcv_1d: Optional[pd.DataFrame],
+        ohlcv_4h: Optional[pd.DataFrame],
+        ohlcv_1h: Optional[pd.DataFrame],
+        fallback_ohlcv: Optional[pd.DataFrame]
+    ) -> tuple:
+        """
+        Calculate trend score using multi-timeframe formula:
+        trend_score = 0.4*(MA50_1d vs MA200_1d) + 0.3*(MA20_4h vs MA50_4h) + 0.2*(ROC_1h) + 0.1*(structure)
+        
+        Args:
+            ohlcv_1d: 1-day OHLCV DataFrame
+            ohlcv_4h: 4-hour OHLCV DataFrame
+            ohlcv_1h: 1-hour OHLCV DataFrame
+            fallback_ohlcv: Fallback DataFrame if multi-timeframe data unavailable
+        
+        Returns:
+            Tuple of (trend_score, indicators_by_timeframe)
+        """
+        indicators_by_timeframe = {}
+        score_components = []
+        
+        # Component 1 (40%): MA50 vs MA200 on 1d timeframe
+        if ohlcv_1d is not None and not ohlcv_1d.empty and len(ohlcv_1d) >= 200:
+            indicators_1d = self._calculate_indicators(ohlcv_1d)
+            indicators_by_timeframe['1d'] = indicators_1d
+            
+            if indicators_1d.get('ma50') and indicators_1d.get('ma200'):
+                ma_comparison = (indicators_1d['ma50'] - indicators_1d['ma200']) / indicators_1d['ma200']
+                ma_score = self.normalize_score(ma_comparison * 100, input_min=-10, input_max=10)
+                score_components.append(('ma50_200_1d', ma_score, 0.4))
+            else:
+                score_components.append(('ma50_200_1d', 0.0, 0.4))
+        else:
+            indicators_by_timeframe['1d'] = {}
+            score_components.append(('ma50_200_1d', 0.0, 0.4))
+        
+        # Component 2 (30%): MA20 vs MA50 on 4h timeframe
+        if ohlcv_4h is not None and not ohlcv_4h.empty and len(ohlcv_4h) >= 50:
+            indicators_4h = self._calculate_indicators(ohlcv_4h)
+            indicators_by_timeframe['4h'] = indicators_4h
+            
+            if indicators_4h.get('ma20') and indicators_4h.get('ma50'):
+                ma20_50_comparison = (indicators_4h['ma20'] - indicators_4h['ma50']) / indicators_4h['ma50']
+                ma20_50_score = self.normalize_score(ma20_50_comparison * 100, input_min=-5, input_max=5)
+                score_components.append(('ma20_50_4h', ma20_50_score, 0.3))
+            else:
+                score_components.append(('ma20_50_4h', 0.0, 0.3))
+        else:
+            indicators_by_timeframe['4h'] = {}
+            score_components.append(('ma20_50_4h', 0.0, 0.3))
+        
+        # Component 3 (20%): ROC on 1h timeframe
+        if ohlcv_1h is not None and not ohlcv_1h.empty and len(ohlcv_1h) >= 2:
+            indicators_1h = self._calculate_indicators(ohlcv_1h)
+            indicators_by_timeframe['1h'] = indicators_1h
+            
+            roc = indicators_1h.get('roc', 0.0)
+            roc_score = self.normalize_score(roc, input_min=-10, input_max=10)
+            score_components.append(('roc_1h', roc_score, 0.2))
+        else:
+            indicators_by_timeframe['1h'] = {}
+            score_components.append(('roc_1h', 0.0, 0.2))
+        
+        # Component 4 (10%): Structure analysis (use primary timeframe or fallback)
+        structure_df = ohlcv_1d if ohlcv_1d is not None else (ohlcv_4h if ohlcv_4h is not None else fallback_ohlcv)
+        if structure_df is not None and not structure_df.empty:
+            structure_score = self._analyze_trend_structure(structure_df)
+            score_components.append(('structure', structure_score, 0.1))
+        else:
+            score_components.append(('structure', 0.0, 0.1))
+        
+        # Calculate weighted average
+        total_weight = sum(weight for _, _, weight in score_components)
+        if total_weight > 0:
+            weighted_score = sum(score * weight for _, score, weight in score_components) / total_weight
+        else:
+            weighted_score = 0.0
+        
+        # Store primary indicators (use 1d if available, otherwise 4h, otherwise fallback)
+        if ohlcv_1d is not None and not ohlcv_1d.empty:
+            indicators_by_timeframe['primary'] = indicators_by_timeframe.get('1d', {})
+        elif ohlcv_4h is not None and not ohlcv_4h.empty:
+            indicators_by_timeframe['primary'] = indicators_by_timeframe.get('4h', {})
+        elif fallback_ohlcv is not None and not fallback_ohlcv.empty:
+            indicators_by_timeframe['primary'] = self._calculate_indicators(fallback_ohlcv)
+        else:
+            indicators_by_timeframe['primary'] = {}
+        
+        return self.clamp_score(weighted_score), indicators_by_timeframe

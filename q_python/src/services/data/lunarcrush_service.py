@@ -5,7 +5,7 @@ Fetches cryptocurrency news and social metrics from LunarCrush API v4.
 import logging
 import requests
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from src.config import LUNARCRUSH_API_KEY
 
 logger = logging.getLogger(__name__)
@@ -102,20 +102,8 @@ class LunarCrushService:
                     # Description/text - API doesn't provide this, use title as fallback
                     text = article.get('description', title)
                     
-                    # Parse date - API returns Unix timestamp in post_created
-                    post_created = article.get('post_created')
-                    published_at = None
-                    if post_created:
-                        try:
-                            # Convert Unix timestamp to datetime
-                            published_at = datetime.fromtimestamp(int(post_created))
-                        except (ValueError, TypeError):
-                            # Fallback to other date fields if timestamp parsing fails
-                            date_str = article.get('date', article.get('published_at', article.get('created_at', '')))
-                            published_at = self._parse_date(date_str)
-                    else:
-                        date_str = article.get('date', article.get('published_at', article.get('created_at', '')))
-                        published_at = self._parse_date(date_str)
+                    # Use date as returned by LunarCrush API
+                    published_at = article.get('date', article.get('published_at', article.get('post_created', article.get('created_at', None))))
                     
                     if title:
                         news_items.append({

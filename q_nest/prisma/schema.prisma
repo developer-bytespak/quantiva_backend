@@ -747,3 +747,12 @@ model strategy_execution_jobs {
   @@index([scheduled_at])
   @@map("strategy_execution_jobs")
 }
+
+model sentiment_ema_state {
+  asset_id       String   @id @db.VarChar(100)
+  ema_value      Float    @db.DoublePrecision
+  last_timestamp DateTime @db.Timestamp(6)
+  updated_at     DateTime @default(now()) @updatedAt @db.Timestamp(6)
+
+  @@map("sentiment_ema_state")
+}
