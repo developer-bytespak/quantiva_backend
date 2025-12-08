@@ -19,10 +19,12 @@ import { ConnectionOwnerGuard } from './guards/connection-owner.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
 import { CreateConnectionDto } from './dto/create-connection.dto';
+import { PlaceOrderDto } from './dto/place-order.dto';
 import { BinanceService } from './integrations/binance.service';
 import { BybitService } from './integrations/bybit.service';
 import { CacheService } from './services/cache.service';
 import { ExchangeType } from '@prisma/client';
+import { ForbiddenException } from '@nestjs/common';
 
 /**
  * Exchanges Controller
@@ -378,6 +380,157 @@ export class ExchangesController {
     return {
       success: true,
       data: price,
+      last_updated: new Date().toISOString(),
+    };
+  }
+
+  @Get('connections/:connectionId/candles/:symbol')
+  @UseGuards(ConnectionOwnerGuard)
+  async getCandlestickData(
+    @Param('connectionId') connectionId: string,
+    @Param('symbol') symbol: string,
+    @Query('interval') interval: string = '1h',
+    @Query('limit') limit: string = '100',
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+  ) {
+    // Get connection to determine which exchange service to use
+    const connection = await this.exchangesService.getConnectionById(connectionId);
+    if (!connection || !connection.exchange) {
+      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    }
+
+    // Candlestick data is public, no need for API keys
+    const exchangeName = connection.exchange.name.toLowerCase();
+    const limitNum = parseInt(limit, 10) || 100;
+    const startTimeNum = startTime ? parseInt(startTime, 10) : undefined;
+    const endTimeNum = endTime ? parseInt(endTime, 10) : undefined;
+
+    let candles;
+    if (exchangeName === 'bybit') {
+      candles = await this.bybitService.getCandlestickData(symbol, interval, limitNum, startTimeNum, endTimeNum);
+    } else {
+      // Default to Binance
+      candles = await this.binanceService.getCandlestickData(symbol, interval, limitNum, startTimeNum, endTimeNum);
+    }
+
+    return {
+      success: true,
+      data: candles,
+      last_updated: new Date().toISOString(),
+    };
+  }
+
+  @Get('connections/:connectionId/trading-permissions')
+  @UseGuards(ConnectionOwnerGuard)
+  async getTradingPermissions(@Param('connectionId') connectionId: string) {
+    const permissionCheck = await this.exchangesService.checkTradingPermission(connectionId);
+    return {
+      success: true,
+      data: permissionCheck,
+      last_updated: new Date().toISOString(),
+    };
+  }
+
+  @Post('connections/:connectionId/orders/place')
+  @UseGuards(ConnectionOwnerGuard)
+  async placeOrder(
+    @Param('connectionId') connectionId: string,
+    @Body() placeOrderDto: PlaceOrderDto,
+  ) {
+    // Check trading permissions
+    const permissionCheck = await this.exchangesService.checkTradingPermission(connectionId);
+    if (!permissionCheck.canTrade) {
+      throw new ForbiddenException(permissionCheck.reason || 'Trading is not allowed');
+    }
+
+    // Place order through service
+    const order = await this.exchangesService.placeOrder(
+      connectionId,
+      placeOrderDto.symbol,
+      placeOrderDto.side,
+      placeOrderDto.type,
+      placeOrderDto.quantity,
+      placeOrderDto.price,
+    );
+
+    return {
+      success: true,
+      data: order,
+      message: 'Order placed successfully',
+      last_updated: new Date().toISOString(),
+    };
+  }
+
+  @Get('connections/:connectionId/coin/:symbol')
+  @UseGuards(ConnectionOwnerGuard)
+  async getCoinDetail(
+    @Param('connectionId') connectionId: string,
+    @Param('symbol') symbol: string,
+  ) {
+    // Get connection to determine which exchange service to use
+    const connection = await this.exchangesService.getConnectionById(connectionId);
+    if (!connection || !connection.exchange) {
+      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    }
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+
+    // Fetch ticker price (24h stats)
+    let ticker;
+    if (exchangeName === 'bybit') {
+      const tickers = await this.bybitService.getTickerPrices([symbol]);
+      ticker = tickers[0] || null;
+    } else {
+      const tickers = await this.binanceService.getTickerPrices([symbol]);
+      ticker = tickers[0] || null;
+    }
+
+    // Fetch current candlestick data (default 1d interval, 100 candles)
+    let candles;
+    if (exchangeName === 'bybit') {
+      candles = await this.bybitService.getCandlestickData(symbol, '1d', 100);
+    } else {
+      candles = await this.binanceService.getCandlestickData(symbol, '1d', 100);
+    }
+
+    // Fetch account balance for quote currency (USDT)
+    const balance = await this.exchangesService.getConnectionData(connectionId, 'balance') as any;
+    const quoteCurrency = 'USDT';
+    const quoteBalance = balance.assets?.find((a: any) => a.symbol === quoteCurrency) || null;
+    const availableBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
+
+    // Extract 24h high/low from ticker if available (Binance provides this, Bybit may not)
+    let high24h = 0;
+    let low24h = 0;
+    let volume24h = 0;
+
+    if (ticker) {
+      // For Binance, we'd need to fetch full ticker data with 24h stats
+      // For now, we'll use the candlestick data to estimate
+      if (candles && candles.length > 0) {
+        const recentCandles = candles.slice(-24); // Last 24 hours worth of 1h candles
+        high24h = Math.max(...recentCandles.map(c => c.high));
+        low24h = Math.min(...recentCandles.map(c => c.low));
+        volume24h = recentCandles.reduce((sum, c) => sum + c.volume, 0);
+      }
+    }
+
+    return {
+      success: true,
+      data: {
+        symbol,
+        tradingPair: symbol,
+        currentPrice: ticker?.price || 0,
+        change24h: ticker?.change24h || 0,
+        changePercent24h: ticker?.changePercent24h || 0,
+        high24h,
+        low24h,
+        volume24h,
+        availableBalance,
+        quoteCurrency,
+        candles: candles.slice(0, 100), // Return last 100 candles
+      },
       last_updated: new Date().toISOString(),
     };
   }

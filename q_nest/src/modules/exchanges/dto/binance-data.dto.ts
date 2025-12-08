@@ -54,3 +54,13 @@ export class TickerPriceDto {
   changePercent24h: number;
 }
 
+export class CandlestickDto {
+  openTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  closeTime: number;
+}
+
