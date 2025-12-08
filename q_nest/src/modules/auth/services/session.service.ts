@@ -1,5 +1,6 @@
-import { Injectable, ForbiddenException } from '@nestjs/common';
+import { Injectable, ForbiddenException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { TokenService } from './token.service';
 
@@ -14,6 +15,8 @@ const TIER_SESSION_LIMITS: Record<UserTier, number> = {
 
 @Injectable()
 export class SessionService {
+  private readonly logger = new Logger(SessionService.name);
+
   constructor(
     private prisma: PrismaService,
     private tokenService: TokenService,
@@ -44,6 +47,9 @@ export class SessionService {
 
   async getActiveSessionCount(userId: string): Promise<number> {
     const now = new Date();
+    // Clean up expired sessions for this user first
+    await this.cleanupExpiredSessionsForUser(userId);
+    
     return this.prisma.user_sessions.count({
       where: {
         user_id: userId,
@@ -73,6 +79,9 @@ export class SessionService {
     ipAddress?: string,
     deviceId?: string,
   ): Promise<string> {
+    // Clean up expired sessions before checking limit
+    await this.cleanupExpiredSessionsForUser(userId);
+    
     await this.checkSessionLimit(userId);
 
     const refreshTokenHash = await this.tokenService.hashRefreshToken(
@@ -225,6 +234,19 @@ export class SessionService {
   async findSessionByRefreshToken(
     refreshToken: string,
   ): Promise<{ session_id: string; user_id: string } | null> {
+    // First, verify the JWT token is valid (not expired)
+    let tokenPayload;
+    try {
+      tokenPayload = await this.tokenService.verifyToken(refreshToken);
+    } catch (error) {
+      // Token is invalid or expired, clean up any expired sessions
+      await this.cleanupExpiredSessions();
+      return null;
+    }
+
+    // Clean up expired sessions before searching
+    await this.cleanupExpiredSessions();
+
     const sessions = await this.prisma.user_sessions.findMany({
       where: {
         revoked: false,
@@ -234,6 +256,7 @@ export class SessionService {
         refresh_token_hash: {
           not: null,
         },
+        user_id: tokenPayload.sub, // Only search for sessions belonging to this user
       },
     });
 
@@ -274,6 +297,53 @@ export class SessionService {
         },
       },
     });
+  }
+
+  async cleanupExpiredSessionsForUser(userId: string): Promise<void> {
+    await this.prisma.user_sessions.deleteMany({
+      where: {
+        user_id: userId,
+        expires_at: {
+          lt: new Date(),
+        },
+      },
+    });
+  }
+
+  async cleanupExpiredAndRevokedSessions(): Promise<void> {
+    const now = new Date();
+    await this.prisma.user_sessions.deleteMany({
+      where: {
+        OR: [
+          {
+            expires_at: {
+              lt: now,
+            },
+          },
+          {
+            revoked: true,
+            expires_at: {
+              lt: now,
+            },
+          },
+        ],
+      },
+    });
+  }
+
+  /**
+   * Scheduled job to clean up expired sessions every hour
+   * This ensures expired sessions are removed from the database
+   */
+  @Cron(CronExpression.EVERY_HOUR)
+  async scheduledCleanupExpiredSessions(): Promise<void> {
+    this.logger.log('Running scheduled cleanup of expired sessions');
+    try {
+      await this.cleanupExpiredSessions();
+      this.logger.log('Cleaned up expired sessions');
+    } catch (error: any) {
+      this.logger.error(`Error cleaning up expired sessions: ${error.message}`);
+    }
   }
 }
 

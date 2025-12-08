@@ -187,13 +187,16 @@ export class AuthService {
   }
 
   async refresh(refreshToken: string) {
-    // Find session by refresh token
+    // Clean up expired sessions first
+    await this.sessionService.cleanupExpiredSessions();
+
+    // Find session by refresh token (this also validates JWT expiry)
     const session = await this.sessionService.findSessionByRefreshToken(
       refreshToken,
     );
 
     if (!session) {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException('Invalid or expired refresh token');
     }
 
     // Get user
@@ -212,11 +215,19 @@ export class AuthService {
       username: user.username,
     });
 
-    // Update session with new refresh token (rotation)
+    // Update session with new refresh token (rotation) and extend expiry
     await this.sessionService.updateSessionRefreshToken(
       session.session_id,
       newRefreshToken,
     );
+
+    // Extend session expiry date
+    const newExpiresAt = new Date();
+    newExpiresAt.setDate(newExpiresAt.getDate() + 7); // 7 days
+    await this.prisma.user_sessions.update({
+      where: { session_id: session.session_id },
+      data: { expires_at: newExpiresAt },
+    });
 
     // Generate access token with session_id
     const payload: TokenPayload = {
