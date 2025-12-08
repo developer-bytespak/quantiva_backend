@@ -9,6 +9,7 @@ import {
   PortfolioDto,
   TickerPriceDto,
 } from '../dto/binance-data.dto';
+import { OrderBookDto, RecentTradeDto } from '../dto/orderbook.dto';
 import {
   BinanceApiException,
   BinanceRateLimitException,
@@ -628,6 +629,79 @@ export class BinanceService {
         throw error;
       }
       throw new BinanceApiException('Failed to place order');
+    }
+  }
+
+  /**
+   * Fetches order book (depth) for a symbol
+   */
+  async getOrderBook(symbol: string, limit: number = 20): Promise<OrderBookDto> {
+    try {
+      const depth = await this.makePublicRequest('/api/v3/depth', {
+        symbol,
+        limit,
+      });
+
+      const bids = depth.bids.map((bid: [string, string]) => ({
+        price: parseFloat(bid[0]),
+        quantity: parseFloat(bid[1]),
+      }));
+
+      const asks = depth.asks.map((ask: [string, string]) => ({
+        price: parseFloat(ask[0]),
+        quantity: parseFloat(ask[1]),
+      }));
+
+      // Calculate cumulative totals
+      let bidTotal = 0;
+      const bidsWithTotal = bids.map((bid) => {
+        bidTotal += bid.quantity;
+        return { ...bid, total: bidTotal };
+      });
+
+      let askTotal = 0;
+      const asksWithTotal = asks.map((ask) => {
+        askTotal += ask.quantity;
+        return { ...ask, total: askTotal };
+      });
+
+      // Calculate spread
+      const bestBid = bids[0]?.price || 0;
+      const bestAsk = asks[0]?.price || 0;
+      const spread = bestAsk - bestBid;
+      const spreadPercent = bestBid > 0 ? (spread / bestBid) * 100 : 0;
+
+      return {
+        bids: bidsWithTotal,
+        asks: asksWithTotal,
+        lastUpdateId: depth.lastUpdateId,
+        spread,
+        spreadPercent,
+      };
+    } catch (error: any) {
+      throw new BinanceApiException(`Failed to fetch order book for ${symbol}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Fetches recent trades for a symbol
+   */
+  async getRecentTrades(symbol: string, limit: number = 50): Promise<RecentTradeDto[]> {
+    try {
+      const trades = await this.makePublicRequest('/api/v3/trades', {
+        symbol,
+        limit,
+      });
+
+      return trades.map((trade: any) => ({
+        id: trade.id.toString(),
+        price: parseFloat(trade.price),
+        quantity: parseFloat(trade.qty),
+        time: trade.time,
+        isBuyerMaker: trade.isBuyerMaker,
+      }));
+    } catch (error: any) {
+      throw new BinanceApiException(`Failed to fetch recent trades for ${symbol}: ${error.message}`);
     }
   }
 }

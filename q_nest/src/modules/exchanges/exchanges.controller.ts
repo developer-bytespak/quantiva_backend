@@ -595,5 +595,45 @@ export class ExchangesController {
       cached: isCached, // Indicate if data came from cache
     };
   }
+
+  @Get('connections/:connectionId/orderbook/:symbol')
+  @UseGuards(ConnectionOwnerGuard)
+  async getOrderBook(
+    @Param('connectionId') connectionId: string,
+    @Param('symbol') symbol: string,
+    @Query('limit') limit: string = '20',
+  ) {
+    const orderBook = await this.exchangesService.getOrderBook(
+      connectionId,
+      symbol,
+      parseInt(limit, 10),
+    );
+
+    return {
+      success: true,
+      data: orderBook,
+      last_updated: new Date().toISOString(),
+    };
+  }
+
+  @Get('connections/:connectionId/trades/:symbol')
+  @UseGuards(ConnectionOwnerGuard)
+  async getRecentTrades(
+    @Param('connectionId') connectionId: string,
+    @Param('symbol') symbol: string,
+    @Query('limit') limit: string = '50',
+  ) {
+    const trades = await this.exchangesService.getRecentTrades(
+      connectionId,
+      symbol,
+      parseInt(limit, 10),
+    );
+
+    return {
+      success: true,
+      data: trades,
+      last_updated: new Date().toISOString(),
+    };
+  }
 }
 

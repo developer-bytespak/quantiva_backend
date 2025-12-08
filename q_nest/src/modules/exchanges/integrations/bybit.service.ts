@@ -9,6 +9,7 @@ import {
   PortfolioDto,
   TickerPriceDto,
 } from '../dto/binance-data.dto';
+import { OrderBookDto, RecentTradeDto } from '../dto/orderbook.dto';
 import {
   BybitApiException,
   BybitRateLimitException,
@@ -789,6 +790,87 @@ export class BybitService {
         throw error;
       }
       throw new BybitApiException('Failed to place order');
+    }
+  }
+
+  /**
+   * Fetches order book (depth) for a symbol
+   */
+  async getOrderBook(symbol: string, limit: number = 20): Promise<OrderBookDto> {
+    try {
+      const result = await this.makePublicRequest('/v5/market/orderbook', {
+        category: 'spot',
+        symbol,
+        limit,
+      });
+
+      // Bybit v5 orderbook returns data directly in result
+      // Structure: { s: 'BTCUSDT', b: [[price, qty], ...], a: [[price, qty], ...], ts: timestamp }
+      const orderbook = result || {};
+      const bids = (orderbook.b || []).map((bid: [string, string]) => ({
+        price: parseFloat(bid[0]),
+        quantity: parseFloat(bid[1]),
+      }));
+
+      const asks = (orderbook.a || []).map((ask: [string, string]) => ({
+        price: parseFloat(ask[0]),
+        quantity: parseFloat(ask[1]),
+      }));
+
+      // Calculate cumulative totals
+      let bidTotal = 0;
+      const bidsWithTotal = bids.map((bid) => {
+        bidTotal += bid.quantity;
+        return { ...bid, total: bidTotal };
+      });
+
+      let askTotal = 0;
+      const asksWithTotal = asks.map((ask) => {
+        askTotal += ask.quantity;
+        return { ...ask, total: askTotal };
+      });
+
+      // Calculate spread
+      const bestBid = bids[0]?.price || 0;
+      const bestAsk = asks[0]?.price || 0;
+      const spread = bestAsk - bestBid;
+      const spreadPercent = bestBid > 0 ? (spread / bestBid) * 100 : 0;
+
+      return {
+        bids: bidsWithTotal,
+        asks: asksWithTotal,
+        lastUpdateId: orderbook.ts || 0,
+        spread,
+        spreadPercent,
+      };
+    } catch (error: any) {
+      throw new BybitApiException(`Failed to fetch order book for ${symbol}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Fetches recent trades for a symbol
+   */
+  async getRecentTrades(symbol: string, limit: number = 50): Promise<RecentTradeDto[]> {
+    try {
+      const result = await this.makePublicRequest('/v5/market/recent-trade', {
+        category: 'spot',
+        symbol,
+        limit,
+      });
+
+      // Bybit v5 recent trades returns data in result.list
+      const trades = result.list || [];
+
+      return trades.map((trade: any) => ({
+        id: trade.execId || trade.tradeId || '',
+        price: parseFloat(trade.price || '0'),
+        quantity: parseFloat(trade.qty || trade.size || '0'),
+        time: parseInt(trade.time || '0', 10),
+        isBuyerMaker: trade.side === 'Sell', // In Bybit, Sell means buyer is maker
+      }));
+    } catch (error: any) {
+      throw new BybitApiException(`Failed to fetch recent trades for ${symbol}: ${error.message}`);
     }
   }
 }

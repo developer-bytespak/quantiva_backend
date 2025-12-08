@@ -13,6 +13,7 @@ import {
   PortfolioDto,
   TickerPriceDto,
 } from './dto/binance-data.dto';
+import { OrderBookDto, RecentTradeDto } from './dto/orderbook.dto';
 
 // Type for exchange services that implement common methods
 type ExchangeService = BinanceService | BybitService;
@@ -559,6 +560,54 @@ export class ExchangesService {
     return this.prisma.user_exchange_connections.delete({
       where: { connection_id: id },
     });
+  }
+
+  /**
+   * Gets order book for a symbol
+   */
+  async getOrderBook(connectionId: string, symbol: string, limit: number = 20): Promise<OrderBookDto> {
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection || !connection.exchange) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+    
+    if (exchangeName === 'binance') {
+      return this.binanceService.getOrderBook(symbol, limit);
+    } else if (exchangeName === 'bybit') {
+      return this.bybitService.getOrderBook(symbol, limit);
+    } else {
+      throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
+    }
+  }
+
+  /**
+   * Gets recent trades for a symbol
+   */
+  async getRecentTrades(connectionId: string, symbol: string, limit: number = 50): Promise<RecentTradeDto[]> {
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection || !connection.exchange) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+    
+    if (exchangeName === 'binance') {
+      return this.binanceService.getRecentTrades(symbol, limit);
+    } else if (exchangeName === 'bybit') {
+      return this.bybitService.getRecentTrades(symbol, limit);
+    } else {
+      throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
+    }
   }
 }
 
