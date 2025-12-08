@@ -410,6 +410,129 @@ export class ExchangesService {
     return fresh;
   }
 
+  /**
+   * Checks if user has trading permissions
+   */
+  async checkTradingPermission(connectionId: string): Promise<{
+    canTrade: boolean;
+    reason?: string;
+  }> {
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection) {
+      return { canTrade: false, reason: 'Connection not found' };
+    }
+
+    if (connection.status !== ConnectionStatus.active) {
+      return { canTrade: false, reason: 'Connection is not active' };
+    }
+
+    const metadata = (connection.connection_metadata as any) || {};
+    
+    // Check if trading is enabled
+    if (metadata.enable_trading !== true) {
+      return { canTrade: false, reason: 'Trading is not enabled for this connection' };
+    }
+
+    // Check permissions for Binance
+    const exchangeName = connection.exchange?.name.toLowerCase();
+    if (exchangeName === 'binance') {
+      const permissions = metadata.permissions || [];
+      const accountType = metadata.accountType || '';
+      
+      // Log permissions for debugging
+      this.logger.debug(`Checking Binance permissions for connection ${connectionId}:`, {
+        permissions,
+        accountType,
+        enable_trading: metadata.enable_trading,
+      });
+      
+      // Binance can return permissions in different formats:
+      // 1. ['SPOT', 'MARGIN', 'FUTURES'] - standard format
+      // 2. ['TRD_GRP_XXX'] - trading group format (newer format)
+      // 3. Account type can be 'SPOT' which indicates spot trading capability
+      
+      // Check if account type indicates spot trading
+      const isSpotAccount = accountType === 'SPOT' || accountType === 'MARGIN';
+      
+      // Check for standard permission names (case-insensitive)
+      const hasSpotPermission = permissions.some(p => 
+        p.toUpperCase().includes('SPOT') || p === 'SPOT'
+      );
+      const hasMarginPermission = permissions.some(p => 
+        p.toUpperCase().includes('MARGIN') || p === 'MARGIN'
+      );
+      
+      // Check for trading group format (TRD_GRP_XXX indicates trading is enabled)
+      const hasTradingGroup = permissions.some(p => 
+        p.toUpperCase().startsWith('TRD_GRP_')
+      );
+      
+      // If enable_trading is true, account is active, and we have any indication of trading capability
+      // OR if we have a trading group (which means trading is enabled)
+      // OR if account type is SPOT/MARGIN
+      if (hasSpotPermission || hasMarginPermission || hasTradingGroup || isSpotAccount) {
+        // Trading is allowed
+        return { canTrade: true };
+      }
+      
+      // If none of the above, trading is not allowed
+      return { 
+        canTrade: false, 
+        reason: `API key does not have trading permissions. Current permissions: ${permissions.join(', ') || 'none'}, Account Type: ${accountType || 'unknown'}. Please ensure Spot Trading and/or Margin Trading is enabled in your Binance API key settings, then re-verify your connection.` 
+      };
+    }
+
+    // For Bybit, we assume if enable_trading is true and connection is active, trading is allowed
+    // Bybit doesn't provide detailed permissions in the verification endpoint
+
+    return { canTrade: true };
+  }
+
+  /**
+   * Places an order through the connected exchange
+   */
+  async placeOrder(
+    connectionId: string,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    type: 'MARKET' | 'LIMIT',
+    quantity: number,
+    price?: number,
+  ): Promise<OrderDto> {
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection || !connection.exchange) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    if (!connection.api_key_encrypted || !connection.api_secret_encrypted) {
+      throw new ConnectionNotFoundException('Connection missing API credentials');
+    }
+
+    // Decrypt API keys
+    const apiKey = this.encryptionService.decryptApiKey(connection.api_key_encrypted);
+    const apiSecret = this.encryptionService.decryptApiKey(connection.api_secret_encrypted);
+
+    // Get the appropriate exchange service
+    const exchangeService = this.getExchangeService(connection.exchange.name);
+
+    // Place order
+    if (exchangeService instanceof BinanceService) {
+      return this.binanceService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
+    } else if (exchangeService instanceof BybitService) {
+      return this.bybitService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
+    } else {
+      throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
+    }
+  }
+
   async updateConnection(id: string, data: {
     auth_type?: string;
     api_key_encrypted?: string;

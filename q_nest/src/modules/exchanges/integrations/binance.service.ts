@@ -3,6 +3,7 @@ import axios, { AxiosInstance } from 'axios';
 import {
   AccountBalanceDto,
   AssetBalanceDto,
+  CandlestickDto,
   OrderDto,
   PositionDto,
   PortfolioDto,
@@ -470,6 +471,164 @@ export class BinanceService {
       change24h,
       changePercent24h,
     };
+  }
+
+  /**
+   * Maps Binance interval to API format
+   */
+  private mapInterval(interval: string): string {
+    const intervalMap: Record<string, string> = {
+      '1m': '1m',
+      '5m': '5m',
+      '15m': '15m',
+      '30m': '30m',
+      '1h': '1h',
+      '4h': '4h',
+      '8h': '8h',
+      '1d': '1d',
+      '1w': '1w',
+      '1M': '1M',
+    };
+    return intervalMap[interval] || '1h';
+  }
+
+  /**
+   * Fetches candlestick/OHLCV data
+   */
+  async getCandlestickData(
+    symbol: string,
+    interval: string = '1h',
+    limit: number = 100,
+    startTime?: number,
+    endTime?: number,
+  ): Promise<CandlestickDto[]> {
+    try {
+      const params: Record<string, any> = {
+        symbol,
+        interval: this.mapInterval(interval),
+        limit,
+      };
+
+      if (startTime) {
+        params.startTime = startTime;
+      }
+      if (endTime) {
+        params.endTime = endTime;
+      }
+
+      const klines = await this.makePublicRequest('/api/v3/klines', params);
+
+      return klines.map((kline: any[]) => ({
+        openTime: kline[0],
+        open: parseFloat(kline[1]),
+        high: parseFloat(kline[2]),
+        low: parseFloat(kline[3]),
+        close: parseFloat(kline[4]),
+        volume: parseFloat(kline[5]),
+        closeTime: kline[6],
+      }));
+    } catch (error: any) {
+      if (error instanceof BinanceApiException || error instanceof BinanceRateLimitException) {
+        throw error;
+      }
+      throw new BinanceApiException('Failed to fetch candlestick data');
+    }
+  }
+
+  /**
+   * Makes a signed POST request to Binance API
+   */
+  private async makeSignedPostRequest(
+    endpoint: string,
+    apiKey: string,
+    apiSecret: string,
+    params: Record<string, any> = {},
+  ): Promise<any> {
+    const serverTime = await this.getBinanceServerTime();
+    const recvWindow = 60000;
+
+    const queryString = new URLSearchParams({
+      ...params,
+      timestamp: serverTime.toString(),
+      recvWindow: recvWindow.toString(),
+    }).toString();
+
+    const signature = this.createSignature(queryString, apiSecret);
+    const url = `${endpoint}?${queryString}&signature=${signature}`;
+
+    try {
+      const response = await this.apiClient.post(url, null, {
+        headers: {
+          'X-MBX-APIKEY': apiKey,
+        },
+      });
+      return response.data;
+    } catch (error: any) {
+      if (error.response?.data?.code) {
+        const binanceCode = error.response.data.code;
+        const binanceMsg = error.response.data.msg || 'Binance API error';
+
+        if (binanceCode === -2015 || binanceCode === -1022) {
+          throw new InvalidApiKeyException(binanceMsg);
+        }
+
+        if (binanceCode === -1003) {
+          throw new BinanceRateLimitException(binanceMsg);
+        }
+
+        throw new BinanceApiException(binanceMsg, `BINANCE_${binanceCode}`);
+      }
+      throw new BinanceApiException(error.message || 'Failed to place order');
+    }
+  }
+
+  /**
+   * Places an order on Binance
+   */
+  async placeOrder(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    type: 'MARKET' | 'LIMIT',
+    quantity: number,
+    price?: number,
+  ): Promise<OrderDto> {
+    try {
+      if (type === 'LIMIT' && !price) {
+        throw new BinanceApiException('Price is required for LIMIT orders');
+      }
+
+      const params: Record<string, any> = {
+        symbol,
+        side: side.toUpperCase(),
+        type: type === 'MARKET' ? 'MARKET' : 'LIMIT',
+        quantity: quantity.toString(),
+      };
+
+      if (type === 'LIMIT') {
+        params.price = price!.toString();
+        params.timeInForce = 'GTC'; // Good Till Cancel
+      }
+
+      const order = await this.makeSignedPostRequest('/api/v3/order', apiKey, apiSecret, params);
+
+      return {
+        orderId: order.orderId.toString(),
+        symbol: order.symbol,
+        side: order.side as 'BUY' | 'SELL',
+        type: order.type,
+        quantity: parseFloat(order.executedQty || order.origQty || '0'),
+        price: parseFloat(order.price || '0'),
+        status: order.status,
+        time: order.transactTime || order.updateTime || Date.now(),
+      };
+    } catch (error: any) {
+      if (error instanceof BinanceApiException || error instanceof InvalidApiKeyException) {
+        throw error;
+      }
+      throw new BinanceApiException('Failed to place order');
+    }
   }
 }
 

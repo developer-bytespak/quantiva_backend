@@ -3,6 +3,7 @@ import axios, { AxiosInstance } from 'axios';
 import {
   AccountBalanceDto,
   AssetBalanceDto,
+  CandlestickDto,
   OrderDto,
   PositionDto,
   PortfolioDto,
@@ -655,6 +656,139 @@ export class BybitService {
       );
 
       return prices.filter((p): p is TickerPriceDto => p !== null);
+    }
+  }
+
+  /**
+   * Maps interval to Bybit format
+   */
+  private mapInterval(interval: string): string {
+    const intervalMap: Record<string, string> = {
+      '1m': '1',
+      '5m': '5',
+      '15m': '15',
+      '30m': '30',
+      '1h': '60',
+      '4h': '240',
+      '8h': '480',
+      '1d': 'D',
+      '1w': 'W',
+      '1M': 'M',
+    };
+    return intervalMap[interval] || '60';
+  }
+
+  /**
+   * Fetches candlestick/OHLCV data
+   */
+  async getCandlestickData(
+    symbol: string,
+    interval: string = '1h',
+    limit: number = 100,
+    startTime?: number,
+    endTime?: number,
+  ): Promise<CandlestickDto[]> {
+    try {
+      const params: Record<string, any> = {
+        category: 'spot',
+        symbol,
+        interval: this.mapInterval(interval),
+        limit,
+      };
+
+      if (startTime) {
+        params.start = startTime;
+      }
+      if (endTime) {
+        params.end = endTime;
+      }
+
+      const result = await this.makePublicRequest('/v5/market/kline', params);
+      const klines = (result.list || []) as any[];
+
+      return klines.map((kline: any) => ({
+        openTime: parseInt(kline[0], 10),
+        open: parseFloat(kline[1]),
+        high: parseFloat(kline[2]),
+        low: parseFloat(kline[3]),
+        close: parseFloat(kline[4]),
+        volume: parseFloat(kline[5]),
+        closeTime: parseInt(kline[0], 10) + (this.getIntervalMs(interval) - 1),
+      }));
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitRateLimitException) {
+        throw error;
+      }
+      throw new BybitApiException('Failed to fetch candlestick data');
+    }
+  }
+
+  /**
+   * Gets interval duration in milliseconds
+   */
+  private getIntervalMs(interval: string): number {
+    const intervalMap: Record<string, number> = {
+      '1m': 60 * 1000,
+      '5m': 5 * 60 * 1000,
+      '15m': 15 * 60 * 1000,
+      '30m': 30 * 60 * 1000,
+      '1h': 60 * 60 * 1000,
+      '4h': 4 * 60 * 60 * 1000,
+      '8h': 8 * 60 * 60 * 1000,
+      '1d': 24 * 60 * 60 * 1000,
+      '1w': 7 * 24 * 60 * 60 * 1000,
+      '1M': 30 * 24 * 60 * 60 * 1000,
+    };
+    return intervalMap[interval] || 60 * 60 * 1000;
+  }
+
+  /**
+   * Places an order on Bybit
+   */
+  async placeOrder(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    type: 'MARKET' | 'LIMIT',
+    quantity: number,
+    price?: number,
+  ): Promise<OrderDto> {
+    try {
+      if (type === 'LIMIT' && !price) {
+        throw new BybitApiException('Price is required for LIMIT orders');
+      }
+
+      const params: Record<string, any> = {
+        category: 'spot',
+        symbol,
+        side: side === 'BUY' ? 'Buy' : 'Sell',
+        orderType: type === 'MARKET' ? 'Market' : 'Limit',
+        qty: quantity.toString(),
+      };
+
+      if (type === 'LIMIT') {
+        params.price = price!.toString();
+      }
+
+      const result = await this.makeSignedRequest('/v5/order/create', apiKey, apiSecret, params, 'POST');
+      const order = result as any;
+
+      return {
+        orderId: order.orderId || '',
+        symbol: order.symbol || symbol,
+        side: side,
+        type: type,
+        quantity: parseFloat(order.qty || quantity.toString()),
+        price: parseFloat(order.price || price?.toString() || '0'),
+        status: order.orderStatus || 'NEW',
+        time: parseInt(order.createdTime || Date.now().toString(), 10),
+      };
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
+        throw error;
+      }
+      throw new BybitApiException('Failed to place order');
     }
   }
 }
