@@ -25,6 +25,7 @@ class MarketSignalAnalyzer:
         self.nestjs_api_url = NESTJS_API_URL
         self.api_timeout = NESTJS_API_TIMEOUT
         self._lunarcrush_service = None  # Lazy initialization to avoid import issues
+        self._warned_symbols = set()  # Track which symbols we've warned about (to avoid spam)
     
     def analyze(
         self,
@@ -133,10 +134,13 @@ class MarketSignalAnalyzer:
         """
         # If no connection_id, we can't fetch data (graceful degradation)
         if not connection_id:
-            self.logger.warning(
-                f"No connection_id provided for {symbol}, skipping OHLCV fetch. "
-                "Market signals will use LunarCrush data only."
-            )
+            # Only warn once per symbol to avoid log spam
+            if symbol not in self._warned_symbols:
+                self.logger.debug(
+                    f"No connection_id provided for {symbol}, skipping OHLCV fetch. "
+                    "Market signals will use LunarCrush data only."
+                )
+                self._warned_symbols.add(symbol)
             return None
         
         try:
