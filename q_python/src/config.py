@@ -118,6 +118,7 @@ FINBERT_CONFIG: Dict[str, Any] = {
 # API Keys Configuration
 STOCK_NEWS_API_KEY = os.getenv("STOCK_NEWS_API_KEY")
 LUNARCRUSH_API_KEY = os.getenv("LUNARCRUSH_API_KEY")
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
 
 # NestJS Backend API Configuration
 NESTJS_API_URL = os.getenv("NESTJS_API_URL", "http://localhost:3000")
