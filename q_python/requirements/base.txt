@@ -12,7 +12,6 @@ fredapi>=0.5.1
 # News API Endpoint Dependencies (LunarCrush + FinBERT Sentiment Analysis)
 # - requests: For LunarCrush API calls (already listed above)
 # - python-dateutil: For date parsing in news services (LunarCrush, Stock News)
-# - transformers/torch: For FinBERT sentiment analysis (already listed below)
 # - python-dotenv: For loading LUNARCRUSH_API_KEY from .env file (already listed below)
 python-dateutil>=2.8.2
 
@@ -28,12 +27,21 @@ deepface>=0.0.79
 # Uncomment below for Linux/macOS:
 # mediapipe>=0.10.0
 
-# FinGPT Model Dependencies
+# ML Model Dependencies (FinBERT + FinGPT)
+# FinBERT: Financial sentiment analysis using ProsusAI/finbert model
+# - Model (ProsusAI/finbert) is automatically downloaded from Hugging Face on first use (438MB)
+# - Download occurs when dashboard is first opened and FinBERT is initialized
+# - Model is cached in ~/.cache/huggingface/ after first download
+# - Requires transformers, torch, and huggingface-hub for model loading
 transformers>=4.32.0
-peft>=0.5.0
 torch>=2.0.0
+huggingface-hub>=0.16.0
+
+# FinGPT Model Dependencies
+peft>=0.5.0
 accelerate>=0.20.0
 sentencepiece>=0.1.99
-huggingface-hub>=0.16.0
+
+# Environment and Database
 python-dotenv>=1.0.0
 psycopg2-binary>=2.9.0

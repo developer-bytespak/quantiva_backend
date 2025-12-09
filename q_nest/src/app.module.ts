@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from './prisma/prisma.module';
 import { ConfigModule } from './config/config.module';
 import { AuthModule } from './modules/auth/auth.module';
@@ -8,7 +9,7 @@ import { UsersModule } from './modules/users/users.module';
 import { NewsModule } from './modules/news/news.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, AuthModule, KycModule, ExchangesModule, UsersModule, NewsModule],
+  imports: [ConfigModule, PrismaModule, ScheduleModule.forRoot(), AuthModule, KycModule, ExchangesModule, UsersModule, NewsModule],
   controllers: [],
   providers: [],
 })
