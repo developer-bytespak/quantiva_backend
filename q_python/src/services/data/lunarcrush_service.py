@@ -155,7 +155,30 @@ class LunarCrushService:
                     text = article.get('description', title)
                     
                     # Use date as returned by LunarCrush API
-                    published_at = article.get('date', article.get('published_at', article.get('post_created', article.get('created_at', None))))
+                    # API returns Unix timestamp (post_created) or ISO string
+                    date_raw = article.get('date', article.get('published_at', article.get('post_created', article.get('created_at', None))))
+                    
+                    # Convert Unix timestamp to datetime if needed
+                    published_at = None
+                    if date_raw:
+                        if isinstance(date_raw, (int, float)):
+                            # Unix timestamp
+                            published_at = datetime.fromtimestamp(date_raw, tz=timezone.utc)
+                        elif isinstance(date_raw, str):
+                            # Try to parse as ISO string or Unix timestamp string
+                            try:
+                                # Try as Unix timestamp string first
+                                if date_raw.isdigit():
+                                    published_at = datetime.fromtimestamp(int(date_raw), tz=timezone.utc)
+                                else:
+                                    # Try ISO format
+                                    from dateutil import parser
+                                    published_at = parser.parse(date_raw)
+                            except (ValueError, TypeError):
+                                self.logger.warning(f"Could not parse date: {date_raw}")
+                                published_at = None
+                        elif isinstance(date_raw, datetime):
+                            published_at = date_raw
                     
                     if title:
                         news_items.append({

@@ -17,5 +17,11 @@ q_python/venv
 q_python/.venv
 q_python/venv*/
 q_python/.venv*/
-q_python/src/__pycache__/
 q_python/v312*/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
