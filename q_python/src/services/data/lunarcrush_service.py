@@ -4,6 +4,7 @@ Fetches cryptocurrency news and social metrics from LunarCrush API v4.
 """
 import logging
 import requests
+import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from src.config import LUNARCRUSH_API_KEY
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 class LunarCrushService:
     """
     Service for fetching cryptocurrency news and social metrics from LunarCrush API v4.
+    Includes rate limiting and caching to avoid 429 errors.
     """
     
     BASE_URL = "https://lunarcrush.com/api4"
@@ -23,11 +25,50 @@ class LunarCrushService:
         self.logger = logging.getLogger(__name__)
         self.api_key = LUNARCRUSH_API_KEY
         
+        # Simple in-memory cache (5 minutes TTL for social metrics, 1 minute for news)
+        self._social_metrics_cache: Dict[str, tuple] = {}  # {symbol: (data, timestamp)}
+        self._news_cache: Dict[str, tuple] = {}  # {symbol: (data, timestamp)}
+        self.SOCIAL_METRICS_TTL = 5 * 60  # 5 minutes
+        self.NEWS_TTL = 1 * 60  # 1 minute
+        
+        # Rate limiting: track last request time and wait if needed
+        self._last_request_time = 0
+        self._min_request_interval = 0.5  # Minimum 0.5 seconds between requests (2 requests/second max)
+        
         if not self.api_key:
             self.logger.warning(
                 "LUNARCRUSH_API_KEY not set. LunarCrush fetching will fail. "
                 "Set LUNARCRUSH_API_KEY environment variable."
             )
+    
+    def _rate_limit(self):
+        """Enforce rate limiting between API requests."""
+        current_time = time.time()
+        time_since_last = current_time - self._last_request_time
+        if time_since_last < self._min_request_interval:
+            sleep_time = self._min_request_interval - time_since_last
+            time.sleep(sleep_time)
+        self._last_request_time = time.time()
+    
+    def _cleanup_cache(self):
+        """Remove expired cache entries to prevent memory growth."""
+        current_time = time.time()
+        
+        # Clean social metrics cache
+        expired_keys = [
+            key for key, (_, timestamp) in self._social_metrics_cache.items()
+            if current_time - timestamp > self.SOCIAL_METRICS_TTL * 2
+        ]
+        for key in expired_keys:
+            del self._social_metrics_cache[key]
+        
+        # Clean news cache
+        expired_keys = [
+            key for key, (_, timestamp) in self._news_cache.items()
+            if current_time - timestamp > self.NEWS_TTL * 2
+        ]
+        for key in expired_keys:
+            del self._news_cache[key]
     
     def fetch_coin_news(
         self,
@@ -36,6 +77,7 @@ class LunarCrushService:
     ) -> List[Dict[str, Any]]:
         """
         Fetch news for a cryptocurrency symbol.
+        Uses caching to reduce API calls and avoid rate limits.
         
         Args:
             symbol: Cryptocurrency symbol (e.g., 'BTC', 'ETH', 'SOL')
@@ -53,7 +95,17 @@ class LunarCrushService:
             self.logger.error("LUNARCRUSH_API_KEY not configured")
             return []
         
+        # Check cache first
+        cache_key = f"{symbol.upper()}_{limit}"
+        if cache_key in self._news_cache:
+            data, timestamp = self._news_cache[cache_key]
+            if time.time() - timestamp < self.NEWS_TTL:
+                self.logger.debug(f"Returning cached news for {symbol}")
+                return data
+        
         try:
+            # Enforce rate limiting
+            self._rate_limit()
             # LunarCrush API v4 endpoint for news
             # Endpoint: /public/topic/:topic/news/v1
             # Note: API v4 doesn't accept limit parameter - we limit results client-side
@@ -141,8 +193,31 @@ class LunarCrushService:
                     continue
             
             self.logger.info(f"Fetched {len(news_items)} news items for {symbol}")
+            
+            # Cache the result
+            self._news_cache[cache_key] = (news_items, time.time())
+            
+            # Cleanup old cache entries periodically
+            if len(self._news_cache) > 50:  # Cleanup if cache gets too large
+                self._cleanup_cache()
+            
             return news_items
             
+        except requests.exceptions.HTTPError as e:
+            if hasattr(e, 'response') and e.response is not None:
+                if e.response.status_code == 429:
+                    self.logger.warning(f"LunarCrush rate limit exceeded for {symbol}. Using cached data if available.")
+                    # Try to return cached data even if expired
+                    if cache_key in self._news_cache:
+                        data, _ = self._news_cache[cache_key]
+                        self.logger.info(f"Returning expired cache for {symbol} due to rate limit")
+                        return data
+                    return []
+            self.logger.error(f"Error fetching news from LunarCrush: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                self.logger.error(f"Response status: {e.response.status_code}")
+                self.logger.error(f"Response body: {e.response.text[:500]}")
+            return []
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Error fetching news from LunarCrush: {str(e)}")
             if hasattr(e, 'response') and e.response is not None:
@@ -159,6 +234,7 @@ class LunarCrushService:
     ) -> Dict[str, Any]:
         """
         Fetch social metrics for a cryptocurrency.
+        Uses caching to reduce API calls and avoid rate limits.
         
         Args:
             symbol: Cryptocurrency symbol (e.g., 'BTC', 'ETH')
@@ -175,7 +251,17 @@ class LunarCrushService:
             self.logger.error("LUNARCRUSH_API_KEY not configured")
             return {}
         
+        # Check cache first
+        cache_key = symbol.upper()
+        if cache_key in self._social_metrics_cache:
+            data, timestamp = self._social_metrics_cache[cache_key]
+            if time.time() - timestamp < self.SOCIAL_METRICS_TTL:
+                self.logger.debug(f"Returning cached social metrics for {symbol}")
+                return data
+        
         try:
+            # Enforce rate limiting
+            self._rate_limit()
             # LunarCrush API v4 endpoint for coin data
             # Endpoint: /public/coins/:coin/v1
             url = f"{self.BASE_URL}/public/coins/{symbol.upper()}/v1"
@@ -218,8 +304,31 @@ class LunarCrushService:
                 }
             
             self.logger.info(f"Fetched social metrics for {symbol}")
+            
+            # Cache the result
+            self._social_metrics_cache[cache_key] = (metrics, time.time())
+            
+            # Cleanup old cache entries periodically
+            if len(self._social_metrics_cache) > 50:  # Cleanup if cache gets too large
+                self._cleanup_cache()
+            
             return metrics
             
+        except requests.exceptions.HTTPError as e:
+            if hasattr(e, 'response') and e.response is not None:
+                if e.response.status_code == 429:
+                    self.logger.warning(f"LunarCrush rate limit exceeded for {symbol}. Using cached data if available.")
+                    # Try to return cached data even if expired
+                    if cache_key in self._social_metrics_cache:
+                        data, _ = self._social_metrics_cache[cache_key]
+                        self.logger.info(f"Returning expired cache for {symbol} due to rate limit")
+                        return data
+                    return {}
+            self.logger.error(f"Error fetching social metrics from LunarCrush: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                self.logger.error(f"Response status: {e.response.status_code}")
+                self.logger.error(f"Response body: {e.response.text[:500]}")
+            return {}
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Error fetching social metrics from LunarCrush: {str(e)}")
             if hasattr(e, 'response') and e.response is not None:
