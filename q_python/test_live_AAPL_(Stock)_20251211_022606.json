@@ -1,0 +1,6 @@
+{
+  "strategy_id": "test_live_stock",
+  "asset_id": "AAPL",
+  "error": "name 'timeframe' is not defined",
+  "action": "HOLD"
+}
