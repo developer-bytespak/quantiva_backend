@@ -40,6 +40,7 @@ enum RiskLevel {
 enum SignalAction {
   BUY
   SELL
+  HOLD
 }
 
 enum ConnectionStatus {
@@ -87,6 +88,17 @@ enum JobStatus {
   running
   completed
   failed
+}
+
+enum NewsSource {
+  StockNewsAPI
+  LunarCrush
+}
+
+enum SentimentLabel {
+  positive
+  negative
+  neutral
 }
 
 // Models
@@ -315,14 +327,19 @@ model trending_assets {
 }
 
 model trending_news {
-  poll_timestamp DateTime @db.Timestamp(6)
-  asset_id       String   @db.Uuid
-  news_score     Decimal? @db.Decimal(10, 4)
-  news_sentiment Decimal? @db.Decimal(10, 4)
-  news_volume    Int?
-  media_buzz     Decimal? @db.Decimal(10, 4)
-  heading        String?  @db.VarChar(120)
-  news_detail    Json?    @db.Json
+  poll_timestamp  DateTime        @db.Timestamp(6)
+  asset_id        String          @db.Uuid
+  news_score      Decimal?        @db.Decimal(10, 4)
+  news_sentiment  Decimal?        @db.Decimal(10, 4)
+  news_volume     Int?
+  media_buzz      Decimal?        @db.Decimal(10, 4)
+  heading         String?         @db.VarChar(120)
+  news_detail     Json?           @db.Json
+  source          NewsSource?
+  article_url     String?         @db.Text
+  published_at    DateTime?       @db.Timestamp(6)
+  sentiment_label SentimentLabel?
+  metadata        Json?           @db.Json
 
   asset assets @relation(fields: [asset_id], references: [asset_id])
 
@@ -351,6 +368,8 @@ model asset_metrics {
   metric_date  DateTime? @db.Date
   metric_type  String?   @db.VarChar(50)
   metric_value Decimal?  @db.Decimal(30, 10)
+  metadata     Json?     @db.Json
+  source       String?   @db.VarChar(50)
 
   asset assets @relation(fields: [asset_id], references: [asset_id])
 
@@ -455,6 +474,7 @@ model strategy_signals {
   event_risk_score  Decimal?     @db.Decimal(6, 3)
   macro_score       Decimal?     @db.Decimal(6, 3)
   volatility_score  Decimal?     @db.Decimal(6, 3)
+  engine_metadata   Json?        @db.Json
 
   strategy             strategies?              @relation(fields: [strategy_id], references: [strategy_id])
   user                 users?                   @relation(fields: [user_id], references: [user_id])
@@ -752,6 +772,9 @@ model sentiment_ema_state {
   asset_id       String   @id @db.VarChar(100)
   ema_value      Float    @db.DoublePrecision
   last_timestamp DateTime @db.Timestamp(6)
+  momentum       Float?   @db.DoublePrecision
+  raw_score      Float?   @db.DoublePrecision
+  metadata       Json?    @db.Json
   updated_at     DateTime @default(now()) @updatedAt @db.Timestamp(6)
 
   @@map("sentiment_ema_state")

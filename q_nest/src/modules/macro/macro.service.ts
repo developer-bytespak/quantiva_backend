@@ -96,7 +96,43 @@ export class MacroService {
       // Handle yield curve separately (it's calculated, not a direct series)
       if (indicatorKey === 'yield_curve' && indicatorData.spread !== undefined) {
         // Store yield curve spread as a calculated indicator
-        // This would require a separate indicator record for yield curve
+        let yieldCurveIndicator = await this.prisma.macro_indicators.findFirst({
+          where: { code: 'YIELD_CURVE' },
+        });
+
+        if (!yieldCurveIndicator) {
+          yieldCurveIndicator = await this.prisma.macro_indicators.create({
+            data: {
+              code: 'YIELD_CURVE',
+              name: 'Yield Curve (10Y-2Y Spread)',
+              category: 'Monetary',
+              frequency: 'Daily',
+              source: 'FRED',
+            },
+          });
+        }
+
+        // Store yield curve spread value
+        if (indicatorData.date) {
+          await this.prisma.macro_indicator_values.upsert({
+            where: {
+              indicator_id_data_date: {
+                indicator_id: yieldCurveIndicator.indicator_id,
+                data_date: new Date(indicatorData.date),
+              },
+            },
+            update: {
+              value: indicatorData.spread,
+              updated_at: new Date(),
+            },
+            create: {
+              indicator_id: yieldCurveIndicator.indicator_id,
+              data_date: new Date(indicatorData.date),
+              value: indicatorData.spread,
+              updated_at: new Date(),
+            },
+          });
+        }
       }
     } catch (error: any) {
       this.logger.error(`Error storing indicator ${indicatorKey}: ${error.message}`);

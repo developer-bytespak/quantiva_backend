@@ -85,20 +85,56 @@ class FusionEngine(BaseEngine):
             # Determine action
             action = self._determine_action(final_score, event_risk_score)
             
-            # Calculate overall confidence (weighted average)
+            # Calculate overall confidence (weighted average, but only count engines with data)
             confidences = []
-            if 'sentiment' in engine_scores:
-                confidences.append(engine_scores['sentiment'].get('confidence', 0.0))
-            if 'trend' in engine_scores:
-                confidences.append(engine_scores['trend'].get('confidence', 0.0))
-            if 'fundamental' in engine_scores:
-                confidences.append(engine_scores['fundamental'].get('confidence', 0.0))
-            if 'event_risk' in engine_scores:
-                confidences.append(engine_scores['event_risk'].get('confidence', 0.0))
-            if 'liquidity' in engine_scores:
-                confidences.append(engine_scores['liquidity'].get('confidence', 0.0))
+            weights = []
             
-            overall_confidence = sum(confidences) / len(confidences) if confidences else 0.5
+            # Sentiment engine (always present, weight: 0.35)
+            if 'sentiment' in engine_scores:
+                conf = engine_scores['sentiment'].get('confidence', 0.0)
+                if conf > 0:
+                    confidences.append(conf)
+                    weights.append(0.35)
+            
+            # Trend engine (weight: 0.25, but may be missing)
+            if 'trend' in engine_scores:
+                conf = engine_scores['trend'].get('confidence', 0.0)
+                if conf > 0:
+                    confidences.append(conf)
+                    weights.append(0.25)
+            
+            # Fundamental engine (always present, weight: 0.15)
+            if 'fundamental' in engine_scores:
+                conf = engine_scores['fundamental'].get('confidence', 0.0)
+                if conf > 0:
+                    confidences.append(conf)
+                    weights.append(0.15)
+            
+            # Event risk engine (always present, weight: 0.15)
+            if 'event_risk' in engine_scores:
+                conf = engine_scores['event_risk'].get('confidence', 0.0)
+                if conf > 0:
+                    confidences.append(conf)
+                    weights.append(0.15)
+            
+            # Liquidity engine (weight: 0.10, but may be missing)
+            if 'liquidity' in engine_scores:
+                conf = engine_scores['liquidity'].get('confidence', 0.0)
+                if conf > 0:
+                    confidences.append(conf)
+                    weights.append(0.10)
+            
+            # Calculate weighted average confidence
+            if confidences and weights:
+                total_weight = sum(weights)
+                if total_weight > 0:
+                    # Normalize weights to sum to 1.0
+                    normalized_weights = [w / total_weight for w in weights]
+                    overall_confidence = sum(c * w for c, w in zip(confidences, normalized_weights))
+                else:
+                    overall_confidence = sum(confidences) / len(confidences) if confidences else 0.5
+            else:
+                overall_confidence = 0.5
             
             metadata = {
                 'action': action,

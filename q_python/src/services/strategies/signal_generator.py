@@ -122,7 +122,7 @@ class SignalGenerator:
             sentiment_result = self.sentiment_engine.calculate(
                 asset_id=asset_id,
                 asset_type=asset_type,
-                timeframe=timeframe,
+                timeframe=strategy_data.get('timeframe'),
                 text_data=text_data
             )
             engine_scores['sentiment'] = sentiment_result
@@ -154,6 +154,19 @@ class SignalGenerator:
                 indicators=indicators
             )
             
+            # Determine final action: Use fusion engine action if no strategy rules,
+            # otherwise use strategy executor action (which can override fusion)
+            entry_rules = strategy_data.get('entry_rules', [])
+            exit_rules = strategy_data.get('exit_rules', [])
+            has_strategy_rules = (entry_rules and len(entry_rules) > 0) or (exit_rules and len(exit_rules) > 0)
+            
+            if has_strategy_rules:
+                # Strategy has rules - use executor's decision (may override fusion)
+                final_action = execution_result.get('signal', fusion_result.get('action', 'HOLD'))
+            else:
+                # No strategy rules - use fusion engine's action decision
+                final_action = fusion_result.get('action', 'HOLD')
+            
             # Calculate confidence and position sizing
             confidence_result = None
             if portfolio_value:
@@ -173,6 +186,21 @@ class SignalGenerator:
                     max_allocation=0.10
                 )
             
+            # Adjust confidence based on available data
+            # Reduce confidence if critical engines are missing data
+            base_confidence = fusion_result.get('confidence', 0.0)
+            has_technical_data = ohlcv_data is not None
+            has_liquidity_data = order_book is not None and market_data.get('price') is not None
+            
+            # Penalize confidence if engines are missing data
+            confidence_penalty = 0.0
+            if not has_technical_data:
+                confidence_penalty += 0.1  # 10% penalty for missing technical data
+            if not has_liquidity_data:
+                confidence_penalty += 0.05  # 5% penalty for missing liquidity data
+            
+            adjusted_confidence = max(0.0, min(1.0, base_confidence - confidence_penalty))
+            
             # Build final signal
             signal = {
                 'strategy_id': strategy_id,
@@ -180,8 +208,8 @@ class SignalGenerator:
                 'asset_type': asset_type,
                 'timestamp': self._get_current_timestamp(),
                 'final_score': fusion_result.get('score', 0.0),
-                'action': execution_result.get('signal', 'HOLD'),
-                'confidence': fusion_result.get('confidence', 0.0),
+                'action': final_action,
+                'confidence': adjusted_confidence,
                 'engine_scores': {
                     'sentiment': engine_scores.get('sentiment', {}).get('score', 0.0),
                     'trend': engine_scores['trend'].get('score', 0.0),
