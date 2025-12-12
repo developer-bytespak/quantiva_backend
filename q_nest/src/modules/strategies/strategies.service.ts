@@ -1,4 +1,4 @@
-import { Injectable, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Inject, forwardRef, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StrategyType, RiskLevel } from '@prisma/client';
 import { CreateStrategyDto } from './dto/create-strategy.dto';
@@ -7,6 +7,7 @@ import { StrategyValidationService } from './services/strategy-validation.servic
 @Injectable()
 export class StrategiesService {
   private strategyScheduler: any; // Will be injected if available
+  private readonly logger = new Logger(StrategiesService.name);
 
   constructor(
     private prisma: PrismaService,
@@ -207,6 +208,127 @@ export class StrategiesService {
     return this.prisma.strategy_parameters.delete({
       where: { parameter_id: parameterId },
     });
+  }
+
+  /**
+   * Use a pre-built strategy (create user strategy from template)
+   */
+  async usePreBuiltStrategy(
+    templateId: string,
+    userId: string,
+    targetAssets: string[],
+    config?: {
+      name?: string;
+      schedule_cron?: string;
+      auto_trade_threshold?: number;
+    },
+  ) {
+    // Get template strategy
+    const template = await this.prisma.strategies.findUnique({
+      where: {
+        strategy_id: templateId,
+      },
+    });
+
+    if (!template) {
+      throw new Error(`Template strategy ${templateId} not found`);
+    }
+
+    if (template.type !== 'admin') {
+      throw new Error(`Strategy ${templateId} is not a pre-built template`);
+    }
+
+    // Create user strategy from template
+    const strategy = await this.prisma.strategies.create({
+      data: {
+        user_id: userId,
+        name: config?.name || `${template.name} (Custom)`,
+        type: 'user',
+        description: template.description,
+        risk_level: template.risk_level,
+        timeframe: template.timeframe,
+        entry_rules: template.entry_rules ? JSON.parse(JSON.stringify(template.entry_rules)) : null,
+        exit_rules: template.exit_rules ? JSON.parse(JSON.stringify(template.exit_rules)) : null,
+        indicators: template.indicators ? JSON.parse(JSON.stringify(template.indicators)) : null,
+        stop_loss_type: 'percentage',
+        stop_loss_value: template.stop_loss_value,
+        take_profit_type: 'percentage',
+        take_profit_value: template.take_profit_value,
+        schedule_cron: config?.schedule_cron || template.schedule_cron,
+        target_assets: targetAssets as any,
+        engine_weights: template.engine_weights ? JSON.parse(JSON.stringify(template.engine_weights)) : null,
+        template_id: templateId,
+        auto_trade_threshold: config?.auto_trade_threshold || template.auto_trade_threshold,
+        is_active: false, // User must activate manually
+      },
+      include: {
+        user: true,
+        parameters: true,
+      },
+    });
+
+    return strategy;
+  }
+
+  /**
+   * Get all pre-built strategies
+   */
+  async getPreBuiltStrategies() {
+    return this.prisma.strategies.findMany({
+      where: {
+        type: 'admin',
+        is_active: true,
+      },
+      orderBy: {
+        created_at: 'asc',
+      },
+    });
+  }
+
+  /**
+   * Activate a strategy
+   */
+  async activateStrategy(strategyId: string, userId: string) {
+    // Verify strategy belongs to user
+    const strategy = await this.prisma.strategies.findUnique({
+      where: {
+        strategy_id: strategyId,
+      },
+    });
+
+    if (!strategy) {
+      throw new Error(`Strategy ${strategyId} not found`);
+    }
+
+    if (strategy.user_id !== userId) {
+      throw new Error(`Strategy ${strategyId} does not belong to user ${userId}`);
+    }
+
+    // Validate strategy
+    if (!strategy.target_assets || (strategy.target_assets as any[]).length === 0) {
+      throw new Error('Strategy must have at least one target asset');
+    }
+
+    // Activate strategy
+    const updated = await this.prisma.strategies.update({
+      where: {
+        strategy_id: strategyId,
+      },
+      data: {
+        is_active: true,
+      },
+    });
+
+    // Schedule strategy if has cron expression
+    if (updated.schedule_cron && this.strategyScheduler) {
+      try {
+        await this.strategyScheduler.scheduleStrategy(strategyId);
+      } catch (error) {
+        this.logger.error(`Failed to schedule strategy ${strategyId}:`, error);
+      }
+    }
+
+    return updated;
   }
 }
 

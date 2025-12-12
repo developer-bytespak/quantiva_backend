@@ -421,16 +421,21 @@ model strategies {
   take_profit_value    Decimal?     @db.Decimal(10, 4)
   schedule_cron        String?      @db.VarChar(100)
   target_assets        Json?
+  template_id          String?      @db.Uuid
+  engine_weights       Json?
   created_at           DateTime     @default(now()) @db.Timestamp(6)
   updated_at           DateTime?    @db.Timestamp(6)
 
   user           users?                    @relation(fields: [user_id], references: [user_id])
+  template       strategies?               @relation("StrategyTemplate", fields: [template_id], references: [strategy_id])
+  clones         strategies[]              @relation("StrategyTemplate")
   parameters     strategy_parameters[]
   signals        strategy_signals[]
   execution_jobs strategy_execution_jobs[]
 
   @@index([user_id])
   @@index([is_active])
+  @@index([template_id])
   @@map("strategies")
 }
 
@@ -512,11 +517,14 @@ model signal_details {
 }
 
 model signal_explanations {
-  explanation_id String    @id @default(uuid()) @db.Uuid
-  signal_id      String    @db.Uuid
-  llm_model      String?   @db.VarChar(50)
-  text           String?   @db.Text
-  created_at     DateTime? @db.Timestamp(6)
+  explanation_id     String    @id @default(uuid()) @db.Uuid
+  signal_id          String    @db.Uuid
+  llm_model          String?   @db.VarChar(50)
+  text               String?   @db.Text
+  explanation_status String?   @db.VarChar(20)
+  error_message      String?   @db.Text
+  retry_count        Int       @default(0)
+  created_at         DateTime? @db.Timestamp(6)
 
   signal strategy_signals @relation(fields: [signal_id], references: [signal_id])
 

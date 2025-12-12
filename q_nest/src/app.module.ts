@@ -11,6 +11,7 @@ import { MacroModule } from './modules/macro/macro.module';
 import { SentimentModule } from './modules/sentiment/sentiment.module';
 import { EnginesModule } from './modules/engines/engines.module';
 import { MarketModule } from './modules/market/market.module';
+import { StrategiesModule } from './modules/strategies/strategies.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { MarketModule } from './modules/market/market.module';
     SentimentModule,
     EnginesModule,
     MarketModule,
+    StrategiesModule,
   ],
   controllers: [],
   providers: [],

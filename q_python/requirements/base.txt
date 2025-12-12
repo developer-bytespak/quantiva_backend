@@ -45,3 +45,8 @@ sentencepiece>=0.1.99
 # Environment and Database
 python-dotenv>=1.0.0
 psycopg2-binary>=2.9.0
+
+# LLM Dependencies
+google-generativeai>=0.3.0
+
+tf-keras>=2.20.0
