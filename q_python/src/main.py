@@ -7,6 +7,7 @@ from src.api.v1.signals import router as signals_router
 from src.api.v1.macro import router as macro_router
 from src.api.v1.news import router as news_router
 from src.api.v1.sentiment import router as sentiment_router
+from src.api.v1.llm import router as llm_router
 
 app = FastAPI(title="Quantiva Python API", version="1.0.0")
 
@@ -26,6 +27,7 @@ app.include_router(signals_router, prefix="/api/v1")
 app.include_router(macro_router, prefix="/api/v1")
 app.include_router(news_router, prefix="/api/v1")
 app.include_router(sentiment_router, prefix="/api/v1")
+app.include_router(llm_router, prefix="/api/v1")
 
 @app.get('/')
 def read_root():

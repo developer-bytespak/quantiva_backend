@@ -171,11 +171,13 @@ class FusionEngine(BaseEngine):
             event_risk_score: Event risk score
         
         Returns:
-            Action: 'BUY', 'SELL', 'HOLD', or 'AVOID'
+            Action: 'BUY', 'SELL', or 'HOLD'
+            Note: AVOID is mapped to HOLD for schema compatibility (SignalAction enum doesn't include AVOID)
         """
-        # AVOID overrides everything if high risk events
+        # AVOID mapped to HOLD for schema compatibility (SignalAction enum doesn't include AVOID)
+        # High risk events result in HOLD action
         if event_risk_score < -0.5:
-            return 'AVOID'
+            return 'HOLD'
         
         # Determine action based on final score
         if final_score > 0.3:
