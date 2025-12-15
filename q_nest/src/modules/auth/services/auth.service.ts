@@ -4,6 +4,8 @@ import {
   ConflictException,
   BadRequestException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { TokenService, TokenPayload } from './token.service';
 import { SessionService } from './session.service';
@@ -23,7 +25,13 @@ export class AuthService {
     private sessionService: SessionService,
     private twoFactorService: TwoFactorService,
     private rateLimitService: RateLimitService,
+    private configService: ConfigService,
   ) {}
+
+  private getGoogleClient() {
+    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID') || process.env.GOOGLE_CLIENT_ID;
+    return new OAuth2Client(clientId);
+  }
 
   async register(registerDto: RegisterDto) {
     const { email, username, password } = registerDto;
@@ -334,6 +342,96 @@ export class AuthService {
     }
 
     return user;
+  }
+
+  // Google Sign-in: verify id token, find or create user, create session + tokens
+  async loginWithGoogle(idToken: string, ipAddress?: string, deviceId?: string) {
+    if (!idToken) throw new BadRequestException('Missing idToken');
+
+    const client = this.getGoogleClient();
+    let payload: any;
+    try {
+      const ticket = await client.verifyIdToken({ idToken });
+      payload = ticket.getPayload();
+    } catch (err) {
+      throw new UnauthorizedException('Invalid Google id token');
+    }
+
+    if (!payload || !payload.email) {
+      throw new UnauthorizedException('Invalid Google token payload');
+    }
+
+    if (!payload.email_verified) {
+      // depending on policy you may still allow, but safer to require verified
+      throw new UnauthorizedException('Google account email is not verified');
+    }
+
+    const email: string = payload.email;
+    const name: string = payload.name || null;
+    const picture: string = payload.picture || null;
+
+    // Try find existing user by email
+    let user = await this.prisma.users.findUnique({ where: { email } });
+
+    if (!user) {
+      // create a username from email local part (ensure uniqueness by appending short id if needed)
+      const local = email.split('@')[0].replace(/[^a-zA-Z0-9_\-\.]/g, '');
+      let username = local;
+      // ensure username unique
+      let suffix = 0;
+      while (await this.prisma.users.findUnique({ where: { username } })) {
+        suffix += 1;
+        username = `${local}${suffix}`;
+      }
+
+      // create user
+      user = await this.prisma.users.create({
+        data: {
+          email,
+          username,
+          email_verified: true,
+          full_name: name,
+          profile_pic_url: picture,
+          // leave password_hash null for social logins
+        },
+      });
+    }
+
+    // Generate refresh token and session similar to verify2FA flow
+    const refreshToken = await this.tokenService.generateRefreshToken({
+      sub: user.user_id,
+      email: user.email,
+      username: user.username,
+    });
+
+    const sessionId = await this.sessionService.createSession(
+      user.user_id,
+      refreshToken,
+      ipAddress,
+      deviceId,
+    );
+
+    const payloadForAccess = {
+      sub: user.user_id,
+      email: user.email,
+      username: user.username,
+      session_id: sessionId,
+    } as TokenPayload;
+
+    const accessToken = await this.tokenService.generateAccessToken(payloadForAccess);
+
+    return {
+      user: {
+        user_id: user.user_id,
+        email: user.email,
+        username: user.username,
+        email_verified: user.email_verified,
+        kyc_status: user.kyc_status,
+      },
+      accessToken,
+      refreshToken,
+      sessionId,
+    };
   }
 }
 
