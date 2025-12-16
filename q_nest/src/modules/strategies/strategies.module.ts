@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { StrategiesController } from './strategies.controller';
 import { StrategiesService } from './strategies.service';
 import { StrategyValidationService } from './services/strategy-validation.service';
@@ -12,7 +12,7 @@ import { KycModule } from '../../kyc/kyc.module';
 import { SignalsModule } from '../signals/signals.module';
 
 @Module({
-  imports: [PrismaModule, KycModule, SignalsModule],
+  imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule)],
   controllers: [StrategiesController],
   providers: [
     StrategiesService,

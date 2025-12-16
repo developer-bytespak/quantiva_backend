@@ -8,14 +8,28 @@ import torch
 # Load .env file if it exists
 try:
     from dotenv import load_dotenv
-    # Load .env from project root (q_python directory)
-    env_path = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
-    if os.path.exists(env_path):
-        load_dotenv(env_path)
-    # Also try loading from current directory
-    load_dotenv()
+    import pathlib
+    
+    # Try multiple .env file locations
+    # 1. q_python/.env (project root)
+    env_path1 = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
+    if os.path.exists(env_path1):
+        load_dotenv(env_path1)
+        print(f"Loaded .env from: {env_path1}")
+    
+    # 2. Current directory
+    env_path2 = os.path.join(os.path.dirname(__file__), '.env')
+    if os.path.exists(env_path2):
+        load_dotenv(env_path2)
+        print(f"Loaded .env from: {env_path2}")
+    
+    # 3. Try loading from current working directory
+    load_dotenv(override=False)  # Don't override if already loaded
+    
 except ImportError:
-    pass  # dotenv not installed, skip
+    print("Warning: python-dotenv not installed. Environment variables must be set manually.")
+except Exception as e:
+    print(f"Warning: Error loading .env file: {e}")
 
 # ML Model Configuration
 ML_CONFIG: Dict[str, Any] = {

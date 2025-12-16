@@ -6,7 +6,10 @@ TODO: Integrate with Binance/Bybit exchange services.
 from typing import Dict, Any, Optional, List
 import pandas as pd
 import logging
+import requests
+import os
 from datetime import datetime, timedelta
+from src.config import NESTJS_API_URL, NESTJS_API_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -43,23 +46,71 @@ class MarketDataService:
             DataFrame with columns: open, high, low, close, volume, timestamp
         """
         try:
-            # TODO: Implement actual exchange API calls
-            # if exchange == 'binance':
-            #     return self._fetch_binance_ohlcv(symbol, interval, limit)
-            # elif exchange == 'bybit':
-            #     return self._fetch_bybit_ohlcv(symbol, interval, limit)
-            
-            self.logger.warning(
-                f"Market data fetching not yet implemented. "
-                f"TODO: Integrate {exchange} API for {symbol}"
-            )
-            
-            # Return empty DataFrame for now
-            return pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'timestamp'])
-            
+            # Prefer fetching OHLCV from NestJS backend if available
+            connection_id = os.getenv('NESTJS_DEFAULT_CONNECTION_ID')
+
+            # Convert simple symbol (e.g., 'BTC') to trading pair 'BTCUSDT' if needed
+            pair = symbol.upper()
+            if not pair.endswith('USDT') and len(pair) <= 5:
+                pair = f"{pair}USDT"
+
+            if not connection_id:
+                self.logger.debug(
+                    "NESTJS_DEFAULT_CONNECTION_ID not set; MarketDataService cannot fetch OHLCV from NestJS."
+                )
+                return pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'timestamp'])
+
+            url = f"{NESTJS_API_URL}/exchanges/connections/{connection_id}/candles/{pair}"
+            params = {
+                'interval': interval,
+                'limit': str(limit)
+            }
+
+            self.logger.info(f"Fetching OHLCV from NestJS: {url} params={params}")
+            resp = requests.get(url, params=params, timeout=int(NESTJS_API_TIMEOUT))
+            resp.raise_for_status()
+
+            data = resp.json()
+            if not data:
+                self.logger.warning(f"Empty response fetching OHLCV for {pair}")
+                return pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'timestamp'])
+
+            # NestJS endpoints return { success: true, data: [...] }
+            candles = None
+            if isinstance(data, dict) and data.get('success') and data.get('data'):
+                candles = data.get('data')
+            elif isinstance(data, dict) and data.get('data'):
+                candles = data.get('data')
+            elif isinstance(data, list):
+                candles = data
+
+            if not candles:
+                self.logger.warning(f"No candle data for {pair}")
+                return pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'timestamp'])
+
+            # Normalize to DataFrame
+            df = pd.DataFrame(candles)
+
+            # Expecting fields: openTime/open, high, low, close, volume
+            if 'openTime' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['openTime'], unit='ms')
+            elif 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            else:
+                df['timestamp'] = pd.to_datetime(df.index)
+
+            # Ensure numeric columns
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                else:
+                    df[col] = 0
+
+            return df[['open', 'high', 'low', 'close', 'volume', 'timestamp']]
+
         except Exception as e:
-            self.logger.error(f"Error fetching OHLCV data: {str(e)}")
-            return None
+            self.logger.error(f"Error fetching OHLCV data from NestJS: {str(e)}", exc_info=True)
+            return pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'timestamp'])
     
     def fetch_order_book(
         self,

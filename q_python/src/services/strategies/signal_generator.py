@@ -147,11 +147,13 @@ class SignalGenerator:
                     'ATR': trend_indicators.get('atr'),
                 })
             
-            # Execute strategy rules
+            # Execute strategy rules (pass engine_scores and fusion_result for field-based rules)
             execution_result = self.executor.execute(
                 strategy=parsed_strategy,
                 market_data=market_data,
-                indicators=indicators
+                indicators=indicators,
+                engine_scores=engine_scores,
+                fusion_result=fusion_result
             )
             
             # Determine final action: Use fusion engine action if no strategy rules,
@@ -201,21 +203,33 @@ class SignalGenerator:
             
             adjusted_confidence = max(0.0, min(1.0, base_confidence - confidence_penalty))
             
+            # Ensure fusion_result has a score (handle error cases)
+            fusion_score = 0.0
+            if isinstance(fusion_result, dict) and 'score' in fusion_result:
+                fusion_score = fusion_result.get('score', 0.0)
+            elif isinstance(fusion_result, dict) and 'error' in fusion_result:
+                # Fusion engine returned an error, use default score
+                fusion_score = 0.0
+                self.logger.warning(f"Fusion engine returned error, using default score: {fusion_result.get('error', 'Unknown error')}")
+            
+            # Ensure confidence is a number
+            fusion_confidence = adjusted_confidence if adjusted_confidence is not None else 0.0
+            
             # Build final signal
             signal = {
                 'strategy_id': strategy_id,
                 'asset_id': asset_id,
                 'asset_type': asset_type,
                 'timestamp': self._get_current_timestamp(),
-                'final_score': fusion_result.get('score', 0.0),
+                'final_score': float(fusion_score) if fusion_score is not None else 0.0,
                 'action': final_action,
-                'confidence': adjusted_confidence,
+                'confidence': float(fusion_confidence) if fusion_confidence is not None else 0.0,
                 'engine_scores': {
-                    'sentiment': engine_scores.get('sentiment', {}).get('score', 0.0),
-                    'trend': engine_scores['trend'].get('score', 0.0),
-                    'fundamental': engine_scores['fundamental'].get('score', 0.0),
-                    'liquidity': engine_scores['liquidity'].get('score', 0.0),
-                    'event_risk': engine_scores['event_risk'].get('score', 0.0)
+                    'sentiment': {'score': float(engine_scores.get('sentiment', {}).get('score', 0.0) or 0.0)},
+                    'trend': {'score': float(engine_scores.get('trend', {}).get('score', 0.0) or 0.0)},
+                    'fundamental': {'score': float(engine_scores.get('fundamental', {}).get('score', 0.0) or 0.0)},
+                    'liquidity': {'score': float(engine_scores.get('liquidity', {}).get('score', 0.0) or 0.0)},
+                    'event_risk': {'score': float(engine_scores.get('event_risk', {}).get('score', 0.0) or 0.0)}
                 },
                 'strategy_execution': execution_result,
                 'position_sizing': confidence_result,
@@ -229,11 +243,27 @@ class SignalGenerator:
             
         except Exception as e:
             self.logger.error(f"Error generating signal: {str(e)}")
+            # Return a proper signal structure even on error
             return {
                 'strategy_id': strategy_id,
                 'asset_id': asset_id,
+                'asset_type': asset_type,
+                'timestamp': self._get_current_timestamp(),
+                'final_score': 0.0,
+                'action': 'HOLD',
+                'confidence': 0.0,
+                'engine_scores': {
+                    'sentiment': {'score': 0.0},
+                    'trend': {'score': 0.0},
+                    'fundamental': {'score': 0.0},
+                    'liquidity': {'score': 0.0},
+                    'event_risk': {'score': 0.0}
+                },
                 'error': str(e),
-                'action': 'HOLD'
+                'metadata': {
+                    'error': True,
+                    'error_message': str(e)
+                }
             }
     
     def _get_current_timestamp(self) -> str:

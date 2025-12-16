@@ -38,20 +38,37 @@ class GeminiAdapter(BaseLLMAdapter):
         genai.configure(api_key=api_key)
         
         # Get model name from env or use default
-        model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        # Use gemini-2.5-flash (available in free tier) as default
+        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         
-        try:
-            # Try primary model first
-            if model_name == "gemini-2.0-flash-exp":
-                self.model = genai.GenerativeModel(model_name)
-            else:
-                # Fallback to gemini-1.5-flash
-                self.model = genai.GenerativeModel("gemini-1.5-flash")
-                model_name = "gemini-1.5-flash"
-        except Exception as e:
-            logger.warning(f"Failed to load {model_name}, falling back to gemini-1.5-flash: {e}")
-            self.model = genai.GenerativeModel("gemini-1.5-flash")
-            model_name = "gemini-1.5-flash"
+        # List of models to try in order (based on what's available in your project)
+        models_to_try = [
+            model_name,  # User specified or default
+            "gemini-2.5-flash",  # Latest flash model (free tier: 5 RPM, 250K TPM, 20 RPD)
+            "gemini-2.5-flash-lite",  # Lite version (free tier: 10 RPM, 250K TPM, 20 RPD)
+            "gemini-1.5-flash-latest",  # Fallback to older model
+            "gemini-1.5-pro",  # Pro model fallback
+            "gemini-pro",  # Original pro model fallback
+        ]
+        
+        # Try each model until one works
+        last_error = None
+        for model_to_try in models_to_try:
+            try:
+                self.model = genai.GenerativeModel(model_to_try)
+                model_name = model_to_try
+                logger.info(f"Successfully loaded Gemini model: {model_name}")
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Failed to load {model_to_try}: {str(e)}")
+                continue
+        
+        if not hasattr(self, 'model'):
+            raise ValueError(
+                f"Could not load any Gemini model. Tried: {', '.join(models_to_try)}. "
+                f"Last error: {str(last_error)}"
+            )
         
         self.model_name = model_name
         self.temperature = 0.7
@@ -103,15 +120,35 @@ class GeminiAdapter(BaseLLMAdapter):
     ) -> str:
         """Build detailed prompt for signal explanation."""
         action = signal_data.get("action", "HOLD")
-        final_score = signal_data.get("final_score", 0.0)
-        confidence = signal_data.get("confidence", 0.0)
         
-        # Extract engine scores
-        sentiment_score = engine_scores.get("sentiment", {}).get("score", 0.0)
-        trend_score = engine_scores.get("trend", {}).get("score", 0.0)
-        fundamental_score = engine_scores.get("fundamental", {}).get("score", 0.0)
-        liquidity_score = engine_scores.get("liquidity", {}).get("score", 0.0)
-        event_risk_score = engine_scores.get("event_risk", {}).get("score", 0.0)
+        # Convert to float if string (from database)
+        final_score_raw = signal_data.get("final_score", 0.0)
+        confidence_raw = signal_data.get("confidence", 0.0)
+        
+        try:
+            final_score = float(final_score_raw) if final_score_raw is not None else 0.0
+        except (ValueError, TypeError):
+            final_score = 0.0
+        
+        try:
+            confidence = float(confidence_raw) if confidence_raw is not None else 0.0
+        except (ValueError, TypeError):
+            confidence = 0.0
+        
+        # Extract engine scores (ensure they're floats)
+        def safe_float(value, default=0.0):
+            try:
+                if value is None:
+                    return default
+                return float(value)
+            except (ValueError, TypeError):
+                return default
+        
+        sentiment_score = safe_float(engine_scores.get("sentiment", {}).get("score", 0.0))
+        trend_score = safe_float(engine_scores.get("trend", {}).get("score", 0.0))
+        fundamental_score = safe_float(engine_scores.get("fundamental", {}).get("score", 0.0))
+        liquidity_score = safe_float(engine_scores.get("liquidity", {}).get("score", 0.0))
+        event_risk_score = safe_float(engine_scores.get("event_risk", {}).get("score", 0.0))
         
         prompt = f"""You are a financial trading analyst. Explain the following trading signal in clear, concise language.
 

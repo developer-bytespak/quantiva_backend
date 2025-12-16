@@ -1,9 +1,13 @@
 import { Controller, Get, Post, Put, Delete, Body, Param, Query } from '@nestjs/common';
 import { AssetsService } from './assets.service';
+import { AssetsSyncCronjobService } from './assets-sync-cronjob.service';
 
 @Controller('assets')
 export class AssetsController {
-  constructor(private readonly assetsService: AssetsService) {}
+  constructor(
+    private readonly assetsService: AssetsService,
+    private readonly assetsSyncCronjobService: AssetsSyncCronjobService,
+  ) {}
 
   @Get()
   findAll() {
@@ -46,6 +50,11 @@ export class AssetsController {
   @Delete(':id')
   remove(@Param('id') id: string) {
     return this.assetsService.delete(id);
+  }
+
+  @Post('sync-coingecko')
+  async syncFromCoinGecko() {
+    return this.assetsSyncCronjobService.manualSync();
   }
 }
 

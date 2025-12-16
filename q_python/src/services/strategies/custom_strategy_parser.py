@@ -72,13 +72,19 @@ class CustomStrategyParser:
             if not self._validate_rule(rule):
                 raise ValueError(f"Invalid rule: {rule}")
             
+            # Support both indicator-based and field-based rules
             parsed_rule = {
-                'indicator': rule['indicator'],
                 'operator': rule['operator'],
                 'value': float(rule['value']),
                 'timeframe': rule.get('timeframe'),
                 'logic': rule.get('logic', 'AND')  # Default to AND
             }
+            
+            # Add indicator or field based on what's present
+            if 'indicator' in rule:
+                parsed_rule['indicator'] = rule['indicator']
+            elif 'field' in rule:
+                parsed_rule['field'] = rule['field']
             
             parsed_rules.append(parsed_rule)
         
@@ -115,15 +121,34 @@ class CustomStrategyParser:
         if not isinstance(rule, dict):
             return False
         
-        if 'indicator' not in rule or 'operator' not in rule or 'value' not in rule:
+        # Must have operator and value
+        if 'operator' not in rule or 'value' not in rule:
             return False
         
-        if rule['indicator'] not in self.valid_indicators:
+        # Must have either 'indicator' (for indicator-based rules) or 'field' (for field-based rules)
+        has_indicator = 'indicator' in rule
+        has_field = 'field' in rule
+        
+        if not (has_indicator or has_field):
             return False
         
+        # If it's an indicator-based rule, validate the indicator
+        if has_indicator:
+            if rule['indicator'] not in self.valid_indicators:
+                return False
+        
+        # If it's a field-based rule, validate the field path
+        if has_field:
+            # Allow fields like 'final_score', 'metadata.engine_details.event_risk.score', etc.
+            field = rule['field']
+            if not isinstance(field, str) or len(field) == 0:
+                return False
+        
+        # Validate operator
         if rule['operator'] not in self.valid_operators:
             return False
         
+        # Validate value (must be numeric)
         try:
             float(rule['value'])
         except (ValueError, TypeError):

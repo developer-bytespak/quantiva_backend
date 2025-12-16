@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 
 from src.config import NESTJS_API_URL, NESTJS_API_TIMEOUT
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -132,16 +133,21 @@ class MarketSignalAnalyzer:
         Returns:
             List of candlestick data or None if failed
         """
-        # If no connection_id, we can't fetch data (graceful degradation)
+        # If no connection_id, try configured default connection id (env var)
         if not connection_id:
-            # Only warn once per symbol to avoid log spam
-            if symbol not in self._warned_symbols:
-                self.logger.debug(
-                    f"No connection_id provided for {symbol}, skipping OHLCV fetch. "
-                    "Market signals will use LunarCrush data only."
-                )
-                self._warned_symbols.add(symbol)
-            return None
+            default_conn = os.getenv('NESTJS_DEFAULT_CONNECTION_ID')
+            if default_conn:
+                self.logger.info(f"No connection_id provided for {symbol}; using NESTJS_DEFAULT_CONNECTION_ID from env")
+                connection_id = default_conn
+            else:
+                # Only warn once per symbol to avoid log spam
+                if symbol not in self._warned_symbols:
+                    self.logger.debug(
+                        f"No connection_id provided for {symbol}, skipping OHLCV fetch. "
+                        "Market signals will use LunarCrush data only. Set NESTJS_DEFAULT_CONNECTION_ID to enable OHLCV."
+                    )
+                    self._warned_symbols.add(symbol)
+                return None
         
         try:
             # Convert symbol to trading pair format (e.g., BTC -> BTCUSDT)

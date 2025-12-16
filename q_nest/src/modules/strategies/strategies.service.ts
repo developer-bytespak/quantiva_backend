@@ -23,7 +23,18 @@ export class StrategiesService {
       include: {
         user: true,
         parameters: true,
-        signals: true,
+        signals: {
+          select: {
+            signal_id: true,
+            strategy_id: true,
+            asset_id: true,
+            timestamp: true,
+            action: true,
+            final_score: true,
+          },
+          orderBy: { timestamp: 'desc' },
+          take: 10, // Limit to latest 10 signals per strategy
+        },
       },
     });
   }
@@ -35,7 +46,26 @@ export class StrategiesService {
         user: true,
         parameters: true,
         signals: {
-          include: { asset: true },
+          select: {
+            signal_id: true,
+            strategy_id: true,
+            user_id: true,
+            asset_id: true,
+            timestamp: true,
+            final_score: true,
+            action: true,
+            confidence: true,
+            sentiment_score: true,
+            trend_score: true,
+            fundamental_score: true,
+            liquidity_score: true,
+            event_risk_score: true,
+            macro_score: true,
+            volatility_score: true,
+            engine_metadata: true,
+          },
+          orderBy: { timestamp: 'desc' },
+          take: 50, // Limit to latest 50 signals
         },
       },
     });
@@ -215,7 +245,7 @@ export class StrategiesService {
    */
   async usePreBuiltStrategy(
     templateId: string,
-    userId: string,
+    userId: string | null,
     targetAssets: string[],
     config?: {
       name?: string;

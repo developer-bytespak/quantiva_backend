@@ -79,43 +79,57 @@ export class PreBuiltStrategiesService implements OnModuleInit {
    * Get top N trending assets
    */
   async getTopTrendingAssets(limit: number = 20) {
-    // Get most recent poll_timestamp
-    const latestPoll = await this.prisma.trending_assets.findFirst({
-      orderBy: {
-        poll_timestamp: 'desc',
+    // Get all trending assets (all rows, not grouped)
+    const allTrendingAssets = await this.prisma.trending_assets.findMany({
+      include: {
+        asset: true, // Include asset relation if it exists
       },
-      select: {
-        poll_timestamp: true,
-      },
+      orderBy: [
+        {
+          poll_timestamp: 'desc', // Get latest entries first
+        },
+      ],
+      take: limit, // Apply limit directly
     });
 
-    if (!latestPoll) {
+    this.logger.log(`Found ${allTrendingAssets.length} trending asset records (limit: ${limit})`);
+
+    if (allTrendingAssets.length === 0) {
       return [];
     }
 
-    // Get top assets from most recent poll
-    const trendingAssets = await this.prisma.trending_assets.findMany({
+    // Get all unique asset IDs to fetch asset info in bulk
+    const assetIds = [...new Set(allTrendingAssets.map((ta) => ta.asset_id))];
+    const assetsMap = new Map();
+    
+    // Fetch all assets in one query
+    const assets = await this.prisma.assets.findMany({
       where: {
-        poll_timestamp: latestPoll.poll_timestamp,
+        asset_id: { in: assetIds },
       },
-      include: {
-        asset: true,
-      },
-      orderBy: {
-        galaxy_score: 'desc',
-      },
-      take: limit,
     });
+    
+    this.logger.log(`Found ${assets.length} matching assets in assets table`);
+    
+    // Create a map for quick lookup
+    for (const asset of assets) {
+      assetsMap.set(asset.asset_id, asset);
+    }
 
-    return trendingAssets.map((ta) => ({
-      asset_id: ta.asset_id,
-      symbol: ta.asset.symbol,
-      asset_type: ta.asset.asset_type,
-      galaxy_score: ta.galaxy_score,
-      alt_rank: ta.alt_rank,
-      social_score: ta.social_score,
-      price_usd: ta.price_usd,
-    }));
+    // Return all trending assets with asset info
+    return allTrendingAssets.map((ta) => {
+      const asset = assetsMap.get(ta.asset_id) || ta.asset; // Use fetched asset or included asset
+      return {
+        asset_id: ta.asset_id,
+        symbol: asset?.symbol || 'UNKNOWN',
+        asset_type: asset?.asset_type || 'crypto',
+        galaxy_score: ta.galaxy_score,
+        alt_rank: ta.alt_rank,
+        social_score: ta.social_score,
+        price_usd: ta.price_usd,
+        poll_timestamp: ta.poll_timestamp, // Include timestamp so you can see when each was polled
+      };
+    });
   }
 
   /**
