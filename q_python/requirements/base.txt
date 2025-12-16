@@ -27,7 +27,7 @@ deepface>=0.0.79
 # Uncomment below for Linux/macOS:
 # mediapipe>=0.10.0
 
-# ML Model Dependencies (FinBERT + FinGPT)
+# ML Model Dependencies (FinBERT)
 # FinBERT: Financial sentiment analysis using ProsusAI/finbert model
 # - Model (ProsusAI/finbert) is automatically downloaded from Hugging Face on first use (438MB)
 # - Download occurs when dashboard is first opened and FinBERT is initialized
@@ -36,11 +36,6 @@ deepface>=0.0.79
 transformers>=4.32.0
 torch>=2.0.0
 huggingface-hub>=0.16.0
-
-# FinGPT Model Dependencies
-peft>=0.5.0
-accelerate>=0.20.0
-sentencepiece>=0.1.99
 
 # Environment and Database
 python-dotenv>=1.0.0
