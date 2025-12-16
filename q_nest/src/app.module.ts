@@ -5,6 +5,7 @@ import { ConfigModule } from './config/config.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { KycModule } from './kyc/kyc.module';
 import { ExchangesModule } from './modules/exchanges/exchanges.module';
+import { BinanceTestnetModule } from './modules/binance-testnet/binance-testnet.module';
 import { UsersModule } from './modules/users/users.module';
 import { NewsModule } from './modules/news/news.module';
 import { MacroModule } from './modules/macro/macro.module';
@@ -21,6 +22,7 @@ import { StrategiesModule } from './modules/strategies/strategies.module';
     AuthModule,
     KycModule,
     ExchangesModule,
+    BinanceTestnetModule,
     UsersModule,
     NewsModule,
     MacroModule,
