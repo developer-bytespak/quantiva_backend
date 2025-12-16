@@ -48,7 +48,11 @@ def main() -> int:
             print("  set NO_RELOAD=true && python run.py")
             print("  or use: python run_no_reload.py")
         
-        uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=use_reload, app_dir="src")
+        # Use PORT environment variable for Render compatibility, default to 8000 for local dev
+        port = int(os.environ.get("PORT", 8000))
+        # Default to 0.0.0.0 if PORT is set (production), otherwise 127.0.0.1 for local dev
+        host = "0.0.0.0" if os.environ.get("PORT") else os.environ.get("HOST", "127.0.0.1")
+        uvicorn.run("main:app", host=host, port=port, reload=use_reload, app_dir="src")
     except KeyboardInterrupt:
         print("\n\nShutting down server...")
         return 0
@@ -56,7 +60,6 @@ def main() -> int:
         print(f"\nError: {e}")
         return 1
     return 0
-
 
 if __name__ == "__main__":
     try:
