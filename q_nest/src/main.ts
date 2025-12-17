@@ -6,12 +6,33 @@ import cookieParser from 'cookie-parser';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Enable CORS. Prefer a configured FRONTEND_URL in production so
-  // Access-Control-Allow-Origin is a specific origin (required when sending credentials).
-  const frontendUrl = process.env.FRONTEND_URL; // e.g. https://your-frontend.vercel.app
+  // Enable CORS. Support multiple frontend origins via FRONTEND_URLS (comma-separated)
+  // Example: FRONTEND_URLS=https://quantiva-hq.vercel.app,https://preview-app.vercel.app
+  const envFrontend = process.env.FRONTEND_URL;
+  const envFrontendList = process.env.FRONTEND_URLS;
+  const allowedOrigins = new Set<string>();
+  if (envFrontend) allowedOrigins.add(envFrontend.replace(/\/$/, ''));
+  if (envFrontendList) {
+    envFrontendList.split(',').map(s => s.trim()).filter(Boolean).forEach(u => allowedOrigins.add(u.replace(/\/$/, '')));
+  }
+  // Always allow localhost during development
+  if (process.env.NODE_ENV !== 'production') {
+    allowedOrigins.add('http://localhost:3000');
+  }
+
   app.enableCors({
-    origin: frontendUrl ? [frontendUrl] : true,
+    origin: (origin, callback) => {
+      // Allow non-browser requests (no origin)
+      if (!origin) return callback(null, true);
+      // If origin exactly matches an allowed origin, allow it
+      if (allowedOrigins.has(origin)) return callback(null, true);
+      // As a last resort, if NODE_ENV is not production allow (useful for unknown preview URLs)
+      if (process.env.NODE_ENV !== 'production') return callback(null, true);
+      return callback(new Error('Not allowed by CORS'));
+    },
     credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-device-id'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });
 
   // Cookie parser middleware
