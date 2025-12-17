@@ -7,7 +7,7 @@ from datetime import datetime
 import logging
 
 from .base_engine import BaseEngine
-from src.models.finbert import get_finbert_inference
+# Defer importing the heavy FinBERT modules until needed (lazy import)
 from src.services.data.stock_news_service import StockNewsService
 from src.services.data.lunarcrush_service import LunarCrushService
 from src.services.data.ema_state_service import EMAStateService
@@ -58,8 +58,17 @@ class SentimentEngine(BaseEngine):
             return False
         
         self._initialization_attempted = True
+        # Respect SKIP_ML_INIT to allow the API to start without loading ML libraries
+        import os
+        skip = os.environ.get("SKIP_ML_INIT", "").lower()
+        if skip in ("1", "true", "yes"):
+            self.logger.info("SKIP_ML_INIT enabled; skipping FinBERT initialization at startup")
+            return False
+
         try:
             self.logger.info("Initializing FinBERT inference (lazy loading)...")
+            # Import inside the function to avoid heavy imports at module import time
+            from src.models.finbert import get_finbert_inference
             self.finbert_inference = get_finbert_inference()
             self.logger.info("FinBERT inference initialized successfully")
             return True

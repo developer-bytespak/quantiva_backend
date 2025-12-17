@@ -64,6 +64,13 @@ except Exception as e:
     logger.error(f"Failed to load LLM router: {e}", exc_info=True)
     llm_router = None
 
+try:
+    from src.api.v1.admin import router as admin_router
+    logger.info("Admin router loaded")
+except Exception as e:
+    logger.error(f"Failed to load Admin router: {e}", exc_info=True)
+    admin_router = None
+
 app = FastAPI(title="Quantiva Python API", version="1.0.0")
 logger.info("FastAPI app created")
 
@@ -99,6 +106,10 @@ if llm_router:
     app.include_router(llm_router, prefix="/api/v1")
     logger.info("LLM router included")
 
+if admin_router:
+    app.include_router(admin_router, prefix="/api/v1")
+    logger.info("Admin router included")
+
 logger.info("All routers included, application ready")
 
 @app.get('/')
@@ -111,3 +122,7 @@ async def startup_event():
     import os
     port = os.environ.get("PORT", "8000")
     logger.info(f"Server should be listening on port {port}")
+    # Log ML init policy
+    skip = os.environ.get("SKIP_ML_INIT", "").lower()
+    if skip in ("1", "true", "yes"):
+        logger.info("SKIP_ML_INIT is enabled - ML models will not be initialized at startup")
