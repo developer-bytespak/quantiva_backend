@@ -10,7 +10,7 @@
     "dev": "npm run start:dev",
     "prisma:validate": "prisma validate",
     "prisma:format": "prisma format",
-    "prisma:generate": "prisma generate",
+    "prisma:generate": "npx prisma@6.19.0 generate",
     "prisma:db:push": "prisma db push",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
