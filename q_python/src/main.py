@@ -1,15 +1,71 @@
 # FastAPI entrypoint
+import logging
+import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from src.api.v1.kyc import router as kyc_router
-from src.api.v1.strategies import router as strategies_router
-from src.api.v1.signals import router as signals_router
-from src.api.v1.macro import router as macro_router
-from src.api.v1.news import router as news_router
-from src.api.v1.sentiment import router as sentiment_router
-from src.api.v1.llm import router as llm_router
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+logger.info("Starting FastAPI application...")
+
+# Import routers with error handling
+try:
+    from src.api.v1.kyc import router as kyc_router
+    logger.info("KYC router loaded")
+except Exception as e:
+    logger.error(f"Failed to load KYC router: {e}", exc_info=True)
+    kyc_router = None
+
+try:
+    from src.api.v1.strategies import router as strategies_router
+    logger.info("Strategies router loaded")
+except Exception as e:
+    logger.error(f"Failed to load Strategies router: {e}", exc_info=True)
+    strategies_router = None
+
+try:
+    from src.api.v1.signals import router as signals_router
+    logger.info("Signals router loaded")
+except Exception as e:
+    logger.error(f"Failed to load Signals router: {e}", exc_info=True)
+    signals_router = None
+
+try:
+    from src.api.v1.macro import router as macro_router
+    logger.info("Macro router loaded")
+except Exception as e:
+    logger.error(f"Failed to load Macro router: {e}", exc_info=True)
+    macro_router = None
+
+try:
+    from src.api.v1.news import router as news_router
+    logger.info("News router loaded")
+except Exception as e:
+    logger.error(f"Failed to load News router: {e}", exc_info=True)
+    news_router = None
+
+try:
+    from src.api.v1.sentiment import router as sentiment_router
+    logger.info("Sentiment router loaded")
+except Exception as e:
+    logger.error(f"Failed to load Sentiment router: {e}", exc_info=True)
+    sentiment_router = None
+
+try:
+    from src.api.v1.llm import router as llm_router
+    logger.info("LLM router loaded")
+except Exception as e:
+    logger.error(f"Failed to load LLM router: {e}", exc_info=True)
+    llm_router = None
 
 app = FastAPI(title="Quantiva Python API", version="1.0.0")
+logger.info("FastAPI app created")
 
 # CORS middleware
 app.add_middleware(
@@ -21,14 +77,37 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(kyc_router, prefix="/api/v1")
-app.include_router(strategies_router, prefix="/api/v1")
-app.include_router(signals_router, prefix="/api/v1")
-app.include_router(macro_router, prefix="/api/v1")
-app.include_router(news_router, prefix="/api/v1")
-app.include_router(sentiment_router, prefix="/api/v1")
-app.include_router(llm_router, prefix="/api/v1")
+if kyc_router:
+    app.include_router(kyc_router, prefix="/api/v1")
+    logger.info("KYC router included")
+if strategies_router:
+    app.include_router(strategies_router, prefix="/api/v1")
+    logger.info("Strategies router included")
+if signals_router:
+    app.include_router(signals_router, prefix="/api/v1")
+    logger.info("Signals router included")
+if macro_router:
+    app.include_router(macro_router, prefix="/api/v1")
+    logger.info("Macro router included")
+if news_router:
+    app.include_router(news_router, prefix="/api/v1")
+    logger.info("News router included")
+if sentiment_router:
+    app.include_router(sentiment_router, prefix="/api/v1")
+    logger.info("Sentiment router included")
+if llm_router:
+    app.include_router(llm_router, prefix="/api/v1")
+    logger.info("LLM router included")
+
+logger.info("All routers included, application ready")
 
 @app.get('/')
 def read_root():
     return {"msg": "Quantiva Python API", "version": "1.0.0"}
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("FastAPI application startup complete")
+    import os
+    port = os.environ.get("PORT", "8000")
+    logger.info(f"Server should be listening on port {port}")
