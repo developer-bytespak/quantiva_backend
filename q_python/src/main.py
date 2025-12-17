@@ -14,13 +14,22 @@ logger = logging.getLogger(__name__)
 
 logger.info("Starting FastAPI application...")
 
+# Determine ML init policy early to avoid importing ML-heavy modules
+import os
+_skip_ml_init = os.environ.get("SKIP_ML_INIT", "").lower() in ("1", "true", "yes")
+
 # Import routers with error handling
-try:
-    from src.api.v1.kyc import router as kyc_router
-    logger.info("KYC router loaded")
-except Exception as e:
-    logger.error(f"Failed to load KYC router: {e}", exc_info=True)
+# Skip importing KYC (and other ML-heavy routers) when SKIP_ML_INIT is enabled
+if _skip_ml_init:
+    logger.info("SKIP_ML_INIT is enabled - skipping KYC router import to avoid ML libs loading")
     kyc_router = None
+else:
+    try:
+        from src.api.v1.kyc import router as kyc_router
+        logger.info("KYC router loaded")
+    except Exception as e:
+        logger.error(f"Failed to load KYC router: {e}", exc_info=True)
+        kyc_router = None
 
 try:
     from src.api.v1.strategies import router as strategies_router

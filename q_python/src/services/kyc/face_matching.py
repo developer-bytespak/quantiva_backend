@@ -5,7 +5,6 @@ Uses DeepFace library for face embedding extraction and similarity calculation.
 from typing import Dict, Optional, Tuple
 from PIL import Image
 import numpy as np
-from deepface import DeepFace
 from logging import getLogger
 
 from src.utils.image_utils import preprocess_image, validate_image, calculate_image_quality
@@ -17,6 +16,20 @@ logger = getLogger(__name__)
 DEEPFACE_MODEL = get_config("deepface_model", "VGG-Face")
 DEEPFACE_BACKEND = get_config("deepface_backend", "opencv")
 FACE_MATCH_THRESHOLD = get_config("face_match_threshold", 0.6)
+
+# Lazy DeepFace loader
+_deepface = None
+
+def _get_deepface():
+    global _deepface
+    if _deepface is None:
+        try:
+            from deepface import DeepFace
+            _deepface = DeepFace
+        except Exception as e:
+            logger.error(f"DeepFace import failed: {e}")
+            _deepface = None
+    return _deepface
 
 
 def extract_face_embedding(image: Image.Image) -> Optional[np.ndarray]:
@@ -57,30 +70,32 @@ def extract_face_embedding(image: Image.Image) -> Optional[np.ndarray]:
         
         # Try multiple detector backends in order of preference
         detector_backends = [DEEPFACE_BACKEND, 'mtcnn', 'retinaface', 'opencv', 'ssd', 'dlib']
-        
+
+        DeepFace = _get_deepface()
+        if DeepFace is None:
+            logger.warning("DeepFace not available; cannot extract embeddings")
+            return None
+
         last_error = None
         for backend in detector_backends:
             try:
                 logger.debug(f"Trying face detection with backend: {backend}")
-                
-                # DeepFace.represent() can accept numpy array directly
-                # It expects RGB format (which we have from PIL)
+
                 embedding = DeepFace.represent(
                     img_path=img_array,
                     model_name=DEEPFACE_MODEL,
                     detector_backend=backend,
-                    enforce_detection=False,  # Don't raise error, return None instead
+                    enforce_detection=False,
                 )
-                
+
                 if embedding and len(embedding) > 0:
-                    # DeepFace returns a list with dict containing 'embedding'
                     embedding_vector = np.array(embedding[0]['embedding'])
                     logger.info(f"Face embedding extracted successfully using {backend} (dim: {len(embedding_vector)})")
                     return embedding_vector
                 else:
                     logger.debug(f"No face found with backend: {backend}")
                     continue
-                    
+
             except ValueError as e:
                 error_msg = str(e)
                 if "Face could not be detected" in error_msg or "could not detect a face" in error_msg.lower():

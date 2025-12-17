@@ -5,8 +5,21 @@ import io
 from typing import Tuple, Optional
 from PIL import Image
 import numpy as np
-import cv2
 from logging import getLogger
+
+# Lazy OpenCV loader to avoid importing at module import time
+_cv2 = None
+
+def _get_cv2():
+    global _cv2
+    if _cv2 is None:
+        try:
+            import cv2 as _cv2mod
+            _cv2 = _cv2mod
+        except Exception as e:
+            getLogger(__name__).error(f"cv2 import failed: {e}")
+            _cv2 = None
+    return _cv2
 
 try:
     from src.config import get_config
@@ -75,11 +88,21 @@ def preprocess_image(image: Image.Image, enhance: bool = True) -> np.ndarray:
         else:
             img_array = img_array.astype(np.uint8)
     
-    if image.mode == 'RGBA':
-        # Convert RGBA to RGB
-        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
-    elif image.mode != 'RGB':
-        img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+    cv2 = _get_cv2()
+    if cv2 is None:
+        # Fallback: use simple conversions without OpenCV
+        if image.mode == 'RGBA':
+            img_array = img_array[:, :, :3]
+        elif image.mode != 'RGB':
+            # Stack grayscale to RGB
+            if len(img_array.shape) == 2:
+                img_array = np.stack([img_array] * 3, axis=-1)
+    else:
+        if image.mode == 'RGBA':
+            # Convert RGBA to RGB
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+        elif image.mode != 'RGB':
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
     
     if enhance:
         # Apply basic enhancements
@@ -107,6 +130,9 @@ def enhance_image(img_array: np.ndarray) -> np.ndarray:
         img_array = np.clip(img_array, 0, 255).astype(np.uint8)
     
     # Convert to LAB color space for better enhancement
+    cv2 = _get_cv2()
+    if cv2 is None:
+        return img_array
     lab = cv2.cvtColor(img_array, cv2.COLOR_RGB2LAB)
     l, a, b = cv2.split(lab)
     
@@ -193,11 +219,19 @@ def calculate_image_quality(img_array: np.ndarray) -> float:
     Returns:
         Quality score (0.0-1.0)
     """
-    # Convert to grayscale for analysis
-    if len(img_array.shape) == 3:
-        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    cv2 = _get_cv2()
+    if cv2 is None:
+        # Fallback simple grayscale
+        if len(img_array.shape) == 3:
+            gray = np.dot(img_array[..., :3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+        else:
+            gray = img_array
     else:
-        gray = img_array
+        # Convert to grayscale for analysis
+        if len(img_array.shape) == 3:
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_array
     
     # Calculate sharpness using Laplacian variance
     laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()

@@ -5,10 +5,23 @@ Uses EasyOCR for text extraction and includes MRZ parsing for passports.
 import re
 from typing import Dict, Optional
 from PIL import Image
-import easyocr
 import numpy as np
-import cv2
 from logging import getLogger
+
+# Lazy loaders for heavy libs
+_ocr_reader = None
+_cv2 = None
+
+def _get_cv2():
+    global _cv2
+    if _cv2 is None:
+        try:
+            import cv2 as _cv2mod
+            _cv2 = _cv2mod
+        except Exception as e:
+            getLogger(__name__).error(f"cv2 import failed: {e}")
+            _cv2 = None
+    return _cv2
 
 from src.utils.image_utils import preprocess_image, validate_image
 from src.config import get_config
@@ -24,6 +37,12 @@ def get_ocr_reader():
     global _ocr_reader
     if _ocr_reader is None:
         logger.info("Initializing EasyOCR reader...")
+        try:
+            import easyocr
+        except Exception as e:
+            logger.error(f"Failed to import easyocr: {e}")
+            raise
+
         languages = get_config("ocr_languages", ["en"])
         use_gpu = get_config("ocr_gpu", False)
         _ocr_reader = easyocr.Reader(languages, gpu=use_gpu)
@@ -67,7 +86,8 @@ def extract_text(image: Image.Image, document_type: Optional[str] = None) -> Dic
         
         # EasyOCR expects BGR format (OpenCV format), but we have RGB
         # Convert RGB to BGR for EasyOCR
-        if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+        cv2 = _get_cv2()
+        if cv2 is not None and len(img_array.shape) == 3 and img_array.shape[2] == 3:
             img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
         else:
             img_bgr = img_array

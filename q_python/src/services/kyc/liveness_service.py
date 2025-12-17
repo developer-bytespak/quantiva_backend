@@ -5,8 +5,6 @@ Uses OpenCV and DeepFace for spoof detection and quality assessment.
 from typing import Dict, Optional
 from PIL import Image
 import numpy as np
-import cv2
-from deepface import DeepFace
 from logging import getLogger
 
 from src.utils.image_utils import preprocess_image, validate_image, calculate_image_quality
@@ -17,6 +15,20 @@ logger = getLogger(__name__)
 # Liveness detection thresholds (from config)
 LIVENESS_CONFIDENCE_THRESHOLD = get_config("liveness_confidence_threshold", 0.7)
 QUALITY_THRESHOLD = get_config("quality_threshold", 0.5)
+
+# Lazy OpenCV loader
+_cv2 = None
+
+def _get_cv2():
+    global _cv2
+    if _cv2 is None:
+        try:
+            import cv2 as _cv2mod
+            _cv2 = _cv2mod
+        except Exception as e:
+            logger.error(f"cv2 import failed: {e}")
+            _cv2 = None
+    return _cv2
 
 
 def detect_liveness(image: Image.Image, is_video: bool = False) -> Dict:
@@ -44,7 +56,7 @@ def detect_liveness(image: Image.Image, is_video: bool = False) -> Dict:
         
         # Preprocess image
         img_array = preprocess_image(image, enhance=True)
-        
+
         # Calculate quality score
         quality_score = calculate_image_quality(img_array)
         
@@ -111,6 +123,10 @@ def analyze_texture(image: np.ndarray) -> float:
         Texture score (0.0-1.0), higher = more likely live
     """
     try:
+        cv2 = _get_cv2()
+        if cv2 is None:
+            logger.warning("cv2 not available, returning neutral texture score")
+            return 0.5
         # Convert to grayscale
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
@@ -152,6 +168,10 @@ def analyze_depth_cues(image: np.ndarray) -> float:
         Depth score (0.0-1.0), higher = more likely 3D (live)
     """
     try:
+        cv2 = _get_cv2()
+        if cv2 is None:
+            logger.warning("cv2 not available, returning neutral depth score")
+            return 0.5
         # Convert to grayscale
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
@@ -189,6 +209,10 @@ def analyze_reflection(image: np.ndarray) -> float:
         Reflection score (0.0-1.0), higher = more likely live
     """
     try:
+        cv2 = _get_cv2()
+        if cv2 is None:
+            logger.warning("cv2 not available, returning neutral reflection score")
+            return 0.5
         # Convert to HSV for better reflection analysis
         if len(image.shape) == 3:
             hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
@@ -245,6 +269,10 @@ def detect_spoof_type(image: np.ndarray, texture_score: float, depth_score: floa
         
         # Analyze for mask (partial face occlusion)
         # This is a simplified check - real implementation would use face landmarks
+        cv2 = _get_cv2()
+        if cv2 is None:
+            logger.warning("cv2 not available, defaulting to 'photo' spoof type")
+            return "photo"
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if len(image.shape) == 3 else image
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         faces = face_cascade.detectMultiScale(gray, 1.1, 4)

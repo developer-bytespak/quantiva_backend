@@ -3,7 +3,6 @@ Configuration settings for KYC ML services and FinBERT model.
 """
 import os
 from typing import Dict, Any
-import torch
 
 # Load .env file if it exists
 try:
