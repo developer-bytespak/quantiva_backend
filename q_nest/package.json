@@ -2,8 +2,8 @@
   "name": "q_nest",
   "version": "0.1.0",
   "scripts": {
-    "build": "npx -p @nestjs/cli nest build",
-    "start": "node dist/src/main",
+    "build": "npm ci --include=dev && npx -p @nestjs/cli nest build",
+    "start": "node dist/src/main.js",
     "start:dev": "npx -p @nestjs/cli nest start --watch",
     "start:debug": "npx -p @nestjs/cli nest start --debug --watch",
     "start:prod": "node dist/src/main.js",
@@ -46,11 +46,9 @@
     "speakeasy": "^2.0.0",
     "uuid": "^9.0.1"
   },
-  "dependencies": {
-    "@types/express": "^4.17.21",
-    "@types/multer": "^1.4.11"
-  },
   "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.11",
     "@nestjs/cli": "^10.0.0",
     "@nestjs/schematics": "^10.0.0",
     "@nestjs/testing": "^10.0.0",
