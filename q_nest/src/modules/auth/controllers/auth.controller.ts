@@ -50,10 +50,9 @@ export class AuthController {
       path: '/',
     };
 
-    // Only set domain in production if configured
-    if (isProduction && jwtConfig.cookieDomain) {
-      cookieOptions.domain = jwtConfig.cookieDomain;
-    }
+    // Do not set cookie domain explicitly. Let the browser scope the cookie to the
+    // backend host that set it. Setting a cross-site domain here can prevent the
+    // browser from sending the cookie on subsequent requests.
 
     res.cookie(name, value, cookieOptions);
   }
