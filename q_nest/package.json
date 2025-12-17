@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "scripts": {
     "build": "nest build",
-    "start": "node dist/main",
+    "start": "node dist/src/main",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/main.js",
+    "start:prod": "node dist/src/main.js",
     "dev": "npm run start:dev",
     "prisma:validate": "prisma validate",
     "prisma:format": "prisma format",

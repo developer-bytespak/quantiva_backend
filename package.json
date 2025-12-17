@@ -1,8 +1,0 @@
-{
-  "dependencies": {
-    "@nestjs/platform-express": "^11.1.9",
-    "cloudinary": "^1.41.3",
-    "multer": "^2.0.2",
-    "multer-storage-cloudinary": "^4.0.0"
-  }
-}

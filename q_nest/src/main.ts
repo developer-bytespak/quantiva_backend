@@ -6,9 +6,11 @@ import cookieParser from 'cookie-parser';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Enable CORS if needed
+  // Enable CORS. Prefer a configured FRONTEND_URL in production so
+  // Access-Control-Allow-Origin is a specific origin (required when sending credentials).
+  const frontendUrl = process.env.FRONTEND_URL; // e.g. https://your-frontend.vercel.app
   app.enableCors({
-    origin: true,
+    origin: frontendUrl ? [frontendUrl] : true,
     credentials: true,
   });
 

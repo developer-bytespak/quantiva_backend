@@ -41,11 +41,11 @@ export class AuthController {
     const isProduction = jwtConfig.isProduction;
 
     // For localhost development, use 'lax' sameSite and don't set domain
-    // For production, use 'strict' and set domain if configured
+    // For production, use 'none' to allow cross-site cookies (required when frontend and backend are on different domains)
     const cookieOptions: any = {
       httpOnly: true,
       secure: isProduction,
-      sameSite: isProduction ? 'strict' : 'lax', // Use 'lax' for localhost development
+      sameSite: isProduction ? 'none' : 'lax', // Use 'lax' for localhost development; 'none' in production for cross-site cookies
       maxAge: maxAge * 1000, // Convert to milliseconds
       path: '/',
     };
@@ -63,7 +63,7 @@ export class AuthController {
     const cookieOptions: any = {
       httpOnly: true,
       secure: jwtConfig.isProduction,
-      sameSite: jwtConfig.isProduction ? 'strict' : 'lax',
+      sameSite: jwtConfig.isProduction ? 'none' : 'lax',
       path: '/',
     };
 
