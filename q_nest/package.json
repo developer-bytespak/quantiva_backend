@@ -2,10 +2,10 @@
   "name": "q_nest",
   "version": "0.1.0",
   "scripts": {
-    "build": "npx nest build",
+    "build": "npx -p @nestjs/cli nest build",
     "start": "node dist/src/main",
-    "start:dev": "npx nest start --watch",
-    "start:debug": "npx nest start --debug --watch",
+    "start:dev": "npx -p @nestjs/cli nest start --watch",
+    "start:debug": "npx -p @nestjs/cli nest start --debug --watch",
     "start:prod": "node dist/src/main.js",
     "dev": "npm run start:dev",
     "prisma:validate": "prisma validate",
