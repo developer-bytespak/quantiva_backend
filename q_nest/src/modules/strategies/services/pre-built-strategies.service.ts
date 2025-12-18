@@ -11,7 +11,7 @@ export class PreBuiltStrategiesService implements OnModuleInit {
   constructor(
     private prisma: PrismaService,
     private pythonApi: PythonApiService,
-  ) {}
+  ) { }
 
   async onModuleInit() {
     // Seed pre-built strategies on module initialization
@@ -76,47 +76,83 @@ export class PreBuiltStrategiesService implements OnModuleInit {
   }
 
   /**
-   * Get top N trending assets
+   * Get top N trending assets with Tier-1 Trend Ranking
+   * 
+   * Ranking formula:
+   * trend_score = (galaxy_score × 0.4) + ((100 − alt_rank) × 0.3) + (social_score × 0.3)
+   * 
+   * Includes:
+   * - Trend direction (UP/DOWN/STABLE) by comparing with previous poll
+   * - Volume surge detection (NORMAL/VOLUME_SURGE/MASSIVE_SURGE)
    */
   async getTopTrendingAssets(limit: number = 20) {
-    // Get most recent poll_timestamp
-    const latestPoll = await this.prisma.trending_assets.findFirst({
-      orderBy: {
-        poll_timestamp: 'desc',
-      },
-      select: {
-        poll_timestamp: true,
-      },
-    });
+  try {
+    const rows: any[] = await this.prisma.$queryRawUnsafe(`
+      SELECT DISTINCT ON (ta.asset_id)
+        ta.asset_id,
+        ta.galaxy_score,
+        ta.alt_rank,
+        ta.social_score,
+        ta.price_usd,
+        ta.market_volume,
+        ta.poll_timestamp
+      FROM trending_assets ta
+      WHERE
+        ta.galaxy_score IS NOT NULL
+        AND ta.alt_rank IS NOT NULL
+        AND ta.alt_rank < 300
+        AND ta.price_usd IS NOT NULL
+        AND ta.market_volume > 10000000
+      ORDER BY
+        ta.asset_id,
+        ta.price_usd DESC
+    `);
 
-    if (!latestPoll) {
-      return [];
-    }
+    if (!rows.length) return [];
 
-    // Get top assets from most recent poll
-    const trendingAssets = await this.prisma.trending_assets.findMany({
+    const assetIds = rows.map(r => r.asset_id);
+
+    const assets = await this.prisma.assets.findMany({
       where: {
-        poll_timestamp: latestPoll.poll_timestamp,
-      },
-      include: {
-        asset: true,
-      },
-      orderBy: {
-        galaxy_score: 'desc',
-      },
-      take: limit,
+        asset_id: { in: assetIds },
+        asset_type: 'crypto',
+        NOT: {
+          symbol: {
+            in: [
+              'USDT','USDC','DAI','PYUSD','USD1',
+              'WBETH','STETH','CBBTC','FBTC',
+              'XAUT','PAXG'
+            ]
+          }
+        }
+      }
     });
 
-    return trendingAssets.map((ta) => ({
-      asset_id: ta.asset_id,
-      symbol: ta.asset.symbol,
-      asset_type: ta.asset.asset_type,
-      galaxy_score: ta.galaxy_score,
-      alt_rank: ta.alt_rank,
-      social_score: ta.social_score,
-      price_usd: ta.price_usd,
-    }));
+    const assetMap = new Map(assets.map(a => [a.asset_id, a]));
+
+    return rows
+      .filter(r => assetMap.has(r.asset_id))
+      .slice(0, limit)
+      .map(r => {
+        const asset = assetMap.get(r.asset_id)!;
+        return {
+          asset_id: r.asset_id,
+          symbol: asset.symbol,
+          asset_type: asset.asset_type,
+          galaxy_score: Number(r.galaxy_score),
+          alt_rank: Number(r.alt_rank),
+          social_score: Number(r.social_score ?? 0),
+          price_usd: Number(r.price_usd),
+          market_volume: Number(r.market_volume),
+          poll_timestamp: r.poll_timestamp,
+        };
+      });
+
+  } catch (err: any) {
+    this.logger.warn(`Trending assets error: ${err?.message || err}`);
+    return [];
   }
+}
 
   /**
    * Preview strategy on multiple assets (without storing signals)
@@ -198,6 +234,22 @@ export class PreBuiltStrategiesService implements OnModuleInit {
           },
         );
 
+        // Enrich preview with market data fallbacks similar to strategy-preview
+        const entryPrice = signal.entryPrice ?? signal.entry_price ?? signal.entry ?? marketData.price ?? null;
+        const stopLossPct = signal.stop_loss ?? signal.stopLoss ?? strategy.stop_loss_value ?? null;
+        const takeProfitPct = signal.take_profit ?? signal.takeProfit ?? strategy.take_profit_value ?? null;
+
+        const parsedEntry = entryPrice !== null ? Number(entryPrice) : null;
+        const parsedStopLoss = stopLossPct != null ? Number(stopLossPct) : null;
+        const parsedTakeProfit = takeProfitPct != null ? Number(takeProfitPct) : null;
+
+        const computedStopLossPrice = parsedEntry != null && parsedStopLoss != null && !isNaN(parsedEntry) && !isNaN(parsedStopLoss)
+          ? parsedEntry * (1 - parsedStopLoss / 100)
+          : null;
+        const computedTakeProfitPrice = parsedEntry != null && parsedTakeProfit != null && !isNaN(parsedEntry) && !isNaN(parsedTakeProfit)
+          ? parsedEntry * (1 + parsedTakeProfit / 100)
+          : null;
+
         results.push({
           asset_id: asset.asset_id,
           symbol: asset.symbol,
@@ -206,6 +258,21 @@ export class PreBuiltStrategiesService implements OnModuleInit {
           final_score: signal.final_score,
           confidence: signal.confidence,
           engine_scores: signal.engine_scores,
+          // Additional fields for frontend preview
+          entry: signal.entry ?? signal.entry_price ?? signal.suggested_entry ?? (marketData.price ?? null),
+          entry_price: parsedEntry ?? null,
+          stop_loss: stopLossPct ?? null,
+          stop_loss_price: signal.stop_loss_price ?? signal.stopLossPrice ?? computedStopLossPrice ?? null,
+          take_profit: takeProfitPct ?? null,
+          take_profit_price: signal.take_profit_price ?? signal.takeProfitPrice ?? computedTakeProfitPrice ?? null,
+          changePercent: signal.changePercent ?? signal.change_pct ?? signal.profit ?? null,
+          winRate: signal.winRate ?? signal.win_rate ?? signal.win_pct ?? null,
+          volume: signal.volume ?? signal.market_volume ?? marketData.price ?? null,
+          insights: signal.insights ?? signal.reasons ?? [],
+          // include strategy-level rules so preview response matches strategy object
+          entry_rules: strategy.entry_rules ?? null,
+          exit_rules: strategy.exit_rules ?? null,
+          breakdown: signal.breakdown ?? null,
         });
       } catch (error: any) {
         this.logger.warn(

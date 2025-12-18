@@ -17,7 +17,11 @@ export class StrategyExecutionService {
   /**
    * Execute strategy on an asset
    */
-  async executeStrategy(strategyId: string, assetId: string): Promise<any> {
+  async executeStrategy(
+    strategyId: string,
+    assetId: string,
+    generateLLM: boolean = false,
+  ): Promise<any> {
     // Get strategy
     const strategy = await this.prisma.strategies.findUnique({
       where: {
@@ -113,22 +117,293 @@ export class StrategyExecutionService {
         });
       }
 
-      // Queue LLM explanation job (async, don't wait)
-      this.queueLLMExplanation(signal.signal_id, pythonSignal, assetId, asset.asset_type).catch(
-        (error) => {
-          this.logger.error(
-            `Failed to queue LLM explanation for signal ${signal.signal_id}: ${error.message}`,
-          );
-        },
-      );
+      // Generate LLM explanation SYNCHRONOUSLY (wait for it) - only if generateLLM is true
+      let explanation = null;
+      // Note: LLM generation is controlled by the caller (executeStrategyOnAssets)
+      // This method will generate LLM if generateLLM parameter is true
+      // For now, we'll skip LLM here and let executeStrategyOnAssets handle it
 
-      return signal;
+      // Generate LLM explanation if requested
+      if (generateLLM) {
+        try {
+          // Use asset symbol instead of UUID for LLM
+          const assetSymbol = asset.symbol || assetId;
+          
+          // Handle null values - provide defaults
+          const finalScore = pythonSignal.final_score ?? 0;
+          const confidence = pythonSignal.confidence ?? 0;
+          
+          // Only generate if we have valid action
+          if (pythonSignal.action) {
+            const llmResponse = await this.pythonApi.post('/api/v1/llm/explain-signal', {
+              signal_data: {
+                action: pythonSignal.action,
+                final_score: finalScore,
+                confidence: confidence,
+              },
+              engine_scores: pythonSignal.engine_scores || {},
+              asset_id: assetSymbol, // Use symbol instead of UUID
+              asset_type: asset.asset_type || 'crypto',
+            });
+
+            // Store explanation
+            explanation = await this.prisma.signal_explanations.create({
+              data: {
+                signal_id: signal.signal_id,
+                llm_model: llmResponse.data.model,
+                text: llmResponse.data.explanation,
+                explanation_status: 'generated',
+                error_message: null,
+                retry_count: 0,
+              },
+            });
+          } else {
+            this.logger.warn(
+              `Skipping LLM explanation for signal ${signal.signal_id}: no action`,
+            );
+            explanation = await this.prisma.signal_explanations.create({
+              data: {
+                signal_id: signal.signal_id,
+                explanation_status: 'skipped',
+                error_message: 'No action in signal',
+                text: 'Unable to generate explanation: signal has no action.',
+                retry_count: 0,
+              },
+            });
+          }
+        } catch (error: any) {
+          this.logger.error(
+            `Failed to generate LLM explanation for signal ${signal.signal_id}: ${error.message}`,
+          );
+          // Create failed explanation record
+          explanation = await this.prisma.signal_explanations.create({
+            data: {
+              signal_id: signal.signal_id,
+              explanation_status: 'failed',
+              error_message: error.message,
+              text: 'Unable to generate explanation.',
+              retry_count: 0,
+            },
+          });
+        }
+      }
+
+      // Return signal WITH explanation
+      return {
+        ...signal,
+        explanation: explanation ? {
+          text: explanation.text,
+          llm_model: explanation.llm_model,
+          explanation_status: explanation.explanation_status,
+        } : null,
+      };
     } catch (error: any) {
       this.logger.error(
         `Error executing strategy ${strategyId} on asset ${assetId}: ${error.message}`,
       );
       throw error;
     }
+  }
+
+  /**
+   * Execute strategy on multiple assets
+   * Only generates LLM explanations for top 5 signals (by final_score or confidence)
+   * to avoid hitting Gemini free tier rate limits
+   */
+  async executeStrategyOnAssets(
+    strategyId: string,
+    assetIds: string[],
+  ): Promise<any[]> {
+    const results: any[] = [];
+    const LLM_LIMIT = 5; // Only generate LLM for top 5 signals
+
+    this.logger.log(
+      `Executing strategy ${strategyId} on ${assetIds.length} assets`,
+    );
+
+    // Step 1: Generate all signals without LLM
+    for (const assetId of assetIds) {
+      try {
+        const result = await this.executeStrategy(strategyId, assetId, false);
+        results.push(result);
+      } catch (error: any) {
+        this.logger.warn(
+          `Error executing strategy ${strategyId} on asset ${assetId}: ${error.message}`,
+        );
+        results.push({
+          asset_id: assetId,
+          error: error.message,
+        });
+      }
+    }
+
+    this.logger.log(
+      `Generated ${results.length} signals (${results.filter((r) => r.signal_id).length} successful)`,
+    );
+
+    // Step 2: Identify top 5 signals for LLM generation
+    // Sort by: action priority (BUY > SELL > HOLD), then by final_score, then by confidence
+    // Include all signals even if final_score is null (use 0 as default)
+    const signalsWithScores = results
+      .filter((r) => r.signal_id && r.action) // Only signals with valid action
+      .map((r) => {
+        // Calculate sort score: prioritize action type, then scores
+        const actionPriority = r.action === 'BUY' ? 3 : r.action === 'SELL' ? 2 : 1;
+        const finalScore = r.final_score ?? 0;
+        const confidence = r.confidence ?? 0;
+        // Use sum of engine scores as fallback if final_score is null
+        const engineScoreSum = 
+          (Number(r.sentiment_score || 0) +
+           Number(r.trend_score || 0) +
+           Number(r.fundamental_score || 0) +
+           Number(r.liquidity_score || 0) +
+           Number(r.event_risk_score || 0)) / 5;
+        const effectiveScore = finalScore !== null && finalScore !== undefined ? finalScore : engineScoreSum;
+        const sortScore = actionPriority * 1000 + effectiveScore * 0.7 + confidence * 0.3;
+        
+        return {
+          ...r,
+          sortScore,
+        };
+      })
+      .sort((a, b) => (b.sortScore || 0) - (a.sortScore || 0))
+      .slice(0, LLM_LIMIT);
+
+    this.logger.log(
+      `Generating LLM explanations for top ${signalsWithScores.length} signals out of ${results.length} total`,
+    );
+
+    // Step 3: Generate LLM explanations for top signals
+    for (const signal of signalsWithScores) {
+      try {
+        // Get asset info
+        const asset = await this.prisma.assets.findUnique({
+          where: { asset_id: signal.asset_id },
+        });
+
+        if (!asset) {
+          this.logger.warn(`Asset ${signal.asset_id} not found for LLM generation`);
+          continue;
+        }
+
+        // Use asset symbol instead of UUID
+        const assetSymbol = asset.symbol || signal.asset_id;
+        
+        // Handle null values
+        const finalScore = signal.final_score ?? 0;
+        const confidence = signal.confidence ?? 0;
+
+        // Construct engine_scores from individual score fields if not present
+        let engineScores = signal.engine_scores;
+        if (!engineScores || Object.keys(engineScores).length === 0) {
+          engineScores = {
+            sentiment: { score: Number(signal.sentiment_score || 0) },
+            trend: { score: Number(signal.trend_score || 0) },
+            fundamental: { score: Number(signal.fundamental_score || 0) },
+            liquidity: { score: Number(signal.liquidity_score || 0) },
+            event_risk: { score: Number(signal.event_risk_score || 0) },
+          };
+        }
+
+        if (signal.action) {
+          const llmResponse = await this.pythonApi.post('/api/v1/llm/explain-signal', {
+            signal_data: {
+              action: signal.action,
+              final_score: finalScore,
+              confidence: confidence,
+            },
+            engine_scores: engineScores,
+            asset_id: assetSymbol, // Use symbol instead of UUID
+            asset_type: asset.asset_type || 'crypto',
+          });
+
+          // Check if explanation already exists
+          const existingExplanation = await this.prisma.signal_explanations.findFirst({
+            where: { signal_id: signal.signal_id },
+            orderBy: { created_at: 'desc' },
+          });
+
+          let explanation;
+          if (existingExplanation) {
+            // Update existing explanation
+            explanation = await this.prisma.signal_explanations.update({
+              where: { explanation_id: existingExplanation.explanation_id },
+              data: {
+                llm_model: llmResponse.data.model,
+                text: llmResponse.data.explanation,
+                explanation_status: 'generated',
+                error_message: null,
+              },
+            });
+          } else {
+            // Create new explanation
+            explanation = await this.prisma.signal_explanations.create({
+              data: {
+                signal_id: signal.signal_id,
+                llm_model: llmResponse.data.model,
+                text: llmResponse.data.explanation,
+                explanation_status: 'generated',
+                error_message: null,
+                retry_count: 0,
+              },
+            });
+          }
+
+          // Update the result with explanation
+          const resultIndex = results.findIndex((r) => r.signal_id === signal.signal_id);
+          if (resultIndex !== -1) {
+            results[resultIndex] = {
+              ...results[resultIndex],
+              explanation: {
+                text: explanation.text,
+                llm_model: explanation.llm_model,
+                explanation_status: explanation.explanation_status,
+              },
+            };
+          }
+        }
+      } catch (error: any) {
+        this.logger.error(
+          `Failed to generate LLM explanation for signal ${signal.signal_id}: ${error?.message || error}`,
+        );
+
+        // Safely create or update a failed explanation record without letting
+        // database errors bubble up and abort the overall generate-signals flow.
+        try {
+          const existingExplanation = await this.prisma.signal_explanations.findFirst({
+            where: { signal_id: signal.signal_id },
+            orderBy: { created_at: 'desc' },
+          });
+
+          if (existingExplanation) {
+            await this.prisma.signal_explanations.update({
+              where: { explanation_id: existingExplanation.explanation_id },
+              data: {
+                explanation_status: 'failed',
+                error_message: error?.message || String(error),
+                text: 'Unable to generate explanation.',
+              },
+            });
+          } else {
+            await this.prisma.signal_explanations.create({
+              data: {
+                signal_id: signal.signal_id,
+                explanation_status: 'failed',
+                error_message: error?.message || String(error),
+                text: 'Unable to generate explanation.',
+                retry_count: 0,
+              },
+            });
+          }
+        } catch (dbError: any) {
+          this.logger.error(
+            `Failed to record failed explanation for signal ${signal.signal_id}: ${dbError?.message || dbError}`,
+          );
+        }
+      }
+    }
+
+    return results;
   }
 
   /**

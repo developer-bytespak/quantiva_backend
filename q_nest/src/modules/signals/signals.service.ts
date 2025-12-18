@@ -59,6 +59,54 @@ export class SignalsService {
     });
   }
 
+  /**
+   * Return latest signal per asset. Keeps full history in DB; this returns a deduped
+   * view by selecting the most-recent signal (timestamp desc) per asset.
+   */
+  async findLatestSignals(options?: { strategyId?: string; userId?: string; limit?: number }) {
+    const where: any = {};
+    if (options?.strategyId) where.strategy_id = options.strategyId;
+    if (options?.userId) where.user_id = options.userId;
+
+    // Fetch signals ordered by timestamp desc so the first occurrence per asset is the latest
+    const signals = await this.prisma.strategy_signals.findMany({
+      where,
+      orderBy: { timestamp: 'desc' },
+      include: { asset: true, explanations: true, strategy: true, user: true },
+      // Optionally cap the number of rows fetched to something reasonable
+      take: options?.limit || undefined,
+    });
+
+    const seen = new Map<string, any>();
+    for (const s of signals) {
+      const assetId = s.asset?.asset_id || s.asset_id;
+      if (!assetId) continue; // skip malformed rows
+      if (!seen.has(assetId)) {
+        // Normalize shape: ensure `explanations` array exists; fallback to legacy `explanation`
+        const explanations = (s.explanations && s.explanations.length > 0)
+          ? s.explanations
+          : (s['explanation'] ? [{ text: s['explanation'] }] : []);
+
+        seen.set(assetId, {
+          signal_id: s.signal_id,
+          strategy_id: s.strategy_id,
+          asset: s.asset || null,
+          timestamp: s.timestamp,
+          action: s.action,
+          confidence: s.confidence ?? null,
+          final_score: s.final_score ?? null,
+          explanations,
+        });
+      }
+    }
+
+    return Array.from(seen.values()).sort((a, b) => {
+      const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+      const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+      return tb - ta;
+    });
+  }
+
   async create(data: {
     strategy_id?: string;
     user_id?: string;
@@ -75,6 +123,32 @@ export class SignalsService {
     macro_score?: number;
     volatility_score?: number;
   }) {
+    // Prevent duplicate signals for same strategy + asset within short execution window
+    try {
+      if (data.strategy_id && data.asset_id) {
+        const recent = await this.prisma.strategy_signals.findFirst({
+          where: {
+            strategy_id: data.strategy_id,
+            asset_id: data.asset_id,
+          },
+          orderBy: { timestamp: 'desc' },
+        });
+
+        if (recent) {
+          const recentTs = recent.timestamp ? new Date(recent.timestamp).getTime() : 0;
+          const nowTs = (data.timestamp ? new Date(data.timestamp).getTime() : Date.now());
+          const windowMs = 60 * 1000; // 60 seconds execution window
+          if (nowTs - recentTs < windowMs) {
+            // Return existing recent signal to avoid duplicate insert
+            return recent;
+          }
+        }
+      }
+    } catch (err) {
+      // If the duplicate-check fails for any reason, fall back to creating the record
+      this.logger.warn(`Duplicate check failed: ${err?.message || err}`);
+    }
+
     return this.prisma.strategy_signals.create({
       data: {
         strategy_id: data.strategy_id,
@@ -153,17 +227,58 @@ export class SignalsService {
     });
   }
 
-  async createExplanation(signalId: string, data: {
-    llm_model?: string;
-    text?: string;
-  }) {
-    return this.prisma.signal_explanations.create({
-      data: {
-        signal_id: signalId,
-        ...data,
-      },
-    });
+  async createExplanation(
+    signalId: string,
+    data: {
+      llm_model?: string;
+      text?: string;
+      explanation_status?: string | null;
+      error_message?: string | null;
+      retry_count?: number;
+    },
+  ) {
+      // Ensure only one explanation per signal. If exists, return it.
+      try {
+        const existing = await this.prisma.signal_explanations.findFirst({
+          where: { signal_id: signalId },
+          orderBy: { created_at: 'desc' },
+        });
+        if (existing) return existing;
+      } catch (err) {
+        this.logger.warn(`Explanation lookup failed: ${err?.message || err}`);
+      }
+
+      return this.prisma.signal_explanations.create({
+        data: {
+          signal_id: signalId,
+          llm_model: data.llm_model,
+          text: data.text,
+          explanation_status: data.explanation_status || 'generated',
+          error_message: data.error_message || null,
+          retry_count: data.retry_count || 0,
+        },
+      });
   }
+
+    async getExplanationBySignalId(signalId: string) {
+      return this.prisma.signal_explanations.findFirst({
+        where: { signal_id: signalId },
+        orderBy: { created_at: 'desc' },
+      });
+    }
+
+    async findExplanationByStrategyAndAsset(strategyId: string, assetId: string) {
+      return this.prisma.signal_explanations.findFirst({
+        where: {
+          signal: {
+            strategy_id: strategyId,
+            asset_id: assetId,
+          },
+        },
+        include: { signal: true },
+        orderBy: { created_at: 'desc' },
+      });
+    }
 
   async generateSignalFromPython(
     strategyId: string,

@@ -11,7 +11,7 @@ import { AssetsModule } from '../assets/assets.module';
   imports: [KycModule, PrismaModule, ScheduleModule, AssetsModule], // Provides PythonApiService, PrismaService, AssetsService
   controllers: [NewsController],
   providers: [NewsService, NewsCronjobService],
-  exports: [NewsService],
+  exports: [NewsService, NewsCronjobService],
 })
 export class NewsModule {}
 

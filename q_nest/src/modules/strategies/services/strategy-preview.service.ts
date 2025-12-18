@@ -79,6 +79,22 @@ export class StrategyPreviewService {
           },
         );
 
+        // Enrich signal with market data and strategy defaults when generator omits values
+        const entryPrice = signal.entryPrice ?? signal.entry_price ?? signal.entry ?? marketData.price ?? null;
+        const stopLossPct = signal.stop_loss ?? signal.stopLoss ?? strategy.stop_loss_value ?? null;
+        const takeProfitPct = signal.take_profit ?? signal.takeProfit ?? strategy.take_profit_value ?? null;
+
+        const parsedEntry = entryPrice !== null ? Number(entryPrice) : null;
+        const parsedStopLoss = stopLossPct != null ? Number(stopLossPct) : null;
+        const parsedTakeProfit = takeProfitPct != null ? Number(takeProfitPct) : null;
+
+        const computedStopLossPrice = parsedEntry != null && parsedStopLoss != null && !isNaN(parsedEntry) && !isNaN(parsedStopLoss)
+          ? parsedEntry * (1 - parsedStopLoss / 100)
+          : null;
+        const computedTakeProfitPrice = parsedEntry != null && parsedTakeProfit != null && !isNaN(parsedEntry) && !isNaN(parsedTakeProfit)
+          ? parsedEntry * (1 + parsedTakeProfit / 100)
+          : null;
+
         results.push({
           asset_id: asset.asset_id,
           symbol: asset.symbol,
@@ -87,6 +103,21 @@ export class StrategyPreviewService {
           final_score: signal.final_score,
           confidence: signal.confidence,
           engine_scores: signal.engine_scores,
+          // Additional fields for frontend preview: entry/exit, prices, profit, win rate, volume, insights
+          entry: signal.entry ?? signal.entry_price ?? signal.suggested_entry ?? (marketData.price ?? null),
+          entry_price: parsedEntry ?? null,
+          stop_loss: stopLossPct ?? null,
+          stop_loss_price: signal.stop_loss_price ?? signal.stopLossPrice ?? computedStopLossPrice ?? null,
+          take_profit: takeProfitPct ?? null,
+          take_profit_price: signal.take_profit_price ?? signal.takeProfitPrice ?? computedTakeProfitPrice ?? null,
+          changePercent: signal.changePercent ?? signal.change_pct ?? signal.profit ?? null,
+          winRate: signal.winRate ?? signal.win_rate ?? signal.win_pct ?? null,
+          volume: signal.volume ?? signal.market_volume ?? marketData.volume_24h ?? null,
+          insights: signal.insights ?? signal.reasons ?? [],
+          // include strategy rules so frontend preview has entry/exit criteria
+          entry_rules: strategy.entry_rules ?? null,
+          exit_rules: strategy.exit_rules ?? null,
+          breakdown: signal.breakdown ?? null,
         });
       } catch (error: any) {
         this.logger.warn(

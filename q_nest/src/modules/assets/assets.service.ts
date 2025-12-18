@@ -32,7 +32,10 @@ export class AssetsService {
   }) {
     return this.prisma.assets.create({
       data: {
-        ...data,
+        symbol: data.symbol,
+        name: data.name,
+        asset_type: data.asset_type,
+        sector: data.sector,
         is_active: data.is_active ?? true,
         first_seen_at: new Date(),
         last_seen_at: new Date(),

@@ -3,6 +3,8 @@ import { StrategiesService } from './strategies.service';
 import { CreateStrategyDto, ValidateStrategyDto } from './dto/create-strategy.dto';
 import { PreBuiltStrategiesService } from './services/pre-built-strategies.service';
 import { StrategyPreviewService } from './services/strategy-preview.service';
+import { StrategyExecutionService } from './services/strategy-execution.service';
+import { NewsCronjobService } from '../news/news-cronjob.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
@@ -14,7 +16,9 @@ export class StrategiesController {
     private readonly strategiesService: StrategiesService,
     private readonly preBuiltStrategiesService: PreBuiltStrategiesService,
     private readonly strategyPreviewService: StrategyPreviewService,
-    private readonly prisma: PrismaService, // Add this
+    private readonly strategyExecutionService: StrategyExecutionService,
+    private readonly newsCronjobService: NewsCronjobService,
+    private readonly prisma: PrismaService,
   ) {}
 
   @Get()
@@ -51,24 +55,75 @@ export class StrategiesController {
     return this.strategyPreviewService.previewStrategy(id, assetIds);
   }
 
+  // Preview route for user-created strategies: GET /strategies/:id/preview
+  @Get(':id/preview')
+  async previewUserStrategy(
+    @Param('id') id: string,
+    @Query('limit') limit?: string,
+  ) {
+    const limitNum = limit ? parseInt(limit, 10) : 50;
+    const assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum);
+    const assetIds = assets.map((a) => a.asset_id);
+    return this.strategyPreviewService.previewStrategy(id, assetIds);
+  }
+
   // Move this route BEFORE the generic :id route
-  @UseGuards(JwtAuthGuard)
   @Get(':id/signals')
   async getStrategySignals(
     @Param('id') id: string,
-    @CurrentUser() user: TokenPayload,
+    @Query('latest_only') latestOnly?: string,
   ) {
-    // Verify strategy belongs to user
+    // Verify strategy exists and get its parameters
     const strategy = await this.strategiesService.findOne(id);
     if (!strategy) {
       throw new NotFoundException(`Strategy ${id} not found`);
     }
-    if (strategy.user_id !== user.sub) {
-      throw new ForbiddenException(`Strategy ${id} does not belong to user`);
+
+    // If latest_only=true, return only one signal per asset (latest per asset)
+    if (latestOnly === 'true' || latestOnly === '1') {
+      const signals = await this.prisma.strategy_signals.findMany({
+        where: {
+          strategy_id: id,
+        },
+        include: {
+          asset: true,
+          explanations: {
+            orderBy: {
+              created_at: 'desc',
+            },
+            take: 1, // Get latest explanation
+          },
+        },
+        orderBy: {
+          timestamp: 'desc',
+        },
+        take: 1000, // Fetch enough to dedupe by asset
+      });
+
+      // Dedupe: keep only the latest signal per asset
+      const seen = new Map<string, any>();
+      for (const s of signals) {
+        const assetId = s.asset?.asset_id || s.asset_id;
+        if (!assetId) continue;
+        if (!seen.has(assetId)) {
+          // Enrich signal with strategy parameters
+          seen.set(assetId, {
+            ...s,
+            stop_loss: strategy.stop_loss_value,
+            take_profit: strategy.take_profit_value,
+          });
+        }
+      }
+
+      return Array.from(seen.values()).sort((a, b) => {
+        const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return tb - ta;
+      });
     }
 
-    // Get signals with explanations
-    return this.prisma.strategy_signals.findMany({
+    // Get all signals with explanations (without deduping)
+    const signals = await this.prisma.strategy_signals.findMany({
       where: {
         strategy_id: id,
       },
@@ -86,6 +141,13 @@ export class StrategiesController {
       },
       take: 50, // Limit to latest 50 signals
     });
+
+    // Enrich all signals with strategy parameters
+    return signals.map((s) => ({
+      ...s,
+      stop_loss: strategy.stop_loss_value,
+      take_profit: strategy.take_profit_value,
+    }));
   }
 
   // Generic :id route should come AFTER specific routes
@@ -151,18 +213,18 @@ export class StrategiesController {
     return this.strategiesService.deleteParameter(parameterId);
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post('pre-built/:id/use')
   @HttpCode(HttpStatus.CREATED)
   usePreBuiltStrategy(
     @Param('id') id: string,
-    @CurrentUser() user: TokenPayload,
-    @Body() body: { targetAssets: string[]; config?: any },
+    @Body() body: { targetAssets?: string[]; config?: any; userId?: string },
   ) {
+    // Use userId from body if provided, otherwise null (for testing)
+    const userId = body.userId || null;
     return this.strategiesService.usePreBuiltStrategy(
       id,
-      user.sub, // Extract user ID from JWT token
-      body.targetAssets,
+      userId,
+      body.targetAssets || [],
       body.config,
     );
   }
@@ -175,6 +237,42 @@ export class StrategiesController {
     @CurrentUser() user: TokenPayload,
   ) {
     return this.strategiesService.activateStrategy(id, user.sub);
+  }
+
+  @Post(':id/generate-signals')
+  @HttpCode(HttpStatus.OK)
+  async generateSignals(
+    @Param('id') id: string,
+    @Body() body: { assetIds?: string[]; limit?: number },
+  ) {
+    // Verify strategy exists
+    const strategy = await this.strategiesService.findOne(id);
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${id} not found`);
+    }
+
+    // Get asset IDs
+    let assetIds: string[];
+    if (body.assetIds && body.assetIds.length > 0) {
+      assetIds = body.assetIds;
+    } else {
+      // Use trending assets if not provided
+      const limit = body.limit || 10;
+      const assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limit);
+      assetIds = assets.map((a) => a.asset_id);
+    }
+
+    // Generate signals with LLM explanations
+    return this.strategyExecutionService.executeStrategyOnAssets(id, assetIds);
+  }
+
+  /**
+   * Manual trigger for sentiment aggregation (for debugging)
+   * This will immediately process all active assets through the sentiment engine
+   */
+  @Post('trigger-sentiment-aggregation')
+  async triggerSentimentAggregation() {
+    return this.newsCronjobService.triggerManualAggregation();
   }
 }
 

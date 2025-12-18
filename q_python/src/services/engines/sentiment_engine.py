@@ -130,15 +130,26 @@ class SentimentEngine(BaseEngine):
                 text_data = self._fetch_news_data(asset_id, asset_type, news_source)
             
             # If still no text data, return neutral score
-            if not text_data or len(text_data) == 0:
-                self.logger.warning(f"No text data available for {asset_id}, returning neutral score")
+            # Fetch social metrics from LunarCrush EARLY (before potential early returns)
+            # This ensures trending_assets gets populated even if no news text is available
+            social_metrics = {}
+            if asset_type == 'crypto':
+                try:
+                    social_metrics = self.lunarcrush_service.fetch_social_metrics(asset_id)
+                    self.logger.debug(f"Fetched social metrics for {asset_id}: galaxy_score={social_metrics.get('galaxy_score')}, alt_rank={social_metrics.get('alt_rank')}, price={social_metrics.get('price')}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch social metrics for {asset_id}: {str(e)}")
+            
+            if not text_data:
+                self.logger.warning(f"No text data available for {asset_id}, returning neutral score with social metrics")
                 return self.create_result(
                     0.0,
                     0.0,
                     {
                         'note': 'No text data available',
                         'asset_id': asset_id,
-                        'asset_type': asset_type
+                        'asset_type': asset_type,
+                        'social_metrics': social_metrics
                     }
                 )
             
@@ -261,6 +272,7 @@ class SentimentEngine(BaseEngine):
                 'layers': aggregated.get('layers', {}),
                 'keyword_analysis': keyword_result if asset_type == 'crypto' else None,
                 'market_signals': market_result.get('signals', {}) if market_result else None,
+                'social_metrics': social_metrics,
                 'error': ml_aggregated.get('error', False),
                 'error_count': ml_aggregated.get('error_count', 0),
                 'timeout_count': ml_aggregated.get('timeout_count', 0),

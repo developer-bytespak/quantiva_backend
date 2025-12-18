@@ -1,12 +1,28 @@
 import { Controller, Get, Post, Put, Delete, Body, Param, Query } from '@nestjs/common';
 import { SignalsService } from './signals.service';
+import { LLMExplanationProcessorService } from '../strategies/services/llm-explanation-processor.service';
 
 @Controller('signals')
 export class SignalsController {
-  constructor(private readonly signalsService: SignalsService) {}
+  constructor(
+    private readonly signalsService: SignalsService,
+    private readonly llmProcessor: LLMExplanationProcessorService,
+  ) {}
 
   @Get()
-  findAll(@Query('strategyId') strategyId?: string, @Query('userId') userId?: string) {
+  async findAll(
+    @Query('strategyId') strategyId?: string,
+    @Query('userId') userId?: string,
+    @Query('latest_only') latestOnly?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const latest = latestOnly === 'true' || latestOnly === '1';
+    const cap = limit ? Number(limit) : undefined;
+
+    if (latest) {
+      return this.signalsService.findLatestSignals({ strategyId, userId, limit: cap });
+    }
+
     if (strategyId) {
       return this.signalsService.findByStrategy(strategyId);
     }
@@ -44,6 +60,22 @@ export class SignalsController {
   @Post(':id/explanations')
   createExplanation(@Param('id') id: string, @Body() explanationDto: any) {
     return this.signalsService.createExplanation(id, explanationDto);
+  }
+
+  @Post(':id/explain')
+  async explainSignal(@Param('id') id: string) {
+    // Non-throwing endpoint: attempt to (re)generate LLM explanation for a signal
+    try {
+      await this.llmProcessor.generateExplanation(id);
+      const signal = await this.signalsService.findOne(id);
+      const explanation = signal?.explanations?.[0] || null;
+      return { success: true, explanation };
+    } catch (error: any) {
+      // Return structured failure with any existing explanation record
+      const signal = await this.signalsService.findOne(id);
+      const explanation = signal?.explanations?.[0] || null;
+      return { success: false, error: error?.message || String(error), explanation };
+    }
   }
 }
 
