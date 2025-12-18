@@ -1,4 +1,4 @@
-import { Injectable, Inject, forwardRef, Logger } from '@nestjs/common';
+import { Injectable, Inject, forwardRef, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StrategyType, RiskLevel } from '@prisma/client';
 import { CreateStrategyDto } from './dto/create-strategy.dto';
@@ -121,7 +121,7 @@ export class StrategiesService {
     // Validate strategy
     const validation = await this.validationService.validateStrategy(dto);
     if (!validation.valid) {
-      throw new Error(`Strategy validation failed: ${validation.errors.join(', ')}`);
+      throw new BadRequestException({ message: 'Strategy validation failed', errors: validation.errors });
     }
 
     // Parse rules

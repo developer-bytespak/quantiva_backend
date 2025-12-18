@@ -10,7 +10,19 @@ export class SignalsController {
   ) {}
 
   @Get()
-  findAll(@Query('strategyId') strategyId?: string, @Query('userId') userId?: string) {
+  async findAll(
+    @Query('strategyId') strategyId?: string,
+    @Query('userId') userId?: string,
+    @Query('latest_only') latestOnly?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const latest = latestOnly === 'true' || latestOnly === '1';
+    const cap = limit ? Number(limit) : undefined;
+
+    if (latest) {
+      return this.signalsService.findLatestSignals({ strategyId, userId, limit: cap });
+    }
+
     if (strategyId) {
       return this.signalsService.findByStrategy(strategyId);
     }

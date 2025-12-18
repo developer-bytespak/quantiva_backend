@@ -119,6 +119,36 @@ export class NewsCronjobService {
         } as any, // Type assertion until Prisma client is regenerated after migration
       });
 
+      // Store market metrics in trending_assets table for top trades discovery
+      const socialMetrics = metadata.social_metrics || {};
+      if (Object.keys(socialMetrics).length > 0) {
+        try {
+          await this.prisma.trending_assets.create({
+            data: {
+              poll_timestamp: pollTimestamp,
+              asset_id: assetId,
+              galaxy_score: socialMetrics.galaxy_score || null,
+              alt_rank: socialMetrics.alt_rank || null,
+              social_score: socialMetrics.social_score || null,
+              market_volume: socialMetrics.volume_24h || null,
+              price_usd: socialMetrics.price || null,
+            },
+          });
+          this.logger.debug(
+            `Stored trending asset for ${symbol}: galaxy_score=${socialMetrics.galaxy_score}, alt_rank=${socialMetrics.alt_rank}, price=${socialMetrics.price}`,
+          );
+        } catch (error: any) {
+          // Ignore duplicate key errors (same timestamp + asset_id)
+          if (!error.message?.includes('Unique constraint')) {
+            this.logger.warn(
+              `Error storing trending assets for ${symbol}: ${error.message}`,
+            );
+          }
+        }
+      } else {
+        this.logger.debug(`No social metrics available for ${symbol}, skipping trending_assets storage`);
+      }
+
       this.logger.debug(`Updated sentiment for ${symbol}: score=${sentimentData.score}`);
     } catch (error: any) {
       this.logger.error(`Error processing sentiment for ${symbol}: ${error.message}`);
@@ -141,6 +171,50 @@ export class NewsCronjobService {
       };
     }
     return null;
+  }
+
+  /**
+   * Manually trigger sentiment aggregation (for debugging/testing)
+   */
+  async triggerManualAggregation(): Promise<{ message: string; processed: number; errors: number }> {
+    this.logger.log('Manual sentiment aggregation triggered');
+    const startTime = Date.now();
+    let processedCount = 0;
+    let errorCount = 0;
+
+    try {
+      const assets = await this.prisma.assets.findMany({
+        where: { is_active: true },
+      });
+
+      this.logger.log(`Processing ${assets.length} active assets (manual)`);
+
+      for (const asset of assets) {
+        try {
+          await this.processAssetSentiment(asset.asset_id, asset.symbol, asset.asset_type);
+          processedCount++;
+        } catch (error: any) {
+          errorCount++;
+          this.logger.error(
+            `Error processing sentiment for asset ${asset.symbol} (${asset.asset_id}): ${error.message}`,
+          );
+        }
+      }
+
+      const duration = Date.now() - startTime;
+      this.logger.log(
+        `Manual aggregation completed: ${processedCount} processed, ${errorCount} errors, ${duration}ms`,
+      );
+
+      return { 
+        message: 'Manual aggregation completed', 
+        processed: processedCount, 
+        errors: errorCount 
+      };
+    } catch (error: any) {
+      this.logger.error(`Fatal error in manual aggregation: ${error.message}`);
+      throw error;
+    }
   }
 
   /**

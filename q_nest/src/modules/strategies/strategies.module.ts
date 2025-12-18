@@ -10,9 +10,10 @@ import { LLMExplanationProcessorService } from './services/llm-explanation-proce
 import { PrismaModule } from '../../prisma/prisma.module';
 import { KycModule } from '../../kyc/kyc.module';
 import { SignalsModule } from '../signals/signals.module';
+import { NewsModule } from '../news/news.module';
 
 @Module({
-  imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule)],
+  imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule), NewsModule],
   controllers: [StrategiesController],
   providers: [
     StrategiesService,

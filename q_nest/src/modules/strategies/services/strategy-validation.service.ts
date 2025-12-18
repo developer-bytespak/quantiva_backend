@@ -16,6 +16,8 @@ export class StrategyValidationService {
     'CCI',
     'OBV',
     'VOLUME',
+    // allow using the aggregated final score as a rule indicator
+    'final_score',
   ];
 
   private readonly validOperators = [
@@ -55,7 +57,7 @@ export class StrategyValidationService {
       errors.push(...exitErrors);
     }
 
-    // Validate indicators
+    // Validate indicators (optional — allow empty array)
     if ('indicators' in dto && dto.indicators) {
       const indicatorErrors = this.validateIndicators(dto.indicators);
       errors.push(...indicatorErrors);
@@ -106,10 +108,10 @@ export class StrategyValidationService {
       }
     }
 
-    // Validate target assets
-    if ('target_assets' in dto && dto.target_assets) {
-      if (!Array.isArray(dto.target_assets) || dto.target_assets.length === 0) {
-        errors.push('target_assets must be a non-empty array');
+    // Validate target assets (allow empty array at creation; activation requires non-empty)
+    if ('target_assets' in dto) {
+      if (!Array.isArray(dto.target_assets)) {
+        errors.push('target_assets must be an array');
       }
     }
 
@@ -172,8 +174,12 @@ export class StrategyValidationService {
   ): string[] {
     const errors: string[] = [];
 
-    if (!Array.isArray(indicators) || indicators.length === 0) {
-      errors.push('indicators must be a non-empty array');
+    if (!Array.isArray(indicators)) {
+      errors.push('indicators must be an array');
+      return errors;
+    }
+    // allow empty indicators array at creation time
+    if (indicators.length === 0) {
       return errors;
     }
 
