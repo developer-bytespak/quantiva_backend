@@ -6,6 +6,8 @@ import { PythonApiService } from '../../kyc/integrations/python-api.service';
 @Injectable()
 export class NewsCronjobService {
   private readonly logger = new Logger(NewsCronjobService.name);
+  private readonly BATCH_SIZE = 5; // Process 5 assets in parallel
+  private readonly UPDATE_INTERVAL_MINUTES = 30; // Skip if updated within 30 minutes
 
   constructor(
     private prisma: PrismaService,
@@ -14,39 +16,77 @@ export class NewsCronjobService {
 
   /**
    * News Sentiment Aggregation Cronjob
-   * Runs every 10 minutes to fetch and aggregate sentiment for all active assets
+   * Runs every 10 minutes to fetch and aggregate sentiment for assets
+   * Optimized: Parallel processing (5 at a time) + Skip recently updated assets
    */
   @Cron('*/10 * * * *') // Every 10 minutes
   async aggregateNewsSentiment(): Promise<void> {
-    this.logger.log('Starting news sentiment aggregation cronjob');
+    this.logger.log('Starting news sentiment aggregation cronjob (optimized)');
     const startTime = Date.now();
     let processedCount = 0;
+    let skippedCount = 0;
     let errorCount = 0;
 
     try {
-      // Get all active assets
+      // Calculate cutoff time (30 minutes ago)
+      const cutoffTime = new Date(Date.now() - this.UPDATE_INTERVAL_MINUTES * 60 * 1000);
+
+      // Get all active assets with their latest trending_assets record
       const assets = await this.prisma.assets.findMany({
         where: { is_active: true },
+        include: {
+          trending_assets: {
+            orderBy: { poll_timestamp: 'desc' },
+            take: 1,
+          },
+        },
       });
 
-      this.logger.log(`Processing ${assets.length} active assets`);
+      // Filter: Skip assets updated within the interval
+      const assetsToProcess = assets.filter((asset) => {
+        const latestPoll = asset.trending_assets?.[0]?.poll_timestamp;
+        if (!latestPoll || latestPoll < cutoffTime) {
+          return true; // Process: No recent data
+        }
+        skippedCount++;
+        return false; // Skip: Recently updated
+      });
 
-      for (const asset of assets) {
-        try {
-          await this.processAssetSentiment(asset.asset_id, asset.symbol, asset.asset_type);
-          processedCount++;
-        } catch (error: any) {
-          errorCount++;
-          this.logger.error(
-            `Error processing sentiment for asset ${asset.symbol} (${asset.asset_id}): ${error.message}`,
-          );
-          // Continue processing other assets
+      this.logger.log(
+        `Processing ${assetsToProcess.length} assets (${skippedCount} skipped, updated within ${this.UPDATE_INTERVAL_MINUTES}min)`,
+      );
+
+      // Process in parallel batches of 5
+      for (let i = 0; i < assetsToProcess.length; i += this.BATCH_SIZE) {
+        const batch = assetsToProcess.slice(i, i + this.BATCH_SIZE);
+
+        await Promise.all(
+          batch.map(async (asset) => {
+            try {
+              await this.processAssetSentiment(
+                asset.asset_id,
+                asset.symbol,
+                asset.asset_type,
+              );
+              processedCount++;
+            } catch (error: any) {
+              errorCount++;
+              this.logger.error(
+                `Error processing sentiment for asset ${asset.symbol} (${asset.asset_id}): ${error.message}`,
+              );
+            }
+          }),
+        );
+
+        // Small delay between batches to avoid overwhelming API
+        if (i + this.BATCH_SIZE < assetsToProcess.length) {
+          await this.sleep(500);
         }
       }
 
       const duration = Date.now() - startTime;
       this.logger.log(
-        `News sentiment aggregation completed: ${processedCount} processed, ${errorCount} errors, ${duration}ms`,
+        `News sentiment aggregation completed: ${processedCount} processed, ${skippedCount} skipped, ${errorCount} errors, ${duration}ms`,
       );
     } catch (error: any) {
       this.logger.error(`Fatal error in news sentiment aggregation: ${error.message}`);
@@ -175,41 +215,86 @@ export class NewsCronjobService {
 
   /**
    * Manually trigger sentiment aggregation (for debugging/testing)
+   * Same optimizations as cronjob: parallel + skip recently updated
    */
-  async triggerManualAggregation(): Promise<{ message: string; processed: number; errors: number }> {
-    this.logger.log('Manual sentiment aggregation triggered');
+  async triggerManualAggregation(): Promise<{
+    message: string;
+    processed: number;
+    skipped: number;
+    errors: number;
+  }> {
+    this.logger.log('Manual sentiment aggregation triggered (optimized)');
     const startTime = Date.now();
     let processedCount = 0;
+    let skippedCount = 0;
     let errorCount = 0;
 
     try {
+      // Calculate cutoff time
+      const cutoffTime = new Date(Date.now() - this.UPDATE_INTERVAL_MINUTES * 60 * 1000);
+
+      // Get assets with their latest trending_assets record
       const assets = await this.prisma.assets.findMany({
         where: { is_active: true },
+        include: {
+          trending_assets: {
+            orderBy: { poll_timestamp: 'desc' },
+            take: 1,
+          },
+        },
       });
 
-      this.logger.log(`Processing ${assets.length} active assets (manual)`);
+      // Filter: Skip recently updated
+      const assetsToProcess = assets.filter((asset) => {
+        const latestPoll = asset.trending_assets?.[0]?.poll_timestamp;
+        if (!latestPoll || latestPoll < cutoffTime) {
+          return true;
+        }
+        skippedCount++;
+        return false;
+      });
 
-      for (const asset of assets) {
-        try {
-          await this.processAssetSentiment(asset.asset_id, asset.symbol, asset.asset_type);
-          processedCount++;
-        } catch (error: any) {
-          errorCount++;
-          this.logger.error(
-            `Error processing sentiment for asset ${asset.symbol} (${asset.asset_id}): ${error.message}`,
-          );
+      this.logger.log(
+        `Manual: Processing ${assetsToProcess.length} assets (${skippedCount} skipped)`,
+      );
+
+      // Process in parallel batches
+      for (let i = 0; i < assetsToProcess.length; i += this.BATCH_SIZE) {
+        const batch = assetsToProcess.slice(i, i + this.BATCH_SIZE);
+
+        await Promise.all(
+          batch.map(async (asset) => {
+            try {
+              await this.processAssetSentiment(
+                asset.asset_id,
+                asset.symbol,
+                asset.asset_type,
+              );
+              processedCount++;
+            } catch (error: any) {
+              errorCount++;
+              this.logger.error(
+                `Error processing sentiment for asset ${asset.symbol}: ${error.message}`,
+              );
+            }
+          }),
+        );
+
+        if (i + this.BATCH_SIZE < assetsToProcess.length) {
+          await this.sleep(500);
         }
       }
 
       const duration = Date.now() - startTime;
       this.logger.log(
-        `Manual aggregation completed: ${processedCount} processed, ${errorCount} errors, ${duration}ms`,
+        `Manual aggregation completed: ${processedCount} processed, ${skippedCount} skipped, ${errorCount} errors, ${duration}ms`,
       );
 
-      return { 
-        message: 'Manual aggregation completed', 
-        processed: processedCount, 
-        errors: errorCount 
+      return {
+        message: 'Manual aggregation completed',
+        processed: processedCount,
+        skipped: skippedCount,
+        errors: errorCount,
       };
     } catch (error: any) {
       this.logger.error(`Fatal error in manual aggregation: ${error.message}`);
@@ -237,6 +322,13 @@ export class NewsCronjobService {
       // Default based on asset type if source doesn't match
       return assetType === 'stock' ? 'StockNewsAPI' : 'LunarCrush';
     }
+  }
+
+  /**
+   * Sleep utility for delays between batches
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**

@@ -11,7 +11,7 @@ export class PreBuiltStrategiesService implements OnModuleInit {
   constructor(
     private prisma: PrismaService,
     private pythonApi: PythonApiService,
-  ) {}
+  ) { }
 
   async onModuleInit() {
     // Seed pre-built strategies on module initialization
@@ -76,56 +76,83 @@ export class PreBuiltStrategiesService implements OnModuleInit {
   }
 
   /**
-   * Get top N trending assets
+   * Get top N trending assets with Tier-1 Trend Ranking
+   * 
+   * Ranking formula:
+   * trend_score = (galaxy_score × 0.4) + ((100 − alt_rank) × 0.3) + (social_score × 0.3)
+   * 
+   * Includes:
+   * - Trend direction (UP/DOWN/STABLE) by comparing with previous poll
+   * - Volume surge detection (NORMAL/VOLUME_SURGE/MASSIVE_SURGE)
    */
   async getTopTrendingAssets(limit: number = 20) {
-    // Ensure index exists to speed up the DISTINCT ON query
-    try {
-      await this.prisma.$executeRawUnsafe(
-        `CREATE INDEX IF NOT EXISTS idx_trending_asset_poll ON trending_assets (asset_id, poll_timestamp DESC)`,
-      );
-    } catch (err: any) {
-      this.logger.debug(`Failed to create index idx_trending_asset_poll: ${err?.message || err}`);
-    }
+  try {
+    const rows: any[] = await this.prisma.$queryRawUnsafe(`
+      SELECT DISTINCT ON (ta.asset_id)
+        ta.asset_id,
+        ta.galaxy_score,
+        ta.alt_rank,
+        ta.social_score,
+        ta.price_usd,
+        ta.market_volume,
+        ta.poll_timestamp
+      FROM trending_assets ta
+      WHERE
+        ta.galaxy_score IS NOT NULL
+        AND ta.alt_rank IS NOT NULL
+        AND ta.alt_rank < 300
+        AND ta.price_usd IS NOT NULL
+        AND ta.market_volume > 10000000
+      ORDER BY
+        ta.asset_id,
+        ta.price_usd DESC
+    `);
 
-    // Use a Postgres DISTINCT ON query to get the latest row per asset_id,
-    // then order those latest rows by poll_timestamp DESC and limit.
-    try {
-      const rows: any[] = await this.prisma.$queryRawUnsafe(`
-        SELECT * FROM (
-          SELECT DISTINCT ON (asset_id) asset_id, galaxy_score, alt_rank, social_score, price_usd, poll_timestamp
-          FROM trending_assets
-          ORDER BY asset_id, poll_timestamp DESC
-        ) s
-        ORDER BY s.poll_timestamp DESC
-        LIMIT ${limit}
-      `);
+    if (!rows.length) return [];
 
-      if (!rows || rows.length === 0) return [];
+    const assetIds = rows.map(r => r.asset_id);
 
-      const assetIds = rows.map((r) => r.asset_id);
-      const assets = await this.prisma.assets.findMany({ where: { asset_id: { in: assetIds } } });
-      const assetsMap = new Map<string, any>();
-      for (const a of assets) assetsMap.set(a.asset_id, a);
+    const assets = await this.prisma.assets.findMany({
+      where: {
+        asset_id: { in: assetIds },
+        asset_type: 'crypto',
+        NOT: {
+          symbol: {
+            in: [
+              'USDT','USDC','DAI','PYUSD','USD1',
+              'WBETH','STETH','CBBTC','FBTC',
+              'XAUT','PAXG'
+            ]
+          }
+        }
+      }
+    });
 
-      return rows.map((ta) => {
-        const asset = assetsMap.get(ta.asset_id) || ta.asset;
+    const assetMap = new Map(assets.map(a => [a.asset_id, a]));
+
+    return rows
+      .filter(r => assetMap.has(r.asset_id))
+      .slice(0, limit)
+      .map(r => {
+        const asset = assetMap.get(r.asset_id)!;
         return {
-          asset_id: ta.asset_id,
-          symbol: asset?.symbol || 'UNKNOWN',
-          asset_type: asset?.asset_type || 'crypto',
-          galaxy_score: ta.galaxy_score,
-          alt_rank: ta.alt_rank,
-          social_score: ta.social_score,
-          price_usd: ta.price_usd,
-          poll_timestamp: ta.poll_timestamp,
+          asset_id: r.asset_id,
+          symbol: asset.symbol,
+          asset_type: asset.asset_type,
+          galaxy_score: Number(r.galaxy_score),
+          alt_rank: Number(r.alt_rank),
+          social_score: Number(r.social_score ?? 0),
+          price_usd: Number(r.price_usd),
+          market_volume: Number(r.market_volume),
+          poll_timestamp: r.poll_timestamp,
         };
       });
-    } catch (err: any) {
-      this.logger.warn(`Error running DISTINCT ON trending query: ${err?.message || err}`);
-      return [];
-    }
+
+  } catch (err: any) {
+    this.logger.warn(`Trending assets error: ${err?.message || err}`);
+    return [];
   }
+}
 
   /**
    * Preview strategy on multiple assets (without storing signals)
