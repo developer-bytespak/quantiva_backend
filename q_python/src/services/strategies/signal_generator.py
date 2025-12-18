@@ -77,16 +77,19 @@ class SignalGenerator:
             engine_scores = {}
             
             # Technical Engine
-            if ohlcv_data is not None:
-                technical_result = self.technical_engine.calculate(
-                    asset_id=asset_id,
-                    asset_type=asset_type,
-                    timeframe=strategy_data.get('timeframe'),
-                    ohlcv_data=ohlcv_data
-                )
-                engine_scores['trend'] = technical_result
-            else:
-                engine_scores['trend'] = {'score': 0.0, 'confidence': 0.0}
+            # Forward connection info so TechnicalEngine can fetch OHLCV from NestJS when available.
+            connection_id = kwargs.get('connection_id')
+            exchange = kwargs.get('exchange', 'binance')
+
+            technical_result = self.technical_engine.calculate(
+                asset_id=asset_id,
+                asset_type=asset_type,
+                timeframe=strategy_data.get('timeframe'),
+                ohlcv_data=ohlcv_data,
+                connection_id=connection_id,
+                exchange=exchange
+            )
+            engine_scores['trend'] = technical_result if technical_result is not None else {'score': 0.0, 'confidence': 0.0}
             
             # Fundamental Engine
             fundamental_result = self.fundamental_engine.calculate(
