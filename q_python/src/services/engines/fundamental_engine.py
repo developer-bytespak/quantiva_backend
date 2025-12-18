@@ -80,21 +80,32 @@ class FundamentalEngine(BaseEngine):
         fundamental_score = 0.50 * galaxy_score + 0.30 * dev_activity + 0.20 * alt_rank
         
         Args:
-            asset_id: Crypto asset identifier (symbol, e.g., 'BTC', 'ETH')
-            **kwargs: Additional parameters
+            asset_id: Crypto asset identifier (UUID or symbol)
+            **kwargs: Additional parameters (asset_symbol for external API calls)
         
         Returns:
             Dictionary with score, confidence, and metadata
         """
         try:
-            # Fetch data from LunarCrush
-            lunarcrush_metrics = self.lunarcrush_service.fetch_social_metrics(asset_id)
+            # Use asset_symbol if provided (for external API calls), otherwise use asset_id
+            asset_symbol = kwargs.get('asset_symbol', asset_id)
             
-            # Fetch developer activity from CoinGecko
-            dev_activity_data = self.coingecko_service.get_developer_activity_score(asset_id)
+            # Fetch data from LunarCrush (needs symbol, not UUID)
+            lunarcrush_metrics = self.lunarcrush_service.fetch_social_metrics(asset_symbol)
             
-            # Fetch tokenomics data from CoinGecko
-            tokenomics_data = self.coingecko_service.get_tokenomics_score(asset_id)
+            # Fetch developer activity from CoinGecko (needs symbol, not UUID)
+            try:
+                dev_activity_data = self.coingecko_service.get_developer_activity_score(asset_symbol)
+            except Exception as e:
+                self.logger.warning(f"Error fetching developer activity for {asset_symbol}: {str(e)}")
+                dev_activity_data = {'activity_score': 0}
+            
+            # Fetch tokenomics data from CoinGecko (needs symbol, not UUID)
+            try:
+                tokenomics_data = self.coingecko_service.get_tokenomics_score(asset_symbol)
+            except Exception as e:
+                self.logger.warning(f"Error fetching tokenomics for {asset_symbol}: {str(e)}")
+                tokenomics_data = {'tokenomics_score': 0}
             
             # Extract metrics
             galaxy_score = lunarcrush_metrics.get('galaxy_score', 0)  # 0-100 scale

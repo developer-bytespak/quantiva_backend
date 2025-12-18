@@ -1,6 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { PythonApiService } from '../../../kyc/integrations/python-api.service';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { ExchangesService } from '../../exchanges/exchanges.service';
 
 @Injectable()
 export class StrategyPreviewService {
@@ -14,6 +15,8 @@ export class StrategyPreviewService {
   constructor(
     private pythonApi: PythonApiService,
     private prisma: PrismaService,
+    @Inject(forwardRef(() => ExchangesService))
+    private exchangesService: ExchangesService,
   ) {}
 
   /**
@@ -22,7 +25,11 @@ export class StrategyPreviewService {
   async previewStrategy(
     strategyId: string,
     assetIds: string[],
+    userId?: string, // Optional: current user ID for connection lookup
   ): Promise<any[]> {
+    const startTime = Date.now();
+    this.logger.log(`Preview started for strategy ${strategyId} with ${assetIds.length} assets`);
+    
     // Get strategy
     const strategy = await this.prisma.strategies.findUnique({
       where: {
@@ -45,95 +52,184 @@ export class StrategyPreviewService {
 
     const results: any[] = [];
 
-    // Preview strategy on each asset
-    for (const asset of assets) {
-      try {
-        // Get market data (with caching)
-        const marketData = await this.getMarketData(asset.asset_id);
+    // Get user's active connection once (shared across all assets)
+    let connectionId: string | null = null;
+    let exchange: string = 'binance';
+    const userIdToTry = userId || strategy.user_id;
+    try {
+      if (userIdToTry) {
+        const activeConnection = await this.exchangesService.getActiveConnection(userIdToTry);
+        connectionId = activeConnection.connection_id;
+        exchange = activeConnection.exchange?.name?.toLowerCase() || 'binance';
+        this.logger.debug(`Preview: Using connection ${connectionId} for exchange ${exchange} (user: ${userIdToTry})`);
+      }
+    } catch (error: any) {
+      this.logger.debug(
+        `Preview: Could not get active connection for user ${userIdToTry}: ${error.message}. OHLCV data may not be available.`,
+      );
+    }
 
-        // Prepare strategy data
-        const strategyData = {
-          entry_rules: strategy.entry_rules,
-          exit_rules: strategy.exit_rules,
-          indicators: strategy.indicators,
-          timeframe: strategy.timeframe,
-          engine_weights:
-            strategy.engine_weights || {
-              sentiment: 0.35,
-              trend: 0.25,
-              fundamental: 0.15,
-              event_risk: 0.15,
-              liquidity: 0.1,
-            },
-          stop_loss_value: strategy.stop_loss_value,
-          take_profit_value: strategy.take_profit_value,
-        };
+    // Prepare strategy data once (shared across all assets)
+    const strategyData = {
+      entry_rules: strategy.entry_rules || [],
+      exit_rules: strategy.exit_rules || [],
+      indicators: strategy.indicators || [],
+      timeframe: strategy.timeframe,
+      engine_weights:
+        strategy.engine_weights || {
+          sentiment: 0.35,
+          trend: 0.25,
+          fundamental: 0.15,
+          event_risk: 0.15,
+          liquidity: 0.1,
+        },
+      stop_loss_value: strategy.stop_loss_value,
+      take_profit_value: strategy.take_profit_value,
+    };
 
-        // Call Python API to generate signal (preview only, not stored)
-        const signal = await this.pythonApi.generateSignal(
-          strategyId,
-          asset.asset_id,
-          {
-            strategy_data: strategyData,
-            market_data: marketData,
-          },
-        );
+    // Process assets in parallel batches to avoid timeout
+    // Batch size: 3 assets at a time to reduce per-batch time and avoid rate limits
+    const BATCH_SIZE = 3;
+    const TIMEOUT_MS = 60000; // 60 seconds per asset (matches Python API timeout for preview)
 
-        // Enrich signal with market data and strategy defaults when generator omits values
-        const entryPrice = signal.entryPrice ?? signal.entry_price ?? signal.entry ?? marketData.price ?? null;
-        const stopLossPct = signal.stop_loss ?? signal.stopLoss ?? strategy.stop_loss_value ?? null;
-        const takeProfitPct = signal.take_profit ?? signal.takeProfit ?? strategy.take_profit_value ?? null;
+    for (let i = 0; i < assets.length; i += BATCH_SIZE) {
+      const batchStartTime = Date.now();
+      const batch = assets.slice(i, i + BATCH_SIZE);
+      const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+      const totalBatches = Math.ceil(assets.length / BATCH_SIZE);
+      
+      this.logger.log(`Processing batch ${batchNum}/${totalBatches} (${batch.length} assets)`);
+      
+      const batchResults = await Promise.allSettled(
+        batch.map(async (asset) => {
+          // Wrap in timeout to prevent hanging
+          return Promise.race([
+            this.processAssetPreview(
+              strategyId,
+              asset,
+              strategyData,
+              strategy,
+              connectionId,
+              exchange,
+              userId,
+            ),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('Asset processing timeout')), TIMEOUT_MS),
+            ),
+          ]);
+        }),
+      );
 
-        const parsedEntry = entryPrice !== null ? Number(entryPrice) : null;
-        const parsedStopLoss = stopLossPct != null ? Number(stopLossPct) : null;
-        const parsedTakeProfit = takeProfitPct != null ? Number(takeProfitPct) : null;
+      // Process batch results
+      for (let j = 0; j < batchResults.length; j++) {
+        const result = batchResults[j];
+        if (result.status === 'fulfilled') {
+          results.push(result.value);
+        } else {
+          const asset = batch[j];
+          this.logger.warn(
+            `Error previewing strategy on asset ${asset.symbol}: ${result.reason?.message || result.reason}`,
+          );
+          results.push({
+            asset_id: asset.asset_id,
+            symbol: asset.symbol,
+            asset_type: asset.asset_type,
+            error: result.reason?.message || 'Processing failed',
+          });
+        }
+      }
 
-        const computedStopLossPrice = parsedEntry != null && parsedStopLoss != null && !isNaN(parsedEntry) && !isNaN(parsedStopLoss)
-          ? parsedEntry * (1 - parsedStopLoss / 100)
-          : null;
-        const computedTakeProfitPrice = parsedEntry != null && parsedTakeProfit != null && !isNaN(parsedEntry) && !isNaN(parsedTakeProfit)
-          ? parsedEntry * (1 + parsedTakeProfit / 100)
-          : null;
+      const batchDuration = Date.now() - batchStartTime;
+      this.logger.log(`Batch ${batchNum} completed in ${batchDuration}ms`);
 
-        results.push({
-          asset_id: asset.asset_id,
-          symbol: asset.symbol,
-          asset_type: asset.asset_type,
-          action: signal.action,
-          final_score: signal.final_score,
-          confidence: signal.confidence,
-          engine_scores: signal.engine_scores,
-          // Additional fields for frontend preview: entry/exit, prices, profit, win rate, volume, insights
-          entry: signal.entry ?? signal.entry_price ?? signal.suggested_entry ?? (marketData.price ?? null),
-          entry_price: parsedEntry ?? null,
-          stop_loss: stopLossPct ?? null,
-          stop_loss_price: signal.stop_loss_price ?? signal.stopLossPrice ?? computedStopLossPrice ?? null,
-          take_profit: takeProfitPct ?? null,
-          take_profit_price: signal.take_profit_price ?? signal.takeProfitPrice ?? computedTakeProfitPrice ?? null,
-          changePercent: signal.changePercent ?? signal.change_pct ?? signal.profit ?? null,
-          winRate: signal.winRate ?? signal.win_rate ?? signal.win_pct ?? null,
-          volume: signal.volume ?? signal.market_volume ?? marketData.volume_24h ?? null,
-          insights: signal.insights ?? signal.reasons ?? [],
-          // include strategy rules so frontend preview has entry/exit criteria
-          entry_rules: strategy.entry_rules ?? null,
-          exit_rules: strategy.exit_rules ?? null,
-          breakdown: signal.breakdown ?? null,
-        });
-      } catch (error: any) {
-        this.logger.warn(
-          `Error previewing strategy on asset ${asset.symbol}: ${error.message}`,
-        );
-        // Continue with next asset
-        results.push({
-          asset_id: asset.asset_id,
-          symbol: asset.symbol,
-          asset_type: asset.asset_type,
-          error: error.message,
-        });
+      // Small delay between batches to avoid overwhelming APIs
+      if (i + BATCH_SIZE < assets.length) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
     }
 
+    const totalDuration = Date.now() - startTime;
+    this.logger.log(`Preview completed for strategy ${strategyId}: ${results.length} results in ${totalDuration}ms`);
     return results;
+  }
+
+  /**
+   * Process preview for a single asset (extracted for parallel processing)
+   */
+  private async processAssetPreview(
+    strategyId: string,
+    asset: any,
+    strategyData: any,
+    strategy: any,
+    connectionId: string | null,
+    exchange: string,
+    userId?: string,
+  ): Promise<any> {
+    // Get market data (with caching)
+    const marketData = await this.getMarketData(asset.asset_id);
+
+    // Call Python API to generate signal (preview only, not stored)
+    // Pass asset symbol for OHLCV fetching (Python services need symbol, not UUID)
+    // Use longer timeout for preview (60s) to handle slow external APIs
+    const assetSymbol = asset.symbol || asset.asset_id;
+    const signal = await this.pythonApi.post(
+      '/api/v1/signals/generate',
+      {
+        strategy_id: strategyId,
+        asset_id: asset.asset_id,
+        asset_type: marketData.asset_type || 'crypto',
+        connection_id: connectionId, // Automatically fetched from database if userId available
+        exchange: exchange,
+        asset_symbol: assetSymbol,
+        strategy_data: {
+          ...strategyData,
+          user_id: userId || strategy.user_id, // Pass user_id for logging/debugging
+        },
+        market_data: marketData,
+      },
+      { timeout: 60000 }, // 60 seconds for preview operations
+    ).then((response) => response.data);
+
+    // Enrich signal with market data and strategy defaults when generator omits values
+    const entryPrice = signal.entryPrice ?? signal.entry_price ?? signal.entry ?? marketData.price ?? null;
+    const stopLossPct = signal.stop_loss ?? signal.stopLoss ?? strategy.stop_loss_value ?? null;
+    const takeProfitPct = signal.take_profit ?? signal.takeProfit ?? strategy.take_profit_value ?? null;
+
+    const parsedEntry = entryPrice !== null ? Number(entryPrice) : null;
+    const parsedStopLoss = stopLossPct != null ? Number(stopLossPct) : null;
+    const parsedTakeProfit = takeProfitPct != null ? Number(takeProfitPct) : null;
+
+    const computedStopLossPrice = parsedEntry != null && parsedStopLoss != null && !isNaN(parsedEntry) && !isNaN(parsedStopLoss)
+      ? parsedEntry * (1 - parsedStopLoss / 100)
+      : null;
+    const computedTakeProfitPrice = parsedEntry != null && parsedTakeProfit != null && !isNaN(parsedEntry) && !isNaN(parsedTakeProfit)
+      ? parsedEntry * (1 + parsedTakeProfit / 100)
+      : null;
+
+    return {
+      asset_id: asset.asset_id,
+      symbol: asset.symbol,
+      asset_type: asset.asset_type,
+      action: signal.action,
+      final_score: signal.final_score,
+      confidence: signal.confidence,
+      engine_scores: signal.engine_scores,
+      // Additional fields for frontend preview: entry/exit, prices, profit, win rate, volume, insights
+      entry: signal.entry ?? signal.entry_price ?? signal.suggested_entry ?? (marketData.price ?? null),
+      entry_price: parsedEntry ?? null,
+      stop_loss: stopLossPct ?? null,
+      stop_loss_price: signal.stop_loss_price ?? signal.stopLossPrice ?? computedStopLossPrice ?? null,
+      take_profit: takeProfitPct ?? null,
+      take_profit_price: signal.take_profit_price ?? signal.takeProfitPrice ?? computedTakeProfitPrice ?? null,
+      changePercent: signal.changePercent ?? signal.change_pct ?? signal.profit ?? null,
+      winRate: signal.winRate ?? signal.win_rate ?? signal.win_pct ?? null,
+      volume: signal.volume ?? signal.market_volume ?? marketData.volume_24h ?? null,
+      insights: signal.insights ?? signal.reasons ?? [],
+      // include strategy rules so frontend preview has entry/exit criteria
+      entry_rules: strategy.entry_rules ?? null,
+      exit_rules: strategy.exit_rules ?? null,
+      breakdown: signal.breakdown ?? null,
+    };
   }
 
   /**

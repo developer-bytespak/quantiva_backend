@@ -1,8 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { PythonApiService } from '../../../kyc/integrations/python-api.service';
 import { SignalsService } from '../../signals/signals.service';
 import { SignalAction } from '@prisma/client';
+import { ExchangesService } from '../../exchanges/exchanges.service';
 
 @Injectable()
 export class StrategyExecutionService {
@@ -12,6 +13,8 @@ export class StrategyExecutionService {
     private prisma: PrismaService,
     private pythonApi: PythonApiService,
     private signalsService: SignalsService,
+    @Inject(forwardRef(() => ExchangesService))
+    private exchangesService: ExchangesService,
   ) {}
 
   /**
@@ -47,12 +50,29 @@ export class StrategyExecutionService {
     // Get market data
     const marketData = await this.getMarketData(assetId, asset.asset_type);
 
+    // Get user's active connection for OHLCV data fetching
+    let connectionId: string | null = null;
+    let exchange: string = 'binance';
+    try {
+      if (strategy.user_id) {
+        const activeConnection = await this.exchangesService.getActiveConnection(strategy.user_id);
+        connectionId = activeConnection.connection_id;
+        exchange = activeConnection.exchange?.name?.toLowerCase() || 'binance';
+        this.logger.debug(`Using connection ${connectionId} for exchange ${exchange}`);
+      }
+    } catch (error: any) {
+      this.logger.warn(
+        `Could not get active connection for user ${strategy.user_id}: ${error.message}. OHLCV data may not be available.`,
+      );
+    }
+
     // Prepare strategy data
+    // Normalize null/undefined to empty arrays for Python parser
     const strategyData = {
       user_id: strategy.user_id,
-      entry_rules: strategy.entry_rules,
-      exit_rules: strategy.exit_rules,
-      indicators: strategy.indicators,
+      entry_rules: strategy.entry_rules || [],
+      exit_rules: strategy.exit_rules || [],
+      indicators: strategy.indicators || [],
       timeframe: strategy.timeframe,
       engine_weights:
         strategy.engine_weights || {
@@ -68,12 +88,17 @@ export class StrategyExecutionService {
 
     try {
       // Call Python API to generate signal
+      // Pass asset symbol for OHLCV fetching (Python services need symbol, not UUID)
+      const assetSymbol = asset.symbol || assetId;
       const pythonSignal = await this.pythonApi.generateSignal(
         strategyId,
         assetId,
         {
           strategy_data: strategyData,
           market_data: marketData,
+          connection_id: connectionId,
+          exchange: exchange,
+          asset_symbol: assetSymbol, // Pass symbol for OHLCV fetching
         },
       );
 

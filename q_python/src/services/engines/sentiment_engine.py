@@ -125,9 +125,12 @@ class SentimentEngine(BaseEngine):
                     }
                 )
             
+            # Get asset_symbol early for use in API calls
+            asset_symbol = kwargs.get('asset_symbol', asset_id)
+            
             # If no text data provided, try to fetch from APIs
             if not text_data or len(text_data) == 0:
-                text_data = self._fetch_news_data(asset_id, asset_type, news_source)
+                text_data = self._fetch_news_data(asset_id, asset_type, news_source, asset_symbol=asset_symbol)
             
             # If still no text data, return neutral score
             # Fetch social metrics from LunarCrush EARLY (before potential early returns)
@@ -135,10 +138,12 @@ class SentimentEngine(BaseEngine):
             social_metrics = {}
             if asset_type == 'crypto':
                 try:
-                    social_metrics = self.lunarcrush_service.fetch_social_metrics(asset_id)
-                    self.logger.debug(f"Fetched social metrics for {asset_id}: galaxy_score={social_metrics.get('galaxy_score')}, alt_rank={social_metrics.get('alt_rank')}, price={social_metrics.get('price')}")
+                    # Use asset_symbol if provided (for external API calls), otherwise use asset_id
+                    social_metrics = self.lunarcrush_service.fetch_social_metrics(asset_symbol)
+                    self.logger.debug(f"Fetched social metrics for {asset_symbol}: galaxy_score={social_metrics.get('galaxy_score')}, alt_rank={social_metrics.get('alt_rank')}, price={social_metrics.get('price')}")
                 except Exception as e:
-                    self.logger.warning(f"Failed to fetch social metrics for {asset_id}: {str(e)}")
+                    asset_symbol = kwargs.get('asset_symbol', asset_id)
+                    self.logger.warning(f"Failed to fetch social metrics for {asset_symbol}: {str(e)}")
             
             if not text_data:
                 self.logger.warning(f"No text data available for {asset_id}, returning neutral score with social metrics")
@@ -220,10 +225,12 @@ class SentimentEngine(BaseEngine):
             
             # Market signal analysis
             connection_id = kwargs.get('connection_id')  # Optional connection ID for NestJS API
+            # Use asset_symbol if provided (for OHLCV fetching), otherwise use asset_id
+            asset_symbol = kwargs.get('asset_symbol', asset_id)
             market_result = None
             try:
                 market_result = self.market_signal_analyzer.analyze(
-                    asset_id,
+                    asset_symbol,  # Use symbol for OHLCV fetching
                     asset_type,
                     exchange or 'binance',
                     connection_id
@@ -308,7 +315,8 @@ class SentimentEngine(BaseEngine):
         self,
         asset_id: str,
         asset_type: str,
-        news_source: Optional[str] = None
+        news_source: Optional[str] = None,
+        asset_symbol: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Fetch news data from appropriate API based on asset type.
@@ -350,8 +358,9 @@ class SentimentEngine(BaseEngine):
             elif asset_type == 'crypto':
                 # Fetch from LunarCrush
                 if news_source in (None, 'lunarcrush', 'auto'):
-                    self.logger.info(f"Fetching crypto news for {asset_id} from LunarCrush...")
-                    news_items = self.lunarcrush_service.fetch_coin_news(asset_id, limit=50)
+                    symbol_to_use = asset_symbol or asset_id
+                    self.logger.info(f"Fetching crypto news for {symbol_to_use} from LunarCrush...")
+                    news_items = self.lunarcrush_service.fetch_coin_news(symbol_to_use, limit=50)
                     
                     for item in news_items:
                         # Combine title and text for analysis

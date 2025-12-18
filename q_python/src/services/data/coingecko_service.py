@@ -232,8 +232,11 @@ class CoinGeckoService:
         
         # Extract metrics
         code_changes = dev_data.get('code_additions_deletions_4_weeks', {})
-        additions = code_changes.get('additions', 0) if isinstance(code_changes, dict) else 0
-        deletions = code_changes.get('deletions', 0) if isinstance(code_changes, dict) else 0
+        additions = code_changes.get('additions') if isinstance(code_changes, dict) else None
+        deletions = code_changes.get('deletions') if isinstance(code_changes, dict) else None
+        # Handle None values (CoinGecko may return None instead of 0)
+        additions = additions if additions is not None else 0
+        deletions = deletions if deletions is not None else 0
         net_changes = additions - deletions
         
         forks = dev_data.get('forks', 0)

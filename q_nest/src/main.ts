@@ -58,8 +58,18 @@ async function bootstrap() {
     }),
   );
 
+  // Increase server timeout for long-running preview requests (5 minutes)
+  // Preview can take 2-3 minutes with 20 assets, so we set timeout to 5 minutes
+  const server = app.getHttpServer();
+  server.timeout = 300000; // 5 minutes in milliseconds
+
   const port = process.env.PORT || 3000;
-  await app.listen(port, '0.0.0.0');
+  const server = await app.listen(port, '0.0.0.0');
+  
+  // Increase server timeout for long-running preview requests (5 minutes)
+  // Preview can take 2-3 minutes with 20 assets, so we set timeout to 5 minutes
+  server.timeout = 300000; // 5 minutes in milliseconds
+  
   console.log(`Application is running on: http://0.0.0.0:${port}`);
 }
 

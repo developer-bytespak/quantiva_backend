@@ -87,12 +87,26 @@ class EventRiskEngine(BaseEngine):
             Dictionary with score, confidence, and metadata
         """
         try:
+            # #region agent log
+            import json
+            try:
+                with open(r'c:\Users\BYTES PAK\Desktop\Quantiva-hq\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"event_risk_engine.py:89","message":"EventRiskEngine.calculate entry","data":{"asset_id":asset_id,"asset_type":asset_type,"has_kwargs":bool(kwargs),"asset_symbol_in_kwargs":kwargs.get('asset_symbol')},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+            except: pass
+            # #endregion
             if not self.validate_inputs(asset_id, asset_type):
                 return self.handle_error(ValueError("Invalid inputs"), "validation")
             
             # Get upcoming events
             if events is None:
-                events = self._get_upcoming_events(asset_id, asset_type, days_ahead=30)
+                asset_symbol = kwargs.get('asset_symbol', asset_id)  # Get asset_symbol from kwargs
+                # #region agent log
+                try:
+                    with open(r'c:\Users\BYTES PAK\Desktop\Quantiva-hq\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"event_risk_engine.py:96","message":"Calling _get_upcoming_events","data":{"asset_id":asset_id,"asset_symbol":asset_symbol},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                except: pass
+                # #endregion
+                events = self._get_upcoming_events(asset_id, asset_type, days_ahead=30, asset_symbol=asset_symbol)
             
             # Get economic risk from FRED (for stocks only)
             economic_risk = None
@@ -871,7 +885,8 @@ class EventRiskEngine(BaseEngine):
         self,
         asset_id: str,
         asset_type: str,
-        days_ahead: int = 30
+        days_ahead: int = 30,
+        asset_symbol: Optional[str] = None
     ) -> List[Dict]:
         """
         Get upcoming events for an asset by parsing news articles.
@@ -923,8 +938,17 @@ class EventRiskEngine(BaseEngine):
         
         elif asset_type == 'crypto':
             try:
-                # Fetch news from LunarCrush
-                news_data = self.lunarcrush_service.fetch_coin_news(asset_id, limit=100)
+                # Use asset_symbol if provided (for external API calls), otherwise use asset_id
+                symbol_to_use = asset_symbol or asset_id
+                # #region agent log
+                import json
+                try:
+                    with open(r'c:\Users\BYTES PAK\Desktop\Quantiva-hq\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"event_risk_engine.py:930","message":"_get_upcoming_events crypto branch","data":{"asset_id":asset_id,"asset_symbol_param":asset_symbol,"symbol_to_use":symbol_to_use},"timestamp":int(__import__('time').time()*1000)}) + '\n')
+                except: pass
+                # #endregion
+                # Fetch news from LunarCrush (needs symbol, not UUID)
+                news_data = self.lunarcrush_service.fetch_coin_news(symbol_to_use, limit=100)
                 
                 self.logger.info(f"Fetched {len(news_data) if news_data else 0} news articles for {asset_id}")
                 

@@ -80,6 +80,8 @@ class SignalGenerator:
             # Forward connection info so TechnicalEngine can fetch OHLCV from NestJS when available.
             connection_id = kwargs.get('connection_id')
             exchange = kwargs.get('exchange', 'binance')
+            # Use asset_symbol if provided (for OHLCV fetching), otherwise use asset_id
+            asset_symbol = kwargs.get('asset_symbol', asset_id)
 
             technical_result = self.technical_engine.calculate(
                 asset_id=asset_id,
@@ -87,16 +89,23 @@ class SignalGenerator:
                 timeframe=strategy_data.get('timeframe'),
                 ohlcv_data=ohlcv_data,
                 connection_id=connection_id,
-                exchange=exchange
+                exchange=exchange,
+                asset_symbol=asset_symbol  # Pass symbol for OHLCV fetching
             )
             engine_scores['trend'] = technical_result if technical_result is not None else {'score': 0.0, 'confidence': 0.0}
             
             # Fundamental Engine
-            fundamental_result = self.fundamental_engine.calculate(
-                asset_id=asset_id,
-                asset_type=asset_type
-            )
-            engine_scores['fundamental'] = fundamental_result
+            # Pass asset_symbol for external API calls (CoinGecko, LunarCrush need symbols, not UUIDs)
+            try:
+                fundamental_result = self.fundamental_engine.calculate(
+                    asset_id=asset_id,
+                    asset_type=asset_type,
+                    asset_symbol=asset_symbol  # Pass symbol for external API calls
+                )
+                engine_scores['fundamental'] = fundamental_result if fundamental_result is not None else {'score': 0.0, 'confidence': 0.0}
+            except Exception as e:
+                logger.warning(f"Fundamental engine error for {asset_symbol} (asset_id: {asset_id}): {str(e)}")
+                engine_scores['fundamental'] = {'score': 0.0, 'confidence': 0.0, 'error': True, 'error_message': str(e)}
             
             # Liquidity Engine
             if order_book and market_data.get('price'):
@@ -113,20 +122,26 @@ class SignalGenerator:
                 engine_scores['liquidity'] = {'score': 0.0, 'confidence': 0.0}
             
             # Event Risk Engine
+            # Pass asset_symbol for external API calls (LunarCrush needs symbols, not UUIDs)
             event_risk_result = self.event_risk_engine.calculate(
                 asset_id=asset_id,
-                asset_type=asset_type
+                asset_type=asset_type,
+                asset_symbol=asset_symbol  # Pass symbol for external API calls
             )
             engine_scores['event_risk'] = event_risk_result
             
             # Sentiment Engine
             # Extract text_data from kwargs if provided
+            # Also pass connection_id, exchange, and asset_symbol for MarketSignalAnalyzer to fetch OHLCV
             text_data = kwargs.get('text_data', None)
             sentiment_result = self.sentiment_engine.calculate(
                 asset_id=asset_id,
                 asset_type=asset_type,
                 timeframe=strategy_data.get('timeframe'),
-                text_data=text_data
+                text_data=text_data,
+                connection_id=connection_id,
+                exchange=exchange,
+                asset_symbol=asset_symbol  # Pass symbol for OHLCV fetching
             )
             engine_scores['sentiment'] = sentiment_result
             
