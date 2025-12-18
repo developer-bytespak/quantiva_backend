@@ -28,7 +28,7 @@ export class PreBuiltSignalsCronjobService {
    * Fetches trending assets, runs sentiment analysis, and generates signals for all 4 pre-built strategies
    */
   @Cron('*/10 * * * *') // Every 10 minutes
-  async generatePreBuiltSignals(): Promise<void> {
+  async generatePreBuiltSignals(options?: { connectionId?: string }): Promise<void> {
     if (this.isRunning) {
       this.logger.warn('Previous signal generation job still running, skipping this execution');
       return;
@@ -57,8 +57,31 @@ export class PreBuiltSignalsCronjobService {
 
       this.logger.log(`Processing ${trendingAssets.length} trending assets`);
 
-      // Step 3: Get first available connection for OHLCV data
-      const connectionInfo = await this.getFirstAvailableConnection();
+      // Step 3: Get first available connection for OHLCV data (or use provided override)
+      let connectionInfo = null;
+      if (options?.connectionId) {
+        try {
+          const conn = await this.prisma.user_exchange_connections.findUnique({
+            where: { connection_id: options.connectionId },
+            include: { exchange: true },
+          });
+          if (conn && conn.exchange) {
+            connectionInfo = {
+              connectionId: conn.connection_id,
+              exchange: conn.exchange.name.toLowerCase() || 'binance',
+            };
+            this.logger.log(`Using overridden connection ${options.connectionId} for OHLCV data`);
+          } else {
+            this.logger.warn(`Connection ${options.connectionId} not found or has no exchange; falling back to first available`);
+            connectionInfo = await this.getFirstAvailableConnection();
+          }
+        } catch (err: any) {
+          this.logger.warn(`Error fetching override connection ${options.connectionId}: ${err.message}`);
+          connectionInfo = await this.getFirstAvailableConnection();
+        }
+      } else {
+        connectionInfo = await this.getFirstAvailableConnection();
+      }
 
       // Step 4: Process each asset through sentiment analysis and signal generation
       let processedCount = 0;
@@ -463,13 +486,13 @@ export class PreBuiltSignalsCronjobService {
   /**
    * Manual trigger for testing/debugging
    */
-  async triggerManualGeneration(): Promise<{
+  async triggerManualGeneration(options?: { connectionId?: string }): Promise<{
     message: string;
     processed: number;
     errors: number;
   }> {
     this.logger.log('Manual pre-built signals generation triggered');
-    await this.generatePreBuiltSignals();
+    await this.generatePreBuiltSignals(options);
     return {
       message: 'Manual generation completed',
       processed: 0, // Would need to track this in the method

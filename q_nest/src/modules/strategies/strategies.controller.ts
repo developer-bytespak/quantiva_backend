@@ -384,8 +384,8 @@ export class StrategiesController {
    */
   @Post('trigger-pre-built-signals')
   @HttpCode(HttpStatus.OK)
-  async triggerPreBuiltSignals() {
-    return this.preBuiltSignalsCronjobService.triggerManualGeneration();
+  async triggerPreBuiltSignals(@Body() body?: { connectionId?: string }) {
+    return this.preBuiltSignalsCronjobService.triggerManualGeneration(body || undefined);
   }
 }
 

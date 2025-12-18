@@ -1,7 +1,8 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { ValidationPipe, Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import cookieParser from 'cookie-parser';
+import { PreBuiltSignalsCronjobService } from './modules/strategies/services/pre-built-signals-cronjob.service';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -58,19 +59,34 @@ async function bootstrap() {
     }),
   );
 
-  // Increase server timeout for long-running preview requests (5 minutes)
-  // Preview can take 2-3 minutes with 20 assets, so we set timeout to 5 minutes
-  const server = app.getHttpServer();
-  server.timeout = 300000; // 5 minutes in milliseconds
-
   const port = process.env.PORT || 3000;
   const server = await app.listen(port, '0.0.0.0');
-  
+
   // Increase server timeout for long-running preview requests (5 minutes)
   // Preview can take 2-3 minutes with 20 assets, so we set timeout to 5 minutes
-  server.timeout = 300000; // 5 minutes in milliseconds
+  const httpServer = app.getHttpServer();
+  httpServer.timeout = 300000; // 5 minutes in milliseconds
   
   console.log(`Application is running on: http://0.0.0.0:${port}`);
+
+  // Trigger an initial run of the pre-built signals generation on startup
+  // This seeds the DB with initial signals so the cronjob has data thereafter.
+  // Run non-blocking and catch errors so startup isn't prevented.
+  try {
+    const logger = new Logger('PreBuiltSignalsStartup');
+    const cronService = app.get(PreBuiltSignalsCronjobService);
+    if (cronService) {
+      const connectionId = '7de89ad0-42c5-4491-906e-32dc59500945';
+      cronService.triggerManualGeneration({ connectionId })
+        .then(() => logger.log(`Initial pre-built signals generation completed (connection ${connectionId})`))
+        .catch((err) => logger.error('Initial pre-built generation failed', err.stack || err));
+    } else {
+      logger.warn('PreBuiltSignalsCronjobService not available on startup');
+    }
+  } catch (err: any) {
+    // Don't prevent the app from starting if this fails
+    console.warn('Failed to trigger initial pre-built signals generation:', err?.message || err);
+  }
 }
 
 bootstrap();
