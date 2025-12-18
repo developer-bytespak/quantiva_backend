@@ -128,7 +128,7 @@ export class PreBuiltStrategiesService implements OnModuleInit {
       }
     });
 
-    const assetMap = new Map(assets.map(a => [a.asset_id, a]));
+    const assetMap = new Map<string, any>(assets.map(a => [a.asset_id, a]));
 
     return rows
       .filter(r => assetMap.has(r.asset_id))
