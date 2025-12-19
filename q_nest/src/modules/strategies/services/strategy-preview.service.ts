@@ -2,6 +2,7 @@ import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { PythonApiService } from '../../../kyc/integrations/python-api.service';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
+import { BinanceService } from '../../binance/binance.service';
 
 @Injectable()
 export class StrategyPreviewService {
@@ -17,6 +18,7 @@ export class StrategyPreviewService {
     private prisma: PrismaService,
     @Inject(forwardRef(() => ExchangesService))
     private exchangesService: ExchangesService,
+    private binanceService: BinanceService,
   ) {}
 
   /**
@@ -206,6 +208,41 @@ export class StrategyPreviewService {
       ? parsedEntry * (1 + parsedTakeProfit / 100)
       : null;
 
+    // Try to enrich with live Binance data (realtime OHLCV)
+    let liveTradeMetrics: any = null;
+    let realtimeMarketData: any = null;
+    
+    try {
+      // Fetch realtime market data from Binance
+      realtimeMarketData = await this.binanceService.getEnrichedMarketData(asset.symbol);
+      this.logger.debug(`Fetched realtime market data for ${asset.symbol}: price=${realtimeMarketData.price}`);
+      
+      // Use realtime price as entry if not already set
+      const effectiveEntry = parsedEntry && parsedEntry > 0 ? parsedEntry : realtimeMarketData.price;
+      
+      if (effectiveEntry && effectiveEntry > 0 && parsedStopLoss && parsedTakeProfit) {
+        liveTradeMetrics = await this.binanceService.calculateTradeMetrics(
+          asset.symbol,
+          effectiveEntry,
+          parsedStopLoss,
+          parsedTakeProfit,
+        );
+        this.logger.debug(`Calculated trade metrics for ${asset.symbol} with realtime data`);
+      }
+    } catch (error: any) {
+      this.logger.warn(`Could not fetch realtime data for ${asset.symbol}: ${error.message}`);
+      // Continue with computed values if Binance fetch fails
+    }
+
+    // Use live data if available, otherwise use computed values
+    const finalStopLoss = liveTradeMetrics?.stop_loss ?? computedStopLossPrice ?? null;
+    const finalTakeProfit = liveTradeMetrics?.exit ?? computedTakeProfitPrice ?? null;
+    const finalVolume = liveTradeMetrics?.volume ?? realtimeMarketData?.volume24h ?? signal.volume ?? signal.market_volume ?? marketData.volume_24h ?? null;
+    const finalProfit = liveTradeMetrics?.profit_percent ?? signal.changePercent ?? signal.change_pct ?? signal.profit ?? null;
+    const finalExt = liveTradeMetrics?.extension_percent ?? signal.changePercent ?? signal.change_pct ?? null;
+    const finalCurrentPrice = liveTradeMetrics?.current_price ?? realtimeMarketData?.price ?? marketData.price ?? null;
+    const finalEntry = liveTradeMetrics?.entry ?? parsedEntry ?? realtimeMarketData?.price ?? marketData.price ?? null;
+
     return {
       asset_id: asset.asset_id,
       symbol: asset.symbol,
@@ -215,15 +252,27 @@ export class StrategyPreviewService {
       confidence: signal.confidence,
       engine_scores: signal.engine_scores,
       // Additional fields for frontend preview: entry/exit, prices, profit, win rate, volume, insights
-      entry: signal.entry ?? signal.entry_price ?? signal.suggested_entry ?? (marketData.price ?? null),
-      entry_price: parsedEntry ?? null,
+      entry: finalEntry,
+      entry_price: finalEntry,
+      ext: finalExt ?? null,
       stop_loss: stopLossPct ?? null,
-      stop_loss_price: signal.stop_loss_price ?? signal.stopLossPrice ?? computedStopLossPrice ?? null,
+      stop_loss_price: finalStopLoss ?? null,
       take_profit: takeProfitPct ?? null,
-      take_profit_price: signal.take_profit_price ?? signal.takeProfitPrice ?? computedTakeProfitPrice ?? null,
+      take_profit_price: finalTakeProfit ?? null,
       changePercent: signal.changePercent ?? signal.change_pct ?? signal.profit ?? null,
       winRate: signal.winRate ?? signal.win_rate ?? signal.win_pct ?? null,
-      volume: signal.volume ?? signal.market_volume ?? marketData.volume_24h ?? null,
+      volume: finalVolume ?? null,
+      profit: finalProfit ?? null,
+      current_price: finalCurrentPrice,
+      risk_reward_ratio: liveTradeMetrics?.risk_reward_ratio ?? null,
+      // Include realtime market data
+      realtime_data: realtimeMarketData ? {
+        price: realtimeMarketData.price,
+        priceChangePercent: realtimeMarketData.priceChangePercent,
+        high24h: realtimeMarketData.high24h,
+        low24h: realtimeMarketData.low24h,
+        volume24h: realtimeMarketData.volume24h,
+      } : null,
       insights: signal.insights ?? signal.reasons ?? [],
       // include strategy rules so frontend preview has entry/exit criteria
       entry_rules: strategy.entry_rules ?? null,

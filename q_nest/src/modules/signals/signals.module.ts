@@ -4,9 +4,10 @@ import { SignalsService } from './signals.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { KycModule } from '../../kyc/kyc.module';
 import { StrategiesModule } from '../strategies/strategies.module';
+import { BinanceModule } from '../binance/binance.module';
 
 @Module({
-  imports: [PrismaModule, KycModule, forwardRef(() => StrategiesModule)],
+  imports: [PrismaModule, KycModule, forwardRef(() => StrategiesModule), BinanceModule],
   controllers: [SignalsController],
   providers: [SignalsService],
   exports: [SignalsService],

@@ -41,15 +41,20 @@ export class StrategiesController {
   }
 
   @Get('trending-assets')
-  getTrendingAssets(@Query('limit') limit?: string) {
+  getTrendingAssets(
+    @Query('limit') limit?: string,
+    @Query('realtime') realtime?: string,
+  ) {
     const limitNum = limit ? parseInt(limit, 10) : 50;
-    return this.preBuiltStrategiesService.getTopTrendingAssets(limitNum);
+    const enrichWithRealtime = realtime === 'true' || realtime === '1';
+    return this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, enrichWithRealtime);
   }
 
   @Get('pre-built/:id/signals')
   async getPreBuiltStrategySignals(
     @Param('id') id: string,
     @Query('latest_only') latestOnly?: string,
+    @Query('realtime') realtime?: string,
   ) {
     // Verify strategy exists and is a pre-built strategy
     const strategy = await this.strategiesService.findOne(id);
@@ -59,6 +64,8 @@ export class StrategiesController {
     if (strategy.type !== 'admin') {
       throw new NotFoundException(`Strategy ${id} is not a pre-built strategy`);
     }
+
+    const enrichWithRealtime = realtime === 'true' || realtime === '1';
 
     // If latest_only=true, return only one signal per asset (latest per asset)
     if (latestOnly === 'true' || latestOnly === '1') {
@@ -103,11 +110,43 @@ export class StrategiesController {
         }
       }
 
-      return Array.from(seen.values()).sort((a, b) => {
+      let results = Array.from(seen.values()).sort((a, b) => {
         const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
         const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
         return tb - ta;
       });
+
+      // Enrich with realtime data if requested
+      if (enrichWithRealtime) {
+        const { BinanceService } = await import('../binance/binance.service');
+        const binanceService = new BinanceService();
+        
+        results = await Promise.all(
+          results.map(async (signal) => {
+            if (signal.asset?.symbol) {
+              try {
+                const realtimeData = await binanceService.getEnrichedMarketData(signal.asset.symbol);
+                return {
+                  ...signal,
+                  realtime_data: {
+                    price: realtimeData.price,
+                    priceChangePercent: realtimeData.priceChangePercent,
+                    high24h: realtimeData.high24h,
+                    low24h: realtimeData.low24h,
+                    volume24h: realtimeData.volume24h,
+                    quoteVolume24h: realtimeData.quoteVolume24h,
+                  },
+                };
+              } catch (error: any) {
+                return { ...signal, realtime_data: null };
+              }
+            }
+            return signal;
+          })
+        );
+      }
+
+      return results;
     }
 
     // Get all signals with explanations (without deduping)
