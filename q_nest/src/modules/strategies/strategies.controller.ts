@@ -4,6 +4,7 @@ import { CreateStrategyDto, ValidateStrategyDto } from './dto/create-strategy.dt
 import { PreBuiltStrategiesService } from './services/pre-built-strategies.service';
 import { StrategyPreviewService } from './services/strategy-preview.service';
 import { StrategyExecutionService } from './services/strategy-execution.service';
+import { PreBuiltSignalsCronjobService } from './services/pre-built-signals-cronjob.service';
 import { NewsCronjobService } from '../news/news-cronjob.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -17,6 +18,7 @@ export class StrategiesController {
     private readonly preBuiltStrategiesService: PreBuiltStrategiesService,
     private readonly strategyPreviewService: StrategyPreviewService,
     private readonly strategyExecutionService: StrategyExecutionService,
+    private readonly preBuiltSignalsCronjobService: PreBuiltSignalsCronjobService,
     private readonly newsCronjobService: NewsCronjobService,
     private readonly prisma: PrismaService,
   ) {}
@@ -44,15 +46,115 @@ export class StrategiesController {
     return this.preBuiltStrategiesService.getTopTrendingAssets(limitNum);
   }
 
+  @Get('pre-built/:id/signals')
+  async getPreBuiltStrategySignals(
+    @Param('id') id: string,
+    @Query('latest_only') latestOnly?: string,
+  ) {
+    // Verify strategy exists and is a pre-built strategy
+    const strategy = await this.strategiesService.findOne(id);
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${id} not found`);
+    }
+    if (strategy.type !== 'admin') {
+      throw new NotFoundException(`Strategy ${id} is not a pre-built strategy`);
+    }
+
+    // If latest_only=true, return only one signal per asset (latest per asset)
+    if (latestOnly === 'true' || latestOnly === '1') {
+      const signals = await this.prisma.strategy_signals.findMany({
+        where: {
+          strategy_id: id,
+          user_id: null, // Only system-generated signals
+        },
+        include: {
+          asset: true,
+          explanations: {
+            orderBy: {
+              created_at: 'desc',
+            },
+            take: 1, // Get latest explanation
+          },
+          details: {
+            orderBy: {
+              created_at: 'desc',
+            },
+            take: 1, // Get latest details
+          },
+        },
+        orderBy: {
+          timestamp: 'desc',
+        },
+        take: 1000, // Fetch enough to dedupe by asset
+      });
+
+      // Dedupe: keep only the latest signal per asset
+      const seen = new Map<string, any>();
+      for (const s of signals) {
+        const assetId = s.asset?.asset_id || s.asset_id;
+        if (!assetId) continue;
+        if (!seen.has(assetId)) {
+          // Enrich signal with strategy parameters
+          seen.set(assetId, {
+            ...s,
+            stop_loss: strategy.stop_loss_value,
+            take_profit: strategy.take_profit_value,
+          });
+        }
+      }
+
+      return Array.from(seen.values()).sort((a, b) => {
+        const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return tb - ta;
+      });
+    }
+
+    // Get all signals with explanations (without deduping)
+    const signals = await this.prisma.strategy_signals.findMany({
+      where: {
+        strategy_id: id,
+        user_id: null, // Only system-generated signals
+      },
+      include: {
+        asset: true,
+        explanations: {
+          orderBy: {
+            created_at: 'desc',
+          },
+          take: 1, // Get latest explanation
+        },
+        details: {
+          orderBy: {
+            created_at: 'desc',
+          },
+          take: 1, // Get latest details
+        },
+      },
+      orderBy: {
+        timestamp: 'desc',
+      },
+      take: 50, // Limit to latest 50 signals
+    });
+
+    // Enrich all signals with strategy parameters
+    return signals.map((s) => ({
+      ...s,
+      stop_loss: strategy.stop_loss_value,
+      take_profit: strategy.take_profit_value,
+    }));
+  }
+
   @Get('pre-built/:id/preview')
   async previewStrategy(
     @Param('id') id: string,
     @Query('limit') limit?: string,
+    @CurrentUser() user?: TokenPayload, // Optional: use if authenticated
   ) {
     const limitNum = limit ? parseInt(limit, 10) : 50;
     const assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum);
     const assetIds = assets.map((a) => a.asset_id);
-    return this.strategyPreviewService.previewStrategy(id, assetIds);
+    return this.strategyPreviewService.previewStrategy(id, assetIds, user?.sub);
   }
 
   // Preview route for user-created strategies: GET /strategies/:id/preview
@@ -60,11 +162,12 @@ export class StrategiesController {
   async previewUserStrategy(
     @Param('id') id: string,
     @Query('limit') limit?: string,
+    @CurrentUser() user?: TokenPayload, // Optional: use if authenticated
   ) {
     const limitNum = limit ? parseInt(limit, 10) : 50;
     const assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum);
     const assetIds = assets.map((a) => a.asset_id);
-    return this.strategyPreviewService.previewStrategy(id, assetIds);
+    return this.strategyPreviewService.previewStrategy(id, assetIds, user?.sub);
   }
 
   // Move this route BEFORE the generic :id route
@@ -273,6 +376,16 @@ export class StrategiesController {
   @Post('trigger-sentiment-aggregation')
   async triggerSentimentAggregation() {
     return this.newsCronjobService.triggerManualAggregation();
+  }
+
+  /**
+   * Manual trigger for pre-built signals generation (for testing/debugging)
+   * This will immediately generate signals for all pre-built strategies
+   */
+  @Post('trigger-pre-built-signals')
+  @HttpCode(HttpStatus.OK)
+  async triggerPreBuiltSignals(@Body() body?: { connectionId?: string }) {
+    return this.preBuiltSignalsCronjobService.triggerManualGeneration(body || undefined);
   }
 }
 

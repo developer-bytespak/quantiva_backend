@@ -226,6 +226,9 @@ export class PythonApiService {
       ohlcv_data?: any;
       order_book?: any;
       portfolio_value?: number;
+      connection_id?: string | null;
+      exchange?: string;
+      asset_symbol?: string;
     },
   ): Promise<any> {
     try {
@@ -233,6 +236,9 @@ export class PythonApiService {
         strategy_id: strategyId,
         asset_id: assetId,
         asset_type: requestData.market_data?.asset_type || 'crypto',
+        connection_id: requestData.connection_id || null,
+        exchange: requestData.exchange || 'binance',
+        asset_symbol: requestData.asset_symbol || assetId, // Use symbol if provided, fallback to assetId
         ...requestData,
       });
       return response.data;

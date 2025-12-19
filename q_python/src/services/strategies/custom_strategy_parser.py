@@ -35,10 +35,15 @@ class CustomStrategyParser:
             Parsed strategy in executable format
         """
         try:
+            # Handle None values - convert to empty lists if None
+            entry_rules = strategy_data.get('entry_rules') or []
+            exit_rules = strategy_data.get('exit_rules') or []
+            indicators = strategy_data.get('indicators') or []
+            
             parsed = {
-                'entry_rules': self._parse_rules(strategy_data.get('entry_rules', [])),
-                'exit_rules': self._parse_rules(strategy_data.get('exit_rules', [])),
-                'indicators': self._parse_indicators(strategy_data.get('indicators', [])),
+                'entry_rules': self._parse_rules(entry_rules if isinstance(entry_rules, list) else []),
+                'exit_rules': self._parse_rules(exit_rules if isinstance(exit_rules, list) else []),
+                'indicators': self._parse_indicators(indicators if isinstance(indicators, list) else []),
                 'timeframe': strategy_data.get('timeframe'),
                 'stop_loss': {
                     'type': strategy_data.get('stop_loss_type'),
@@ -61,12 +66,16 @@ class CustomStrategyParser:
         Parse entry or exit rules.
         
         Args:
-            rules: List of rule dictionaries
+            rules: List of rule dictionaries (or None)
         
         Returns:
             Parsed rules in executable format
         """
         parsed_rules = []
+        
+        # Handle None or non-list input
+        if not rules or not isinstance(rules, list):
+            return parsed_rules
         
         for rule in rules:
             if not self._validate_rule(rule):
@@ -95,12 +104,16 @@ class CustomStrategyParser:
         Parse indicator configurations.
         
         Args:
-            indicators: List of indicator dictionaries
+            indicators: List of indicator dictionaries (or None)
         
         Returns:
             Parsed indicators in executable format
         """
         parsed_indicators = []
+        
+        # Handle None or non-list input
+        if not indicators or not isinstance(indicators, list):
+            return parsed_indicators
         
         for indicator in indicators:
             if not self._validate_indicator(indicator):
@@ -181,20 +194,26 @@ class CustomStrategyParser:
         """
         indicators = set()
         
-        # From entry rules
-        for rule in strategy_data.get('entry_rules', []):
-            if 'indicator' in rule:
-                indicators.add(rule['indicator'])
+        # From entry rules (handle None)
+        entry_rules = strategy_data.get('entry_rules') or []
+        if isinstance(entry_rules, list):
+            for rule in entry_rules:
+                if isinstance(rule, dict) and 'indicator' in rule:
+                    indicators.add(rule['indicator'])
         
-        # From exit rules
-        for rule in strategy_data.get('exit_rules', []):
-            if 'indicator' in rule:
-                indicators.add(rule['indicator'])
+        # From exit rules (handle None)
+        exit_rules = strategy_data.get('exit_rules') or []
+        if isinstance(exit_rules, list):
+            for rule in exit_rules:
+                if isinstance(rule, dict) and 'indicator' in rule:
+                    indicators.add(rule['indicator'])
         
-        # From indicator configs
-        for indicator in strategy_data.get('indicators', []):
-            if 'name' in indicator:
-                indicators.add(indicator['name'])
+        # From indicator configs (handle None)
+        indicator_configs = strategy_data.get('indicators') or []
+        if isinstance(indicator_configs, list):
+            for indicator in indicator_configs:
+                if isinstance(indicator, dict) and 'name' in indicator:
+                    indicators.add(indicator['name'])
         
         return list(indicators)
     
@@ -210,20 +229,26 @@ class CustomStrategyParser:
         """
         errors = []
         
-        # Validate entry rules
-        for i, rule in enumerate(strategy_data.get('entry_rules', [])):
-            if not self._validate_rule(rule):
-                errors.append(f"Entry rule {i + 1} is invalid")
+        # Validate entry rules (handle None)
+        entry_rules = strategy_data.get('entry_rules') or []
+        if isinstance(entry_rules, list):
+            for i, rule in enumerate(entry_rules):
+                if not self._validate_rule(rule):
+                    errors.append(f"Entry rule {i + 1} is invalid")
         
-        # Validate exit rules
-        for i, rule in enumerate(strategy_data.get('exit_rules', [])):
-            if not self._validate_rule(rule):
-                errors.append(f"Exit rule {i + 1} is invalid")
+        # Validate exit rules (handle None)
+        exit_rules = strategy_data.get('exit_rules') or []
+        if isinstance(exit_rules, list):
+            for i, rule in enumerate(exit_rules):
+                if not self._validate_rule(rule):
+                    errors.append(f"Exit rule {i + 1} is invalid")
         
-        # Validate indicators
-        for i, indicator in enumerate(strategy_data.get('indicators', [])):
-            if not self._validate_indicator(indicator):
-                errors.append(f"Indicator {i + 1} is invalid")
+        # Validate indicators (handle None)
+        indicators = strategy_data.get('indicators') or []
+        if isinstance(indicators, list):
+            for i, indicator in enumerate(indicators):
+                if not self._validate_indicator(indicator):
+                    errors.append(f"Indicator {i + 1} is invalid")
         
         return {
             'valid': len(errors) == 0,

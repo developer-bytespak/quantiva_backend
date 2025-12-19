@@ -60,12 +60,14 @@ class TechnicalEngine(BaseEngine):
             # Try to fetch multi-timeframe data if connection_id provided
             connection_id = kwargs.get('connection_id')
             exchange = kwargs.get('exchange', 'binance')
+            # Use asset_symbol if provided (for OHLCV fetching), otherwise use asset_id
+            asset_symbol = kwargs.get('asset_symbol', asset_id)
             
             multi_timeframe_data = None
             if connection_id:
                 try:
                     multi_timeframe_data = self._fetch_multi_timeframe_ohlcv(
-                        asset_id, exchange, connection_id
+                        asset_symbol, exchange, connection_id
                     )
                 except Exception as e:
                     self.logger.warning(f"Failed to fetch multi-timeframe data: {str(e)}")
@@ -95,7 +97,24 @@ class TechnicalEngine(BaseEngine):
             else:
                 # Fallback to single timeframe calculation
                 if ohlcv_data is None or ohlcv_data.empty:
-                    return self.handle_error(ValueError("No OHLCV data provided"), "data")
+                    # If no OHLCV data and no connection_id, return neutral score instead of error
+                    # This allows preview to work even without user connection
+                    if not connection_id:
+                        self.logger.warning(
+                            f"No OHLCV data and no connection_id for {asset_id}. "
+                            f"Returning neutral trend score. For real scores, ensure user has active exchange connection."
+                        )
+                        return self.create_result(
+                            0.0,
+                            0.0,
+                            {
+                                'note': 'No OHLCV data available - connection_id required for data fetching',
+                                'indicators': {},
+                                'data_available': False
+                            }
+                        )
+                    else:
+                        return self.handle_error(ValueError("No OHLCV data provided"), "data")
                 
                 # Ensure required columns exist
                 required_cols = ['open', 'high', 'low', 'close', 'volume']
