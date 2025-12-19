@@ -113,6 +113,35 @@ export class BinanceTestnetService {
   }
 
   /**
+   * Gets all orders (including filled)
+   */
+  async getAllOrders(symbol?: string, limit: number = 20): Promise<TestnetOrderDto[]> {
+    if (!this.isConfigured()) {
+      throw new Error('Testnet not configured');
+    }
+
+    const cacheKey = `testnet:allorders:${symbol || 'all'}:${limit}`;
+
+    // Try cache first
+    const cached = this.cacheService.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const orders = await this.binanceTestnetApi.getAllOrders(
+      this.apiKey,
+      this.apiSecret,
+      symbol,
+      limit,
+    );
+
+    // Cache result for shorter time since this includes recent activity
+    this.cacheService.set(cacheKey, orders, 3000);
+
+    return orders;
+  }
+
+  /**
    * Places an order on testnet
    */
   async placeOrder(

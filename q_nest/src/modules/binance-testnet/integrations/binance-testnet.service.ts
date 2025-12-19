@@ -107,7 +107,7 @@ export class BinanceTestnetService {
             'X-MBX-APIKEY': apiKey,
           },
           params: { ...queryParams, signature },
-          data: method.toUpperCase() !== 'GET' ? data : undefined,
+          // Binance API uses query params even for POST, not request body
         };
 
         const response = await this.apiClient.request(config);
@@ -117,8 +117,15 @@ export class BinanceTestnetService {
         lastError = error;
 
         this.logger.warn(`Request error on attempt ${attempt + 1}: ${error.message}`);
+        
+        // Log detailed error response from Binance
         if (error.response?.data) {
           this.logger.warn(`API Response: ${JSON.stringify(error.response.data)}`);
+          
+          // Extract Binance error message
+          if (error.response.data.msg) {
+            lastError = new Error(error.response.data.msg);
+          }
         }
 
         if (error.response?.status === 429) {
@@ -261,6 +268,47 @@ export class BinanceTestnetService {
   }
 
   /**
+   * Gets all orders (including filled and cancelled) for a specific symbol
+   */
+  async getAllOrders(
+    apiKey: string,
+    apiSecret: string,
+    symbol?: string,
+    limit: number = 20,
+  ): Promise<TestnetOrderDto[]> {
+    try {
+      const params: any = { limit };
+      if (symbol) {
+        params.symbol = symbol;
+      }
+
+      const orders: BinanceTestnetOrder[] = await this.makeSignedRequest(
+        'GET',
+        '/v3/allOrders',
+        apiKey,
+        apiSecret,
+        params,
+      );
+
+      return orders.map((order) => ({
+        orderId: order.orderId,
+        symbol: order.symbol,
+        side: order.side,
+        type: order.type,
+        quantity: parseFloat(order.origQty),
+        price: parseFloat(order.price),
+        status: order.status,
+        timestamp: order.time,
+        executedQuantity: parseFloat(order.executedQty),
+        cumulativeQuoteAssetTransacted: parseFloat(order.cumulativeQuoteAssetTransacted),
+      }));
+    } catch (error) {
+      this.logger.error(`Failed to get all orders: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
    * Places a new order on the testnet
    */
   async placeOrder(
@@ -277,17 +325,34 @@ export class BinanceTestnetService {
         symbol,
         side,
         type,
-        quantity: quantity.toString(),
       };
 
-      if (type === 'LIMIT' && price) {
+      // For MARKET orders, use quoteOrderQty (amount in USDT) to avoid LOT_SIZE errors
+      // For LIMIT orders, use quantity and price
+      if (type === 'MARKET') {
+        // For MARKET BUY orders, use quoteOrderQty (spend X USDT)
+        // For MARKET SELL orders, use quantity (sell X units)
+        if (side === 'BUY') {
+          // Calculate USDT amount to spend (quantity is the amount we want to spend)
+          params.quoteOrderQty = quantity.toFixed(2); // USDT amount
+        } else {
+          // For SELL, we need the actual quantity of the asset
+          params.quantity = quantity.toString();
+        }
+      } else if (type === 'LIMIT') {
+        if (!price) {
+          throw new Error('Price is required for LIMIT orders');
+        }
+        params.quantity = quantity.toString();
         params.price = price.toString();
         params.timeInForce = 'GTC';
       }
 
+      this.logger.log(`Placing ${type} order: ${JSON.stringify(params)}`);
+
       const order: BinanceTestnetOrder = await this.makeSignedRequest(
         'POST',
-        '/v3/order/test',
+        '/v3/order',
         apiKey,
         apiSecret,
         params,

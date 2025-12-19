@@ -77,6 +77,23 @@ export class BinanceTestnetController {
   }
 
   /**
+   * Get all orders (including filled)
+   * @route GET /binance-testnet/orders/all
+   */
+  @Public()
+  @Get('orders/all')
+  async getAllOrders(
+    @Query('symbol') symbol?: string,
+    @Query('limit') limit?: number,
+  ) {
+    try {
+      return await this.binanceTestnetService.getAllOrders(symbol, limit || 20);
+    } catch (error: any) {
+      throw new BadRequestException(error.message || 'Failed to fetch all orders');
+    }
+  }
+
+  /**
    * Place an order
    * @route POST /binance-testnet/orders/place
    */

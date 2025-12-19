@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SignalAction, OrderType } from '@prisma/client';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
+import { BinanceService } from '../binance/binance.service';
 
 @Injectable()
 export class SignalsService {
@@ -10,6 +11,7 @@ export class SignalsService {
   constructor(
     private prisma: PrismaService,
     private pythonApi: PythonApiService,
+    private binanceService: BinanceService,
   ) {}
 
   async findAll() {
@@ -62,8 +64,14 @@ export class SignalsService {
   /**
    * Return latest signal per asset. Keeps full history in DB; this returns a deduped
    * view by selecting the most-recent signal (timestamp desc) per asset.
+   * Optionally enriches with realtime OHLCV data from Binance.
    */
-  async findLatestSignals(options?: { strategyId?: string; userId?: string; limit?: number }) {
+  async findLatestSignals(options?: { 
+    strategyId?: string; 
+    userId?: string; 
+    limit?: number;
+    enrichWithRealtime?: boolean;
+  }) {
     const where: any = {};
     if (options?.strategyId) where.strategy_id = options.strategyId;
     if (options?.userId) where.user_id = options.userId;
@@ -72,7 +80,7 @@ export class SignalsService {
     const signals = await this.prisma.strategy_signals.findMany({
       where,
       orderBy: { timestamp: 'desc' },
-      include: { asset: true, explanations: true, strategy: true, user: true },
+      include: { asset: true, explanations: true, strategy: true, user: true, details: true },
       // Optionally cap the number of rows fetched to something reasonable
       take: options?.limit || undefined,
     });
@@ -87,6 +95,18 @@ export class SignalsService {
           ? s.explanations
           : (s['explanation'] ? [{ text: s['explanation'] }] : []);
 
+        let realtimeData = null;
+        
+        // Enrich with realtime Binance data if requested
+        if (options?.enrichWithRealtime && s.asset?.symbol) {
+          try {
+            realtimeData = await this.binanceService.getEnrichedMarketData(s.asset.symbol);
+            this.logger.debug(`Enriched signal for ${s.asset.symbol} with realtime data`);
+          } catch (error: any) {
+            this.logger.warn(`Could not fetch realtime data for ${s.asset.symbol}: ${error.message}`);
+          }
+        }
+
         seen.set(assetId, {
           signal_id: s.signal_id,
           strategy_id: s.strategy_id,
@@ -96,6 +116,8 @@ export class SignalsService {
           confidence: s.confidence ?? null,
           final_score: s.final_score ?? null,
           explanations,
+          details: s.details?.[0] || null,
+          realtime_data: realtimeData,
         });
       }
     }

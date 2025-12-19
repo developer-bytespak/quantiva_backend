@@ -4,6 +4,7 @@ import { StrategyType, RiskLevel } from '@prisma/client';
 import { PRE_BUILT_STRATEGIES } from '../data/pre-built-strategies';
 import { PythonApiService } from '../../../kyc/integrations/python-api.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
+import { BinanceService } from '../../binance/binance.service';
 
 @Injectable()
 export class PreBuiltStrategiesService implements OnModuleInit {
@@ -14,6 +15,7 @@ export class PreBuiltStrategiesService implements OnModuleInit {
     private pythonApi: PythonApiService,
     @Inject(forwardRef(() => ExchangesService))
     private exchangesService: ExchangesService,
+    private binanceService: BinanceService,
   ) { }
 
   async onModuleInit() {
@@ -87,8 +89,9 @@ export class PreBuiltStrategiesService implements OnModuleInit {
    * Includes:
    * - Trend direction (UP/DOWN/STABLE) by comparing with previous poll
    * - Volume surge detection (NORMAL/VOLUME_SURGE/MASSIVE_SURGE)
+   * - Realtime OHLCV data from Binance
    */
-  async getTopTrendingAssets(limit: number = 20) {
+  async getTopTrendingAssets(limit: number = 20, enrichWithRealtime: boolean = true) {
   try {
     const rows: any[] = await this.prisma.$queryRawUnsafe(`
       SELECT DISTINCT ON (ta.asset_id)
@@ -133,7 +136,7 @@ export class PreBuiltStrategiesService implements OnModuleInit {
 
     const assetMap = new Map<string, any>(assets.map(a => [a.asset_id, a]));
 
-    return rows
+    const baseResults = rows
       .filter(r => assetMap.has(r.asset_id))
       .slice(0, limit)
       .map(r => {
@@ -150,6 +153,34 @@ export class PreBuiltStrategiesService implements OnModuleInit {
           poll_timestamp: r.poll_timestamp,
         };
       });
+
+    // Enrich with realtime Binance data if requested
+    if (enrichWithRealtime) {
+      const enrichedResults = await Promise.all(
+        baseResults.map(async (asset) => {
+          try {
+            const realtimeData = await this.binanceService.getEnrichedMarketData(asset.symbol);
+            return {
+              ...asset,
+              realtime_data: {
+                price: realtimeData.price,
+                priceChangePercent: realtimeData.priceChangePercent,
+                high24h: realtimeData.high24h,
+                low24h: realtimeData.low24h,
+                volume24h: realtimeData.volume24h,
+                quoteVolume24h: realtimeData.quoteVolume24h,
+              },
+            };
+          } catch (error: any) {
+            this.logger.warn(`Could not fetch realtime data for ${asset.symbol}: ${error.message}`);
+            return { ...asset, realtime_data: null };
+          }
+        })
+      );
+      return enrichedResults;
+    }
+
+    return baseResults;
 
   } catch (err: any) {
     this.logger.warn(`Trending assets error: ${err?.message || err}`);
