@@ -97,6 +97,7 @@ export class BinanceTestnetController {
    * Place an order
    * @route POST /binance-testnet/orders/place
    */
+  @Public()
   @Post('orders/place')
   @HttpCode(HttpStatus.CREATED)
   async placeOrder(@Body() dto: PlaceTestnetOrderDto) {
@@ -126,6 +127,7 @@ export class BinanceTestnetController {
    * Get ticker price
    * @route GET /binance-testnet/ticker/:symbol
    */
+  @Public()
   @Get('ticker/:symbol')
   async getTickerPrice(@Param('symbol') symbol: string) {
     return this.binanceTestnetService.getTickerPrice(symbol);
