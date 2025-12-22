@@ -77,17 +77,43 @@ export class BinanceTestnetController {
   }
 
   /**
-   * Get all orders (including filled)
+   * Get all orders (including filled) with comprehensive filters
    * @route GET /binance-testnet/orders/all
+   * Query params:
+   * - symbol: filter by symbol (e.g., BTCUSDT)
+   * - status: filter by order status (NEW, FILLED, PARTIALLY_FILLED, CANCELED, REJECTED, EXPIRED)
+   * - side: filter by order side (BUY, SELL)
+   * - type: filter by order type (MARKET, LIMIT, STOP_LOSS, STOP_LOSS_LIMIT, TAKE_PROFIT, TAKE_PROFIT_LIMIT)
+   * - orderId: get specific order by orderId
+   * - startTime: filter orders from this timestamp (ms)
+   * - endTime: filter orders until this timestamp (ms)
+   * - limit: max number of orders (default 50, max 1000)
    */
   @Public()
   @Get('orders/all')
   async getAllOrders(
     @Query('symbol') symbol?: string,
+    @Query('status') status?: string,
+    @Query('side') side?: string,
+    @Query('type') type?: string,
+    @Query('orderId') orderId?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
     @Query('limit') limit?: number,
   ) {
     try {
-      return await this.binanceTestnetService.getAllOrders(symbol, limit || 20);
+      const filters = {
+        symbol,
+        status,
+        side,
+        type,
+        orderId: orderId ? parseInt(orderId, 10) : undefined,
+        startTime: startTime ? parseInt(startTime, 10) : undefined,
+        endTime: endTime ? parseInt(endTime, 10) : undefined,
+        limit: limit ? Math.min(limit, 1000) : 50,
+      };
+
+      return await this.binanceTestnetService.getAllOrders(filters);
     } catch (error: any) {
       throw new BadRequestException(error.message || 'Failed to fetch all orders');
     }

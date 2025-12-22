@@ -268,18 +268,43 @@ export class BinanceTestnetService {
   }
 
   /**
-   * Gets all orders (including filled and cancelled) for a specific symbol
+   * Gets all orders (including filled and cancelled) with comprehensive filters
    */
   async getAllOrders(
     apiKey: string,
     apiSecret: string,
-    symbol?: string,
-    limit: number = 20,
+    filters: {
+      symbol?: string;
+      status?: string;
+      side?: string;
+      type?: string;
+      orderId?: number;
+      startTime?: number;
+      endTime?: number;
+      limit?: number;
+    },
   ): Promise<TestnetOrderDto[]> {
     try {
-      const params: any = { limit };
-      if (symbol) {
-        params.symbol = symbol;
+      const params: any = { 
+        limit: filters.limit || 50,
+      };
+      
+      // Binance API requires symbol for allOrders endpoint
+      if (filters.symbol) {
+        params.symbol = filters.symbol;
+      }
+      
+      // Add orderId if specified (returns order and all subsequent orders)
+      if (filters.orderId) {
+        params.orderId = filters.orderId;
+      }
+      
+      // Add time filters
+      if (filters.startTime) {
+        params.startTime = filters.startTime;
+      }
+      if (filters.endTime) {
+        params.endTime = filters.endTime;
       }
 
       const orders: BinanceTestnetOrder[] = await this.makeSignedRequest(
@@ -290,7 +315,26 @@ export class BinanceTestnetService {
         params,
       );
 
-      return orders.map((order) => ({
+      let filteredOrders = orders;
+
+      // Apply client-side filters for fields not supported by Binance API
+      if (filters.status) {
+        filteredOrders = filteredOrders.filter(
+          (order) => order.status === filters.status,
+        );
+      }
+      if (filters.side) {
+        filteredOrders = filteredOrders.filter(
+          (order) => order.side === filters.side,
+        );
+      }
+      if (filters.type) {
+        filteredOrders = filteredOrders.filter(
+          (order) => order.type === filters.type,
+        );
+      }
+
+      return filteredOrders.map((order) => ({
         orderId: order.orderId,
         symbol: order.symbol,
         side: order.side,
