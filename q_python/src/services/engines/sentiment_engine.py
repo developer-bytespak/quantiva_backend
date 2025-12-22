@@ -49,6 +49,35 @@ class SentimentEngine(BaseEngine):
             'default': 1.0
         }
     
+    def initialize(self):
+        """Pre-warm FinBERT model on startup (for background processing)."""
+        if self.finbert_inference is not None:
+            self.logger.info("FinBERT already initialized")
+            return True
+        
+        try:
+            self.logger.info("🔥 Pre-warming FinBERT model...")
+            import time
+            start_time = time.time()
+            
+            # Import and initialize
+            from src.models.finbert import get_finbert_inference
+            self.finbert_inference = get_finbert_inference()
+            self._initialization_attempted = True
+            
+            elapsed = time.time() - start_time
+            self.logger.info(f"✅ FinBERT model loaded in {elapsed:.2f}s - Ready for inference")
+            return True
+        except Exception as e:
+            self.logger.error(f"❌ Failed to pre-warm FinBERT: {str(e)}", exc_info=True)
+            self.finbert_inference = None
+            self._initialization_attempted = True
+            return False
+    
+    def is_initialized(self) -> bool:
+        """Check if FinBERT model is loaded and ready."""
+        return self.finbert_inference is not None
+    
     def _ensure_inference_initialized(self):
         """Ensure FinBERT inference is initialized (truly lazy loading)."""
         if self.finbert_inference is not None:

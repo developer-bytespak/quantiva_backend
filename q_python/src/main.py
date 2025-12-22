@@ -125,13 +125,58 @@ logger.info("All routers included, application ready")
 def read_root():
     return {"msg": "Quantiva Python API", "version": "1.0.0"}
 
+@app.get('/health')
+def health_check():
+    """Health check endpoint with ML model status."""
+    try:
+        from src.services.engines.sentiment_engine import SentimentEngine
+        sentiment_engine = SentimentEngine()
+        model_loaded = sentiment_engine.is_initialized()
+    except Exception:
+        model_loaded = False
+    
+    from datetime import datetime
+    return {
+        "status": "healthy",
+        "model_loaded": model_loaded,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "service": "Quantiva Python ML API"
+    }
+
 @app.on_event("startup")
 async def startup_event():
-    logger.info("FastAPI application startup complete")
+    logger.info("🚀 FastAPI application starting up...")
     import os
+    import time
+    
     port = os.environ.get("PORT", "8000")
-    logger.info(f"Server should be listening on port {port}")
+    logger.info(f"Server will listen on port {port}")
+    
     # Log ML init policy
     skip = os.environ.get("SKIP_ML_INIT", "").lower()
     if skip in ("1", "true", "yes"):
-        logger.info("SKIP_ML_INIT is enabled - ML models will not be initialized at startup")
+        logger.info("⚠️ SKIP_ML_INIT is enabled - ML models will NOT be pre-loaded")
+        logger.info("✅ Startup complete (fast mode)")
+        return
+    
+    # Pre-warm FinBERT model for production
+    logger.info("🔥 Pre-warming FinBERT model for production use...")
+    start_time = time.time()
+    
+    try:
+        from src.services.engines.sentiment_engine import SentimentEngine
+        sentiment_engine = SentimentEngine()
+        success = sentiment_engine.initialize()
+        
+        elapsed = time.time() - start_time
+        
+        if success:
+            logger.info(f"✅ FinBERT model pre-loaded in {elapsed:.2f}s - API ready for requests")
+        else:
+            logger.warning(f"⚠️ FinBERT initialization failed after {elapsed:.2f}s - will retry on first request")
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error(f"❌ Error during FinBERT pre-warming ({elapsed:.2f}s): {str(e)}")
+        logger.info("API will start anyway - FinBERT will load on first request")
+    
+    logger.info("✅ Startup complete - Ready to process requests")
