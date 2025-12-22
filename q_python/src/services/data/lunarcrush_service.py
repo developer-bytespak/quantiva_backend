@@ -134,8 +134,15 @@ class LunarCrushService:
                 # Ensure articles is a list
                 if not isinstance(articles, list):
                     articles = []
+                
+                # Log response summary
+                self.logger.info(f"LunarCrush returned {len(articles)} articles for {symbol}")
+                if len(articles) == 0:
+                    self.logger.warning(f"No articles in response. Response keys: {list(data.keys())}")
+                    self.logger.debug(f"Full response: {str(data)[:500]}")
             elif isinstance(data, list):
                 articles = data
+                self.logger.info(f"LunarCrush returned {len(articles)} articles for {symbol} (list format)")
             else:
                 self.logger.warning(f"Unexpected response format from LunarCrush: {type(data)}")
                 self.logger.debug(f"Response data: {str(data)[:500]}")
@@ -188,6 +195,8 @@ class LunarCrushService:
                             'published_at': published_at,
                             'url': url
                         })
+                    else:
+                        self.logger.debug(f"Skipping article with no title: {article.keys()}")
                 except Exception as e:
                     self.logger.warning(f"Error parsing article: {str(e)}")
                     continue

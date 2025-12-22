@@ -31,6 +31,14 @@ export interface CryptoNewsResponse {
   news_items: CryptoNewsItem[];
   social_metrics: SocialMetrics;
   timestamp: string;
+  metadata?: {
+    source: 'database' | 'python_api';
+    is_fresh: boolean;
+    last_updated_at: string;
+    freshness: string;
+    message?: string;
+    total_count?: number;
+  };
 }
 
 @Injectable()
@@ -47,7 +55,292 @@ export class NewsService {
     private assetsService: AssetsService,
   ) {}
 
-  async getCryptoNews(symbol: string, limit: number = 2): Promise<CryptoNewsResponse> {
+  /**
+   * Get all news from database (no filtering by asset or time)
+   * Returns ALL news with actual content
+   */
+  async getAllNewsFromDB(limit: number = 100) {
+    try {
+      // Query all news with actual content (must have URL - real articles)
+      const newsRecords = await this.prisma.trending_news.findMany({
+        where: {
+          AND: [
+            { article_url: { not: null } },
+            { article_url: { not: '' } },
+            { heading: { not: null } },
+            { heading: { not: '' } },
+          ],
+        },
+        orderBy: {
+          poll_timestamp: 'desc',
+        },
+        take: limit * 3, // Fetch more to account for filtering
+        include: {
+          asset: {
+            select: {
+              symbol: true,
+              asset_type: true,
+            },
+          },
+        },
+      });
+
+      this.logger.log(`Found ${newsRecords.length} news records with URLs in database`);
+
+      // Transform to response format and filter out source-only records
+      const news_items = newsRecords
+        .map((record) => {
+          const metadata = record.metadata as any;
+          const newsDetail = record.news_detail as any;
+          
+          let description = '';
+          if (metadata?.description) {
+            description = metadata.description;
+          } else if (newsDetail?.description) {
+            description = newsDetail.description;
+          } else if (typeof record.news_detail === 'string') {
+            description = record.news_detail;
+          }
+          
+          return {
+            symbol: record.asset?.symbol || 'Unknown',
+            title: record.heading || 'Crypto News',
+            description: description,
+            url: record.article_url || '',
+            source: record.source || 'Unknown',
+            published_at: record.published_at?.toISOString() || record.poll_timestamp.toISOString(),
+            sentiment: {
+              label: record.sentiment_label || 'neutral',
+              score: Number(record.news_sentiment || 0),
+              confidence: metadata?.confidence || 0.5,
+            },
+          };
+        })
+        .filter((item) => {
+          // Filter out items where title is just a source name (common patterns)
+          const sourceLikeNames = [
+            'CryptoSlate', 'AMBCrypto', 'ZyCrypto', 'CCN', 'CBS News', 
+            'Cryptonews.com', 'CryptoPanic', 'Crypto Daily', 'TWJ News',
+            'Bitcoin.com News', 'The Boston Globe', 'The Verge', 'The Daily Beast',
+            'CoinDesk', 'Crypto Briefing', 'Decrypt', 'CNBC International',
+            'The Washington Post', 'Yahoo Finance', 'The Associated Press',
+            'Trader Edge', 'CoinGape'
+          ];
+          
+          // Keep items that have a URL AND title is NOT just a source name
+          return item.url && !sourceLikeNames.includes(item.title);
+        })
+        .slice(0, limit); // Apply limit after filtering
+
+      this.logger.log(`Returning ${news_items.length} complete news items after filtering`);
+
+      return {
+        total_count: news_items.length,
+        news_items: news_items,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error: any) {
+      this.logger.error(`Error reading all news from database: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get recent news from database (FAST - for user requests)
+   * Reads from trending_news and sentiment_analyses tables
+   */
+  async getRecentNewsFromDB(symbol: string, limit: number = 10): Promise<CryptoNewsResponse> {
+    try {
+      const symbolUpper = symbol.toUpperCase();
+
+      // Get or find asset
+      let asset = await this.assetsService.findBySymbol(symbolUpper);
+      if (!asset) {
+        this.logger.warn(`Asset ${symbolUpper} not found in database`);
+        // Return empty response with metadata
+        return {
+          symbol: symbolUpper,
+          news_items: [],
+          social_metrics: {
+            galaxy_score: 0,
+            alt_rank: 999999,
+            social_volume: 0,
+            price: 0,
+            volume_24h: 0,
+            market_cap: 0,
+          },
+          timestamp: new Date().toISOString(),
+          metadata: {
+            source: 'database',
+            last_updated_at: null,
+            is_fresh: false,
+            freshness: 'no_data',
+            message: 'No data available. Please try again later.',
+          },
+        };
+      }
+
+      const assetId = asset.asset_id;
+      const now = new Date();
+      const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+      this.logger.debug(`Querying news for asset_id: ${assetId}, symbol: ${symbolUpper}`);
+
+      // Query trending_news for recent articles with actual content
+      // Filter out records with "No text data available" in metadata
+      const newsRecords = await this.prisma.trending_news.findMany({
+        where: {
+          asset_id: assetId,
+          poll_timestamp: {
+            gte: twentyFourHoursAgo,
+          },
+          OR: [
+            { AND: [{ heading: { not: null } }, { heading: { not: '' } }] },
+            { AND: [{ article_url: { not: null } }, { article_url: { not: '' } }] },
+          ],
+        },
+        orderBy: {
+          poll_timestamp: 'desc',
+        },
+        take: limit * 3, // Query 3x the limit to account for filtering
+      });
+
+      this.logger.debug(`Found ${newsRecords.length} news records in last 24h for ${symbolUpper}`);
+
+      // If no news in last 24h, try 48h
+      let finalNewsRecords = newsRecords;
+      if (newsRecords.length === 0) {
+        this.logger.debug(`No news in 24h, trying 48h for ${symbolUpper}`);
+        const fortyEightHoursAgo = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+        finalNewsRecords = await this.prisma.trending_news.findMany({
+          where: {
+            asset_id: assetId,
+            poll_timestamp: {
+              gte: fortyEightHoursAgo,
+            },
+            OR: [
+              { AND: [{ heading: { not: null } }, { heading: { not: '' } }] },
+              { AND: [{ article_url: { not: null } }, { article_url: { not: '' } }] },
+            ],
+          },
+          orderBy: {
+            poll_timestamp: 'desc',
+          },
+          take: limit * 3,
+        });
+        this.logger.debug(`Found ${finalNewsRecords.length} news records in last 48h for ${symbolUpper}`);
+      }
+
+      // If still no news, try 7 days (for testing with older data)
+      if (finalNewsRecords.length === 0) {
+        this.logger.debug(`No news in 48h, trying 7 days for ${symbolUpper}`);
+        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        finalNewsRecords = await this.prisma.trending_news.findMany({
+          where: {
+            asset_id: assetId,
+            poll_timestamp: {
+              gte: sevenDaysAgo,
+            },
+            OR: [
+              { AND: [{ heading: { not: null } }, { heading: { not: '' } }] },
+              { AND: [{ article_url: { not: null } }, { article_url: { not: '' } }] },
+            ],
+          },
+          orderBy: {
+            poll_timestamp: 'desc',
+          },
+          take: limit * 3,
+        });
+        this.logger.debug(`Found ${finalNewsRecords.length} news records in last 7 days for ${symbolUpper}`);
+      }
+
+      // Filter out records with "No text data available" note
+      finalNewsRecords = finalNewsRecords.filter((record) => {
+        const metadata = record.metadata as any;
+        return metadata?.note !== 'No text data available';
+      }).slice(0, limit); // Apply the original limit after filtering
+
+      // Transform to response format
+      const news_items: CryptoNewsItem[] = finalNewsRecords.map((record) => {
+        const metadata = record.metadata as any;
+        const newsDetail = record.news_detail as any;
+        
+        // Extract description from metadata or news_detail
+        let description = '';
+        if (metadata?.description) {
+          description = metadata.description;
+        } else if (newsDetail?.description) {
+          description = newsDetail.description;
+        } else if (typeof record.news_detail === 'string') {
+          description = record.news_detail;
+        }
+        
+        return {
+          title: record.heading || 'Crypto News',
+          description: description,
+          url: record.article_url || '',
+          source: record.source || 'Unknown',
+          published_at: record.published_at?.toISOString() || record.poll_timestamp.toISOString(),
+          sentiment: {
+            label: record.sentiment_label || 'neutral',
+            score: Number(record.news_sentiment || 0),
+            confidence: metadata?.confidence || 0.5,
+          },
+        };
+      });
+
+      // Get latest social metrics from trending_assets
+      const latestTrendingAsset = await this.prisma.trending_assets.findFirst({
+        where: {
+          asset_id: assetId,
+        },
+        orderBy: {
+          poll_timestamp: 'desc',
+        },
+      });
+
+      const social_metrics = {
+        galaxy_score: Number(latestTrendingAsset?.galaxy_score || 0),
+        alt_rank: Number(latestTrendingAsset?.alt_rank || 999999),
+        social_volume: 0, // Not stored in trending_assets
+        price: Number(latestTrendingAsset?.price_usd || 0),
+        volume_24h: Number(latestTrendingAsset?.market_volume || 0),
+        market_cap: 0, // Not stored in trending_assets
+      };
+
+      // Calculate freshness
+      const latestNewsTime = finalNewsRecords[0]?.poll_timestamp;
+      const ageMinutes = latestNewsTime
+        ? (now.getTime() - new Date(latestNewsTime).getTime()) / 1000 / 60
+        : 999999;
+
+      let is_fresh = false;
+      if (ageMinutes < 30) is_fresh = true;
+
+      return {
+        symbol: symbolUpper,
+        news_items,
+        social_metrics,
+        timestamp: now.toISOString(),
+        metadata: {
+          source: 'database',
+          last_updated_at: latestNewsTime?.toISOString() || null,
+          is_fresh,
+          freshness: ageMinutes < 30 ? 'fresh' : ageMinutes < 120 ? 'recent' : 'cached',
+          total_count: finalNewsRecords.length,
+        },
+      };
+    } catch (error: any) {
+      this.logger.error(`Error reading news from database for ${symbol}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch news from Python API and store in database (SLOW - for background jobs)
+   * This method should ONLY be called by cron jobs or admin refresh endpoints
+   */
+  async fetchAndStoreNewsFromPython(symbol: string, limit: number = 20): Promise<CryptoNewsResponse> {
     const cacheKey = `${symbol}_${limit}`;
     
     // Check cache first
@@ -65,6 +358,7 @@ export class NewsService {
           symbol: symbol.toUpperCase(),
           limit: limit,
         },
+        { timeout: 300000 }, // 5 minute timeout for background jobs
       );
 
       const data = response.data;
@@ -72,6 +366,7 @@ export class NewsService {
       // Store news articles and sentiment data in database
       try {
         await this.storeNewsAndSentiment(symbol, data);
+        this.logger.log(`Stored ${data.news_items.length} news items for ${symbol}`);
       } catch (storageError: any) {
         // Log error but don't fail the request
         this.logger.error(
@@ -88,10 +383,10 @@ export class NewsService {
       // Clean up old cache entries (simple cleanup)
       this.cleanupCache();
 
-      this.logger.log(`Fetched ${data.news_items.length} news items for ${symbol}`);
+      this.logger.log(`Fetched ${data.news_items.length} news items from Python for ${symbol}`);
       return data;
     } catch (error: any) {
-      this.logger.error(`Error fetching crypto news for ${symbol}: ${error.message}`);
+      this.logger.error(`Error fetching crypto news from Python for ${symbol}: ${error.message}`);
       
       // Return cached data if available, even if expired
       if (cached) {
@@ -99,7 +394,20 @@ export class NewsService {
         return cached.data;
       }
       
-      throw error;
+      // Don't throw in background jobs - return partial data
+      return {
+        symbol: symbol.toUpperCase(),
+        news_items: [],
+        social_metrics: {
+          galaxy_score: 0,
+          alt_rank: 999999,
+          social_volume: 0,
+          price: 0,
+          volume_24h: 0,
+          market_cap: 0,
+        },
+        timestamp: new Date().toISOString(),
+      };
     }
   }
 
@@ -421,5 +729,96 @@ export class NewsService {
 
     return null;
   }
-}
 
+  /**
+   * Get all active crypto assets from database
+   */
+  async getAllActiveAssets() {
+    const assets = await this.prisma.assets.findMany({
+      where: {
+        is_active: true,
+        asset_type: 'crypto',
+      },
+      select: {
+        asset_id: true,
+        symbol: true,
+        asset_type: true,
+        created_at: true,
+      },
+      orderBy: {
+        symbol: 'asc',
+      },
+    });
+
+    return assets;
+  }
+
+  /**
+   * Get statistics about news in database
+   */
+  async getNewsStats() {
+    const [totalNews, newsWithContent, newsBySymbol, recentNews] = await Promise.all([
+      // Total news count
+      this.prisma.trending_news.count(),
+      
+      // News with actual content (not empty placeholders)
+      this.prisma.trending_news.count({
+        where: {
+          OR: [
+            { AND: [{ heading: { not: null } }, { heading: { not: '' } }] },
+            { AND: [{ article_url: { not: null } }, { article_url: { not: '' } }] },
+          ],
+        },
+      }),
+      
+      // Count by symbol
+      this.prisma.trending_news.groupBy({
+        by: ['asset_id'],
+        _count: true,
+        orderBy: {
+          _count: {
+            asset_id: 'desc',
+          },
+        },
+        take: 10,
+      }),
+      
+      // Recent news (last 24h)
+      this.prisma.trending_news.count({
+        where: {
+          poll_timestamp: {
+            gte: new Date(Date.now() - 24 * 60 * 60 * 1000),
+          },
+        },
+      }),
+    ]);
+
+    // Get asset symbols for top assets
+    const assetIds = newsBySymbol.map(item => item.asset_id);
+    const assets = await this.prisma.assets.findMany({
+      where: {
+        asset_id: {
+          in: assetIds,
+        },
+      },
+      select: {
+        asset_id: true,
+        symbol: true,
+      },
+    });
+
+    const assetMap = new Map(assets.map(a => [a.asset_id, a.symbol]));
+    const topAssets = newsBySymbol.map(item => ({
+      symbol: assetMap.get(item.asset_id) || 'Unknown',
+      count: item._count,
+    }));
+
+    return {
+      total_news: totalNews,
+      news_with_content: newsWithContent,
+      empty_placeholders: totalNews - newsWithContent,
+      recent_24h: recentNews,
+      top_assets: topAssets,
+    };
+  }
+}
