@@ -87,74 +87,80 @@ export class PreBuiltStrategiesService implements OnModuleInit {
    * trend_score = (galaxy_score × 0.4) + ((100 − alt_rank) × 0.3) + (social_score × 0.3)
    * 
    * Includes:
-   * - Trend direction (UP/DOWN/STABLE) by comparing with previous poll
-   * - Volume surge detection (NORMAL/VOLUME_SURGE/MASSIVE_SURGE)
-   * - Realtime OHLCV data from Binance
+   * - Comprehensive market data from database (price, 24h change, volume, high/low)
+   * - Asset display name and logo URL (cached)
+   * - Optional realtime OHLCV data from Binance
    */
   async getTopTrendingAssets(limit: number = 20, enrichWithRealtime: boolean = true) {
-  try {
-    const rows: any[] = await this.prisma.$queryRawUnsafe(`
-      SELECT DISTINCT ON (ta.asset_id)
-        ta.asset_id,
-        ta.galaxy_score,
-        ta.alt_rank,
-        ta.social_score,
-        ta.price_usd,
-        ta.market_volume,
-        ta.poll_timestamp
-      FROM trending_assets ta
-      WHERE
-        ta.galaxy_score IS NOT NULL
-        AND ta.alt_rank IS NOT NULL
-        AND ta.alt_rank < 300
-        AND ta.price_usd IS NOT NULL
-        AND ta.market_volume > 10000000
-      ORDER BY
-        ta.asset_id,
-        ta.price_usd DESC
-    `);
+    try {
+      const rows: any[] = await this.prisma.$queryRaw`
+        SELECT DISTINCT ON (ta.asset_id)
+          ta.asset_id,
+          ta.galaxy_score,
+          ta.alt_rank,
+          ta.social_score,
+          ta.price_usd,
+          ta.market_volume,
+          ta.volume_24h,
+          ta.price_change_24h,
+          ta.price_change_24h_usd,
+          ta.market_cap,
+          ta.high_24h,
+          ta.low_24h,
+          ta.poll_timestamp,
+          a.symbol,
+          a.name,
+          a.display_name,
+          a.logo_url,
+          a.coingecko_id,
+          a.asset_type,
+          a.market_cap_rank
+        FROM trending_assets ta
+        INNER JOIN assets a ON ta.asset_id = a.asset_id
+        WHERE
+          ta.galaxy_score IS NOT NULL
+          AND ta.alt_rank IS NOT NULL
+          AND ta.alt_rank < 300
+          AND ta.price_usd IS NOT NULL
+          AND ta.market_volume > 10000000
+          AND a.asset_type = 'crypto'
+          AND a.symbol NOT IN (
+            'USDT','USDC','DAI','PYUSD','USD1',
+            'WBETH','STETH','CBBTC','FBTC',
+            'XAUT','PAXG'
+          )
+        ORDER BY
+          ta.asset_id,
+          ta.poll_timestamp DESC
+        LIMIT ${limit}
+      `;
 
     if (!rows.length) return [];
 
-    const assetIds = rows.map(r => r.asset_id);
+    // Transform to response format with all DB fields
+    let baseResults = rows.map(r => ({
+      asset_id: r.asset_id,
+      symbol: r.symbol,
+      name: r.display_name || r.name || r.symbol,
+      logo_url: r.logo_url,
+      coingecko_id: r.coingecko_id,
+      asset_type: r.asset_type,
+      price_usd: Number(r.price_usd),
+      price_change_24h: Number(r.price_change_24h || 0),
+      price_change_24h_usd: Number(r.price_change_24h_usd || 0),
+      market_cap: Number(r.market_cap || 0),
+      volume_24h: Number(r.volume_24h || r.market_volume || 0),
+      high_24h: Number(r.high_24h || 0),
+      low_24h: Number(r.low_24h || 0),
+      galaxy_score: Number(r.galaxy_score),
+      alt_rank: Number(r.alt_rank),
+      social_score: Number(r.social_score || 0),
+      market_volume: Number(r.market_volume),
+      market_cap_rank: r.market_cap_rank,
+      poll_timestamp: r.poll_timestamp,
+    }));
 
-    const assets = await this.prisma.assets.findMany({
-      where: {
-        asset_id: { in: assetIds },
-        asset_type: 'crypto',
-        NOT: {
-          symbol: {
-            in: [
-              'USDT','USDC','DAI','PYUSD','USD1',
-              'WBETH','STETH','CBBTC','FBTC',
-              'XAUT','PAXG'
-            ]
-          }
-        }
-      }
-    });
-
-    const assetMap = new Map<string, any>(assets.map(a => [a.asset_id, a]));
-
-    const baseResults = rows
-      .filter(r => assetMap.has(r.asset_id))
-      .slice(0, limit)
-      .map(r => {
-        const asset = assetMap.get(r.asset_id)!;
-        return {
-          asset_id: r.asset_id,
-          symbol: asset.symbol,
-          asset_type: asset.asset_type,
-          galaxy_score: Number(r.galaxy_score),
-          alt_rank: Number(r.alt_rank),
-          social_score: Number(r.social_score ?? 0),
-          price_usd: Number(r.price_usd),
-          market_volume: Number(r.market_volume),
-          poll_timestamp: r.poll_timestamp,
-        };
-      });
-
-    // Enrich with realtime Binance data if requested
+    // Enrich with realtime Binance data if requested (overrides DB values)
     if (enrichWithRealtime) {
       const enrichedResults = await Promise.all(
         baseResults.map(async (asset) => {
@@ -162,6 +168,12 @@ export class PreBuiltStrategiesService implements OnModuleInit {
             const realtimeData = await this.binanceService.getEnrichedMarketData(asset.symbol);
             return {
               ...asset,
+              // Override with fresh realtime data
+              price_usd: realtimeData.price,
+              price_change_24h: realtimeData.priceChangePercent,
+              volume_24h: realtimeData.volume24h,
+              high_24h: realtimeData.high24h,
+              low_24h: realtimeData.low24h,
               realtime_data: {
                 price: realtimeData.price,
                 priceChangePercent: realtimeData.priceChangePercent,
@@ -173,7 +185,7 @@ export class PreBuiltStrategiesService implements OnModuleInit {
             };
           } catch (error: any) {
             this.logger.warn(`Could not fetch realtime data for ${asset.symbol}: ${error.message}`);
-            return { ...asset, realtime_data: null };
+            return asset; // Return DB data as fallback
           }
         })
       );
@@ -183,7 +195,7 @@ export class PreBuiltStrategiesService implements OnModuleInit {
     return baseResults;
 
   } catch (err: any) {
-    this.logger.warn(`Trending assets error: ${err?.message || err}`);
+    this.logger.error(`Trending assets error: ${err?.message || err}`);
     return [];
   }
 }

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
+import { BinanceService } from '../binance/binance.service';
 
 @Injectable()
 export class NewsCronjobService {
@@ -12,6 +13,7 @@ export class NewsCronjobService {
   constructor(
     private prisma: PrismaService,
     private pythonApi: PythonApiService,
+    private binanceService: BinanceService,
   ) {}
 
   /**
@@ -163,6 +165,16 @@ export class NewsCronjobService {
       const socialMetrics = metadata.social_metrics || {};
       if (Object.keys(socialMetrics).length > 0) {
         try {
+          // Fetch enriched market data from Binance
+          let marketData = null;
+          if (symbol && assetType === 'crypto') {
+            try {
+              marketData = await this.binanceService.getEnrichedMarketData(symbol);
+            } catch (error: any) {
+              this.logger.warn(`Could not fetch Binance data for ${symbol}: ${error.message}`);
+            }
+          }
+
           await this.prisma.trending_assets.create({
             data: {
               poll_timestamp: pollTimestamp,
@@ -171,11 +183,18 @@ export class NewsCronjobService {
               alt_rank: socialMetrics.alt_rank || null,
               social_score: socialMetrics.social_score || null,
               market_volume: socialMetrics.volume_24h || null,
-              price_usd: socialMetrics.price || null,
+              price_usd: socialMetrics.price || (marketData ? marketData.price : null),
+              // New market data fields
+              price_change_24h: marketData?.priceChangePercent || null,
+              price_change_24h_usd: marketData ? (marketData.price * (marketData.priceChangePercent / 100)) : null,
+              volume_24h: marketData?.volume24h || socialMetrics.volume_24h || null,
+              high_24h: marketData?.high24h || null,
+              low_24h: marketData?.low24h || null,
+              market_cap: null, // Not available from Binance
             },
           });
           this.logger.debug(
-            `Stored trending asset for ${symbol}: galaxy_score=${socialMetrics.galaxy_score}, alt_rank=${socialMetrics.alt_rank}, price=${socialMetrics.price}`,
+            `Stored trending asset for ${symbol}: galaxy_score=${socialMetrics.galaxy_score}, alt_rank=${socialMetrics.alt_rank}, price=${marketData?.price || socialMetrics.price}`,
           );
         } catch (error: any) {
           // Ignore duplicate key errors (same timestamp + asset_id)
