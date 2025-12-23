@@ -99,8 +99,12 @@ export class AuthController {
       // Refresh token: 7 days
       this.setCookie(res, 'refresh_token', result.refreshToken, 7 * 24 * 60 * 60);
 
+      // Return tokens in response body as fallback for cross-origin cookie issues
       return {
         user: result.user,
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+        sessionId: result.sessionId,
         message: 'Authentication successful',
       };
     }
