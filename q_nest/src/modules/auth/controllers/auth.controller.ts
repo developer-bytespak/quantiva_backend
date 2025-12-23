@@ -87,9 +87,26 @@ export class AuthController {
   async login(
     @Body() loginDto: LoginDto,
     @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
   ) {
     const ipAddress = req.ip || req.socket.remoteAddress;
-    return this.authService.login(loginDto, ipAddress);
+    const result = await this.authService.login(loginDto, ipAddress);
+
+    // If 2FA is disabled and tokens are returned directly, set cookies
+    if (result.accessToken && result.refreshToken) {
+      // Access token: 45 minutes
+      this.setCookie(res, 'access_token', result.accessToken, 45 * 60);
+      // Refresh token: 7 days
+      this.setCookie(res, 'refresh_token', result.refreshToken, 7 * 24 * 60 * 60);
+
+      return {
+        user: result.user,
+        message: 'Authentication successful',
+      };
+    }
+
+    // If 2FA is still required (original flow)
+    return result;
   }
 
   @Public()

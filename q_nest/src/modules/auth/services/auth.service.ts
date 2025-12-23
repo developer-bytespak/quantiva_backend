@@ -56,7 +56,7 @@ export class AuthService {
     const passwordHash = await bcrypt.hash(password, 10);
 
     // Generate TOTP secret for 2FA
-    const twoFactorSecret = this.twoFactorService.generateTOTPSecret();
+    // const twoFactorSecret = this.twoFactorService.generateTOTPSecret();
 
     // Create user
     const user = await this.prisma.users.create({
@@ -64,8 +64,8 @@ export class AuthService {
         email,
         username,
         password_hash: passwordHash,
-        two_factor_enabled: true,
-        two_factor_secret: twoFactorSecret,
+        two_factor_enabled: false, // Temporarily disabled
+        // two_factor_secret: twoFactorSecret,
       },
     });
 
@@ -77,7 +77,7 @@ export class AuthService {
         email_verified: user.email_verified,
         kyc_status: user.kyc_status,
       },
-      message: 'User registered successfully. 2FA is enabled.',
+      message: 'User registered successfully. 2FA is temporarily disabled.',
     };
   }
 
@@ -112,19 +112,55 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    // Generate and send 2FA code
-    const code = await this.twoFactorService.generateCode(user.user_id, 'login');
-    await this.twoFactorService.sendCodeByEmail(user.email, code);
+    // Generate and send 2FA code (TEMPORARILY DISABLED)
+    // const code = await this.twoFactorService.generateCode(user.user_id, 'login');
+    // await this.twoFactorService.sendCodeByEmail(user.email, code);
 
     // Record successful attempt (clears rate limit)
     if (ipAddress) {
       this.rateLimitService.recordSuccessfulAttempt(ipAddress);
     }
 
-    return {
-      requires2FA: true,
-      message: '2FA code sent to your email',
+    // TEMPORARILY DISABLED 2FA - Generate tokens directly
+    const refreshToken = await this.tokenService.generateRefreshToken({
+      sub: user.user_id,
+      email: user.email,
+      username: user.username,
+    });
+    
+    const sessionId = await this.sessionService.createSession(
+      user.user_id,
+      refreshToken,
+      ipAddress,
+    );
+
+    const payload: TokenPayload = {
+      sub: user.user_id,
+      email: user.email,
+      username: user.username,
+      session_id: sessionId,
     };
+
+    const accessToken = await this.tokenService.generateAccessToken(payload);
+
+    return {
+      user: {
+        user_id: user.user_id,
+        email: user.email,
+        username: user.username,
+        email_verified: user.email_verified,
+        kyc_status: user.kyc_status,
+      },
+      accessToken,
+      refreshToken,
+      sessionId,
+    };
+
+    // ORIGINAL 2FA FLOW (commented out)
+    // return {
+    //   requires2FA: true,
+    //   message: '2FA code sent to your email',
+    // };
   }
 
   async verify2FA(
