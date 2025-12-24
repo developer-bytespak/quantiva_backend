@@ -92,7 +92,13 @@ export class BinanceTestnetService {
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
       try {
         const timestamp = await this.getBinanceServerTime();
-        const queryParams = { ...params, timestamp: timestamp.toString() };
+        // Convert all params to strings for URLSearchParams
+        const stringParams = Object.entries(params).reduce((acc, [key, value]) => {
+          acc[key] = value !== undefined && value !== null ? String(value) : '';
+          return acc;
+        }, {} as Record<string, string>);
+        
+        const queryParams = { ...stringParams, timestamp: timestamp.toString() };
         const queryString = new URLSearchParams(queryParams).toString();
         const signature = this.createSignature(queryString, apiSecret);
 
@@ -188,6 +194,25 @@ export class BinanceTestnetService {
   /**
    * Gets account balance information
    */
+  async getAccountInfo(apiKey: string, apiSecret: string): Promise<any> {
+    try {
+      this.logger.log(`Fetching account info from: ${this.baseUrl}/v3/account`);
+      
+      const accountInfo: BinanceTestnetAccountInfo = await this.makeSignedRequest(
+        'GET',
+        '/v3/account',
+        apiKey,
+        apiSecret,
+      );
+
+      this.logger.log(`Account info received. Total balances: ${accountInfo.balances.length}`);
+      return accountInfo;
+    } catch (error) {
+      this.logger.error(`Failed to get account info: ${error.message}`);
+      throw error;
+    }
+  }
+
   async getAccountBalance(apiKey: string, apiSecret: string): Promise<AccountTestnetBalanceDto> {
     try {
       this.logger.log(`Fetching account balance from: ${this.baseUrl}/v3/account`);
@@ -200,25 +225,25 @@ export class BinanceTestnetService {
         apiSecret,
       );
 
-      this.logger.log(`Account info received. Balances count: ${accountInfo.balances.length}`);
+      this.logger.log(`Account info received. Total balances: ${accountInfo.balances.length}`);
 
-      const balances: AssetTestnetBalanceDto[] = accountInfo.balances
-        .map((balance) => ({
-          asset: balance.asset,
-          free: parseFloat(balance.free),
-          locked: parseFloat(balance.locked),
-        }))
-        .filter((balance) => balance.free > 0 || balance.locked > 0);
+      // Filter only USDT balance
+      const usdtBalance = accountInfo.balances.find((balance) => balance.asset === 'USDT');
+      
+      const balances: AssetTestnetBalanceDto[] = usdtBalance
+        ? [{
+            asset: usdtBalance.asset,
+            free: parseFloat(usdtBalance.free),
+            locked: parseFloat(usdtBalance.locked),
+          }]
+        : [];
 
-      // Calculate total balance in USDT (simplified - would need price data for accurate conversion)
-      let totalBalanceUSD = 0;
-      for (const balance of balances) {
-        if (balance.asset === 'USDT' || balance.asset === 'BUSD') {
-          totalBalanceUSD += balance.free + balance.locked;
-        }
-      }
+      // Calculate total balance in USDT
+      const totalBalanceUSD = balances.length > 0 
+        ? (balances[0].free + balances[0].locked)
+        : 0;
 
-      this.logger.log(`Total balance USD: ${totalBalanceUSD}`);
+      this.logger.log(`USDT balance: ${totalBalanceUSD}`);
 
       return {
         balances,
@@ -268,18 +293,43 @@ export class BinanceTestnetService {
   }
 
   /**
-   * Gets all orders (including filled and cancelled) for a specific symbol
+   * Gets all orders (including filled and cancelled) with comprehensive filters
    */
   async getAllOrders(
     apiKey: string,
     apiSecret: string,
-    symbol?: string,
-    limit: number = 20,
+    filters: {
+      symbol?: string;
+      status?: string;
+      side?: string;
+      type?: string;
+      orderId?: number;
+      startTime?: number;
+      endTime?: number;
+      limit?: number;
+    },
   ): Promise<TestnetOrderDto[]> {
     try {
-      const params: any = { limit };
-      if (symbol) {
-        params.symbol = symbol;
+      const params: any = { 
+        limit: filters.limit || 50,
+      };
+      
+      // Binance API requires symbol for allOrders endpoint
+      if (filters.symbol) {
+        params.symbol = filters.symbol;
+      }
+      
+      // Add orderId if specified (returns order and all subsequent orders)
+      if (filters.orderId) {
+        params.orderId = filters.orderId;
+      }
+      
+      // Add time filters
+      if (filters.startTime) {
+        params.startTime = filters.startTime;
+      }
+      if (filters.endTime) {
+        params.endTime = filters.endTime;
       }
 
       const orders: BinanceTestnetOrder[] = await this.makeSignedRequest(
@@ -290,7 +340,26 @@ export class BinanceTestnetService {
         params,
       );
 
-      return orders.map((order) => ({
+      let filteredOrders = orders;
+
+      // Apply client-side filters for fields not supported by Binance API
+      if (filters.status) {
+        filteredOrders = filteredOrders.filter(
+          (order) => order.status === filters.status,
+        );
+      }
+      if (filters.side) {
+        filteredOrders = filteredOrders.filter(
+          (order) => order.side === filters.side,
+        );
+      }
+      if (filters.type) {
+        filteredOrders = filteredOrders.filter(
+          (order) => order.type === filters.type,
+        );
+      }
+
+      return filteredOrders.map((order) => ({
         orderId: order.orderId,
         symbol: order.symbol,
         side: order.side,
@@ -321,11 +390,18 @@ export class BinanceTestnetService {
     price?: number,
   ): Promise<TestnetOrderDto> {
     try {
+      // Validate symbol is not empty or undefined
+      if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
+        throw new Error(`Invalid symbol provided: "${symbol}"`);
+      }
+
       const params: any = {
-        symbol,
-        side,
-        type,
+        symbol: symbol.trim().toUpperCase(), // Ensure symbol is uppercase
+        side: side.toUpperCase(),
+        type: type.toUpperCase(),
       };
+
+      this.logger.debug(`Placing ${type} order for symbol: ${params.symbol}, side: ${params.side}`);
 
       // For MARKET orders, use quoteOrderQty (amount in USDT) to avoid LOT_SIZE errors
       // For LIMIT orders, use quantity and price

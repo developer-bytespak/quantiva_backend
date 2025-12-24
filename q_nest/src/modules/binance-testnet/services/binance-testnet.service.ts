@@ -65,7 +65,31 @@ export class BinanceTestnetService {
   }
 
   /**
-   * Gets account balance
+   * Gets full account information (all balances)
+   */
+  async getAccountInfo(): Promise<any> {
+    if (!this.isConfigured()) {
+      throw new Error('Testnet not configured');
+    }
+
+    const cacheKey = 'testnet:accountinfo';
+
+    // Try cache first
+    const cached = this.cacheService.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const accountInfo = await this.binanceTestnetApi.getAccountInfo(this.apiKey, this.apiSecret);
+
+    // Cache result for 5 seconds
+    this.cacheService.set(cacheKey, accountInfo, 5000);
+
+    return accountInfo;
+  }
+
+  /**
+   * Gets account balance (USDT only for performance)
    */
   async getAccountBalance(): Promise<AccountTestnetBalanceDto> {
     if (!this.isConfigured()) {
@@ -80,9 +104,10 @@ export class BinanceTestnetService {
       return cached;
     }
 
+    // Get USDT balance from integration layer
     const balance = await this.binanceTestnetApi.getAccountBalance(this.apiKey, this.apiSecret);
 
-    // Cache result
+    // Cache result for 5 seconds
     this.cacheService.set(cacheKey, balance, 5000);
 
     return balance;
@@ -113,14 +138,23 @@ export class BinanceTestnetService {
   }
 
   /**
-   * Gets all orders (including filled)
+   * Gets all orders (including filled) with comprehensive filters
    */
-  async getAllOrders(symbol?: string, limit: number = 20): Promise<TestnetOrderDto[]> {
+  async getAllOrders(filters: {
+    symbol?: string;
+    status?: string;
+    side?: string;
+    type?: string;
+    orderId?: number;
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+  }): Promise<TestnetOrderDto[]> {
     if (!this.isConfigured()) {
       throw new Error('Testnet not configured');
     }
 
-    const cacheKey = `testnet:allorders:${symbol || 'all'}:${limit}`;
+    const cacheKey = `testnet:allorders:${JSON.stringify(filters)}`;
 
     // Try cache first
     const cached = this.cacheService.get(cacheKey);
@@ -131,8 +165,7 @@ export class BinanceTestnetService {
     const orders = await this.binanceTestnetApi.getAllOrders(
       this.apiKey,
       this.apiSecret,
-      symbol,
-      limit,
+      filters,
     );
 
     // Cache result for shorter time since this includes recent activity
