@@ -6,9 +6,10 @@ import { NewsCronjobService } from './news-cronjob.service';
 import { KycModule } from '../../kyc/kyc.module';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { AssetsModule } from '../assets/assets.module';
+import { BinanceModule } from '../binance/binance.module';
 
 @Module({
-  imports: [KycModule, PrismaModule, ScheduleModule, AssetsModule], // Provides PythonApiService, PrismaService, AssetsService
+  imports: [KycModule, PrismaModule, ScheduleModule, AssetsModule, BinanceModule], // Provides PythonApiService, PrismaService, AssetsService, BinanceService
   controllers: [NewsController],
   providers: [NewsService, NewsCronjobService],
   exports: [NewsService, NewsCronjobService],

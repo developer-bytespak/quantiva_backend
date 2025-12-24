@@ -19,7 +19,7 @@ export class PythonApiService {
     this.baseUrl = this.configService.get<string>('PYTHON_API_URL', 'http://localhost:8000');
     this.axiosInstance = axios.create({
       baseURL: this.baseUrl,
-      timeout: 30000,
+      timeout: 120000, // 2 minutes default (increased for sentiment/news operations)
       headers: {
         'Content-Type': 'application/json',
       },

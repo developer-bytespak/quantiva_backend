@@ -282,6 +282,10 @@ model assets {
   is_active     Boolean   @default(true)
   first_seen_at DateTime? @db.Timestamp(6)
   last_seen_at  DateTime? @db.Timestamp(6)
+  display_name  String?   @db.VarChar(255)
+  logo_url      String?   @db.Text
+  coingecko_id  String?   @db.VarChar(100)
+  market_cap_rank Int?
 
   market_rankings          market_rankings[]
   trending_assets          trending_assets[]
@@ -319,6 +323,12 @@ model trending_assets {
   social_score   Decimal? @db.Decimal(20, 8)
   market_volume  Decimal? @db.Decimal(30, 10)
   price_usd      Decimal? @db.Decimal(20, 8)
+  price_change_24h      Decimal? @db.Decimal(10, 4)
+  price_change_24h_usd  Decimal? @db.Decimal(20, 8)
+  market_cap            Decimal? @db.Decimal(30, 2)
+  volume_24h            Decimal? @db.Decimal(30, 10)
+  high_24h              Decimal? @db.Decimal(20, 8)
+  low_24h               Decimal? @db.Decimal(20, 8)
 
   asset assets @relation(fields: [asset_id], references: [asset_id])
 

@@ -87,9 +87,32 @@ export class AuthController {
   async login(
     @Body() loginDto: LoginDto,
     @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
   ) {
     const ipAddress = req.ip || req.socket.remoteAddress;
-    return this.authService.login(loginDto, ipAddress);
+    const result = await this.authService.login(loginDto, ipAddress);
+
+    // Check if 2FA is required or if tokens are returned directly
+    if ('accessToken' in result && 'refreshToken' in result) {
+      // 2FA is disabled - tokens returned directly, set cookies
+      const tokenResult = result as any;
+      // Access token: 45 minutes
+      this.setCookie(res, 'access_token', tokenResult.accessToken, 45 * 60);
+      // Refresh token: 7 days
+      this.setCookie(res, 'refresh_token', tokenResult.refreshToken, 7 * 24 * 60 * 60);
+
+      // Return tokens in response body as fallback for cross-origin cookie issues
+      return {
+        user: tokenResult.user,
+        accessToken: tokenResult.accessToken,
+        refreshToken: tokenResult.refreshToken,
+        sessionId: tokenResult.sessionId,
+        message: 'Authentication successful',
+      };
+    }
+
+    // 2FA is required (original flow)
+    return result;
   }
 
   @Public()
@@ -115,8 +138,12 @@ export class AuthController {
     // Refresh token: 7 days
     this.setCookie(res, 'refresh_token', result.refreshToken, 7 * 24 * 60 * 60);
 
+    // Return tokens in response body as fallback for cross-origin cookie issues
     return {
       user: result.user,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      sessionId: result.sessionId,
       message: 'Authentication successful',
     };
   }

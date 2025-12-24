@@ -3,9 +3,16 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import cookieParser from 'cookie-parser';
 import { PreBuiltSignalsCronjobService } from './modules/strategies/services/pre-built-signals-cronjob.service';
+import { json, urlencoded } from 'express';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  // Increase body size limit to 10MB for file uploads (default is 100kb)
+  // This applies to JSON and URL-encoded bodies. For multipart/form-data (file uploads),
+  // the size limit is controlled by multer configuration in individual controllers.
+  app.use(json({ limit: '10mb' }));
+  app.use(urlencoded({ limit: '10mb', extended: true }));
 
   // Enable CORS. Support multiple frontend origins via FRONTEND_URLS (comma-separated)
   // Example: FRONTEND_URLS=https://quantiva-hq.vercel.app,https://preview-app.vercel.app

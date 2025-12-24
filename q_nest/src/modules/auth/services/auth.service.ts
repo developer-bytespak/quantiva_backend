@@ -373,7 +373,9 @@ export class AuthService {
     // Try find existing user by email
     let user = await this.prisma.users.findUnique({ where: { email } });
 
+    let isNewUser = false;
     if (!user) {
+      isNewUser = true;
       // create a username from email local part (ensure uniqueness by appending short id if needed)
       const local = email.split('@')[0].replace(/[^a-zA-Z0-9_\-\.]/g, '');
       let username = local;
@@ -390,7 +392,8 @@ export class AuthService {
           email,
           username,
           email_verified: true,
-          full_name: name,
+          // Don't set full_name here - user should complete personal-info during onboarding
+          // full_name: name,
           profile_pic_url: picture,
           // leave password_hash null for social logins
         },
