@@ -42,6 +42,7 @@ python-dotenv>=1.0.0
 psycopg2-binary>=2.9.0
 
 # LLM Dependencies
-google-generativeai>=0.3.0
+google-generativeai>=0.3.0  # Gemini (fallback)
+openai>=1.0.0                # OpenAI (primary)
 
 tf-keras>=2.20.0
