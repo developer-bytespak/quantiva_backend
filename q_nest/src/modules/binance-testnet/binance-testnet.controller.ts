@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Put,
   Delete,
   Body,
   Param,
@@ -16,6 +17,7 @@ import { BinanceTestnetService } from './services/binance-testnet.service';
 import { JwtAuthGuard } from '../../modules/auth/guards/jwt-auth.guard';
 import { Public } from '../../common/decorators/public.decorator';
 import { PlaceTestnetOrderDto } from './dto/place-testnet-order.dto';
+import { TestnetOrderDto } from './dto/testnet-data.dto';
 
 /**
  * Binance Testnet Paper Trading Controller
@@ -178,59 +180,81 @@ export class BinanceTestnetController {
         return await this.binanceTestnetService.getAllOrders({ symbol, ...filters });
       }
 
-      // No symbol provided -> aggregate across all trading symbols for the account
-      this.logger.debug('No symbol specified, aggregating orders across all trading symbols');
+      // No symbol provided -> aggregate across trading symbols with actual balances
+      this.logger.debug('No symbol specified, aggregating orders across symbols with balances');
 
-      // Try to get all symbols from account balances, fallback to default list
-      let symbolList = this.DEFAULT_TRADING_SYMBOLS;
+      // ONLY query symbols that have non-zero balances to minimize API calls and avoid rate limits
+      let symbolList: string[] = [];
       try {
         const accountInfo = await this.binanceTestnetService.getAccountInfo();
         if (accountInfo?.balances && Array.isArray(accountInfo.balances)) {
-          // Build symbol list from all non-zero balances (USDT pairs)
+          // Build symbol list ONLY from assets with non-zero balances
           const accountSymbols = new Set<string>();
           for (const balance of accountInfo.balances) {
             const asset = balance.asset;
-            if (asset && asset !== 'USDT' && asset !== 'BUSD') {
-              // Try common trading pairs
+            const total = parseFloat(balance.free || '0') + parseFloat(balance.locked || '0');
+            // Only include assets with actual balance
+            if (asset && total > 0 && asset !== 'USDT' && asset !== 'BUSD') {
               accountSymbols.add(`${asset}USDT`);
             }
           }
-          // Merge with default symbols to ensure coverage
-          if (accountSymbols.size > 0) {
-            symbolList = Array.from(new Set([...accountSymbols, ...this.DEFAULT_TRADING_SYMBOLS]));
-            this.logger.debug(`Built symbol list from account balances: ${symbolList.length} symbols`);
-          }
+          symbolList = Array.from(accountSymbols);
+          this.logger.debug(`Found ${symbolList.length} symbols with balances: ${symbolList.join(', ')}`);
+        }
+        
+        // If no balances found, use a minimal default list
+        if (symbolList.length === 0) {
+          symbolList = ['BTCUSDT', 'ETHUSDT']; // Only top 2 to avoid rate limits
+          this.logger.debug('No balances found, using minimal default symbols');
         }
       } catch (err: any) {
-        this.logger.warn(`Failed to fetch account info for symbol discovery: ${err?.message}, using default symbols`);
+        this.logger.warn(`Failed to fetch account info: ${err?.message}, using minimal defaults`);
+        symbolList = ['BTCUSDT', 'ETHUSDT']; // Fallback to minimal list
       }
 
       // When aggregating across multiple symbols, request more per symbol to ensure adequate coverage
-      const perSymbolLimit = Math.ceil((parsedLimit * symbolList.length) / Math.max(symbolList.length, 1));
+      const perSymbolLimit = Math.ceil(parsedLimit / Math.max(symbolList.length, 1));
 
-      // Parallel requests for better performance instead of sequential
-      const requests = symbolList.map(s =>
-        this.binanceTestnetService.getAllOrders({ 
-          symbol: s, 
-          ...filters,
-          limit: perSymbolLimit,
-        }).catch((err: any) => {
-          // Log and continue on individual symbol failures (rate limits, invalid symbol, etc.)
-          this.logger.warn(
-            `Failed fetching orders for symbol ${s}: ${err?.message ?? 'Unknown error'}`,
-          );
-          return []; // Return empty array on error
-        })
-      );
+      // Process symbols in batches of 5 to avoid rate limiting
+      // This prevents too many concurrent API calls
+      const batchSize = 5;
+      const allResponses: TestnetOrderDto[][] = [];
+      
+      for (let i = 0; i < symbolList.length; i += batchSize) {
+        const batch = symbolList.slice(i, i + batchSize);
+        this.logger.debug(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(symbolList.length / batchSize)}: ${batch.join(', ')}`);
+        
+        const batchRequests = batch.map(s =>
+          this.binanceTestnetService.getAllOrders({ 
+            symbol: s, 
+            ...filters,
+            limit: perSymbolLimit,
+          }).catch((err: any) => {
+            // Log and continue on individual symbol failures
+            this.logger.warn(
+              `Failed fetching orders for symbol ${s}: ${err?.message ?? 'Unknown error'}`,
+            );
+            return []; // Return empty array on error
+          })
+        );
+        
+        const batchResponses = await Promise.all(batchRequests);
+        allResponses.push(...batchResponses);
+        
+        // Small delay between batches to further reduce rate limit pressure
+        if (i + batchSize < symbolList.length) {
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+      }
 
-      const responses = await Promise.all(requests);
+      const responses = allResponses;
       
       // Flatten all responses into a single array
       const aggregated = responses.flat();
 
-      // Sort by order time (most recent first) and apply global limit
+      // Sort by order timestamp (most recent first) and apply global limit
       const sorted = aggregated.sort(
-        (a, b) => (b.timestamp ?? b.time ?? b.updateTime ?? 0) - (a.timestamp ?? a.time ?? a.updateTime ?? 0),
+        (a, b) => (b.timestamp || 0) - (a.timestamp || 0),
       );
 
       const result = sorted.slice(0, parsedLimit);
@@ -364,5 +388,56 @@ export class BinanceTestnetController {
   async getDashboardData(@Query('symbols') symbols: string = 'BTCUSDT,ETHUSDT') {
     const symbolList = symbols.split(',').map((s) => s.trim());
     return this.binanceTestnetService.getDashboardData(symbolList);
+  }
+
+  /**
+   * Create WebSocket listen key
+   * @route POST /binance-testnet/websocket/listen-key
+   */
+  @Public()
+  @Post('websocket/listen-key')
+  @HttpCode(HttpStatus.OK)
+  async createListenKey() {
+    try {
+      this.logger.log('Creating WebSocket listen key...');
+      const listenKey = await this.binanceTestnetService.createListenKey();
+      this.logger.log(`Listen key created: ${listenKey}`);
+      return { listenKey };
+    } catch (error: any) {
+      this.logger.error(`Failed to create listen key in controller: ${error.message}`, error.stack);
+      throw new BadRequestException(error.message || 'Failed to create listen key');
+    }
+  }
+
+  /**
+   * Keep alive WebSocket listen key
+   * @route PUT /binance-testnet/websocket/listen-key
+   */
+  @Public()
+  @Put('websocket/listen-key')
+  @HttpCode(HttpStatus.OK)
+  async keepAliveListenKey() {
+    try {
+      await this.binanceTestnetService.keepAliveListenKey();
+      return { success: true };
+    } catch (error: any) {
+      throw new BadRequestException(error.message || 'Failed to keep alive listen key');
+    }
+  }
+
+  /**
+   * Close WebSocket listen key
+   * @route DELETE /binance-testnet/websocket/listen-key
+   */
+  @Public()
+  @Delete('websocket/listen-key')
+  @HttpCode(HttpStatus.OK)
+  async closeListenKey() {
+    try {
+      await this.binanceTestnetService.closeListenKey();
+      return { success: true };
+    } catch (error: any) {
+      throw new BadRequestException(error.message || 'Failed to close listen key');
+    }
   }
 }
