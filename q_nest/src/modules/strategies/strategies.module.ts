@@ -15,9 +15,10 @@ import { SignalsModule } from '../signals/signals.module';
 import { NewsModule } from '../news/news.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 import { BinanceModule } from '../binance/binance.module';
+import { AiInsightsModule } from '../../ai-insights/ai-insights.module';
 
 @Module({
-  imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule), NewsModule, forwardRef(() => ExchangesModule), BinanceModule, ScheduleModule],
+  imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule), NewsModule, forwardRef(() => ExchangesModule), BinanceModule, ScheduleModule, AiInsightsModule],
   controllers: [StrategiesController],
   providers: [
     StrategiesService,

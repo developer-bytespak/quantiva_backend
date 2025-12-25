@@ -17,6 +17,7 @@
     "prisma:migrate:reset": "prisma migrate reset"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@nestjs/bullmq": "^10.0.1",
     "@nestjs/common": "^10.0.0",
     "@nestjs/config": "^3.1.1",
@@ -40,6 +41,7 @@
     "google-auth-library": "^10.5.0",
     "ioredis": "^5.3.2",
     "multer": "^1.4.5-lts.1",
+    "openai": "^6.15.0",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "reflect-metadata": "^0.1.13",
