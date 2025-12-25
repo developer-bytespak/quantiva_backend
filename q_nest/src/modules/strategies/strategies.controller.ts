@@ -110,6 +110,8 @@ export class StrategiesController {
           entry_price: signal.details[0]?.entry_price,
           stop_loss: signal.details[0]?.stop_loss,
           take_profit_1: signal.details[0]?.take_profit_1,
+          stop_loss_pct: strategy.stop_loss_value, // Add strategy percentage
+          take_profit_pct: strategy.take_profit_value, // Add strategy percentage
           sentiment_score: signal.sentiment_score,
           trend_score: signal.trend_score,
         });
