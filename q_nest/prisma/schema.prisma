@@ -7,7 +7,666 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Enums
+model users {
+  user_id              String                      @id @default(uuid()) @db.Uuid
+  email                String                      @unique @db.VarChar(255)
+  username             String                      @unique @db.VarChar(100)
+  password_hash        String?                     @db.VarChar(255)
+  email_verified       Boolean                     @default(false)
+  kyc_status           KycStatus                   @default(pending)
+  created_at           DateTime                    @default(now()) @db.Timestamp(6)
+  updated_at           DateTime?                   @updatedAt @db.Timestamp(6)
+  two_factor_enabled   Boolean                     @default(true)
+  two_factor_secret    String?                     @db.VarChar(255)
+  dob                  DateTime?                   @db.Date
+  full_name            String?                     @db.VarChar(120)
+  gender               String?                     @db.VarChar(50)
+  nationality          String?                     @db.VarChar(100)
+  phone_number         String?                     @db.VarChar(20)
+  profile_pic_url      String?
+  kyc_verifications    kyc_verifications[]
+  optimization_runs    optimization_runs[]
+  portfolios           portfolios[]
+  risk_events          risk_events[]
+  strategies           strategies[]
+  signals              strategy_signals[]
+  two_factor_codes     two_factor_codes[]
+  exchange_connections user_exchange_connections[]
+  sessions             user_sessions[]
+  settings             user_settings?
+  subscriptions        user_subscriptions[]
+
+  @@map("users")
+}
+
+model user_sessions {
+  session_id         String   @id @default(uuid()) @db.Uuid
+  user_id            String   @db.Uuid
+  issued_at          DateTime @default(now()) @db.Timestamp(6)
+  expires_at         DateTime @db.Timestamp(6)
+  revoked            Boolean  @default(false)
+  device_id          String?  @db.VarChar(255)
+  ip_address         String?  @db.VarChar(45)
+  refresh_token_hash String?
+  user               users    @relation(fields: [user_id], references: [user_id])
+
+  @@index([user_id])
+  @@map("user_sessions")
+}
+
+model two_factor_codes {
+  code_id    String   @id @default(uuid()) @db.Uuid
+  user_id    String   @db.Uuid
+  code       String   @db.VarChar(6)
+  expires_at DateTime @db.Timestamp(6)
+  used       Boolean  @default(false)
+  purpose    String   @db.VarChar(50)
+  created_at DateTime @default(now()) @db.Timestamp(6)
+  user       users    @relation(fields: [user_id], references: [user_id])
+
+  @@index([user_id])
+  @@index([expires_at])
+  @@map("two_factor_codes")
+}
+
+model user_settings {
+  user_id             String        @id @db.Uuid
+  risk_tolerance      RiskTolerance @default(medium)
+  notifications_email Boolean       @default(true)
+  notifications_push  Boolean       @default(true)
+  user                users         @relation(fields: [user_id], references: [user_id])
+
+  @@map("user_settings")
+}
+
+model kyc_verifications {
+  kyc_id                 String             @id @default(uuid()) @db.Uuid
+  user_id                String             @db.Uuid
+  status                 KycStatus          @default(pending)
+  decision_reason        String?
+  doc_authenticity_score Decimal?           @db.Decimal(5, 4)
+  face_match_score       Decimal?           @db.Decimal(5, 4)
+  liveness_confidence    Decimal?           @db.Decimal(5, 4)
+  liveness_result        String?            @db.VarChar(20)
+  mrz_data               Json?              @db.Json
+  documents              kyc_documents[]
+  face_matches           kyc_face_matches[]
+  user                   users              @relation(fields: [user_id], references: [user_id])
+
+  @@index([user_id])
+  @@map("kyc_verifications")
+}
+
+model kyc_documents {
+  document_id        String            @id @default(uuid()) @db.Uuid
+  kyc_id             String            @db.Uuid
+  storage_url        String
+  ocr_name           String?           @db.VarChar(255)
+  ocr_dob            DateTime?         @db.Date
+  ocr_confidence     Decimal?          @db.Decimal(5, 4)
+  created_at         DateTime          @default(now()) @db.Timestamp(6)
+  authenticity_flags Json?             @db.Json
+  document_type      String?           @db.VarChar(50)
+  expiration_date    DateTime?         @db.Date
+  issuing_country    String?           @db.VarChar(100)
+  mrz_text           String?
+  kyc_verifications  kyc_verifications @relation(fields: [kyc_id], references: [kyc_id])
+
+  @@index([kyc_id])
+  @@map("kyc_documents")
+}
+
+model kyc_face_matches {
+  match_id            String            @id @default(uuid()) @db.Uuid
+  kyc_id              String            @db.Uuid
+  photo_url           String
+  similarity          Decimal?          @db.Decimal(5, 4)
+  is_match            Boolean           @default(false)
+  created_at          DateTime          @default(now()) @db.Timestamp(6)
+  liveness_confidence Decimal?          @db.Decimal(5, 4)
+  liveness_result     String?           @db.VarChar(20)
+  quality_score       Decimal?          @db.Decimal(5, 4)
+  spoof_type          String?           @db.VarChar(50)
+  kyc_verifications   kyc_verifications @relation(fields: [kyc_id], references: [kyc_id])
+
+  @@index([kyc_id])
+  @@map("kyc_face_matches")
+}
+
+model exchanges {
+  exchange_id    String                      @id @default(uuid()) @db.Uuid
+  name           String                      @unique @db.VarChar(100)
+  type           ExchangeType
+  supports_oauth Boolean                     @default(false)
+  created_at     DateTime                    @default(now()) @db.Timestamp(6)
+  connections    user_exchange_connections[]
+
+  @@map("exchanges")
+}
+
+model user_exchange_connections {
+  connection_id        String           @id @default(uuid()) @db.Uuid
+  user_id              String           @db.Uuid
+  exchange_id          String           @db.Uuid
+  auth_type            String           @db.VarChar(20)
+  api_key_encrypted    String?
+  api_secret_encrypted String?
+  oauth_access_token   String?
+  oauth_refresh_token  String?
+  permissions          Json?            @db.Json
+  status               ConnectionStatus @default(pending)
+  created_at           DateTime         @default(now()) @db.Timestamp(6)
+  updated_at           DateTime?        @db.Timestamp(6)
+  connection_metadata  Json?            @db.Json
+  last_synced_at       DateTime?        @db.Timestamp(6)
+  exchange             exchanges        @relation(fields: [exchange_id], references: [exchange_id])
+  user                 users            @relation(fields: [user_id], references: [user_id])
+
+  @@index([user_id])
+  @@index([exchange_id])
+  @@index([status])
+  @@index([user_id, status])
+  @@map("user_exchange_connections")
+}
+
+model assets {
+  asset_id                 String                     @id @default(uuid()) @db.Uuid
+  symbol                   String?                    @db.VarChar(50)
+  name                     String?                    @db.VarChar(200)
+  asset_type               String?                    @db.VarChar(20)
+  sector                   String?                    @db.VarChar(100)
+  is_active                Boolean                    @default(true)
+  first_seen_at            DateTime?                  @db.Timestamp(6)
+  last_seen_at             DateTime?                  @db.Timestamp(6)
+  coingecko_id             String?                    @db.VarChar(100)
+  display_name             String?                    @db.VarChar(255)
+  logo_url                 String?
+  market_cap_rank          Int?
+  market_data              asset_market_data[]
+  asset_metrics            asset_metrics[]
+  market_rankings          market_rankings[]
+  optimization_allocations optimization_allocations[]
+  portfolio_positions      portfolio_positions[]
+  rebalanceSuggestions     rebalance_suggestions[]
+  strategySignals          strategy_signals[]
+  trending_assets          trending_assets[]
+  trending_news            trending_news[]
+
+  @@map("assets")
+}
+
+model market_rankings {
+  rank_timestamp DateTime @db.Timestamp(6)
+  asset_id       String   @db.Uuid
+  rank           Int
+  market_cap     Decimal? @db.Decimal(30, 2)
+  price_usd      Decimal? @db.Decimal(20, 8)
+  volume_24h     Decimal? @db.Decimal(30, 2)
+  asset          assets   @relation(fields: [asset_id], references: [asset_id])
+
+  @@id([rank_timestamp, asset_id])
+  @@map("market_rankings")
+}
+
+model trending_assets {
+  poll_timestamp       DateTime @db.Timestamp(6)
+  asset_id             String   @db.Uuid
+  trend_rank           Int?
+  galaxy_score         Decimal? @db.Decimal(10, 4)
+  alt_rank             Decimal? @db.Decimal(10, 4)
+  social_score         Decimal? @db.Decimal(20, 8)
+  market_volume        Decimal? @db.Decimal(30, 10)
+  price_usd            Decimal? @db.Decimal(20, 8)
+  high_24h             Decimal? @db.Decimal(20, 8)
+  low_24h              Decimal? @db.Decimal(20, 8)
+  market_cap           Decimal? @db.Decimal(30, 2)
+  price_change_24h     Decimal? @db.Decimal(10, 4)
+  price_change_24h_usd Decimal? @db.Decimal(20, 8)
+  volume_24h           Decimal? @db.Decimal(30, 10)
+  asset                assets   @relation(fields: [asset_id], references: [asset_id])
+
+  @@id([poll_timestamp, asset_id])
+  @@map("trending_assets")
+}
+
+model trending_news {
+  poll_timestamp  DateTime        @db.Timestamp(6)
+  asset_id        String          @db.Uuid
+  news_score      Decimal?        @db.Decimal(10, 4)
+  news_sentiment  Decimal?        @db.Decimal(10, 4)
+  news_volume     Int?
+  media_buzz      Decimal?        @db.Decimal(10, 4)
+  heading         String?         @db.VarChar(120)
+  news_detail     Json?           @db.Json
+  article_url     String?
+  metadata        Json?           @db.Json
+  published_at    DateTime?       @db.Timestamp(6)
+  sentiment_label SentimentLabel?
+  source          NewsSource?
+  asset           assets          @relation(fields: [asset_id], references: [asset_id])
+
+  @@id([poll_timestamp, asset_id])
+  @@map("trending_news")
+}
+
+model asset_market_data {
+  asset_id    String   @db.Uuid
+  timestamp   DateTime @db.Timestamp(6)
+  open_price  Decimal? @db.Decimal(20, 8)
+  high_price  Decimal? @db.Decimal(20, 8)
+  low_price   Decimal? @db.Decimal(20, 8)
+  close_price Decimal? @db.Decimal(20, 8)
+  volume      Decimal? @db.Decimal(30, 8)
+  asset       assets   @relation(fields: [asset_id], references: [asset_id])
+
+  @@id([asset_id, timestamp])
+  @@map("asset_market_data")
+}
+
+model asset_metrics {
+  metric_id    String    @id @default(uuid()) @db.Uuid
+  asset_id     String    @db.Uuid
+  metric_date  DateTime? @db.Date
+  metric_type  String?   @db.VarChar(50)
+  metric_value Decimal?  @db.Decimal(30, 10)
+  metadata     Json?     @db.Json
+  source       String?   @db.VarChar(50)
+  asset        assets    @relation(fields: [asset_id], references: [asset_id])
+
+  @@index([asset_id])
+  @@map("asset_metrics")
+}
+
+model macro_indicators {
+  indicator_id String                   @id @default(uuid()) @db.Uuid
+  code         String?                  @db.VarChar(50)
+  name         String?                  @db.VarChar(200)
+  category     String?                  @db.VarChar(100)
+  frequency    String?                  @db.VarChar(20)
+  source       String?                  @db.VarChar(50)
+  values       macro_indicator_values[]
+
+  @@map("macro_indicators")
+}
+
+model macro_indicator_values {
+  indicator_id String           @db.Uuid
+  data_date    DateTime         @db.Date
+  value        Decimal?         @db.Decimal(20, 6)
+  updated_at   DateTime?        @db.Timestamp(6)
+  indicator    macro_indicators @relation(fields: [indicator_id], references: [indicator_id])
+
+  @@id([indicator_id, data_date])
+  @@map("macro_indicator_values")
+}
+
+model strategies {
+  strategy_id          String                    @id @default(uuid()) @db.Uuid
+  user_id              String?                   @db.Uuid
+  name                 String?                   @db.VarChar(100)
+  type                 StrategyType
+  description          String?
+  risk_level           RiskLevel
+  auto_trade_threshold Decimal?                  @db.Decimal(5, 4)
+  is_active            Boolean                   @default(true)
+  created_at           DateTime                  @default(now()) @db.Timestamp(6)
+  updated_at           DateTime?                 @db.Timestamp(6)
+  entry_rules          Json?
+  exit_rules           Json?
+  indicators           Json?
+  schedule_cron        String?                   @db.VarChar(100)
+  stop_loss_type       String?                   @db.VarChar(20)
+  stop_loss_value      Decimal?                  @db.Decimal(10, 4)
+  take_profit_type     String?                   @db.VarChar(20)
+  take_profit_value    Decimal?                  @db.Decimal(10, 4)
+  target_assets        Json?
+  timeframe            String?                   @db.VarChar(20)
+  engine_weights       Json?
+  template_id          String?                   @db.Uuid
+  template             strategies?               @relation("StrategyTemplate", fields: [template_id], references: [strategy_id])
+  clones               strategies[]              @relation("StrategyTemplate")
+  user                 users?                    @relation(fields: [user_id], references: [user_id])
+  execution_jobs       strategy_execution_jobs[]
+  parameters           strategy_parameters[]
+  signals              strategy_signals[]
+
+  @@index([user_id])
+  @@index([is_active])
+  @@index([template_id])
+  @@map("strategies")
+}
+
+model strategy_parameters {
+  parameter_id String     @id @default(uuid()) @db.Uuid
+  strategy_id  String     @db.Uuid
+  name         String?    @db.VarChar(100)
+  value        String?    @db.VarChar(255)
+  created_at   DateTime?  @db.Timestamp(6)
+  strategy     strategies @relation(fields: [strategy_id], references: [strategy_id])
+
+  @@index([strategy_id])
+  @@map("strategy_parameters")
+}
+
+model sentiment_analyses {
+  sentiment_id String    @id @default(uuid()) @db.Uuid
+  source_type  String?   @db.VarChar(20)
+  label        String?   @db.VarChar(20)
+  score        Decimal?  @db.Decimal(6, 3)
+  confidence   Decimal?  @db.Decimal(5, 4)
+  created_at   DateTime? @db.Timestamp(6)
+
+  @@map("sentiment_analyses")
+}
+
+model strategy_signals {
+  signal_id            String                   @id @default(uuid()) @db.Uuid
+  strategy_id          String?                  @db.Uuid
+  user_id              String?                  @db.Uuid
+  asset_id             String?                  @db.Uuid
+  timestamp            DateTime?                @db.Timestamp(6)
+  final_score          Decimal?                 @db.Decimal(6, 3)
+  action               SignalAction
+  confidence           Decimal?                 @db.Decimal(5, 4)
+  sentiment_score      Decimal?                 @db.Decimal(6, 3)
+  trend_score          Decimal?                 @db.Decimal(6, 3)
+  fundamental_score    Decimal?                 @db.Decimal(6, 3)
+  liquidity_score      Decimal?                 @db.Decimal(6, 3)
+  event_risk_score     Decimal?                 @db.Decimal(6, 3)
+  macro_score          Decimal?                 @db.Decimal(6, 3)
+  volatility_score     Decimal?                 @db.Decimal(6, 3)
+  engine_metadata      Json?                    @db.Json
+  autoTradeEvaluations auto_trade_evaluations[]
+  orders               orders[]
+  details              signal_details[]
+  explanations         signal_explanations[]
+  asset                assets?                  @relation(fields: [asset_id], references: [asset_id])
+  strategy             strategies?              @relation(fields: [strategy_id], references: [strategy_id])
+  user                 users?                   @relation(fields: [user_id], references: [user_id])
+
+  @@index([strategy_id])
+  @@index([user_id])
+  @@index([asset_id])
+  @@map("strategy_signals")
+}
+
+model signal_details {
+  detail_id      String           @id @default(uuid()) @db.Uuid
+  signal_id      String           @db.Uuid
+  entry_price    Decimal?         @db.Decimal(20, 8)
+  position_size  Decimal?         @db.Decimal(20, 8)
+  position_value Decimal?         @db.Decimal(20, 8)
+  stop_loss      Decimal?         @db.Decimal(20, 8)
+  take_profit_1  Decimal?         @db.Decimal(20, 8)
+  take_profit_2  Decimal?         @db.Decimal(20, 8)
+  leverage       Decimal?         @db.Decimal(6, 2)
+  order_type     OrderType?
+  time_in_force  String?          @db.VarChar(20)
+  metadata       Json?            @db.Json
+  created_at     DateTime?        @db.Timestamp(6)
+  signal         strategy_signals @relation(fields: [signal_id], references: [signal_id])
+
+  @@index([signal_id])
+  @@map("signal_details")
+}
+
+model signal_explanations {
+  explanation_id     String           @id @default(uuid()) @db.Uuid
+  signal_id          String           @db.Uuid
+  llm_model          String?          @db.VarChar(50)
+  text               String?
+  created_at         DateTime?        @db.Timestamp(6)
+  error_message      String?
+  explanation_status String?          @db.VarChar(20)
+  retry_count        Int              @default(0)
+  signal             strategy_signals @relation(fields: [signal_id], references: [signal_id])
+
+  @@index([signal_id])
+  @@map("signal_explanations")
+}
+
+model portfolios {
+  portfolio_id      String                @id @default(uuid()) @db.Uuid
+  user_id           String                @db.Uuid
+  name              String?               @db.VarChar(100)
+  type              PortfolioType         @default(spot)
+  created_at        DateTime              @default(now()) @db.Timestamp(6)
+  updated_at        DateTime?             @db.Timestamp(6)
+  drawdownHistories drawdown_history[]
+  optimizationRuns  optimization_runs[]
+  orders            orders[]
+  positions         portfolio_positions[]
+  snapshots         portfolio_snapshots[]
+  user              users                 @relation(fields: [user_id], references: [user_id])
+
+  @@index([user_id])
+  @@map("portfolios")
+}
+
+model portfolio_positions {
+  position_id     String        @id @default(uuid()) @db.Uuid
+  portfolio_id    String        @db.Uuid
+  asset_id        String        @db.Uuid
+  quantity        Decimal?      @db.Decimal(30, 10)
+  avg_entry_price Decimal?      @db.Decimal(20, 8)
+  current_price   Decimal?      @db.Decimal(20, 8)
+  unrealized_pnl  Decimal?      @db.Decimal(20, 8)
+  realized_pnl    Decimal?      @db.Decimal(20, 8)
+  leverage        Decimal?      @db.Decimal(6, 2)
+  side            PositionSide?
+  updated_at      DateTime?     @db.Timestamp(6)
+  asset           assets        @relation(fields: [asset_id], references: [asset_id])
+  portfolio       portfolios    @relation(fields: [portfolio_id], references: [portfolio_id])
+
+  @@index([portfolio_id])
+  @@index([asset_id])
+  @@map("portfolio_positions")
+}
+
+model orders {
+  order_id            String             @id @default(uuid()) @db.Uuid
+  portfolio_id        String             @db.Uuid
+  signal_id           String?            @db.Uuid
+  side                SignalAction?
+  order_type          OrderType?
+  quantity            Decimal?           @db.Decimal(30, 10)
+  price               Decimal?           @db.Decimal(20, 8)
+  status              OrderStatus        @default(pending)
+  auto_trade_approved Boolean            @default(false)
+  created_at          DateTime           @default(now()) @db.Timestamp(6)
+  updated_at          DateTime?          @db.Timestamp(6)
+  executions          order_executions[]
+  portfolio           portfolios         @relation(fields: [portfolio_id], references: [portfolio_id])
+  signal              strategy_signals?  @relation(fields: [signal_id], references: [signal_id])
+
+  @@index([portfolio_id])
+  @@index([signal_id])
+  @@map("orders")
+}
+
+model order_executions {
+  execution_id String    @id @default(uuid()) @db.Uuid
+  order_id     String    @db.Uuid
+  trade_id     String?   @db.VarChar(100)
+  price        Decimal?  @db.Decimal(20, 8)
+  quantity     Decimal?  @db.Decimal(30, 10)
+  fee          Decimal?  @db.Decimal(20, 8)
+  timestamp    DateTime? @db.Timestamp(6)
+  order        orders    @relation(fields: [order_id], references: [order_id])
+
+  @@index([order_id])
+  @@map("order_executions")
+}
+
+model portfolio_snapshots {
+  snapshot_id     String     @id @default(uuid()) @db.Uuid
+  portfolio_id    String     @db.Uuid
+  timestamp       DateTime   @db.Timestamp(6)
+  total_value     Decimal?   @db.Decimal(30, 10)
+  cash_value      Decimal?   @db.Decimal(30, 10)
+  positions_value Decimal?   @db.Decimal(30, 10)
+  pnl_24h         Decimal?   @db.Decimal(20, 8)
+  metadata        Json?      @db.Json
+  portfolio       portfolios @relation(fields: [portfolio_id], references: [portfolio_id])
+
+  @@index([portfolio_id])
+  @@map("portfolio_snapshots")
+}
+
+model auto_trade_evaluations {
+  evaluation_id String           @id @default(uuid()) @db.Uuid
+  signal_id     String           @db.Uuid
+  final_score   Decimal?         @db.Decimal(6, 3)
+  confidence    Decimal?         @db.Decimal(5, 4)
+  threshold     Decimal?         @db.Decimal(5, 4)
+  passed        Boolean          @default(false)
+  evaluated_at  DateTime?        @db.Timestamp(6)
+  signal        strategy_signals @relation(fields: [signal_id], references: [signal_id])
+
+  @@index([signal_id])
+  @@map("auto_trade_evaluations")
+}
+
+model optimization_runs {
+  optimization_id           String                     @id @default(uuid()) @db.Uuid
+  user_id                   String                     @db.Uuid
+  portfolio_id              String                     @db.Uuid
+  run_time                  DateTime                   @default(now()) @db.Timestamp(6)
+  model_used                String?                    @db.VarChar(50)
+  constraint_max_asset      Decimal?                   @db.Decimal(5, 2)
+  constraint_max_sector     Decimal?                   @db.Decimal(5, 2)
+  constraint_risk_level     RiskLevel
+  included_signal_assets    Json?                      @db.Json
+  included_portfolio_assets Json?                      @db.Json
+  status                    String?                    @db.VarChar(20)
+  log                       String?
+  allocations               optimization_allocations[]
+  portfolio                 portfolios                 @relation(fields: [portfolio_id], references: [portfolio_id])
+  user                      users                      @relation(fields: [user_id], references: [user_id])
+  suggestions               rebalance_suggestions[]
+
+  @@index([user_id])
+  @@index([portfolio_id])
+  @@map("optimization_runs")
+}
+
+model optimization_allocations {
+  allocation_id     String            @id @default(uuid()) @db.Uuid
+  optimization_id   String            @db.Uuid
+  asset_id          String            @db.Uuid
+  final_weight      Decimal?          @db.Decimal(8, 5)
+  expected_return   Decimal?          @db.Decimal(8, 5)
+  risk_score        Decimal?          @db.Decimal(8, 5)
+  sector            String?           @db.VarChar(50)
+  asset             assets            @relation(fields: [asset_id], references: [asset_id])
+  optimization_runs optimization_runs @relation(fields: [optimization_id], references: [optimization_id])
+
+  @@index([optimization_id])
+  @@index([asset_id])
+  @@map("optimization_allocations")
+}
+
+model rebalance_suggestions {
+  suggestion_id     String            @id @default(uuid()) @db.Uuid
+  optimization_id   String            @db.Uuid
+  asset_id          String            @db.Uuid
+  current_weight    Decimal?          @db.Decimal(8, 5)
+  target_weight     Decimal?          @db.Decimal(8, 5)
+  action            String?           @db.VarChar(10)
+  generated_at      DateTime          @default(now()) @db.Timestamp(6)
+  asset             assets            @relation(fields: [asset_id], references: [asset_id])
+  optimization_runs optimization_runs @relation(fields: [optimization_id], references: [optimization_id])
+
+  @@index([optimization_id])
+  @@index([asset_id])
+  @@map("rebalance_suggestions")
+}
+
+model risk_events {
+  risk_event_id  String    @id @default(uuid()) @db.Uuid
+  user_id        String    @db.Uuid
+  portfolio_id   String?   @db.Uuid
+  asset_id       String?   @db.Uuid
+  event_type     String?   @db.VarChar(50)
+  severity_level RiskLevel
+  triggered_by   String?   @db.VarChar(50)
+  score          Decimal?  @db.Decimal(6, 3)
+  detected_at    DateTime? @db.Timestamp(6)
+  resolved_at    DateTime? @db.Timestamp(6)
+  user           users     @relation(fields: [user_id], references: [user_id])
+
+  @@index([user_id])
+  @@map("risk_events")
+}
+
+model drawdown_history {
+  drawdown_id      String     @id @default(uuid()) @db.Uuid
+  portfolio_id     String     @db.Uuid
+  timestamp        DateTime   @db.Timestamp(6)
+  equity_value     Decimal?   @db.Decimal(20, 8)
+  peak_value       Decimal?   @db.Decimal(20, 8)
+  drawdown_percent Decimal?   @db.Decimal(6, 3)
+  portfolio        portfolios @relation(fields: [portfolio_id], references: [portfolio_id])
+
+  @@index([portfolio_id])
+  @@map("drawdown_history")
+}
+
+model subscription_plans {
+  plan_id            String               @id @default(uuid()) @db.Uuid
+  name               String               @unique @db.VarChar(50)
+  price_monthly      Decimal?             @db.Decimal(10, 2)
+  description        String?
+  features_json      Json?                @db.Json
+  user_subscriptions user_subscriptions[]
+
+  @@map("subscription_plans")
+}
+
+model user_subscriptions {
+  subscription_id  String             @id @default(uuid()) @db.Uuid
+  user_id          String             @db.Uuid
+  plan_id          String             @db.Uuid
+  status           SubscriptionStatus @default(active)
+  started_at       DateTime?          @db.Timestamp(6)
+  expires_at       DateTime?          @db.Timestamp(6)
+  billing_provider String?            @db.VarChar(50)
+  plan             subscription_plans @relation(fields: [plan_id], references: [plan_id])
+  user             users              @relation(fields: [user_id], references: [user_id])
+
+  @@index([user_id])
+  @@index([plan_id])
+  @@map("user_subscriptions")
+}
+
+model strategy_execution_jobs {
+  job_id        String     @id @default(uuid()) @db.Uuid
+  strategy_id   String     @db.Uuid
+  status        JobStatus  @default(pending)
+  scheduled_at  DateTime   @db.Timestamp(6)
+  started_at    DateTime?  @db.Timestamp(6)
+  completed_at  DateTime?  @db.Timestamp(6)
+  error_message String?
+  strategy      strategies @relation(fields: [strategy_id], references: [strategy_id])
+
+  @@index([strategy_id])
+  @@index([status])
+  @@index([scheduled_at])
+  @@map("strategy_execution_jobs")
+}
+
+model sentiment_ema_state {
+  asset_id       String   @id @db.VarChar(100)
+  ema_value      Float
+  last_timestamp DateTime @db.Timestamp(6)
+  momentum       Float?
+  raw_score      Float?
+  metadata       Json?    @db.Json
+  updated_at     DateTime @default(now()) @updatedAt @db.Timestamp(6)
+
+  @@map("sentiment_ema_state")
+}
+
 enum KycStatus {
   pending
   approved
@@ -99,701 +758,4 @@ enum SentimentLabel {
   positive
   negative
   neutral
-}
-
-// Models
-model users {
-  user_id            String    @id @default(uuid()) @db.Uuid
-  email              String    @unique @db.VarChar(255)
-  username           String    @unique @db.VarChar(100)
-  password_hash      String?   @db.VarChar(255)
-  email_verified     Boolean   @default(false)
-  kyc_status         KycStatus @default(pending)
-  two_factor_enabled Boolean   @default(true)
-  two_factor_secret  String?   @db.VarChar(255)
-  full_name          String?   @db.VarChar(120)
-  dob                DateTime? @db.Date
-  nationality        String?   @db.VarChar(100)
-  gender             String?   @db.VarChar(50)
-  phone_number       String?   @db.VarChar(20)
-  profile_pic_url    String?   @db.Text
-  created_at         DateTime  @default(now()) @db.Timestamp(6)
-  updated_at         DateTime? @updatedAt @db.Timestamp(6)
-
-  sessions             user_sessions[]
-  two_factor_codes     two_factor_codes[]
-  settings             user_settings?
-  kyc_verifications    kyc_verifications[]
-  exchange_connections user_exchange_connections[]
-  strategies           strategies[]
-  portfolios           portfolios[]
-  subscriptions        user_subscriptions[]
-  optimization_runs    optimization_runs[]
-  risk_events          risk_events[]
-  signals              strategy_signals[]
-
-  @@map("users")
-}
-
-model user_sessions {
-  session_id         String   @id @default(uuid()) @db.Uuid
-  user_id            String   @db.Uuid
-  issued_at          DateTime @default(now()) @db.Timestamp(6)
-  expires_at         DateTime @db.Timestamp(6)
-  revoked            Boolean  @default(false)
-  refresh_token_hash String?  @db.Text
-  ip_address         String?  @db.VarChar(45)
-  device_id          String?  @db.VarChar(255)
-
-  user users @relation(fields: [user_id], references: [user_id])
-
-  @@index([user_id])
-  @@map("user_sessions")
-}
-
-model two_factor_codes {
-  code_id    String   @id @default(uuid()) @db.Uuid
-  user_id    String   @db.Uuid
-  code       String   @db.VarChar(6)
-  expires_at DateTime @db.Timestamp(6)
-  used       Boolean  @default(false)
-  purpose    String   @db.VarChar(50)
-  created_at DateTime @default(now()) @db.Timestamp(6)
-
-  user users @relation(fields: [user_id], references: [user_id])
-
-  @@index([user_id])
-  @@index([expires_at])
-  @@map("two_factor_codes")
-}
-
-model user_settings {
-  user_id             String        @id @db.Uuid
-  risk_tolerance      RiskTolerance @default(medium)
-  notifications_email Boolean       @default(true)
-  notifications_push  Boolean       @default(true)
-
-  user users @relation(fields: [user_id], references: [user_id])
-
-  @@map("user_settings")
-}
-
-model kyc_verifications {
-  kyc_id                 String    @id @default(uuid()) @db.Uuid
-  user_id                String    @db.Uuid
-  status                 KycStatus @default(pending)
-  decision_reason        String?   @db.Text
-  liveness_result        String?   @db.VarChar(20)
-  liveness_confidence    Decimal?  @db.Decimal(5, 4)
-  face_match_score       Decimal?  @db.Decimal(5, 4)
-  doc_authenticity_score Decimal?  @db.Decimal(5, 4)
-  mrz_data               Json?     @db.Json
-
-  user         users              @relation(fields: [user_id], references: [user_id])
-  documents    kyc_documents[]
-  face_matches kyc_face_matches[]
-
-  @@index([user_id])
-  @@map("kyc_verifications")
-}
-
-model kyc_documents {
-  document_id        String    @id @default(uuid()) @db.Uuid
-  kyc_id             String    @db.Uuid
-  storage_url        String    @db.Text
-  document_type      String?   @db.VarChar(50)
-  ocr_name           String?   @db.VarChar(255)
-  ocr_dob            DateTime? @db.Date
-  ocr_confidence     Decimal?  @db.Decimal(5, 4)
-  mrz_text           String?   @db.Text
-  authenticity_flags Json?     @db.Json
-  expiration_date    DateTime? @db.Date
-  issuing_country    String?   @db.VarChar(100)
-  created_at         DateTime  @default(now()) @db.Timestamp(6)
-
-  kyc_verifications kyc_verifications @relation(fields: [kyc_id], references: [kyc_id])
-
-  @@index([kyc_id])
-  @@map("kyc_documents")
-}
-
-model kyc_face_matches {
-  match_id            String   @id @default(uuid()) @db.Uuid
-  kyc_id              String   @db.Uuid
-  photo_url           String   @db.Text
-  similarity          Decimal? @db.Decimal(5, 4)
-  is_match            Boolean  @default(false)
-  liveness_result     String?  @db.VarChar(20)
-  liveness_confidence Decimal? @db.Decimal(5, 4)
-  quality_score       Decimal? @db.Decimal(5, 4)
-  spoof_type          String?  @db.VarChar(50)
-  created_at          DateTime @default(now()) @db.Timestamp(6)
-
-  kyc_verifications kyc_verifications @relation(fields: [kyc_id], references: [kyc_id])
-
-  @@index([kyc_id])
-  @@map("kyc_face_matches")
-}
-
-model exchanges {
-  exchange_id    String       @id @default(uuid()) @db.Uuid
-  name           String       @unique @db.VarChar(100)
-  type           ExchangeType
-  supports_oauth Boolean      @default(false)
-  created_at     DateTime     @default(now()) @db.Timestamp(6)
-
-  connections user_exchange_connections[]
-
-  @@map("exchanges")
-}
-
-model user_exchange_connections {
-  connection_id        String           @id @default(uuid()) @db.Uuid
-  user_id              String           @db.Uuid
-  exchange_id          String           @db.Uuid
-  auth_type            String           @db.VarChar(20)
-  api_key_encrypted    String?          @db.Text
-  api_secret_encrypted String?          @db.Text
-  oauth_access_token   String?          @db.Text
-  oauth_refresh_token  String?          @db.Text
-  permissions          Json?            @db.Json
-  connection_metadata  Json?            @db.Json
-  status               ConnectionStatus @default(pending)
-  last_synced_at       DateTime?        @db.Timestamp(6)
-  created_at           DateTime         @default(now()) @db.Timestamp(6)
-  updated_at           DateTime?        @db.Timestamp(6)
-
-  user     users     @relation(fields: [user_id], references: [user_id])
-  exchange exchanges @relation(fields: [exchange_id], references: [exchange_id])
-
-  @@index([user_id])
-  @@index([exchange_id])
-  @@index([status])
-  @@index([user_id, status])
-  @@map("user_exchange_connections")
-}
-
-model assets {
-  asset_id      String    @id @default(uuid()) @db.Uuid
-  symbol        String?   @db.VarChar(50)
-  name          String?   @db.VarChar(200)
-  asset_type    String?   @db.VarChar(20)
-  sector        String?   @db.VarChar(100)
-  is_active     Boolean   @default(true)
-  first_seen_at DateTime? @db.Timestamp(6)
-  last_seen_at  DateTime? @db.Timestamp(6)
-  display_name  String?   @db.VarChar(255)
-  logo_url      String?   @db.Text
-  coingecko_id  String?   @db.VarChar(100)
-  market_cap_rank Int?
-
-  market_rankings          market_rankings[]
-  trending_assets          trending_assets[]
-  trending_news            trending_news[]
-  market_data              asset_market_data[]
-  asset_metrics            asset_metrics[]
-  portfolio_positions      portfolio_positions[]
-  optimization_allocations optimization_allocations[]
-  strategySignals          strategy_signals[]
-  rebalanceSuggestions     rebalance_suggestions[]
-
-  @@map("assets")
-}
-
-model market_rankings {
-  rank_timestamp DateTime @db.Timestamp(6)
-  asset_id       String   @db.Uuid
-  rank           Int
-  market_cap     Decimal? @db.Decimal(30, 2)
-  price_usd      Decimal? @db.Decimal(20, 8)
-  volume_24h     Decimal? @db.Decimal(30, 2)
-
-  asset assets @relation(fields: [asset_id], references: [asset_id])
-
-  @@id([rank_timestamp, asset_id])
-  @@map("market_rankings")
-}
-
-model trending_assets {
-  poll_timestamp DateTime @db.Timestamp(6)
-  asset_id       String   @db.Uuid
-  trend_rank     Int?
-  galaxy_score   Decimal? @db.Decimal(10, 4)
-  alt_rank       Decimal? @db.Decimal(10, 4)
-  social_score   Decimal? @db.Decimal(20, 8)
-  market_volume  Decimal? @db.Decimal(30, 10)
-  price_usd      Decimal? @db.Decimal(20, 8)
-  price_change_24h      Decimal? @db.Decimal(10, 4)
-  price_change_24h_usd  Decimal? @db.Decimal(20, 8)
-  market_cap            Decimal? @db.Decimal(30, 2)
-  volume_24h            Decimal? @db.Decimal(30, 10)
-  high_24h              Decimal? @db.Decimal(20, 8)
-  low_24h               Decimal? @db.Decimal(20, 8)
-
-  asset assets @relation(fields: [asset_id], references: [asset_id])
-
-  @@id([poll_timestamp, asset_id])
-  @@map("trending_assets")
-}
-
-model trending_news {
-  poll_timestamp  DateTime        @db.Timestamp(6)
-  asset_id        String          @db.Uuid
-  news_score      Decimal?        @db.Decimal(10, 4)
-  news_sentiment  Decimal?        @db.Decimal(10, 4)
-  news_volume     Int?
-  media_buzz      Decimal?        @db.Decimal(10, 4)
-  heading         String?         @db.VarChar(120)
-  news_detail     Json?           @db.Json
-  source          NewsSource?
-  article_url     String?         @db.Text
-  published_at    DateTime?       @db.Timestamp(6)
-  sentiment_label SentimentLabel?
-  metadata        Json?           @db.Json
-
-  asset assets @relation(fields: [asset_id], references: [asset_id])
-
-  @@id([poll_timestamp, asset_id])
-  @@map("trending_news")
-}
-
-model asset_market_data {
-  asset_id    String   @db.Uuid
-  timestamp   DateTime @db.Timestamp(6)
-  open_price  Decimal? @db.Decimal(20, 8)
-  high_price  Decimal? @db.Decimal(20, 8)
-  low_price   Decimal? @db.Decimal(20, 8)
-  close_price Decimal? @db.Decimal(20, 8)
-  volume      Decimal? @db.Decimal(30, 8)
-
-  asset assets @relation(fields: [asset_id], references: [asset_id])
-
-  @@id([asset_id, timestamp])
-  @@map("asset_market_data")
-}
-
-model asset_metrics {
-  metric_id    String    @id @default(uuid()) @db.Uuid
-  asset_id     String    @db.Uuid
-  metric_date  DateTime? @db.Date
-  metric_type  String?   @db.VarChar(50)
-  metric_value Decimal?  @db.Decimal(30, 10)
-  metadata     Json?     @db.Json
-  source       String?   @db.VarChar(50)
-
-  asset assets @relation(fields: [asset_id], references: [asset_id])
-
-  @@index([asset_id])
-  @@map("asset_metrics")
-}
-
-model macro_indicators {
-  indicator_id String  @id @default(uuid()) @db.Uuid
-  code         String? @db.VarChar(50)
-  name         String? @db.VarChar(200)
-  category     String? @db.VarChar(100)
-  frequency    String? @db.VarChar(20)
-  source       String? @db.VarChar(50)
-
-  values macro_indicator_values[]
-
-  @@map("macro_indicators")
-}
-
-model macro_indicator_values {
-  indicator_id String    @db.Uuid
-  data_date    DateTime  @db.Date
-  value        Decimal?  @db.Decimal(20, 6)
-  updated_at   DateTime? @db.Timestamp(6)
-
-  indicator macro_indicators @relation(fields: [indicator_id], references: [indicator_id])
-
-  @@id([indicator_id, data_date])
-  @@map("macro_indicator_values")
-}
-
-model strategies {
-  strategy_id          String       @id @default(uuid()) @db.Uuid
-  user_id              String?      @db.Uuid
-  name                 String?      @db.VarChar(100)
-  type                 StrategyType
-  description          String?      @db.Text
-  risk_level           RiskLevel
-  auto_trade_threshold Decimal?     @db.Decimal(5, 4)
-  is_active            Boolean      @default(true)
-  timeframe            String?      @db.VarChar(20)
-  entry_rules          Json?
-  exit_rules           Json?
-  indicators           Json?
-  stop_loss_type       String?      @db.VarChar(20)
-  stop_loss_value      Decimal?     @db.Decimal(10, 4)
-  take_profit_type     String?      @db.VarChar(20)
-  take_profit_value    Decimal?     @db.Decimal(10, 4)
-  schedule_cron        String?      @db.VarChar(100)
-  target_assets        Json?
-  template_id          String?      @db.Uuid
-  engine_weights       Json?
-  created_at           DateTime     @default(now()) @db.Timestamp(6)
-  updated_at           DateTime?    @db.Timestamp(6)
-
-  user           users?                    @relation(fields: [user_id], references: [user_id])
-  template       strategies?               @relation("StrategyTemplate", fields: [template_id], references: [strategy_id])
-  clones         strategies[]              @relation("StrategyTemplate")
-  parameters     strategy_parameters[]
-  signals        strategy_signals[]
-  execution_jobs strategy_execution_jobs[]
-
-  @@index([user_id])
-  @@index([is_active])
-  @@index([template_id])
-  @@map("strategies")
-}
-
-model strategy_parameters {
-  parameter_id String    @id @default(uuid()) @db.Uuid
-  strategy_id  String    @db.Uuid
-  name         String?   @db.VarChar(100)
-  value        String?   @db.VarChar(255)
-  created_at   DateTime? @db.Timestamp(6)
-
-  strategy strategies @relation(fields: [strategy_id], references: [strategy_id])
-
-  @@index([strategy_id])
-  @@map("strategy_parameters")
-}
-
-model sentiment_analyses {
-  sentiment_id String    @id @default(uuid()) @db.Uuid
-  source_type  String?   @db.VarChar(20)
-  label        String?   @db.VarChar(20)
-  score        Decimal?  @db.Decimal(6, 3)
-  confidence   Decimal?  @db.Decimal(5, 4)
-  created_at   DateTime? @db.Timestamp(6)
-
-  @@map("sentiment_analyses")
-}
-
-model strategy_signals {
-  signal_id         String       @id @default(uuid()) @db.Uuid
-  strategy_id       String?      @db.Uuid
-  user_id           String?      @db.Uuid
-  asset_id          String?      @db.Uuid
-  timestamp         DateTime?    @db.Timestamp(6)
-  final_score       Decimal?     @db.Decimal(6, 3)
-  action            SignalAction
-  confidence        Decimal?     @db.Decimal(5, 4)
-  sentiment_score   Decimal?     @db.Decimal(6, 3)
-  trend_score       Decimal?     @db.Decimal(6, 3)
-  fundamental_score Decimal?     @db.Decimal(6, 3)
-  liquidity_score   Decimal?     @db.Decimal(6, 3)
-  event_risk_score  Decimal?     @db.Decimal(6, 3)
-  macro_score       Decimal?     @db.Decimal(6, 3)
-  volatility_score  Decimal?     @db.Decimal(6, 3)
-  engine_metadata   Json?        @db.Json
-
-  strategy             strategies?              @relation(fields: [strategy_id], references: [strategy_id])
-  user                 users?                   @relation(fields: [user_id], references: [user_id])
-  asset                assets?                  @relation(fields: [asset_id], references: [asset_id])
-  details              signal_details[]
-  explanations         signal_explanations[]
-  orders               orders[]
-  autoTradeEvaluations auto_trade_evaluations[]
-
-  @@index([strategy_id])
-  @@index([user_id])
-  @@index([asset_id])
-  @@map("strategy_signals")
-}
-
-model signal_details {
-  detail_id      String     @id @default(uuid()) @db.Uuid
-  signal_id      String     @db.Uuid
-  entry_price    Decimal?   @db.Decimal(20, 8)
-  position_size  Decimal?   @db.Decimal(20, 8)
-  position_value Decimal?   @db.Decimal(20, 8)
-  stop_loss      Decimal?   @db.Decimal(20, 8)
-  take_profit_1  Decimal?   @db.Decimal(20, 8)
-  take_profit_2  Decimal?   @db.Decimal(20, 8)
-  leverage       Decimal?   @db.Decimal(6, 2)
-  order_type     OrderType?
-  time_in_force  String?    @db.VarChar(20)
-  metadata       Json?      @db.Json
-  created_at     DateTime?  @db.Timestamp(6)
-
-  signal strategy_signals @relation(fields: [signal_id], references: [signal_id])
-
-  @@index([signal_id])
-  @@map("signal_details")
-}
-
-model signal_explanations {
-  explanation_id     String    @id @default(uuid()) @db.Uuid
-  signal_id          String    @db.Uuid
-  llm_model          String?   @db.VarChar(50)
-  text               String?   @db.Text
-  explanation_status String?   @db.VarChar(20)
-  error_message      String?   @db.Text
-  retry_count        Int       @default(0)
-  created_at         DateTime? @db.Timestamp(6)
-
-  signal strategy_signals @relation(fields: [signal_id], references: [signal_id])
-
-  @@index([signal_id])
-  @@map("signal_explanations")
-}
-
-model portfolios {
-  portfolio_id String        @id @default(uuid()) @db.Uuid
-  user_id      String        @db.Uuid
-  name         String?       @db.VarChar(100)
-  type         PortfolioType @default(spot)
-  created_at   DateTime      @default(now()) @db.Timestamp(6)
-  updated_at   DateTime?     @db.Timestamp(6)
-
-  user              users                 @relation(fields: [user_id], references: [user_id])
-  positions         portfolio_positions[]
-  orders            orders[]
-  snapshots         portfolio_snapshots[]
-  optimizationRuns  optimization_runs[]
-  drawdownHistories drawdown_history[]
-
-  @@index([user_id])
-  @@map("portfolios")
-}
-
-model portfolio_positions {
-  position_id     String        @id @default(uuid()) @db.Uuid
-  portfolio_id    String        @db.Uuid
-  asset_id        String        @db.Uuid
-  quantity        Decimal?      @db.Decimal(30, 10)
-  avg_entry_price Decimal?      @db.Decimal(20, 8)
-  current_price   Decimal?      @db.Decimal(20, 8)
-  unrealized_pnl  Decimal?      @db.Decimal(20, 8)
-  realized_pnl    Decimal?      @db.Decimal(20, 8)
-  leverage        Decimal?      @db.Decimal(6, 2)
-  side            PositionSide?
-  updated_at      DateTime?     @db.Timestamp(6)
-
-  portfolio portfolios @relation(fields: [portfolio_id], references: [portfolio_id])
-  asset     assets     @relation(fields: [asset_id], references: [asset_id])
-
-  @@index([portfolio_id])
-  @@index([asset_id])
-  @@map("portfolio_positions")
-}
-
-model orders {
-  order_id            String        @id @default(uuid()) @db.Uuid
-  portfolio_id        String        @db.Uuid
-  signal_id           String?       @db.Uuid
-  side                SignalAction?
-  order_type          OrderType?
-  quantity            Decimal?      @db.Decimal(30, 10)
-  price               Decimal?      @db.Decimal(20, 8)
-  status              OrderStatus   @default(pending)
-  auto_trade_approved Boolean       @default(false)
-  created_at          DateTime      @default(now()) @db.Timestamp(6)
-  updated_at          DateTime?     @db.Timestamp(6)
-
-  portfolio  portfolios         @relation(fields: [portfolio_id], references: [portfolio_id])
-  signal     strategy_signals?  @relation(fields: [signal_id], references: [signal_id])
-  executions order_executions[]
-
-  @@index([portfolio_id])
-  @@index([signal_id])
-  @@map("orders")
-}
-
-model order_executions {
-  execution_id String    @id @default(uuid()) @db.Uuid
-  order_id     String    @db.Uuid
-  trade_id     String?   @db.VarChar(100)
-  price        Decimal?  @db.Decimal(20, 8)
-  quantity     Decimal?  @db.Decimal(30, 10)
-  fee          Decimal?  @db.Decimal(20, 8)
-  timestamp    DateTime? @db.Timestamp(6)
-
-  order orders @relation(fields: [order_id], references: [order_id])
-
-  @@index([order_id])
-  @@map("order_executions")
-}
-
-model portfolio_snapshots {
-  snapshot_id     String   @id @default(uuid()) @db.Uuid
-  portfolio_id    String   @db.Uuid
-  timestamp       DateTime @db.Timestamp(6)
-  total_value     Decimal? @db.Decimal(30, 10)
-  cash_value      Decimal? @db.Decimal(30, 10)
-  positions_value Decimal? @db.Decimal(30, 10)
-  pnl_24h         Decimal? @db.Decimal(20, 8)
-  metadata        Json?    @db.Json
-
-  portfolio portfolios @relation(fields: [portfolio_id], references: [portfolio_id])
-
-  @@index([portfolio_id])
-  @@map("portfolio_snapshots")
-}
-
-model auto_trade_evaluations {
-  evaluation_id String    @id @default(uuid()) @db.Uuid
-  signal_id     String    @db.Uuid
-  final_score   Decimal?  @db.Decimal(6, 3)
-  confidence    Decimal?  @db.Decimal(5, 4)
-  threshold     Decimal?  @db.Decimal(5, 4)
-  passed        Boolean   @default(false)
-  evaluated_at  DateTime? @db.Timestamp(6)
-
-  signal strategy_signals @relation(fields: [signal_id], references: [signal_id])
-
-  @@index([signal_id])
-  @@map("auto_trade_evaluations")
-}
-
-model optimization_runs {
-  optimization_id           String    @id @default(uuid()) @db.Uuid
-  user_id                   String    @db.Uuid
-  portfolio_id              String    @db.Uuid
-  run_time                  DateTime  @default(now()) @db.Timestamp(6)
-  model_used                String?   @db.VarChar(50)
-  constraint_max_asset      Decimal?  @db.Decimal(5, 2)
-  constraint_max_sector     Decimal?  @db.Decimal(5, 2)
-  constraint_risk_level     RiskLevel
-  included_signal_assets    Json?     @db.Json
-  included_portfolio_assets Json?     @db.Json
-  status                    String?   @db.VarChar(20)
-  log                       String?   @db.Text
-
-  user        users                      @relation(fields: [user_id], references: [user_id])
-  portfolio   portfolios                 @relation(fields: [portfolio_id], references: [portfolio_id])
-  allocations optimization_allocations[]
-  suggestions rebalance_suggestions[]
-
-  @@index([user_id])
-  @@index([portfolio_id])
-  @@map("optimization_runs")
-}
-
-model optimization_allocations {
-  allocation_id   String   @id @default(uuid()) @db.Uuid
-  optimization_id String   @db.Uuid
-  asset_id        String   @db.Uuid
-  final_weight    Decimal? @db.Decimal(8, 5)
-  expected_return Decimal? @db.Decimal(8, 5)
-  risk_score      Decimal? @db.Decimal(8, 5)
-  sector          String?  @db.VarChar(50)
-
-  optimization_runs optimization_runs @relation(fields: [optimization_id], references: [optimization_id])
-  asset             assets            @relation(fields: [asset_id], references: [asset_id])
-
-  @@index([optimization_id])
-  @@index([asset_id])
-  @@map("optimization_allocations")
-}
-
-model rebalance_suggestions {
-  suggestion_id   String   @id @default(uuid()) @db.Uuid
-  optimization_id String   @db.Uuid
-  asset_id        String   @db.Uuid
-  current_weight  Decimal? @db.Decimal(8, 5)
-  target_weight   Decimal? @db.Decimal(8, 5)
-  action          String?  @db.VarChar(10)
-  generated_at    DateTime @default(now()) @db.Timestamp(6)
-
-  optimization_runs optimization_runs @relation(fields: [optimization_id], references: [optimization_id])
-  asset             assets            @relation(fields: [asset_id], references: [asset_id])
-
-  @@index([optimization_id])
-  @@index([asset_id])
-  @@map("rebalance_suggestions")
-}
-
-model risk_events {
-  risk_event_id  String    @id @default(uuid()) @db.Uuid
-  user_id        String    @db.Uuid
-  portfolio_id   String?   @db.Uuid
-  asset_id       String?   @db.Uuid
-  event_type     String?   @db.VarChar(50)
-  severity_level RiskLevel
-  triggered_by   String?   @db.VarChar(50)
-  score          Decimal?  @db.Decimal(6, 3)
-  detected_at    DateTime? @db.Timestamp(6)
-  resolved_at    DateTime? @db.Timestamp(6)
-
-  user users @relation(fields: [user_id], references: [user_id])
-
-  @@index([user_id])
-  @@map("risk_events")
-}
-
-model drawdown_history {
-  drawdown_id      String   @id @default(uuid()) @db.Uuid
-  portfolio_id     String   @db.Uuid
-  timestamp        DateTime @db.Timestamp(6)
-  equity_value     Decimal? @db.Decimal(20, 8)
-  peak_value       Decimal? @db.Decimal(20, 8)
-  drawdown_percent Decimal? @db.Decimal(6, 3)
-
-  portfolio portfolios @relation(fields: [portfolio_id], references: [portfolio_id])
-
-  @@index([portfolio_id])
-  @@map("drawdown_history")
-}
-
-model subscription_plans {
-  plan_id       String   @id @default(uuid()) @db.Uuid
-  name          String   @unique @db.VarChar(50)
-  price_monthly Decimal? @db.Decimal(10, 2)
-  description   String?  @db.Text
-  features_json Json?    @db.Json
-
-  user_subscriptions user_subscriptions[]
-
-  @@map("subscription_plans")
-}
-
-model user_subscriptions {
-  subscription_id  String             @id @default(uuid()) @db.Uuid
-  user_id          String             @db.Uuid
-  plan_id          String             @db.Uuid
-  status           SubscriptionStatus @default(active)
-  started_at       DateTime?          @db.Timestamp(6)
-  expires_at       DateTime?          @db.Timestamp(6)
-  billing_provider String?            @db.VarChar(50)
-
-  user users              @relation(fields: [user_id], references: [user_id])
-  plan subscription_plans @relation(fields: [plan_id], references: [plan_id])
-
-  @@index([user_id])
-  @@index([plan_id])
-  @@map("user_subscriptions")
-}
-
-model strategy_execution_jobs {
-  job_id        String    @id @default(uuid()) @db.Uuid
-  strategy_id   String    @db.Uuid
-  status        JobStatus @default(pending)
-  scheduled_at  DateTime  @db.Timestamp(6)
-  started_at    DateTime? @db.Timestamp(6)
-  completed_at  DateTime? @db.Timestamp(6)
-  error_message String?   @db.Text
-
-  strategy strategies @relation(fields: [strategy_id], references: [strategy_id])
-
-  @@index([strategy_id])
-  @@index([status])
-  @@index([scheduled_at])
-  @@map("strategy_execution_jobs")
-}
-
-model sentiment_ema_state {
-  asset_id       String   @id @db.VarChar(100)
-  ema_value      Float    @db.DoublePrecision
-  last_timestamp DateTime @db.Timestamp(6)
-  momentum       Float?   @db.DoublePrecision
-  raw_score      Float?   @db.DoublePrecision
-  metadata       Json?    @db.Json
-  updated_at     DateTime @default(now()) @updatedAt @db.Timestamp(6)
-
-  @@map("sentiment_ema_state")
 }

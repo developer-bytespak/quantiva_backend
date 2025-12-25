@@ -134,6 +134,15 @@ export class BinanceTestnetService {
           }
         }
 
+        // Check for IP ban (Binance returns 418 I'm a teapot when IP is banned)
+        if (error.response?.status === 418 || 
+            (error.response?.status === 400 && error.response.data?.msg?.includes('IP banned'))) {
+          this.logger.error(`IP has been banned by Binance: ${error.response.data?.msg}`);
+          throw new TestnetRateLimitException(
+            `IP is temporarily banned from Binance API: ${error.response.data?.msg}`,
+          );
+        }
+
         if (error.response?.status === 429) {
           throw new TestnetRateLimitException();
         }
@@ -170,7 +179,14 @@ export class BinanceTestnetService {
     try {
       const response = await this.apiClient.get(endpoint, { params });
       return response.data;
-    } catch (error) {
+    } catch (error: any) {
+      // Check for IP ban
+      if (error.response?.status === 418 || 
+          (error.response?.status === 400 && error.response.data?.msg?.includes('IP banned'))) {
+        throw new TestnetRateLimitException(
+          `IP is temporarily banned from Binance API: ${error.response.data?.msg}`,
+        );
+      }
       if (error.response?.status === 429) {
         throw new TestnetRateLimitException();
       }
