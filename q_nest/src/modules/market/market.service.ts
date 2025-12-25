@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { PrismaService } from '../../prisma/prisma.service';
 import axios, { AxiosInstance } from 'axios';
 
 export interface CoinGeckoCoin {
@@ -37,7 +38,10 @@ export class MarketService {
   private readonly apiKey: string | null;
   private readonly baseUrl: string;
 
-  constructor(private configService: ConfigService) {
+  constructor(
+    private configService: ConfigService,
+    private prisma: PrismaService,
+  ) {
     this.apiKey = this.configService.get<string>('COINGECKO_API_KEY') || null;
     
     // Determine base URL based on API key type
@@ -253,6 +257,111 @@ export class MarketService {
 
       throw new Error(
         `Failed to fetch coin details: ${error?.message || 'Unknown error'}`,
+      );
+    }
+  }
+
+  /**
+   * Fetch coins from database (cached data from cron job)
+   * Much faster than CoinGecko API calls
+   */
+  async getCachedMarketData(
+    limit: number = 500,
+    search?: string,
+  ): Promise<{ coins: CoinGeckoCoin[]; lastSyncTime: Date | null }> {
+    try {
+      // Get latest market_rankings timestamp
+      const latestRanking = await this.prisma.market_rankings.findFirst({
+        orderBy: { rank_timestamp: 'desc' },
+        select: { rank_timestamp: true },
+      });
+
+      if (!latestRanking) {
+        this.logger.warn('No market rankings found in database');
+        return { coins: [], lastSyncTime: null };
+      }
+
+      // Build search filter
+      const searchFilter = search
+        ? {
+            OR: [
+              { symbol: { contains: search, mode: 'insensitive' as any } },
+              { name: { contains: search, mode: 'insensitive' as any } },
+            ],
+          }
+        : {};
+
+      // Fetch assets with latest market rankings
+      const assets = await this.prisma.assets.findMany({
+        where: {
+          asset_type: 'crypto',
+          is_active: true,
+          ...searchFilter,
+        },
+        include: {
+          market_rankings: {
+            where: {
+              rank_timestamp: latestRanking.rank_timestamp,
+            },
+            take: 1,
+          },
+        },
+        orderBy: {
+          market_cap_rank: 'asc',
+        },
+        take: limit,
+      });
+
+      // Transform to CoinGeckoCoin format
+      const coins: CoinGeckoCoin[] = assets
+        .filter((asset) => asset.market_rankings.length > 0)
+        .map((asset) => {
+          const ranking = asset.market_rankings[0];
+          const currentPrice = Number(ranking.price_usd || 0);
+          const marketCap = Number(ranking.market_cap || 0);
+          const volume = Number(ranking.volume_24h || 0);
+
+          // Calculate 24h changes (simplified - would need historical data for accurate calc)
+          return {
+            id: asset.coingecko_id || asset.asset_id,
+            symbol: asset.symbol?.toUpperCase() || '',
+            name: asset.display_name || asset.name || '',
+            image: asset.logo_url || '',
+            current_price: currentPrice,
+            market_cap: marketCap,
+            market_cap_rank: asset.market_cap_rank || ranking.rank,
+            fully_diluted_valuation: null,
+            total_volume: volume,
+            high_24h: currentPrice * 1.02, // Approximate
+            low_24h: currentPrice * 0.98, // Approximate
+            price_change_24h: 0, // Would need historical data
+            price_change_percentage_24h: 0, // Would need historical data
+            market_cap_change_24h: 0,
+            market_cap_change_percentage_24h: 0,
+            circulating_supply: 0,
+            total_supply: null,
+            max_supply: null,
+            ath: currentPrice,
+            ath_change_percentage: 0,
+            ath_date: new Date().toISOString(),
+            atl: currentPrice,
+            atl_change_percentage: 0,
+            atl_date: new Date().toISOString(),
+            last_updated: ranking.rank_timestamp.toISOString(),
+          };
+        });
+
+      return {
+        coins,
+        lastSyncTime: latestRanking.rank_timestamp,
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to fetch cached market data from database', {
+        message: error?.message,
+        stack: error?.stack,
+      });
+      throw new Error(
+        `Failed to fetch cached market data: ${error?.message || 'Unknown error'}`,
       );
     }
   }

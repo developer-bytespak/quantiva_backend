@@ -92,24 +92,26 @@ export class AuthController {
     const ipAddress = req.ip || req.socket.remoteAddress;
     const result = await this.authService.login(loginDto, ipAddress);
 
-    // If 2FA is disabled and tokens are returned directly, set cookies
-    if (result.accessToken && result.refreshToken) {
+    // Check if 2FA is required or if tokens are returned directly
+    if ('accessToken' in result && 'refreshToken' in result) {
+      // 2FA is disabled - tokens returned directly, set cookies
+      const tokenResult = result as any;
       // Access token: 45 minutes
-      this.setCookie(res, 'access_token', result.accessToken, 45 * 60);
+      this.setCookie(res, 'access_token', tokenResult.accessToken, 45 * 60);
       // Refresh token: 7 days
-      this.setCookie(res, 'refresh_token', result.refreshToken, 7 * 24 * 60 * 60);
+      this.setCookie(res, 'refresh_token', tokenResult.refreshToken, 7 * 24 * 60 * 60);
 
       // Return tokens in response body as fallback for cross-origin cookie issues
       return {
-        user: result.user,
-        accessToken: result.accessToken,
-        refreshToken: result.refreshToken,
-        sessionId: result.sessionId,
+        user: tokenResult.user,
+        accessToken: tokenResult.accessToken,
+        refreshToken: tokenResult.refreshToken,
+        sessionId: tokenResult.sessionId,
         message: 'Authentication successful',
       };
     }
 
-    // If 2FA is still required (original flow)
+    // 2FA is required (original flow)
     return result;
   }
 
@@ -136,8 +138,12 @@ export class AuthController {
     // Refresh token: 7 days
     this.setCookie(res, 'refresh_token', result.refreshToken, 7 * 24 * 60 * 60);
 
+    // Return tokens in response body as fallback for cross-origin cookie issues
     return {
       user: result.user,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      sessionId: result.sessionId,
       message: 'Authentication successful',
     };
   }
