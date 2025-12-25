@@ -221,16 +221,27 @@ export class BinanceTestnetService {
       return cached;
     }
 
-    const orders = await this.binanceTestnetApi.getAllOrders(
-      this.apiKey,
-      this.apiSecret,
-      filters,
-    );
+    // Use deduplication to avoid duplicate API calls for the same request
+    return this.deduplicatedRequest(cacheKey, async () => {
+      // Double-check cache in case another request just populated it
+      const cachedAgain = this.cacheService.get(cacheKey);
+      if (cachedAgain) {
+        return cachedAgain;
+      }
 
-    // Cache result for shorter time since this includes recent activity
-    this.cacheService.set(cacheKey, orders, 3000);
+      this.logger.log(`Fetching all orders from Binance Testnet API (symbol: ${filters.symbol || 'all'})`);
+      const orders = await this.binanceTestnetApi.getAllOrders(
+        this.apiKey,
+        this.apiSecret,
+        filters,
+      );
 
-    return orders;
+      // Cache result for 30 seconds to reduce API load
+      // This is critical for preventing rate limit bans
+      this.cacheService.set(cacheKey, orders, 30000);
+
+      return orders;
+    });
   }
 
   /**
