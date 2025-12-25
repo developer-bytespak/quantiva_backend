@@ -15,6 +15,9 @@ export class BinanceTestnetService {
   private readonly logger = new Logger(BinanceTestnetService.name);
   private readonly apiKey = binanceTestnetConfig.apiKey;
   private readonly apiSecret = binanceTestnetConfig.apiSecret;
+  
+  // Request deduplication - tracks pending API requests to avoid duplicate calls
+  private pendingRequests: Map<string, Promise<any>> = new Map();
 
   constructor(
     private cacheService: TestnetCacheService,
@@ -32,6 +35,33 @@ export class BinanceTestnetService {
    */
   isConfigured(): boolean {
     return !!this.apiKey && !!this.apiSecret;
+  }
+
+  /**
+   * Helper method to deduplicate concurrent requests
+   * If a request is already pending, return the same promise instead of making a duplicate API call
+   */
+  private async deduplicatedRequest<T>(
+    key: string,
+    requestFn: () => Promise<T>,
+  ): Promise<T> {
+    // If a request is already pending for this key, return it
+    if (this.pendingRequests.has(key)) {
+      this.logger.debug(`Returning pending request for: ${key}`);
+      return this.pendingRequests.get(key)!;
+    }
+
+    // Create the request promise
+    const promise = requestFn()
+      .finally(() => {
+        // Clean up the pending request after completion
+        this.pendingRequests.delete(key);
+      });
+
+    // Store it so concurrent requests can reuse it
+    this.pendingRequests.set(key, promise);
+
+    return promise;
   }
 
   /**
@@ -80,16 +110,26 @@ export class BinanceTestnetService {
       return cached;
     }
 
-    const accountInfo = await this.binanceTestnetApi.getAccountInfo(this.apiKey, this.apiSecret);
+    // Use deduplication to avoid duplicate API calls
+    return this.deduplicatedRequest(cacheKey, async () => {
+      const cachedAgain = this.cacheService.get(cacheKey);
+      if (cachedAgain) {
+        return cachedAgain;
+      }
 
-    // Cache result for 5 seconds
-    this.cacheService.set(cacheKey, accountInfo, 5000);
+      this.logger.log('Fetching account info from Binance Testnet API');
+      const accountInfo = await this.binanceTestnetApi.getAccountInfo(this.apiKey, this.apiSecret);
 
-    return accountInfo;
+      // Cache result for 30 seconds
+      this.cacheService.set(cacheKey, accountInfo, 30000);
+
+      return accountInfo;
+    });
   }
 
   /**
    * Gets account balance (USDT only for performance)
+   * Uses caching and request deduplication to minimize API calls
    */
   async getAccountBalance(): Promise<AccountTestnetBalanceDto> {
     if (!this.isConfigured()) {
@@ -104,13 +144,23 @@ export class BinanceTestnetService {
       return cached;
     }
 
-    // Get USDT balance from integration layer
-    const balance = await this.binanceTestnetApi.getAccountBalance(this.apiKey, this.apiSecret);
+    // Use deduplication to avoid duplicate API calls for concurrent requests
+    return this.deduplicatedRequest(cacheKey, async () => {
+      // Double-check cache in case another request just populated it
+      const cachedAgain = this.cacheService.get(cacheKey);
+      if (cachedAgain) {
+        return cachedAgain;
+      }
 
-    // Cache result for 5 seconds
-    this.cacheService.set(cacheKey, balance, 5000);
+      this.logger.log('Fetching account balance from Binance Testnet API');
+      const balance = await this.binanceTestnetApi.getAccountBalance(this.apiKey, this.apiSecret);
 
-    return balance;
+      // Cache result for 30 seconds - this reduces API load significantly
+      // Balance doesn't change that frequently, so this is safe
+      this.cacheService.set(cacheKey, balance, 30000);
+
+      return balance;
+    });
   }
 
   /**
@@ -129,12 +179,21 @@ export class BinanceTestnetService {
       return cached;
     }
 
-    const orders = await this.binanceTestnetApi.getOpenOrders(this.apiKey, this.apiSecret, symbol);
+    // Use deduplication to avoid duplicate API calls
+    return this.deduplicatedRequest(cacheKey, async () => {
+      const cachedAgain = this.cacheService.get(cacheKey);
+      if (cachedAgain) {
+        return cachedAgain;
+      }
 
-    // Cache result
-    this.cacheService.set(cacheKey, orders, 5000);
+      this.logger.log(`Fetching open orders from Binance Testnet API${symbol ? ` for ${symbol}` : ''}`);
+      const orders = await this.binanceTestnetApi.getOpenOrders(this.apiKey, this.apiSecret, symbol);
 
-    return orders;
+      // Cache result for 15 seconds - orders can change more frequently
+      this.cacheService.set(cacheKey, orders, 15000);
+
+      return orders;
+    });
   }
 
   /**
@@ -162,16 +221,27 @@ export class BinanceTestnetService {
       return cached;
     }
 
-    const orders = await this.binanceTestnetApi.getAllOrders(
-      this.apiKey,
-      this.apiSecret,
-      filters,
-    );
+    // Use deduplication to avoid duplicate API calls for the same request
+    return this.deduplicatedRequest(cacheKey, async () => {
+      // Double-check cache in case another request just populated it
+      const cachedAgain = this.cacheService.get(cacheKey);
+      if (cachedAgain) {
+        return cachedAgain;
+      }
 
-    // Cache result for shorter time since this includes recent activity
-    this.cacheService.set(cacheKey, orders, 3000);
+      this.logger.log(`Fetching all orders from Binance Testnet API (symbol: ${filters.symbol || 'all'})`);
+      const orders = await this.binanceTestnetApi.getAllOrders(
+        this.apiKey,
+        this.apiSecret,
+        filters,
+      );
 
-    return orders;
+      // Cache result for 30 seconds to reduce API load
+      // This is critical for preventing rate limit bans
+      this.cacheService.set(cacheKey, orders, 30000);
+
+      return orders;
+    });
   }
 
   /**

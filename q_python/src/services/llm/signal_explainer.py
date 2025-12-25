@@ -23,33 +23,51 @@ class SignalExplainer:
         Initialize signal explainer with specified LLM provider.
         
         Args:
-            provider: LLM provider name ('gemini' or 'openai'). 
-                     If None, uses LLM_PROVIDER env var or defaults to 'gemini'
+            provider: LLM provider name ('openai' or 'gemini'). 
+                     If None, uses LLM_PROVIDER env var or defaults to 'openai'
         """
-        self.provider = provider or os.getenv("LLM_PROVIDER", "gemini").lower()
+        self.provider = provider or os.getenv("LLM_PROVIDER", "openai").lower()
+        self.fallback_provider = "gemini" if self.provider == "openai" else "openai"
         self.adapter: BaseLLMAdapter = self._create_adapter()
         
-        logger.info(f"Initialized SignalExplainer with provider: {self.provider}")
+        logger.info(f"Initialized SignalExplainer with provider: {self.provider}, fallback: {self.fallback_provider}")
     
     def _create_adapter(self) -> BaseLLMAdapter:
         """Create appropriate LLM adapter based on provider."""
-        if self.provider == "gemini":
+        if self.provider == "openai":
+            try:
+                return OpenAIAdapter()
+            except Exception as e:
+                logger.warning(f"Failed to initialize OpenAI adapter: {str(e)}. Trying fallback...")
+                return self._create_fallback_adapter()
+        elif self.provider == "gemini":
             try:
                 return GeminiAdapter()
             except Exception as e:
-                logger.error(f"Failed to initialize Gemini adapter: {str(e)}")
-                raise
-        elif self.provider == "openai":
-            return OpenAIAdapter()
+                logger.warning(f"Failed to initialize Gemini adapter: {str(e)}. Trying fallback...")
+                return self._create_fallback_adapter()
         else:
             logger.warning(
-                f"Unknown LLM provider: {self.provider}. Defaulting to Gemini."
+                f"Unknown LLM provider: {self.provider}. Defaulting to OpenAI."
             )
             try:
-                return GeminiAdapter()
+                return OpenAIAdapter()
             except Exception as e:
-                logger.error(f"Failed to initialize Gemini adapter: {str(e)}")
-                raise
+                logger.error(f"Failed to initialize OpenAI adapter: {str(e)}")
+                return self._create_fallback_adapter()
+    
+    def _create_fallback_adapter(self) -> BaseLLMAdapter:
+        """Create fallback adapter if primary fails."""
+        try:
+            if self.fallback_provider == "gemini":
+                logger.info("Using Gemini as fallback provider")
+                return GeminiAdapter()
+            else:
+                logger.info("Using OpenAI as fallback provider")
+                return OpenAIAdapter()
+        except Exception as e:
+            logger.error(f"Failed to initialize fallback adapter: {str(e)}")
+            raise ValueError("All LLM providers failed to initialize")
     
     def explain_signal(
         self,

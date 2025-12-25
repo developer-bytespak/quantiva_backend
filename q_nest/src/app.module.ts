@@ -13,6 +13,8 @@ import { SentimentModule } from './modules/sentiment/sentiment.module';
 import { EnginesModule } from './modules/engines/engines.module';
 import { MarketModule } from './modules/market/market.module';
 import { StrategiesModule } from './modules/strategies/strategies.module';
+import { AiInsightsModule } from './ai-insights/ai-insights.module';
+import { TaskSchedulerModule } from './task-scheduler/task-scheduler.module';
 
 @Module({
   imports: [
@@ -30,6 +32,8 @@ import { StrategiesModule } from './modules/strategies/strategies.module';
     EnginesModule,
     MarketModule,
     StrategiesModule,
+    AiInsightsModule,
+    TaskSchedulerModule,
   ],
   controllers: [],
   providers: [],

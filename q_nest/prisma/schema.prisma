@@ -274,17 +274,17 @@ model user_exchange_connections {
 }
 
 model assets {
-  asset_id      String    @id @default(uuid()) @db.Uuid
-  symbol        String?   @db.VarChar(50)
-  name          String?   @db.VarChar(200)
-  asset_type    String?   @db.VarChar(20)
-  sector        String?   @db.VarChar(100)
-  is_active     Boolean   @default(true)
-  first_seen_at DateTime? @db.Timestamp(6)
-  last_seen_at  DateTime? @db.Timestamp(6)
-  display_name  String?   @db.VarChar(255)
-  logo_url      String?   @db.Text
-  coingecko_id  String?   @db.VarChar(100)
+  asset_id        String    @id @default(uuid()) @db.Uuid
+  symbol          String?   @db.VarChar(50)
+  name            String?   @db.VarChar(200)
+  asset_type      String?   @db.VarChar(20)
+  sector          String?   @db.VarChar(100)
+  is_active       Boolean   @default(true)
+  first_seen_at   DateTime? @db.Timestamp(6)
+  last_seen_at    DateTime? @db.Timestamp(6)
+  display_name    String?   @db.VarChar(255)
+  logo_url        String?   @db.Text
+  coingecko_id    String?   @db.VarChar(100)
   market_cap_rank Int?
 
   market_rankings          market_rankings[]
@@ -315,20 +315,23 @@ model market_rankings {
 }
 
 model trending_assets {
-  poll_timestamp DateTime @db.Timestamp(6)
-  asset_id       String   @db.Uuid
-  trend_rank     Int?
-  galaxy_score   Decimal? @db.Decimal(10, 4)
-  alt_rank       Decimal? @db.Decimal(10, 4)
-  social_score   Decimal? @db.Decimal(20, 8)
-  market_volume  Decimal? @db.Decimal(30, 10)
-  price_usd      Decimal? @db.Decimal(20, 8)
-  price_change_24h      Decimal? @db.Decimal(10, 4)
-  price_change_24h_usd  Decimal? @db.Decimal(20, 8)
-  market_cap            Decimal? @db.Decimal(30, 2)
-  volume_24h            Decimal? @db.Decimal(30, 10)
-  high_24h              Decimal? @db.Decimal(20, 8)
-  low_24h               Decimal? @db.Decimal(20, 8)
+  poll_timestamp         DateTime  @db.Timestamp(6)
+  asset_id               String    @db.Uuid
+  trend_rank             Int?
+  galaxy_score           Decimal?  @db.Decimal(10, 4)
+  alt_rank               Decimal?  @db.Decimal(10, 4)
+  social_score           Decimal?  @db.Decimal(20, 8)
+  market_volume          Decimal?  @db.Decimal(30, 10)
+  price_usd              Decimal?  @db.Decimal(20, 8)
+  price_change_24h       Decimal?  @db.Decimal(10, 4)
+  price_change_24h_usd   Decimal?  @db.Decimal(20, 8)
+  market_cap             Decimal?  @db.Decimal(30, 2)
+  volume_24h             Decimal?  @db.Decimal(30, 10)
+  high_24h               Decimal?  @db.Decimal(20, 8)
+  low_24h                Decimal?  @db.Decimal(20, 8)
+  ai_insight             String?   @db.Text
+  ai_insight_strategy_id String?   @db.Uuid
+  insight_generated_at   DateTime? @db.Timestamp(6)
 
   asset assets @relation(fields: [asset_id], references: [asset_id])
 
