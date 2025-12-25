@@ -5,6 +5,7 @@ import {
   Get,
   Req,
   Res,
+  Delete,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -20,6 +21,7 @@ import { RegisterDto } from '../dto/register.dto';
 import { LoginDto } from '../dto/login.dto';
 import { Verify2FADto } from '../dto/verify-2fa.dto';
 import { ChangePasswordDto } from '../dto/change-password.dto';
+import { DeleteAccountDto } from '../dto/delete-account.dto';
 import { ConfigService } from '@nestjs/config';
 import { TokenPayload } from '../services/token.service';
 
@@ -273,6 +275,34 @@ export class AuthController {
   @Get('me')
   async getMe(@CurrentUser() user: TokenPayload) {
     return this.authService.getUserById(user.sub);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('request-delete-account-code')
+  @HttpCode(HttpStatus.OK)
+  async requestDeleteAccountCode(@CurrentUser() user: TokenPayload) {
+    return this.authService.requestDeleteAccountCode(user.sub);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete('delete-account')
+  @HttpCode(HttpStatus.OK)
+  async deleteAccount(
+    @CurrentUser() user: TokenPayload,
+    @Body() deleteAccountDto: DeleteAccountDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // Delete account
+    const result = await this.authService.deleteAccount(
+      user.sub,
+      deleteAccountDto,
+    );
+
+    // Clear authentication cookies after successful deletion
+    this.clearCookie(res, 'access_token');
+    this.clearCookie(res, 'refresh_token');
+
+    return result;
   }
 }
 

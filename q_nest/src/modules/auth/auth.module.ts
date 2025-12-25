@@ -14,10 +14,12 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RefreshTokenGuard } from './guards/refresh-token.guard';
 import { TwoFactorGuard } from './guards/two-factor.guard';
 import { PrismaModule } from '../../prisma/prisma.module';
+import { StorageModule } from '../../storage/storage.module';
 
 @Module({
   imports: [
     PrismaModule,
+    StorageModule,
     PassportModule,
     ConfigModule,
     ScheduleModule,

@@ -16,6 +16,8 @@ import { RegisterDto } from '../dto/register.dto';
 import { LoginDto } from '../dto/login.dto';
 import { Verify2FADto } from '../dto/verify-2fa.dto';
 import { ChangePasswordDto } from '../dto/change-password.dto';
+import { DeleteAccountDto } from '../dto/delete-account.dto';
+import { StorageService } from '../../../storage/storage.service';
 
 @Injectable()
 export class AuthService {
@@ -26,6 +28,7 @@ export class AuthService {
     private twoFactorService: TwoFactorService,
     private rateLimitService: RateLimitService,
     private configService: ConfigService,
+    private storageService: StorageService,
   ) {}
 
   private getGoogleClient() {
@@ -436,5 +439,452 @@ export class AuthService {
       sessionId,
     };
   }
+
+  /**
+   * Request 2FA code for account deletion
+   * Generates and sends verification code to user's email
+   */
+  async requestDeleteAccountCode(userId: string) {
+    // Get user
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+
+    // Generate and send 2FA code for account deletion
+    const code = await this.twoFactorService.generateCode(
+      userId,
+      'account_deletion',
+    );
+    await this.twoFactorService.sendCodeByEmail(user.email, code);
+
+    return {
+      message: 'Verification code sent to your email',
+      email: user.email,
+    };
+  }
+
+  /**
+   * Complete account deletion with all related entities
+   * Executes deletion in reverse dependency order (children → parent)
+   * Uses database transaction for atomicity
+   */
+  async deleteAccount(
+    userId: string,
+    deleteAccountDto: DeleteAccountDto,
+  ) {
+    const { password, twoFactorCode } = deleteAccountDto;
+
+    // ===== PHASE 0: PRE-DELETION SAFETY CHECKS =====
+
+    // Step 1: Authenticate the user
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+
+    // Verify password
+    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Invalid password');
+    }
+
+    // Verify 2FA code
+    const isValid = await this.twoFactorService.validateCode(
+      userId,
+      twoFactorCode,
+      'account_deletion',
+    );
+
+    if (!isValid) {
+      throw new UnauthorizedException('Invalid 2FA code');
+    }
+
+    // Step 2: Check for active orders (orders → portfolio_id → portfolios.user_id)
+    const activeOrdersCount = await this.prisma.orders.count({
+      where: {
+        portfolio: {
+          user_id: userId,
+        },
+        status: {
+          in: ['pending', 'partially_filled'],
+        },
+      },
+    });
+
+    if (activeOrdersCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete account: You have ${activeOrdersCount} active or pending order(s). ` +
+        `Please ensure all orders are completed, cancelled, or rejected before deleting your account.`,
+      );
+    }
+
+    // Step 3: Check for open positions (portfolio_positions → portfolio_id → portfolios.user_id)
+    const openPositionsCount = await this.prisma.portfolio_positions.count({
+      where: {
+        portfolio: {
+          user_id: userId,
+        },
+        quantity: {
+          not: 0,
+        },
+      },
+    });
+
+    if (openPositionsCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete account: You have ${openPositionsCount} open position(s). ` +
+        `Please close all positions before deleting your account.`,
+      );
+    }
+
+    // Step 4: Check for active subscriptions
+    const activeSubscriptionsCount = await this.prisma.user_subscriptions.count({
+      where: {
+        user_id: userId,
+        status: 'active',
+        expires_at: {
+          gt: new Date(),
+        },
+      },
+    });
+
+    if (activeSubscriptionsCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete account: You have ${activeSubscriptionsCount} active subscription(s). ` +
+        `Please cancel your subscription(s) before deleting your account.`,
+      );
+    }
+
+    // Step 5: Check for pending KYC (warn but allow)
+    if (user.kyc_status === 'review' || user.kyc_status === 'pending') {
+      console.warn(
+        `[ACCOUNT_DELETION] User ${userId} (${user.email}) is deleting account with KYC status: ${user.kyc_status}`,
+      );
+    }
+
+    // Step 6: Collect all cloud storage files for deletion BEFORE transaction
+    const filesToDelete: string[] = [];
+
+    // Collect profile picture
+    if (user.profile_pic_url) {
+      filesToDelete.push(user.profile_pic_url);
+    }
+
+    // Collect KYC documents
+    const kycVerifications = await this.prisma.kyc_verifications.findMany({
+      where: { user_id: userId },
+      include: {
+        documents: true,
+        face_matches: true,
+      },
+    });
+
+    for (const kyc of kycVerifications) {
+      for (const doc of kyc.documents) {
+        if (doc.storage_url) {
+          filesToDelete.push(doc.storage_url);
+        }
+      }
+      for (const faceMatch of kyc.face_matches) {
+        if (faceMatch.photo_url) {
+          filesToDelete.push(faceMatch.photo_url);
+        }
+      }
+    }
+
+    // ===== ALL SAFETY CHECKS PASSED - Proceed with deletion =====
+
+    // Step 7: Use database transaction to delete all related entities
+    // Deletion order: child entities → parent entities
+    // Note: timeout set to 60 seconds (default 5s) to allow deletion of users with large amounts of data
+    const deletionSummary = await this.prisma.$transaction(
+      async (tx) => {
+        const summary = {
+        user_id: userId,
+        deleted_at: new Date(),
+        entities_deleted: {},
+      };
+
+      // ===== PHASE 1: DELETE TEMPORARY/EPHEMERAL DATA =====
+
+      // Delete 2FA codes
+      const twoFactorCodesDeleted = await tx.two_factor_codes.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['two_factor_codes'] =
+        twoFactorCodesDeleted.count;
+
+      // Revoke all sessions
+      const sessionsDeleted = await tx.user_sessions.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['user_sessions'] = sessionsDeleted.count;
+
+      // ===== PHASE 2: DELETE KYC AND DOCUMENTS =====
+
+      // Get KYC verification IDs for deletion
+      const kycVerificationIds = kycVerifications.map((k) => k.kyc_id);
+
+      // Delete KYC face matches
+      const faceMatchesDeleted = await tx.kyc_face_matches.deleteMany({
+        where: { kyc_id: { in: kycVerificationIds } },
+      });
+      summary.entities_deleted['kyc_face_matches'] = faceMatchesDeleted.count;
+
+      // Delete KYC documents
+      const kycDocsDeleted = await tx.kyc_documents.deleteMany({
+        where: { kyc_id: { in: kycVerificationIds } },
+      });
+      summary.entities_deleted['kyc_documents'] = kycDocsDeleted.count;
+
+      // Delete KYC verifications
+      const kycDeleted = await tx.kyc_verifications.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['kyc_verifications'] = kycDeleted.count;
+
+      // ===== PHASE 3: DELETE EXCHANGE CONNECTIONS =====
+
+      const exchangeConnectionsDeleted =
+        await tx.user_exchange_connections.deleteMany({
+          where: { user_id: userId },
+        });
+      summary.entities_deleted['user_exchange_connections'] =
+        exchangeConnectionsDeleted.count;
+
+      // ===== PHASE 4: DELETE PORTFOLIO-RELATED DATA =====
+
+      // Get all portfolios
+      const portfolios = await tx.portfolios.findMany({
+        where: { user_id: userId },
+        include: {
+          orders: true,
+          snapshots: true,
+          positions: true,
+          optimizationRuns: true,
+          drawdownHistories: true,
+        },
+      });
+
+      // Delete drawdown history
+      const drawdownDeleted = await tx.drawdown_history.deleteMany({
+        where: { portfolio_id: { in: portfolios.map((p) => p.portfolio_id) } },
+      });
+      summary.entities_deleted['drawdown_history'] = drawdownDeleted.count;
+
+      // Delete optimization-related data
+      const optimizations = await tx.optimization_runs.findMany({
+        where: { user_id: userId },
+      });
+
+      // Delete rebalance suggestions
+      const rebalanceDeleted = await tx.rebalance_suggestions.deleteMany({
+        where: {
+          optimization_id: {
+            in: optimizations.map((o) => o.optimization_id),
+          },
+        },
+      });
+      summary.entities_deleted['rebalance_suggestions'] = rebalanceDeleted.count;
+
+      // Delete optimization allocations
+      const allocationsDeleted = await tx.optimization_allocations.deleteMany({
+        where: {
+          optimization_id: {
+            in: optimizations.map((o) => o.optimization_id),
+          },
+        },
+      });
+      summary.entities_deleted['optimization_allocations'] =
+        allocationsDeleted.count;
+
+      // Delete optimization runs
+      const optimizationDeleted = await tx.optimization_runs.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['optimization_runs'] = optimizationDeleted.count;
+
+      // Delete portfolio snapshots
+      const snapshotsDeleted = await tx.portfolio_snapshots.deleteMany({
+        where: { portfolio_id: { in: portfolios.map((p) => p.portfolio_id) } },
+      });
+      summary.entities_deleted['portfolio_snapshots'] = snapshotsDeleted.count;
+
+      // Delete order executions
+      const orderIds = portfolios.flatMap((p) => p.orders.map((o) => o.order_id));
+      const executionsDeleted = await tx.order_executions.deleteMany({
+        where: { order_id: { in: orderIds } },
+      });
+      summary.entities_deleted['order_executions'] = executionsDeleted.count;
+
+      // Delete orders
+      const ordersDeleted = await tx.orders.deleteMany({
+        where: { portfolio_id: { in: portfolios.map((p) => p.portfolio_id) } },
+      });
+      summary.entities_deleted['orders'] = ordersDeleted.count;
+
+      // Delete portfolio positions
+      const positionsDeleted = await tx.portfolio_positions.deleteMany({
+        where: { portfolio_id: { in: portfolios.map((p) => p.portfolio_id) } },
+      });
+      summary.entities_deleted['portfolio_positions'] = positionsDeleted.count;
+
+      // Delete portfolios
+      const portfoliosDeleted = await tx.portfolios.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['portfolios'] = portfoliosDeleted.count;
+
+      // ===== PHASE 5: DELETE STRATEGY/SIGNAL DATA =====
+
+      // Get all strategies for this user
+      const strategies = await tx.strategies.findMany({
+        where: { user_id: userId },
+      });
+
+      const strategyIds = strategies.map((s) => s.strategy_id);
+
+      // Get all execution jobs
+      const executionJobs = await tx.strategy_execution_jobs.findMany({
+        where: { strategy_id: { in: strategyIds } },
+      });
+
+      // Delete strategy execution jobs
+      const jobsDeleted = await tx.strategy_execution_jobs.deleteMany({
+        where: { strategy_id: { in: strategyIds } },
+      });
+      summary.entities_deleted['strategy_execution_jobs'] = jobsDeleted.count;
+
+      // Get all signals for this user
+      const signals = await tx.strategy_signals.findMany({
+        where: { user_id: userId },
+      });
+
+      const signalIds = signals.map((s) => s.signal_id);
+
+      // Delete auto-trade evaluations
+      const evaluationsDeleted = await tx.auto_trade_evaluations.deleteMany({
+        where: { signal_id: { in: signalIds } },
+      });
+      summary.entities_deleted['auto_trade_evaluations'] =
+        evaluationsDeleted.count;
+
+      // Delete signal explanations
+      const explanationsDeleted = await tx.signal_explanations.deleteMany({
+        where: { signal_id: { in: signalIds } },
+      });
+      summary.entities_deleted['signal_explanations'] = explanationsDeleted.count;
+
+      // Delete signal details
+      const detailsDeleted = await tx.signal_details.deleteMany({
+        where: { signal_id: { in: signalIds } },
+      });
+      summary.entities_deleted['signal_details'] = detailsDeleted.count;
+
+      // Delete strategy signals
+      const signalsDeleted = await tx.strategy_signals.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['strategy_signals'] = signalsDeleted.count;
+
+      // Delete strategy parameters
+      const parametersDeleted = await tx.strategy_parameters.deleteMany({
+        where: { strategy_id: { in: strategyIds } },
+      });
+      summary.entities_deleted['strategy_parameters'] = parametersDeleted.count;
+
+      // Delete strategies (including cloned ones)
+      const strategiesDeleted = await tx.strategies.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['strategies'] = strategiesDeleted.count;
+
+      // ===== PHASE 6: DELETE SUBSCRIPTIONS =====
+
+      const subscriptionsDeleted = await tx.user_subscriptions.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['user_subscriptions'] = subscriptionsDeleted.count;
+
+      // ===== PHASE 7: DELETE USER SETTINGS =====
+
+      const settingsDeleted = await tx.user_settings.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['user_settings'] = settingsDeleted.count;
+
+      // ===== PHASE 8: DELETE RISK EVENTS =====
+
+      const riskEventsDeleted = await tx.risk_events.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['risk_events'] = riskEventsDeleted.count;
+
+      // ===== PHASE 9: DELETE USER RECORD =====
+
+      await tx.users.delete({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['users'] = 1;
+
+      return summary;
+        },
+        {
+          timeout: 60000, // 60 seconds - allows deletion of users with large amounts of data
+        },
+      );
+
+    // Step 8: Delete cloud storage files AFTER database transaction succeeds
+    // This ensures files are only deleted if all database operations succeed
+    let cloudFilesDeleted = 0;
+    let cloudFilesFailed = 0;
+
+    for (const fileUrl of filesToDelete) {
+      try {
+        await this.storageService.deleteFile(fileUrl);
+        cloudFilesDeleted++;
+      } catch (error) {
+        cloudFilesFailed++;
+        console.error(
+          `[ACCOUNT_DELETION] Failed to delete cloud file: ${fileUrl}`,
+          error,
+        );
+        // Continue deletion - don't fail entire operation
+      }
+    }
+
+    // Log final deletion summary
+    console.log(`[ACCOUNT_DELETION] Account deleted successfully`, {
+      user_id: userId,
+      email: user.email,
+      username: user.username,
+      kyc_status: user.kyc_status,
+      reason: deleteAccountDto.reason || 'No reason provided',
+      database_entities_deleted: deletionSummary.entities_deleted,
+      cloud_files_deleted: cloudFilesDeleted,
+      cloud_files_failed: cloudFilesFailed,
+      deleted_at: deletionSummary.deleted_at,
+    });
+
+    return {
+      message: 'Account deleted successfully',
+      summary: {
+        ...deletionSummary,
+        cloud_storage: {
+          files_deleted: cloudFilesDeleted,
+          files_failed: cloudFilesFailed,
+          total_files: filesToDelete.length,
+        },
+      },
+    };
+  }
 }
+
 
