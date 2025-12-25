@@ -15,6 +15,7 @@ import { MarketModule } from './modules/market/market.module';
 import { StrategiesModule } from './modules/strategies/strategies.module';
 import { AiInsightsModule } from './ai-insights/ai-insights.module';
 import { TaskSchedulerModule } from './task-scheduler/task-scheduler.module';
+import { PaperTradingGateway } from './gateways/paper-trading.gateway';
 
 @Module({
   imports: [
@@ -36,6 +37,6 @@ import { TaskSchedulerModule } from './task-scheduler/task-scheduler.module';
     TaskSchedulerModule,
   ],
   controllers: [],
-  providers: [],
+  providers: [PaperTradingGateway],
 })
 export class AppModule {}
