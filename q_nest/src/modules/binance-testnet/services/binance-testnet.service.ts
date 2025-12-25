@@ -416,37 +416,4 @@ export class BinanceTestnetService {
       throw error;
     }
   }
-
-  /**
-   * Creates a WebSocket listen key for user data stream
-   */
-  async createListenKey(): Promise<string> {
-    if (!this.isConfigured()) {
-      throw new Error('Testnet not configured');
-    }
-
-    return this.binanceTestnetApi.createListenKey(this.apiKey, this.apiSecret);
-  }
-
-  /**
-   * Keeps the WebSocket listen key alive (must be called every 30 minutes)
-   */
-  async keepAliveListenKey(): Promise<void> {
-    if (!this.isConfigured()) {
-      throw new Error('Testnet not configured');
-    }
-
-    await this.binanceTestnetApi.keepAliveListenKey(this.apiKey, this.apiSecret);
-  }
-
-  /**
-   * Closes the WebSocket listen key
-   */
-  async closeListenKey(): Promise<void> {
-    if (!this.isConfigured()) {
-      throw new Error('Testnet not configured');
-    }
-
-    await this.binanceTestnetApi.closeListenKey(this.apiKey, this.apiSecret);
-  }
 }
