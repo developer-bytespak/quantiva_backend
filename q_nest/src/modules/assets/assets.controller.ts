@@ -56,5 +56,10 @@ export class AssetsController {
   async syncFromCoinGecko() {
     return this.assetsSyncCronjobService.manualSync();
   }
+
+  @Get('sync-status')
+  getSyncStatus() {
+    return this.assetsSyncCronjobService.getSyncStatus();
+  }
 }
 

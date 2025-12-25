@@ -49,6 +49,33 @@ export class MarketController {
   }
 
   /**
+   * GET /api/market/coins/cached
+   * Fetch cached market data from database (updated every 5 minutes)
+   * Query params: limit (default: 500), search (optional)
+   */
+  @Get('coins/cached')
+  async getCachedMarketData(
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+  ) {
+    try {
+      const limitNum = limit ? parseInt(limit, 10) : 500;
+      if (isNaN(limitNum) || limitNum < 1 || limitNum > 500) {
+        throw new HttpException(
+          'Limit must be a number between 1 and 500',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      return await this.marketService.getCachedMarketData(limitNum, search);
+    } catch (error: any) {
+      throw new HttpException(
+        error.message || 'Failed to fetch cached market data',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
    * GET /api/market/coins/search
    * Search for coins by query string
    * Query params: query (required)
@@ -79,6 +106,7 @@ export class MarketController {
    * GET /api/market/coins/:coinIdOrSymbol
    * Fetch detailed information about a specific coin
    * Accepts either coin ID (e.g., "bitcoin") or symbol (e.g., "BTC")
+   * MUST BE LAST - catch-all route
    */
   @Get('coins/:coinIdOrSymbol')
   async getCoinDetails(@Param('coinIdOrSymbol') coinIdOrSymbol: string) {
