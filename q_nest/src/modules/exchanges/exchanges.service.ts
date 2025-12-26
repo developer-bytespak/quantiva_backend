@@ -392,14 +392,36 @@ export class ExchangesService {
 
     const exchangeName = connection.exchange.name.toLowerCase();
     const cacheKey = `${exchangeName}:${connectionId}:${dataType}`;
-    
+
     // Try cache first
     const cached = this.cacheService.getCached(cacheKey);
     if (cached) {
       return cached;
     }
 
-    // Cache miss - sync data
+    // Special-case: if caller only asked for balance, fetch account snapshot only
+    if (dataType === 'balance') {
+      try {
+        // Decrypt API keys
+        const apiKey = this.encryptionService.decryptApiKey(connection.api_key_encrypted);
+        const apiSecret = this.encryptionService.decryptApiKey(connection.api_secret_encrypted);
+
+        // Use the specific exchange integration to fetch balance-only (fast single call)
+        const exchangeService = this.getExchangeService(exchangeName) as any;
+        if (typeof exchangeService.getAccountBalance === 'function') {
+          const balance = await exchangeService.getAccountBalance(apiKey, apiSecret);
+
+          // Cache and return balance only (avoid fetching orders by default)
+          this.cacheService.setCached(cacheKey, balance);
+          return balance;
+        }
+      } catch (error) {
+        // If balance-only fetch fails for any reason, fall back to full sync
+        this.logger.warn(`Balance-only fetch failed for ${connectionId}, falling back to full sync: ${error?.message ?? error}`);
+      }
+    }
+
+    // Cache miss or not a balance-only request - sync all data (legacy behavior)
     await this.syncConnectionData(connectionId);
 
     // Return from cache after sync

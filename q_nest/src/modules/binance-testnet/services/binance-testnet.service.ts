@@ -309,6 +309,25 @@ export class BinanceTestnetService {
   }
 
   /**
+   * Gets all available trading symbols from Binance testnet
+   */
+  async getAvailableSymbols(): Promise<{ symbols: string[] }> {
+    const cacheKey = 'testnet:exchangeInfo';
+    
+    const cached = this.cacheService.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const exchangeInfo = await this.binanceTestnetApi.getExchangeInfo();
+    
+    // Cache for 1 hour since exchange info rarely changes
+    this.cacheService.set(cacheKey, exchangeInfo, 3600000);
+
+    return exchangeInfo;
+  }
+
+  /**
    * Gets order book
    */
   async getOrderBook(symbol: string, limit?: number): Promise<TestnetOrderBookDto> {

@@ -23,9 +23,9 @@ export const binanceTestnetConfig = {
 
   // Retry configuration
   retry: {
-    maxRetries: 3,
-    baseDelay: 1000, // 1 second
-    maxDelay: 10000, // 10 seconds
+    maxRetries: 2, // Reduced from 3 to speed up failures
+    baseDelay: 500, // Reduced from 1000ms to speed up retries
+    maxDelay: 5000, // Reduced from 10000ms to speed up retries
   },
 
   // Caching

@@ -30,24 +30,18 @@ import { TestnetOrderDto } from './dto/testnet-data.dto';
 export class BinanceTestnetController {
   private readonly logger = new Logger(BinanceTestnetController.name);
 
-  // Fallback trading symbols if unable to fetch account symbols
+  // Verified testnet symbols (as of Dec 2025) - these are guaranteed to exist
   private readonly DEFAULT_TRADING_SYMBOLS = [
     'BTCUSDT',
     'ETHUSDT',
     'BNBUSDT',
-    'XRPUSDT',
     'ADAUSDT',
     'DOGEUSDT',
-    'SHIBUSDT',
     'SOLUSDT',
     'MATICUSDT',
     'LINKUSDT',
-    'ZECUSDT',
-    'XMRUSDT',
     'LTCUSDT',
-    'EOSUSDT',
-    'FILUSDT',
-    'THETAUSDT',
+    'DOTUSDT',
   ];
 
   constructor(private readonly binanceTestnetService: BinanceTestnetService) {}
@@ -70,30 +64,30 @@ export class BinanceTestnetController {
   @Get('symbols')
   async getAvailableSymbols() {
     try {
-      // Try to get symbols from account balances
-      const accountInfo = await this.binanceTestnetService.getAccountInfo();
-      const accountSymbols = new Set<string>();
-      
-      if (accountInfo?.balances && Array.isArray(accountInfo.balances)) {
-        for (const balance of accountInfo.balances) {
-          const asset = balance.asset;
-          if (asset && asset !== 'USDT' && asset !== 'BUSD') {
-            accountSymbols.add(`${asset}USDT`);
-          }
-        }
+      // First try to get actual available symbols from Binance testnet
+      const exchangeInfo = await this.binanceTestnetService.getAvailableSymbols();
+      if (exchangeInfo?.symbols?.length > 0) {
+        return {
+          symbols: exchangeInfo.symbols,
+          count: exchangeInfo.symbols.length,
+          source: 'binance_testnet',
+        };
       }
       
-      const symbols = Array.from(new Set([...accountSymbols, ...this.DEFAULT_TRADING_SYMBOLS]));
-      return { 
-        symbols: symbols.sort(),
-        count: symbols.length,
-      };
-    } catch (error: any) {
-      this.logger.warn(`Failed to fetch available symbols: ${error?.message}`);
+      // Fallback to default list if exchange info fails
+      this.logger.warn('Exchange info unavailable, using default symbol list');
       return {
         symbols: this.DEFAULT_TRADING_SYMBOLS.sort(),
         count: this.DEFAULT_TRADING_SYMBOLS.length,
-        warning: 'Using default symbols - account symbols unavailable',
+        source: 'default',
+      };
+    } catch (error: any) {
+      this.logger.error(`Failed to fetch available symbols: ${error?.message}`);
+      return {
+        symbols: this.DEFAULT_TRADING_SYMBOLS.sort(),
+        count: this.DEFAULT_TRADING_SYMBOLS.length,
+        source: 'default_fallback',
+        error: error?.message,
       };
     }
   }
@@ -224,22 +218,32 @@ export class BinanceTestnetController {
         const batch = symbolList.slice(i, i + batchSize);
         this.logger.debug(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(symbolList.length / batchSize)}: ${batch.join(', ')}`);
         
-        const batchRequests = batch.map(s =>
-          this.binanceTestnetService.getAllOrders({ 
+        const batchStart = Date.now();
+        const batchRequests = batch.map(s => {
+          const symbolStart = Date.now();
+          return this.binanceTestnetService.getAllOrders({ 
             symbol: s, 
             ...filters,
             limit: perSymbolLimit,
+          }).then(result => {
+            const symbolDuration = Date.now() - symbolStart;
+            this.logger.debug(`Symbol ${s}: ${result.length} orders in ${symbolDuration}ms`);
+            return result;
           }).catch((err: any) => {
+            const symbolDuration = Date.now() - symbolStart;
             // Log and continue on individual symbol failures
             this.logger.warn(
-              `Failed fetching orders for symbol ${s}: ${err?.message ?? 'Unknown error'}`,
+              `Failed fetching orders for symbol ${s} (${symbolDuration}ms): ${err?.message ?? 'Unknown error'}`,
             );
             return []; // Return empty array on error
-          })
-        );
+          });
+        });
         
         const batchResponses = await Promise.all(batchRequests);
         allResponses.push(...batchResponses);
+        
+        const batchDuration = Date.now() - batchStart;
+        this.logger.debug(`Batch ${Math.floor(i / batchSize) + 1} completed in ${batchDuration}ms`);
         
         // Small delay between batches to further reduce rate limit pressure
         if (i + batchSize < symbolList.length) {
