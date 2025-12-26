@@ -4,6 +4,8 @@ import axios from 'axios';
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 
+type BinanceConnectionState = 'CONNECTING' | 'CONNECTED' | 'RATE_LIMITED' | 'DISCONNECTED' | 'ERROR';
+
 interface UserConnection {
   listenKey: string;
   ws: WebSocket | null;
@@ -11,12 +13,18 @@ interface UserConnection {
   reconnectAttempts: number;
   keepaliveTimer?: NodeJS.Timeout;
   reconnectTimer?: NodeJS.Timeout;
+  retryTimer?: NodeJS.Timeout;
+  state: BinanceConnectionState;
 }
 
 @Injectable()
 export class BinanceUserWsService extends EventEmitter implements OnModuleDestroy {
   private readonly logger = new Logger(BinanceUserWsService.name);
   private readonly connections = new Map<string, UserConnection>();
+  private readonly lastBalances = new Map<string, Record<string, { free: string; locked: string; timestamp: number }>>();
+  // Store last orders per user as a map of orderId -> orderUpdate
+  private readonly lastOrders = new Map<string, Map<string, any>>();
+  private readonly userRateLimitUntil = new Map<string, number>();
   private readonly MAX_RECONNECT_ATTEMPTS = 10;
   private readonly KEEPALIVE_INTERVAL = 30 * 60 * 1000; // 30 minutes
   private readonly baseUrl: string;
@@ -54,12 +62,48 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
       return;
     }
 
-    try {
-      this.logger.log(`[UserDataStream] Connecting user ${userId}`);
+    // Reuse existing listenKey if connection exists and is still valid
+    if (existing?.listenKey && existing.state !== 'DISCONNECTED') {
+      this.logger.log(`[UserDataStream] Reusing existing listenKey for user ${userId}`);
+      return this.connectWithListenKey(userId, existing.listenKey);
+    }
 
+    // Check if user is currently rate-limited
+    const rateLimitedUntil = this.userRateLimitUntil.get(userId);
+    if (rateLimitedUntil && Date.now() < rateLimitedUntil) {
+      const remainingMs = rateLimitedUntil - Date.now();
+      this.logger.warn(`[UserDataStream] User ${userId} is rate-limited for ${Math.ceil(remainingMs / 1000)}s more`);
+      this.emitBinanceStatus(userId, 'RATE_LIMITED', rateLimitedUntil);
+      return;
+    }
+
+    this.logger.log(`[UserDataStream] Connecting user ${userId}`);
+    this.emitBinanceStatus(userId, 'CONNECTING');
+
+    try {
       // Request listenKey
-      const listenKey = await this.createListenKey();
+      const listenKey = await this.createListenKey(userId);
+      await this.connectWithListenKey(userId, listenKey);
+    } catch (error) {
+      // If rate limited, schedule automatic retry
+      if (error.message === 'RATE_LIMITED') {
+        const rateLimitedUntil = this.userRateLimitUntil.get(userId);
+        if (rateLimitedUntil) {
+          this.scheduleRetry(userId, rateLimitedUntil);
+        }
+        return; // Don't throw - let retry mechanism handle it
+      }
       
+      this.logger.error(`[UserDataStream] Failed to connect user ${userId}: ${error.message}`);
+      this.emitBinanceStatus(userId, 'ERROR', undefined, error.message);
+    }
+  }
+
+  /**
+   * Connect using an existing listenKey
+   */
+  private async connectWithListenKey(userId: string, listenKey: string): Promise<void> {
+    try {
       // Create WebSocket connection
       const ws = new WebSocket(`${this.wsEndpoint}/ws/${listenKey}`);
       
@@ -68,6 +112,7 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
         ws,
         lastKeepalive: Date.now(),
         reconnectAttempts: 0,
+        state: 'CONNECTING',
       };
 
       this.connections.set(userId, connection);
@@ -76,7 +121,8 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
       ws.on('open', () => {
         this.logger.log(`[UserDataStream] Connected for user ${userId}`);
         connection.reconnectAttempts = 0;
-        this.emit('connection:status', { userId, connected: true });
+        connection.state = 'CONNECTED';
+        this.emitBinanceStatus(userId, 'CONNECTED');
         
         // Start keepalive timer
         this.startKeepalive(userId);
@@ -93,12 +139,14 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
 
       ws.on('error', (error) => {
         this.logger.error(`[UserDataStream] WebSocket error for user ${userId}: ${error.message}`);
-        this.emit('error', { userId, code: 'WS_ERROR', message: error.message });
+        connection.state = 'ERROR';
+        this.emitBinanceStatus(userId, 'ERROR', undefined, error.message);
       });
 
       ws.on('close', (code, reason) => {
         this.logger.warn(`[UserDataStream] Connection closed for user ${userId}: ${code} - ${reason}`);
-        this.emit('connection:status', { userId, connected: false });
+        connection.state = 'DISCONNECTED';
+        this.emitBinanceStatus(userId, 'DISCONNECTED');
         this.stopKeepalive(userId);
         
         // Attempt reconnection
@@ -106,18 +154,8 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
       });
 
     } catch (error) {
-      this.logger.error(`[UserDataStream] Failed to connect user ${userId}: ${error.message}`);
-      
-      // If rate limited, don't emit error - just log it
-      if (error.message === 'RATE_LIMITED' || error.message === 'BAD_REQUEST') {
-        this.emit('error', { 
-          userId, 
-          code: 'RATE_LIMITED', 
-          message: 'Binance API rate limited. Please wait 10-15 minutes before refreshing.' 
-        });
-        return; // Don't throw - allow app to continue with REST fallback
-      }
-      
+      this.logger.error(`[UserDataStream] Failed to create WebSocket for user ${userId}: ${error.message}`);
+      this.emitBinanceStatus(userId, 'ERROR', undefined, error.message);
       throw error;
     }
   }
@@ -133,10 +171,13 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
 
     this.logger.log(`[UserDataStream] Disconnecting user ${userId}`);
 
-    // Stop timers
+    // Stop all timers
     this.stopKeepalive(userId);
     if (connection.reconnectTimer) {
       clearTimeout(connection.reconnectTimer);
+    }
+    if (connection.retryTimer) {
+      clearTimeout(connection.retryTimer);
     }
 
     // Close WebSocket
@@ -155,15 +196,16 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
     }
 
     this.connections.delete(userId);
-    this.emit('connection:status', { userId, connected: false });
+    this.userRateLimitUntil.delete(userId);
+    this.emitBinanceStatus(userId, 'DISCONNECTED');
   }
 
   /**
    * Create a new listenKey from Binance
    */
-  private async createListenKey(): Promise<string> {
+  private async createListenKey(userId: string): Promise<string> {
     try {
-      this.logger.log('Requesting listenKey from Binance...');
+      this.logger.log(`Requesting listenKey from Binance for user ${userId}...`);
       const response = await axios.post(
         `${this.baseUrl}/api/v3/userDataStream`,
         {},
@@ -175,7 +217,7 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
         }
       );
 
-      this.logger.log('Successfully created listenKey');
+      this.logger.log(`Successfully created listenKey for user ${userId}`);
       return response.data.listenKey;
     } catch (error) {
       const statusCode = error?.response?.status;
@@ -184,7 +226,14 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
       // Detect rate limiting
       if (statusCode === 429 || statusCode === 418 || errorMsg?.includes('rate limit')) {
         this.logger.error(`⛔ BINANCE RATE LIMITED - Cannot create listenKey. Status: ${statusCode}, Message: ${errorMsg}`);
-        this.logger.warn('⏳ Wait 10-15 minutes before attempting to reconnect');
+        
+        // Set per-user cooldown
+        const cooldownMs = 10 * 60 * 1000; // 10 minutes by default
+        const rateLimitedUntil = Date.now() + cooldownMs;
+        this.userRateLimitUntil.set(userId, rateLimitedUntil);
+        
+        this.logger.warn(`⏳ User ${userId} rate-limited until ${new Date(rateLimitedUntil).toISOString()}`);
+        this.emitBinanceStatus(userId, 'RATE_LIMITED', rateLimitedUntil);
         throw new Error('RATE_LIMITED');
       } else if (statusCode === 400) {
         this.logger.error(`❌ Bad Request (400) - Possible rate limit or API key issue: ${errorMsg}`);
@@ -347,12 +396,19 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
         const locked = balance.l || balance.L;
 
         if (asset && (free !== undefined || locked !== undefined)) {
+          const timestamp = data.E || Date.now();
+
+          // Update in-memory last balance for user (safe, no external calls)
+          const userBalances = this.lastBalances.get(userId) || {};
+          userBalances[asset] = { free: String(free || '0'), locked: String(locked || '0'), timestamp };
+          this.lastBalances.set(userId, userBalances);
+
           this.emit('balance:update', {
             userId,
             asset,
             free: free || '0',
             locked: locked || '0',
-            timestamp: data.E || Date.now(),
+            timestamp,
           });
 
           this.logger.log(`[BalanceUpdate] User ${userId}, ${asset}: free=${free}, locked=${locked}`);
@@ -386,6 +442,13 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
         commission: data.n,
       };
 
+      // Persist last order state in-memory
+      const userOrders = this.lastOrders.get(userId) || new Map<string, any>();
+      if (orderUpdate.orderId) {
+        userOrders.set(orderUpdate.orderId, orderUpdate);
+      }
+      this.lastOrders.set(userId, userOrders);
+
       this.emit('order:update', orderUpdate);
 
       this.logger.log(
@@ -417,8 +480,92 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
         connected: conn.ws?.readyState === WebSocket.OPEN,
         reconnectAttempts: conn.reconnectAttempts,
         lastKeepalive: conn.lastKeepalive,
+        lastBalance: this.lastBalances.get(userId) || null,
       })),
     };
     return stats;
+  }
+
+  /**
+   * Returns rate limit status for a specific user (read-only)
+   */
+  getRateLimitStatus(userId?: string) {
+    const now = Date.now();
+    
+    if (userId) {
+      const rateLimitedUntil = this.userRateLimitUntil.get(userId);
+      if (rateLimitedUntil && rateLimitedUntil > now) {
+        return { rateLimited: true, remainingMs: rateLimitedUntil - now };
+      }
+      return { rateLimited: false, remainingMs: 0 };
+    }
+    
+    // Check if any user is rate-limited (for global health check)
+    const anyRateLimited = Array.from(this.userRateLimitUntil.values())
+      .some(until => until > now);
+    
+    return { rateLimited: anyRateLimited, remainingMs: 0 };
+  }
+
+  /**
+   * Get last known balance for a user (if any)
+   */
+  getLastBalance(userId: string) {
+    return this.lastBalances.get(userId) || null;
+  }
+
+  /**
+   * Get last known orders for a user (if any) as an array sorted by timestamp desc
+   */
+  getLastOrders(userId: string) {
+    const map = this.lastOrders.get(userId);
+    if (!map) return [];
+    const arr = Array.from(map.values());
+    arr.sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
+    return arr;
+  }
+
+  /**
+   * Emit Binance connection status to clients (state-based, not error-based)
+   */
+  private emitBinanceStatus(
+    userId: string, 
+    state: BinanceConnectionState, 
+    retryAt?: number,
+    message?: string
+  ): void {
+    this.emit('binance:status', { 
+      userId, 
+      state, 
+      retryAt: retryAt || null,
+      message: message || null
+    });
+  }
+
+  /**
+   * Schedule automatic retry after rate limit expires
+   */
+  private scheduleRetry(userId: string, rateLimitedUntil: number): void {
+    const connection = this.connections.get(userId);
+    if (!connection) return;
+
+    // Clear any existing retry timer
+    if (connection.retryTimer) {
+      clearTimeout(connection.retryTimer);
+    }
+
+    const retryDelay = rateLimitedUntil - Date.now() + 1000; // Add 1s buffer
+    if (retryDelay <= 0) {
+      // Rate limit already expired, retry immediately
+      this.logger.log(`[UserDataStream] Rate limit expired for user ${userId}, retrying now`);
+      this.connect(userId);
+      return;
+    }
+
+    this.logger.log(`[UserDataStream] Scheduling automatic retry for user ${userId} in ${Math.ceil(retryDelay / 1000)}s`);
+    connection.retryTimer = setTimeout(() => {
+      this.logger.log(`[UserDataStream] Automatic retry triggered for user ${userId}`);
+      this.connect(userId);
+    }, retryDelay);
   }
 }

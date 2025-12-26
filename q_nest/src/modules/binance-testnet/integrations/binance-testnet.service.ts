@@ -45,13 +45,13 @@ export class BinanceTestnetService {
   private readonly logger = new Logger(BinanceTestnetService.name);
   private readonly baseUrl = binanceTestnetConfig.apiEndpoint;
   private readonly apiClient: AxiosInstance;
-  private readonly maxRetries = binanceTestnetConfig.retry.maxRetries;
+  private readonly maxRetries = 2; // Reduced from 3 to speed up failures
   private readonly retryDelay = binanceTestnetConfig.retry.baseDelay;
 
   constructor() {
     this.apiClient = axios.create({
       baseURL: this.baseUrl,
-      timeout: 10000,
+      timeout: 5000, // Reduced from 10000ms to speed up failures
     });
   }
 
@@ -180,6 +180,12 @@ export class BinanceTestnetService {
       const response = await this.apiClient.get(endpoint, { params });
       return response.data;
     } catch (error: any) {
+      // Log detailed error information
+      this.logger.error(`Public request failed: ${endpoint} with params ${JSON.stringify(params)}`);
+      if (error.response) {
+        this.logger.error(`Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`);
+      }
+      
       // Check for IP ban
       if (error.response?.status === 418 || 
           (error.response?.status === 400 && error.response.data?.msg?.includes('IP banned'))) {
@@ -190,7 +196,10 @@ export class BinanceTestnetService {
       if (error.response?.status === 429) {
         throw new TestnetRateLimitException();
       }
-      throw new TestnetApiException(error.message || 'Public request failed');
+      
+      // Include Binance error message if available
+      const errorMessage = error.response?.data?.msg || error.message || 'Public request failed';
+      throw new TestnetApiException(errorMessage);
     }
   }
 
@@ -631,4 +640,26 @@ export class BinanceTestnetService {
       throw error;
     }
   }
-}
+  /**
+   * Gets exchange information including all available trading pairs
+   */
+  async getExchangeInfo(): Promise<{ symbols: string[] }> {
+    try {
+      const exchangeInfo = await this.makePublicRequest('/v3/exchangeInfo');
+      
+      // Extract only USDT pairs that are actively trading
+      const usdtSymbols = exchangeInfo.symbols
+        .filter((s: any) => 
+          s.symbol.endsWith('USDT') && 
+          s.status === 'TRADING' &&
+          s.isSpotTradingAllowed === true
+        )
+        .map((s: any) => s.symbol)
+        .sort();
+      
+      return { symbols: usdtSymbols };
+    } catch (error) {
+      this.logger.error(`Failed to get exchange info: ${error.message}`);
+      throw error;
+    }
+  }}

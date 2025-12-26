@@ -46,16 +46,11 @@ export class PaperTradingGateway implements OnGatewayConnection, OnGatewayDiscon
       this.emitToUser(userId, 'order:update', payload);
     });
 
-    // Forward connection status to clients
-    this.binanceUserWsService.on('connection:status', (data) => {
+    // Forward Binance connection status to clients (state-based, not error-based)
+    this.binanceUserWsService.on('binance:status', (data) => {
       const { userId, ...payload } = data;
-      this.emitToUser(userId, 'connection:status', payload);
-    });
-
-    // Forward errors to clients
-    this.binanceUserWsService.on('error', (data) => {
-      const { userId, ...payload } = data;
-      this.emitToUser(userId, 'error', payload);
+      this.emitToUser(userId, 'binance:status', payload);
+      this.logger.log(`[Binance Status] User ${userId}: ${payload.state}${payload.retryAt ? ` (retry at ${new Date(payload.retryAt).toISOString()})` : ''}`);
     });
   }
 
