@@ -19,6 +19,7 @@ import { ConnectionOwnerGuard } from './guards/connection-owner.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
 import { CreateConnectionDto } from './dto/create-connection.dto';
+import { UpdateConnectionDto } from './dto/update-connection.dto';
 import { PlaceOrderDto } from './dto/place-order.dto';
 import { BinanceService } from './integrations/binance.service';
 import { BybitService } from './integrations/bybit.service';
@@ -54,11 +55,6 @@ export class ExchangesController {
   @Get()
   findAll() {
     return this.exchangesService.findAll();
-  }
-
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.exchangesService.findOne(id);
   }
 
   @Get('connections/active')
@@ -109,9 +105,48 @@ export class ExchangesController {
     }
   }
 
+  /**
+   * Get all connections for the current authenticated user
+   * This is used by the exchange configuration page
+   * MUST be before @Get('connections/:userId') to avoid route collision
+   */
+  @Get('my-connections')
+  async getUserConnectionsForCurrentUser(@CurrentUser() user: TokenPayload) {
+    console.log('[GET my-connections] Route hit');
+    console.log('[GET my-connections] User:', user);
+    
+    if (!user || !user.sub) {
+      console.error('[GET my-connections] No user in request');
+      throw new HttpException(
+        {
+          code: 'UNAUTHORIZED',
+          message: 'User not authenticated',
+        },
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+
+    console.log('[GET my-connections] Fetching connections for userId:', user.sub);
+    
+    const connections = await this.exchangesService.getUserConnections(user.sub);
+    
+    console.log('[GET my-connections] Success! Found', connections?.length || 0, 'connections');
+    console.log('[GET my-connections] Connections:', JSON.stringify(connections, null, 2).substring(0, 500));
+    
+    return {
+      success: true,
+      data: connections || [],
+    };
+  }
+
   @Get('connections/:userId')
   getUserConnections(@Param('userId') userId: string) {
     return this.exchangesService.getUserConnections(userId);
+  }
+
+  @Get(':id')
+  findOne(@Param('id') id: string) {
+    return this.exchangesService.findOne(id);
   }
 
   @Post()
@@ -164,9 +199,54 @@ export class ExchangesController {
     return this.exchangesService.update(id, updateExchangeDto);
   }
 
-  @Put('connections/:id')
-  updateConnection(@Param('id') id: string, @Body() updateConnectionDto: any) {
-    return this.exchangesService.updateConnection(id, updateConnectionDto);
+  /**
+   * Update exchange connection with new API credentials
+   * Requires password verification and connection ownership
+   * 
+   * @param connectionId - Connection ID to update
+   * @param updateConnectionDto - New API credentials and password
+   * @param user - Current authenticated user
+   * @returns Updated connection details
+   */
+  @Put('connections/:connectionId')
+  @UseGuards(ConnectionOwnerGuard)
+  @HttpCode(HttpStatus.OK)
+  async updateConnection(
+    @Param('connectionId') connectionId: string,
+    @Body() updateConnectionDto: UpdateConnectionDto,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    try {
+      const result = await this.exchangesService.updateConnection(
+        connectionId,
+        user.sub,
+        updateConnectionDto.api_key,
+        updateConnectionDto.api_secret,
+        updateConnectionDto.password,
+        updateConnectionDto.passphrase,
+      );
+
+      return {
+        success: true,
+        data: result,
+        message: 'Exchange connection updated successfully',
+      };
+    } catch (error: any) {
+      // Return proper HTTP exception with meaningful error message
+      const statusCode = error?.message?.includes('password') 
+        ? HttpStatus.UNAUTHORIZED 
+        : error?.message?.includes('Unauthorized')
+        ? HttpStatus.FORBIDDEN
+        : HttpStatus.BAD_REQUEST;
+
+      throw new HttpException(
+        {
+          code: 'UPDATE_CONNECTION_FAILED',
+          message: error?.message || 'Failed to update connection',
+        },
+        statusCode,
+      );
+    }
   }
 
   @Delete(':id')
