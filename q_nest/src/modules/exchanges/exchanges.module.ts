@@ -6,6 +6,7 @@ import { ExchangesService } from './exchanges.service';
 import { EncryptionService } from './services/encryption.service';
 import { BinanceService } from './integrations/binance.service';
 import { BybitService } from './integrations/bybit.service';
+import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
 import { ConnectionOwnerGuard } from './guards/connection-owner.guard';
 import { BinanceUserWsService } from './services/binance-user-ws.service';
@@ -20,6 +21,7 @@ import { AuthModule } from '../auth/auth.module';
     EncryptionService,
     BinanceService,
     BybitService,
+    AlpacaService,
     CacheService,
     ConnectionOwnerGuard,
     BinanceUserWsService,
@@ -29,6 +31,7 @@ import { AuthModule } from '../auth/auth.module';
     EncryptionService, 
     BinanceService, 
     BybitService, 
+    AlpacaService,
     CacheService,
     BinanceUserWsService,
   ],
