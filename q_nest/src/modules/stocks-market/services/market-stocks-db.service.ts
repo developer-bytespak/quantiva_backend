@@ -15,62 +15,69 @@ export class MarketStocksDbService {
     try {
       const now = new Date();
 
-      await this.prisma.$transaction(async (tx) => {
-        for (const stock of stocks) {
-          // Upsert into assets table
-          const asset = await tx.assets.upsert({
-            where: {
-              symbol_asset_type: {
-                symbol: stock.symbol,
-                asset_type: 'stock',
+      // Use longer timeout for large batches (60 seconds)
+      await this.prisma.$transaction(
+        async (tx) => {
+          for (const stock of stocks) {
+            // Upsert into assets table
+            const asset = await tx.assets.upsert({
+              where: {
+                symbol_asset_type: {
+                  symbol: stock.symbol,
+                  asset_type: 'stock',
+                },
               },
-            },
-            update: {
-              name: stock.name,
-              sector: stock.sector,
-              is_active: true,
-              last_seen_at: now,
-              display_name: stock.name,
-              market_cap_rank: stock.rank,
-            },
-            create: {
-              symbol: stock.symbol,
-              name: stock.name,
-              asset_type: 'stock',
-              sector: stock.sector,
-              is_active: true,
-              first_seen_at: now,
-              last_seen_at: now,
-              display_name: stock.name,
-              market_cap_rank: stock.rank,
-            },
-          });
+              update: {
+                name: stock.name,
+                sector: stock.sector,
+                is_active: true,
+                last_seen_at: now,
+                display_name: stock.name,
+                market_cap_rank: stock.rank,
+              },
+              create: {
+                symbol: stock.symbol,
+                name: stock.name,
+                asset_type: 'stock',
+                sector: stock.sector,
+                is_active: true,
+                first_seen_at: now,
+                last_seen_at: now,
+                display_name: stock.name,
+                market_cap_rank: stock.rank,
+              },
+            });
 
-          // Upsert into market_rankings table
-          await tx.market_rankings.upsert({
-            where: {
-              rank_timestamp_asset_id: {
+            // Upsert into market_rankings table
+            await tx.market_rankings.upsert({
+              where: {
+                rank_timestamp_asset_id: {
+                  rank_timestamp: now,
+                  asset_id: asset.asset_id,
+                },
+              },
+              update: {
+                rank: stock.rank,
+                market_cap: stock.marketCap,
+                price_usd: stock.price,
+                volume_24h: stock.volume24h,
+              },
+              create: {
                 rank_timestamp: now,
                 asset_id: asset.asset_id,
+                rank: stock.rank,
+                market_cap: stock.marketCap,
+                price_usd: stock.price,
+                volume_24h: stock.volume24h,
               },
-            },
-            update: {
-              rank: stock.rank,
-              market_cap: stock.marketCap,
-              price_usd: stock.price,
-              volume_24h: stock.volume24h,
-            },
-            create: {
-              rank_timestamp: now,
-              asset_id: asset.asset_id,
-              rank: stock.rank,
-              market_cap: stock.marketCap,
-              price_usd: stock.price,
-              volume_24h: stock.volume24h,
-            },
-          });
-        }
-      });
+            });
+          }
+        },
+        {
+          maxWait: 60000, // 60 seconds max wait
+          timeout: 60000, // 60 seconds timeout
+        },
+      );
 
       this.logger.log(`Successfully upserted ${stocks.length} stocks`);
     } catch (error: any) {

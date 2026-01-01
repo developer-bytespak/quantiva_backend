@@ -18,20 +18,23 @@ export interface AlpacaBar {
   l: number; // low
   c: number; // close
   v: number; // volume
+  n?: number; // number of trades
+  vw?: number; // volume weighted average price
 }
 
 export interface AlpacaSnapshot {
   symbol: string;
-  latestTrade: {
+  latestTrade?: {
     t: string;
     p: number;
   };
-  latestQuote: {
+  latestQuote?: {
     ap: number; // ask price
     bp: number; // bid price
   };
-  prevDailyBar: AlpacaBar;
-  dailyBar: AlpacaBar;
+  prevDailyBar?: AlpacaBar;
+  dailyBar?: AlpacaBar;
+  minuteBar?: AlpacaBar;
 }
 
 @Injectable()
@@ -50,10 +53,9 @@ export class AlpacaMarketService {
     this.secretKey = this.configService.get<string>('ALPACA_SECRET_KEY') || '';
     this.isPaper = this.configService.get<string>('ALPACA_PAPER') === 'true';
 
-    // Use paper or live URL based on environment
-    this.baseUrl = this.isPaper
-      ? 'https://paper-api.alpaca.markets'
-      : 'https://api.alpaca.markets';
+    // Use Alpaca Data API (market data is always on data.alpaca.markets)
+    // Note: Trading API is different (api.alpaca.markets or paper-api.alpaca.markets)
+    this.baseUrl = 'https://data.alpaca.markets';
 
     this.apiClient = axios.create({
       baseURL: this.baseUrl,
@@ -66,7 +68,7 @@ export class AlpacaMarketService {
     });
 
     this.logger.log(
-      `Alpaca Market Service initialized: ${this.isPaper ? 'Paper Trading' : 'Live Trading'}`,
+      `Alpaca Market Service initialized with Data API: ${this.baseUrl}`,
     );
   }
 
@@ -102,6 +104,49 @@ export class AlpacaMarketService {
         });
       });
 
+      // For symbols with missing prevDailyBar, fetch historical data
+      const symbolsNeedingHistory: string[] = [];
+      results.forEach((quote, symbol) => {
+        if (quote.change24h === 0 && quote.changePercent24h === 0 && quote.price > 0) {
+          symbolsNeedingHistory.push(symbol);
+        }
+      });
+
+      if (symbolsNeedingHistory.length > 0) {
+        this.logger.log(
+          `Fetching historical data for ${symbolsNeedingHistory.length} symbols with missing change data`,
+        );
+        try {
+          const historicalData = await this.fetchHistoricalBars(symbolsNeedingHistory);
+          
+          this.logger.log(
+            `Retrieved historical data for ${historicalData.size}/${symbolsNeedingHistory.length} symbols`,
+          );
+
+          // Update quotes with historical data
+          let updatedCount = 0;
+          historicalData.forEach((prevClose, symbol) => {
+            const quote = results.get(symbol);
+            if (quote && prevClose > 0) {
+              quote.change24h = quote.price - prevClose;
+              quote.changePercent24h = (quote.change24h / prevClose) * 100;
+              updatedCount++;
+              this.logger.debug(
+                `Updated ${symbol}: price=${quote.price.toFixed(2)}, prevClose=${prevClose.toFixed(2)}, change=${quote.changePercent24h.toFixed(2)}%`,
+              );
+            }
+          });
+
+          this.logger.log(
+            `Successfully updated ${updatedCount} symbols with historical change data`,
+          );
+        } catch (error: any) {
+          this.logger.error(
+            `Failed to fetch historical data: ${error?.message}`,
+          );
+        }
+      }
+
       this.logger.log(
         `Successfully fetched ${results.size}/${symbols.length} quotes`,
       );
@@ -113,6 +158,80 @@ export class AlpacaMarketService {
         symbolCount: symbols.length,
       });
       throw error;
+    }
+  }
+
+  /**
+   * Fetch historical bars to get previous close price
+   */
+  private async fetchHistoricalBars(
+    symbols: string[],
+  ): Promise<Map<string, number>> {
+    const results = new Map<string, number>();
+
+    try {
+      // Get bars for the last 7 trading days to ensure we capture data
+      const end = new Date();
+      const start = new Date();
+      start.setDate(start.getDate() - 10); // Look back 10 days to ensure we get data even with holidays
+
+      const symbolsParam = symbols.join(',');
+      
+      this.logger.debug(
+        `Fetching historical bars from ${start.toISOString().split('T')[0]} to ${end.toISOString().split('T')[0]}`,
+      );
+
+      const response = await this.apiClient.get<{
+        bars: Record<string, AlpacaBar[]>;
+      }>(`/v2/stocks/bars`, {
+        params: {
+          symbols: symbolsParam,
+          timeframe: '1Day',
+          start: start.toISOString().split('T')[0],
+          end: end.toISOString().split('T')[0],
+          limit: 10,
+        },
+      });
+
+      const barsData = response.data?.bars || {};
+
+      this.logger.debug(
+        `Received bars data for ${Object.keys(barsData).length} symbols`,
+      );
+
+      // Extract the second-to-last bar's close price (previous day)
+      Object.entries(barsData).forEach(([symbol, bars]) => {
+        if (bars && bars.length >= 2) {
+          // Use the second-to-last bar as previous close
+          const prevBar = bars[bars.length - 2];
+          results.set(symbol, prevBar.c);
+          this.logger.debug(
+            `${symbol}: Found ${bars.length} bars, using prevClose=${prevBar.c} from ${prevBar.t}`,
+          );
+        } else if (bars && bars.length === 1) {
+          // If only one bar, use its open as previous close
+          results.set(symbol, bars[0].o);
+          this.logger.debug(
+            `${symbol}: Only 1 bar found, using open=${bars[0].o}`,
+          );
+        } else {
+          this.logger.debug(
+            `${symbol}: No bars found`,
+          );
+        }
+      });
+
+      return results;
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to fetch historical bars: ${error?.message}`,
+      );
+      if (error?.response?.data) {
+        this.logger.error(
+          `Alpaca error response: ${JSON.stringify(error.response.data)}`,
+        );
+      }
+      return results;
     }
   }
 
@@ -203,12 +322,18 @@ export class AlpacaMarketService {
     snapshot: AlpacaSnapshot,
   ): AlpacaQuote {
     const currentPrice = snapshot.latestTrade?.p || snapshot.latestQuote?.ap || 0;
-    const prevClose = snapshot.prevDailyBar?.c || currentPrice;
+    const prevClose = snapshot.prevDailyBar?.c || 0;
     const volume24h = snapshot.dailyBar?.v || 0;
 
-    // Calculate 24h change
-    const change24h = currentPrice - prevClose;
-    const changePercent24h = prevClose > 0 ? (change24h / prevClose) * 100 : 0;
+    // Calculate 24h change only if we have prev close data
+    let change24h = 0;
+    let changePercent24h = 0;
+
+    if (prevClose > 0 && currentPrice > 0) {
+      change24h = currentPrice - prevClose;
+      changePercent24h = (change24h / prevClose) * 100;
+    }
+    // If no prevDailyBar, change will be 0 and will be updated later via historical bars
 
     return {
       symbol,
