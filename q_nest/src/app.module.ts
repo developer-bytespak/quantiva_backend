@@ -12,6 +12,7 @@ import { MacroModule } from './modules/macro/macro.module';
 import { SentimentModule } from './modules/sentiment/sentiment.module';
 import { EnginesModule } from './modules/engines/engines.module';
 import { MarketModule } from './modules/market/market.module';
+import { StocksMarketModule } from './modules/stocks-market/stocks-market.module';
 import { StrategiesModule } from './modules/strategies/strategies.module';
 import { AiInsightsModule } from './ai-insights/ai-insights.module';
 import { TaskSchedulerModule } from './task-scheduler/task-scheduler.module';
@@ -32,6 +33,7 @@ import { PaperTradingGateway } from './gateways/paper-trading.gateway';
     SentimentModule,
     EnginesModule,
     MarketModule,
+    StocksMarketModule,
     StrategiesModule,
     AiInsightsModule,
     TaskSchedulerModule,
