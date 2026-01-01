@@ -297,6 +297,7 @@ model assets {
   strategySignals          strategy_signals[]
   rebalanceSuggestions     rebalance_suggestions[]
 
+  @@unique([symbol, asset_type], name: "symbol_asset_type")
   @@map("assets")
 }
 

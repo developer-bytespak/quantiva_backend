@@ -238,6 +238,31 @@ export class ExchangesController {
     };
   }
 
+  @Get('connections/:connectionId/profile')
+  @UseGuards(ConnectionOwnerGuard)
+  async getConnectionProfile(@Param('connectionId') connectionId: string) {
+    try {
+      const profile = await this.exchangesService.getConnectionProfile(connectionId);
+      return {
+        success: true,
+        data: profile,
+        last_updated: new Date().toISOString(),
+      };
+    } catch (error: any) {
+      console.error('Error fetching connection profile:', error?.message || error);
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new HttpException(
+        {
+          code: 'PROFILE_FETCH_FAILED',
+          message: error?.message || 'Failed to fetch connection profile',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
   @Get('connections/:connectionId/positions')
   @UseGuards(ConnectionOwnerGuard)
   async getPositions(@Param('connectionId') connectionId: string) {

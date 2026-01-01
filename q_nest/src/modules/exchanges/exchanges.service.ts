@@ -4,6 +4,7 @@ import { ExchangeType, ConnectionStatus } from '@prisma/client';
 import { EncryptionService } from './services/encryption.service';
 import { BinanceService } from './integrations/binance.service';
 import { BybitService } from './integrations/bybit.service';
+import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
 import { ConnectionNotFoundException } from './exceptions/binance.exceptions';
 import {
@@ -16,7 +17,8 @@ import {
 import { OrderBookDto, RecentTradeDto } from './dto/orderbook.dto';
 
 // Type for exchange services that implement common methods
-type ExchangeService = BinanceService | BybitService;
+// Type for exchange services that implement common methods
+type ExchangeService = BinanceService | BybitService | AlpacaService;
 
 @Injectable()
 export class ExchangesService {
@@ -27,6 +29,7 @@ export class ExchangesService {
     private encryptionService: EncryptionService,
     private binanceService: BinanceService,
     private bybitService: BybitService,
+    private alpacaService: AlpacaService,
     private cacheService: CacheService,
   ) {}
 
@@ -40,6 +43,8 @@ export class ExchangesService {
       return this.binanceService;
     } else if (normalizedName === 'bybit') {
       return this.bybitService;
+    } else if (normalizedName === 'alpaca') {
+      return this.alpacaService as unknown as ExchangeService;
     } else {
       this.logger.warn(`Unknown exchange: ${exchangeName}, defaulting to Binance`);
       return this.binanceService;
@@ -176,6 +181,40 @@ export class ExchangesService {
     });
   }
 
+  /**
+   * Returns account/profile information for a connection by calling the underlying exchange integration.
+   */
+  async getConnectionProfile(connectionId: string): Promise<any> {
+    const connection = await this.getConnectionById(connectionId);
+
+    if (!connection) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    if (!connection.api_key_encrypted || !connection.api_secret_encrypted) {
+      throw new ConnectionNotFoundException('Connection missing API credentials');
+    }
+
+    if (!connection.exchange) {
+      throw new ConnectionNotFoundException('Exchange not found for connection');
+    }
+
+    // Decrypt API keys
+    const apiKey = this.encryptionService.decryptApiKey(connection.api_key_encrypted);
+    const apiSecret = this.encryptionService.decryptApiKey(connection.api_secret_encrypted);
+
+    // Choose correct exchange integration
+    const exchangeService = this.getExchangeService(connection.exchange.name);
+
+    // Ensure integration provides account/profile info
+    if (typeof (exchangeService as any).getAccountInfo === 'function') {
+      const profile = await (exchangeService as any).getAccountInfo(apiKey, apiSecret);
+      return profile;
+    }
+
+    throw new Error(`Unsupported exchange for profile: ${connection.exchange.name}`);
+  }
+
   async createConnection(data: {
     user_id: string;
     exchange_id: string;
@@ -230,6 +269,7 @@ export class ExchangesService {
     }
 
     try {
+      this.logger.debug(`Verifying connection ${connectionId} for exchange: ${connection.exchange.name}`);
       // Decrypt API keys
       const apiKey = this.encryptionService.decryptApiKey(connection.api_key_encrypted);
       const apiSecret = this.encryptionService.decryptApiKey(connection.api_secret_encrypted);
@@ -306,6 +346,7 @@ export class ExchangesService {
     const exchangeName = connection.exchange.name.toLowerCase();
     const isBinance = exchangeName === 'binance';
     const isBybit = exchangeName === 'bybit';
+    const isAlpaca = exchangeName === 'alpaca';
 
     try {
       let balance: AccountBalanceDto;
@@ -339,6 +380,76 @@ export class ExchangesService {
 
         // Portfolio is calculated from positions
         portfolio = this.bybitService.calculatePortfolioFromPositions(positions);
+      } else if (isAlpaca) {
+        // Alpaca: fetch account info, positions and orders
+        const accountInfo = await this.alpacaService.getAccountInfo(apiKey, apiSecret);
+        const positionsRaw = await this.alpacaService.getPositions(apiKey, apiSecret);
+        const ordersRaw = await this.alpacaService.getOrders(apiKey, apiSecret);
+
+        // Map positions
+        positions = (positionsRaw || []).map((p: any) => {
+          const qty = parseFloat(p.qty || p.quantity || '0');
+          const entryPrice = parseFloat(p.avg_entry_price || p.avg_entry_value || '0');
+          const currentPrice = parseFloat(p.current_price || (p.market_value && qty ? (parseFloat(p.market_value) / qty).toString() : '0')) || 0;
+          const unrealizedPnl = (currentPrice - entryPrice) * qty;
+          const pnlPercent = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
+
+          return {
+            symbol: p.symbol,
+            quantity: qty,
+            entryPrice,
+            currentPrice,
+            unrealizedPnl,
+            pnlPercent,
+          } as PositionDto;
+        });
+
+        // Map balance: use accountInfo.portfolio_value and cash if available
+        const totalValueUSD = parseFloat(accountInfo.portfolio_value || accountInfo.equity || '0') || 0;
+        const assets = (positions || []).map((pos) => ({
+          symbol: pos.symbol,
+          free: pos.quantity.toString(),
+          locked: '0',
+          total: pos.quantity.toString(),
+        }));
+
+        balance = {
+          assets,
+          totalValueUSD,
+        } as AccountBalanceDto;
+
+        // Map orders
+        orders = (ordersRaw || []).map((o: any) => ({
+          orderId: o.id || o.client_order_id || '',
+          symbol: o.symbol || o.asset_symbol || '',
+          side: (o.side || '').toUpperCase() === 'BUY' ? 'BUY' : 'SELL',
+          type: o.type || o.order_type || '',
+          quantity: parseFloat(o.qty || o.quantity || '0'),
+          price: parseFloat(o.limit_price || o.price || '0') || 0,
+          status: o.status || '',
+          time: o.created_at ? new Date(o.created_at).getTime() : Date.now(),
+        })) as OrderDto[];
+
+        // Portfolio: simple aggregation from positions
+        const totalCost = positions.reduce((acc, p) => acc + (p.entryPrice || 0) * (p.quantity || 0), 0);
+        const totalValue = positions.reduce((acc, p) => acc + (p.currentPrice || 0) * (p.quantity || 0), 0) + (parseFloat(accountInfo.cash || '0') || 0);
+        const totalPnl = totalValue - totalCost;
+        const pnlPercent = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
+
+        portfolio = {
+          totalValue,
+          totalCost,
+          totalPnl,
+          pnlPercent,
+          assets: positions.map((p) => ({
+            symbol: p.symbol,
+            quantity: p.quantity,
+            value: (p.currentPrice || 0) * p.quantity,
+            cost: (p.entryPrice || 0) * p.quantity,
+            pnl: ((p.currentPrice || 0) - (p.entryPrice || 0)) * p.quantity,
+            pnlPercent: p.entryPrice > 0 ? (((p.currentPrice || 0) - p.entryPrice) / p.entryPrice) * 100 : 0,
+          })),
+        } as PortfolioDto;
       } else {
         throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
       }
