@@ -298,17 +298,18 @@ model assets {
   rebalanceSuggestions     rebalance_suggestions[]
 
   @@unique([symbol, asset_type], name: "symbol_asset_type")
+  @@index([asset_type, is_active])
   @@map("assets")
 }
 
 model market_rankings {
-  rank_timestamp    DateTime @db.Timestamp(6)
-  asset_id          String   @db.Uuid
-  rank              Int
-  market_cap        Decimal? @db.Decimal(30, 2)
-  price_usd         Decimal? @db.Decimal(20, 8)
-  volume_24h        Decimal? @db.Decimal(30, 2)
-  change_24h        Decimal? @db.Decimal(20, 8)
+  rank_timestamp     DateTime @db.Timestamp(6)
+  asset_id           String   @db.Uuid
+  rank               Int
+  market_cap         Decimal? @db.Decimal(30, 2)
+  price_usd          Decimal? @db.Decimal(20, 8)
+  volume_24h         Decimal? @db.Decimal(30, 2)
+  change_24h         Decimal? @db.Decimal(20, 8)
   change_percent_24h Decimal? @db.Decimal(10, 4)
 
   asset assets @relation(fields: [asset_id], references: [asset_id])
@@ -339,6 +340,7 @@ model trending_assets {
   asset assets @relation(fields: [asset_id], references: [asset_id])
 
   @@id([poll_timestamp, asset_id])
+  @@index([asset_id, poll_timestamp])
   @@map("trending_assets")
 }
 

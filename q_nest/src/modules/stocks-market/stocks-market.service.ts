@@ -332,11 +332,21 @@ export class StocksMarketService {
       }
 
       // Fetch from Alpaca (free tier)
-      const bars = await this.alpacaService.getStockBars(
+      const alpacaBars = await this.alpacaService.getHistoricalBars(
         symbol.toUpperCase(),
         timeframe,
         limit,
       );
+
+      // Transform AlpacaBar format to expected format
+      const bars = alpacaBars.map((bar) => ({
+        timestamp: bar.t,
+        open: bar.o,
+        high: bar.h,
+        low: bar.l,
+        close: bar.c,
+        volume: bar.v,
+      }));
 
       const result = {
         symbol: symbol.toUpperCase(),

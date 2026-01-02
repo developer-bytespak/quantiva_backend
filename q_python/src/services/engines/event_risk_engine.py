@@ -11,6 +11,7 @@ import re
 from .base_engine import BaseEngine
 from src.services.data.stock_news_service import StockNewsService
 from src.services.data.lunarcrush_service import LunarCrushService
+from src.services.data.finnhub_service import FinnhubService
 from src.services.macro.fred_service import FredService
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ class EventRiskEngine(BaseEngine):
         super().__init__("EventRiskEngine")
         self.stock_news_service = StockNewsService()
         self.lunarcrush_service = LunarCrushService()
+        self.finnhub_service = FinnhubService()
         self.fred_service = FredService()
         self.event_impacts = {
             # Positive events

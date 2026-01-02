@@ -9,6 +9,8 @@ import { StrategyExecutionService } from './services/strategy-execution.service'
 import { StrategyCacheService } from './services/strategy-cache.service';
 import { LLMExplanationProcessorService } from './services/llm-explanation-processor.service';
 import { PreBuiltSignalsCronjobService } from './services/pre-built-signals-cronjob.service';
+import { StockSignalsCronjobService } from './services/stock-signals-cronjob.service';
+import { StockTrendingService } from './services/stock-trending.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { KycModule } from '../../kyc/kyc.module';
 import { SignalsModule } from '../signals/signals.module';
@@ -29,6 +31,8 @@ import { AiInsightsModule } from '../../ai-insights/ai-insights.module';
     StrategyCacheService,
     LLMExplanationProcessorService,
     PreBuiltSignalsCronjobService,
+    StockSignalsCronjobService,
+    StockTrendingService,
   ],
   exports: [
     StrategiesService,
@@ -39,6 +43,8 @@ import { AiInsightsModule } from '../../ai-insights/ai-insights.module';
     StrategyCacheService,
     LLMExplanationProcessorService,
     PreBuiltSignalsCronjobService,
+    StockSignalsCronjobService,
+    StockTrendingService,
   ],
 })
 export class StrategiesModule {}

@@ -83,7 +83,7 @@ class FusionEngine(BaseEngine):
             )
             
             # Determine action
-            action = self._determine_action(final_score, event_risk_score)
+            action = self._determine_action(final_score, event_risk_score, asset_type)
             
             # Calculate overall confidence (weighted average, but only count engines with data)
             confidences = []
@@ -161,7 +161,8 @@ class FusionEngine(BaseEngine):
     def _determine_action(
         self,
         final_score: float,
-        event_risk_score: float
+        event_risk_score: float,
+        asset_type: str = 'crypto'
     ) -> str:
         """
         Determine trading action based on scores.
@@ -169,6 +170,7 @@ class FusionEngine(BaseEngine):
         Args:
             final_score: Combined fusion score
             event_risk_score: Event risk score
+            asset_type: 'crypto' or 'stock' (affects thresholds)
         
         Returns:
             Action: 'BUY', 'SELL', or 'HOLD'
@@ -179,10 +181,15 @@ class FusionEngine(BaseEngine):
         if event_risk_score < -0.5:
             return 'HOLD'
         
+        # Determine thresholds based on asset type
+        # Stocks require higher conviction (0.5) vs crypto (0.3)
+        buy_threshold = 0.5 if asset_type == 'stock' else 0.3
+        sell_threshold = -0.5 if asset_type == 'stock' else -0.3
+        
         # Determine action based on final score
-        if final_score > 0.3:
+        if final_score > buy_threshold:
             return 'BUY'
-        elif final_score < -0.3:
+        elif final_score < sell_threshold:
             return 'SELL'
         else:
             return 'HOLD'

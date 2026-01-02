@@ -80,6 +80,13 @@ except Exception as e:
     logger.error(f"Failed to load Admin router: {e}", exc_info=True)
     admin_router = None
 
+try:
+    from src.api.v1.routes.stocks import router as stocks_router
+    logger.info("Stocks router loaded")
+except Exception as e:
+    logger.error(f"Failed to load Stocks router: {e}", exc_info=True)
+    stocks_router = None
+
 app = FastAPI(title="Quantiva Python API", version="1.0.0")
 logger.info("FastAPI app created")
 
@@ -118,6 +125,10 @@ if llm_router:
 if admin_router:
     app.include_router(admin_router, prefix="/api/v1")
     logger.info("Admin router included")
+
+if stocks_router:
+    app.include_router(stocks_router, prefix="/api/v1/stocks", tags=["stocks"])
+    logger.info("Stocks router included")
 
 logger.info("All routers included, application ready")
 

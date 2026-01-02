@@ -423,93 +423,106 @@ export class AlpacaMarketService {
   }
 
   /**
-   * Get historical bars for a stock (for candlestick charts)
-   * Alpaca Free Tier: Supports historical bars
-   * @param symbol - Stock symbol (e.g., 'AAPL')
-   * @param timeframe - Bar timeframe: '1Min', '5Min', '15Min', '1Hour', '1Day'
-   * @param limit - Number of bars to return (max 10000)
+   * Get historical bars (OHLCV) for a single symbol
+   * Used by Python technical engine for multi-timeframe analysis
+   * 
+   * @param symbol Stock symbol (e.g., 'AAPL')
+   * @param timeframe Timeframe ('1d', '4h', '1h', '15m', etc.)
+   * @param limit Number of bars to fetch (default: 100)
    * @returns Array of OHLCV bars
    */
-  async getStockBars(
+  async getHistoricalBars(
     symbol: string,
-    timeframe: string = '1Day',
+    timeframe: string = '1d',
     limit: number = 100,
-  ): Promise<
-    Array<{
-      timestamp: string;
-      open: number;
-      high: number;
-      low: number;
-      close: number;
-      volume: number;
-    }>
-  > {
+  ): Promise<AlpacaBar[]> {
     try {
-      this.logger.log(`Fetching bars for ${symbol}`, { timeframe, limit });
+      // Map timeframe to Alpaca format
+      const alpacaTimeframe = this.mapTimeframeToAlpaca(timeframe);
+      
+      // Calculate start date based on timeframe and limit
+      const start = this.calculateStartDate(timeframe, limit);
+      
+      this.logger.debug(
+        `Fetching ${limit} bars for ${symbol} (timeframe: ${alpacaTimeframe}, start: ${start.toISOString()})`,
+      );
 
-      // Calculate start date (limit + buffer for weekends/holidays)
-      const daysBack = this.calculateDaysBack(timeframe, limit);
-      const start = new Date();
-      start.setDate(start.getDate() - daysBack);
-      const startStr = start.toISOString().split('T')[0];
-
-      const response = await this.apiClient.get(`/v2/stocks/${symbol}/bars`, {
+      const response = await this.apiClient.get<{
+        bars: Record<string, AlpacaBar[]>;
+      }>(`/v2/stocks/${symbol}/bars`, {
         params: {
-          timeframe,
-          start: startStr,
-          limit,
+          timeframe: alpacaTimeframe,
+          start: start.toISOString(),
+          limit: limit,
           adjustment: 'split', // Adjust for stock splits
         },
       });
 
-      const bars = response.data?.bars || [];
+      const bars = response.data?.bars?.[symbol] || [];
+      
+      this.logger.debug(
+        `Retrieved ${bars.length} bars for ${symbol} (${timeframe})`,
+      );
 
-      if (bars.length === 0) {
-        this.logger.warn(`No bars returned for ${symbol}`, { timeframe });
-        return [];
-      }
-
-      this.logger.log(`Retrieved ${bars.length} bars for ${symbol}`);
-
-      // Transform to our format
-      return bars.map((bar: AlpacaBar) => ({
-        timestamp: bar.t,
-        open: bar.o,
-        high: bar.h,
-        low: bar.l,
-        close: bar.c,
-        volume: bar.v,
-      }));
+      return bars;
     } catch (error: any) {
-      this.logger.error(`Failed to fetch bars for ${symbol}`, {
-        error: error?.message,
-        response: error?.response?.data,
-      });
-      throw error;
+      this.logger.error(
+        `Failed to fetch historical bars for ${symbol}: ${error?.message}`,
+      );
+      if (error?.response?.data) {
+        this.logger.error(
+          `Alpaca error response: ${JSON.stringify(error.response.data)}`,
+        );
+      }
+      return [];
     }
   }
 
   /**
-   * Calculate how many days back to request based on timeframe and limit
+   * Map internal timeframe format to Alpaca API format
+   * @param timeframe Internal format ('1d', '4h', '1h', '15m')
+   * @returns Alpaca API format ('1Day', '4Hour', '1Hour', '15Min')
    */
-  private calculateDaysBack(timeframe: string, limit: number): number {
-    // Add buffer for weekends/holidays
-    const buffer = 1.5;
+  private mapTimeframeToAlpaca(timeframe: string): string {
+    const mapping: Record<string, string> = {
+      '1d': '1Day',
+      '4h': '4Hour',
+      '1h': '1Hour',
+      '15m': '15Min',
+      '5m': '5Min',
+      '1m': '1Min',
+    };
+    
+    return mapping[timeframe] || '1Day';
+  }
 
-    switch (timeframe) {
-      case '1Min':
-        // 390 minutes per trading day (6.5 hours)
-        return Math.ceil((limit / 390) * buffer) + 5;
-      case '5Min':
-        return Math.ceil((limit / 78) * buffer) + 5;
-      case '15Min':
-        return Math.ceil((limit / 26) * buffer) + 5;
-      case '1Hour':
-        return Math.ceil((limit / 6.5) * buffer) + 5;
-      case '1Day':
-      default:
-        return Math.ceil(limit * buffer) + 5;
+  /**
+   * Calculate start date for historical bars query
+   * @param timeframe Timeframe string
+   * @param limit Number of bars
+   * @returns Start date
+   */
+  private calculateStartDate(timeframe: string, limit: number): Date {
+    const now = new Date();
+    let daysBack = 0;
+
+    // Estimate days needed based on timeframe
+    if (timeframe === '1d') {
+      daysBack = limit + 5; // Add buffer for weekends
+    } else if (timeframe === '4h') {
+      daysBack = Math.ceil((limit * 4) / 6) + 5; // ~6 trading hours/day
+    } else if (timeframe === '1h') {
+      daysBack = Math.ceil(limit / 6) + 5;
+    } else if (timeframe === '15m') {
+      daysBack = Math.ceil(limit / 26) + 5; // ~26 15-min bars/day
+    } else {
+      daysBack = limit + 5; // Default
     }
+
+    const startDate = new Date(now);
+    startDate.setDate(startDate.getDate() - daysBack);
+    
+    return startDate;
   }
 
   /**
