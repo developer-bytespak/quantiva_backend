@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Query,
+  Param,
   HttpException,
   HttpStatus,
   Logger,
@@ -146,6 +147,63 @@ export class StocksMarketController {
 
       throw new HttpException(
         'Failed to get sectors',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/stocks-market/stocks/:symbol
+   * Get individual stock details
+   */
+  @Get('stocks/:symbol')
+  async getStockDetail(@Param('symbol') symbol: string) {
+    try {
+      this.logger.log(`Getting stock detail for ${symbol}`);
+      return await this.stocksMarketService.getStockDetail(symbol);
+    } catch (error: any) {
+      this.logger.error(`Failed to get stock detail for ${symbol}`, {
+        error: error?.message,
+      });
+
+      throw new HttpException(
+        `Failed to get stock detail for ${symbol}`,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/stocks-market/stocks/:symbol/bars
+   * Get historical bars for candlestick chart
+   * Query params:
+   * - timeframe: 1Min, 5Min, 15Min, 1Hour, 1Day (default: 1Day)
+   * - limit: number of bars to return (default: 100)
+   */
+  @Get('stocks/:symbol/bars')
+  async getStockBars(
+    @Param('symbol') symbol: string,
+    @Query('timeframe') timeframe?: string,
+    @Query('limit') limit?: string,
+  ) {
+    try {
+      this.logger.log(`Getting bars for ${symbol}`, {
+        timeframe,
+        limit,
+      });
+
+      return await this.stocksMarketService.getStockBars(
+        symbol,
+        timeframe || '1Day',
+        limit ? parseInt(limit) : 100,
+      );
+    } catch (error: any) {
+      this.logger.error(`Failed to get bars for ${symbol}`, {
+        error: error?.message,
+      });
+
+      throw new HttpException(
+        `Failed to get bars for ${symbol}`,
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }

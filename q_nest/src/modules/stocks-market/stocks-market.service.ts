@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { MarketAggregatorService } from './services/market-aggregator.service';
 import { MarketStocksDbService } from './services/market-stocks-db.service';
 import { CacheManagerService } from './services/cache-manager.service';
+import { AlpacaMarketService } from './services/alpaca-market.service';
 import { MarketDataResponse, MarketStock } from './types/market.types';
 import SP500_SYMBOLS from './data/sp500-symbols';
 import SP500_TOP50 from './data/sp500-top50';
@@ -21,6 +22,7 @@ export class StocksMarketService {
     private marketAggregator: MarketAggregatorService,
     private dbService: MarketStocksDbService,
     private cacheManager: CacheManagerService,
+    private alpacaService: AlpacaMarketService,
   ) {}
 
   /**
@@ -223,6 +225,133 @@ export class StocksMarketService {
       return { sectors: sectorList };
     } catch (error: any) {
       this.logger.error('Failed to get sectors', { error: error?.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Get individual stock detail
+   * Uses Alpaca free tier snapshot API
+   */
+  async getStockDetail(symbol: string): Promise<{
+    symbol: string;
+    name: string;
+    price: number;
+    change24h: number;
+    changePercent24h: number;
+    volume24h: number;
+    marketCap: number | null;
+    sector: string;
+    high24h: number;
+    low24h: number;
+    prevClose: number;
+    open: number;
+    timestamp: string;
+  }> {
+    try {
+      const cacheKey = `stock_detail_${symbol.toUpperCase()}`;
+
+      // Check cache (30s TTL)
+      const cached = this.cacheManager.get<any>(cacheKey);
+      if (cached) {
+        this.logger.log(`Returning cached detail for ${symbol}`);
+        return cached;
+      }
+
+      // Fetch from Alpaca (free tier)
+      const quotesMap = await this.alpacaService.getBatchQuotes([
+        symbol.toUpperCase(),
+      ]);
+
+      const stock = quotesMap.get(symbol.toUpperCase());
+      if (!stock) {
+        throw new Error(`Stock ${symbol} not found`);
+      }
+
+      // Get stock metadata from database
+      const dbStock = await this.dbService.getBySymbols([symbol.toUpperCase()]);
+      const metadata = dbStock[0] || null;
+
+      const detail = {
+        symbol: stock.symbol,
+        name: metadata?.name || stock.symbol,
+        price: stock.price,
+        change24h: stock.change24h,
+        changePercent24h: stock.changePercent24h,
+        volume24h: stock.volume24h,
+        marketCap: metadata?.marketCap || null,
+        sector: metadata?.sector || 'Unknown',
+        high24h: stock.dayHigh || 0,
+        low24h: stock.dayLow || 0,
+        prevClose: stock.prevClose || 0,
+        open: stock.dayOpen || 0,
+        timestamp: new Date().toISOString(),
+      };
+
+      // Cache for 30s
+      this.cacheManager.setPrice(cacheKey, detail);
+
+      return detail;
+    } catch (error: any) {
+      this.logger.error(`Failed to get stock detail for ${symbol}`, {
+        error: error?.message,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get historical bars for candlestick chart
+   * Uses Alpaca free tier bars API
+   * Timeframes: 1Min, 5Min, 15Min, 1Hour, 1Day
+   */
+  async getStockBars(
+    symbol: string,
+    timeframe: string = '1Day',
+    limit: number = 100,
+  ): Promise<{
+    symbol: string;
+    timeframe: string;
+    bars: Array<{
+      timestamp: string;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+    }>;
+  }> {
+    try {
+      const cacheKey = `stock_bars_${symbol.toUpperCase()}_${timeframe}_${limit}`;
+
+      // Check cache (5min TTL)
+      const cached = this.cacheManager.get<any>(cacheKey);
+      if (cached) {
+        this.logger.log(`Returning cached bars for ${symbol}`);
+        return cached;
+      }
+
+      // Fetch from Alpaca (free tier)
+      const bars = await this.alpacaService.getStockBars(
+        symbol.toUpperCase(),
+        timeframe,
+        limit,
+      );
+
+      const result = {
+        symbol: symbol.toUpperCase(),
+        timeframe,
+        bars,
+      };
+
+      // Cache for 5 minutes
+      this.cacheManager.setPrice(cacheKey, result);
+
+      return result;
+    } catch (error: any) {
+      this.logger.error(`Failed to get bars for ${symbol}`, {
+        error: error?.message,
+      });
       throw error;
     }
   }

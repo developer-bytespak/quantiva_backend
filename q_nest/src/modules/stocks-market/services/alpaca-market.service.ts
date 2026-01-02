@@ -9,6 +9,10 @@ export interface AlpacaQuote {
   changePercent24h: number;
   volume24h: number;
   timestamp: Date;
+  dayHigh?: number;
+  dayLow?: number;
+  dayOpen?: number;
+  prevClose?: number;
 }
 
 export interface AlpacaBar {
@@ -342,6 +346,10 @@ export class AlpacaMarketService {
       changePercent24h,
       volume24h,
       timestamp: new Date(snapshot.latestTrade?.t || new Date()),
+      dayHigh: snapshot.dailyBar?.h || 0,
+      dayLow: snapshot.dailyBar?.l || 0,
+      dayOpen: snapshot.dailyBar?.o || 0,
+      prevClose,
     };
   }
 
@@ -411,6 +419,96 @@ export class AlpacaMarketService {
         online: false,
         message: error?.message || 'Alpaca API unreachable',
       };
+    }
+  }
+
+  /**
+   * Get historical bars for a stock (for candlestick charts)
+   * Alpaca Free Tier: Supports historical bars
+   * @param symbol - Stock symbol (e.g., 'AAPL')
+   * @param timeframe - Bar timeframe: '1Min', '5Min', '15Min', '1Hour', '1Day'
+   * @param limit - Number of bars to return (max 10000)
+   * @returns Array of OHLCV bars
+   */
+  async getStockBars(
+    symbol: string,
+    timeframe: string = '1Day',
+    limit: number = 100,
+  ): Promise<
+    Array<{
+      timestamp: string;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+    }>
+  > {
+    try {
+      this.logger.log(`Fetching bars for ${symbol}`, { timeframe, limit });
+
+      // Calculate start date (limit + buffer for weekends/holidays)
+      const daysBack = this.calculateDaysBack(timeframe, limit);
+      const start = new Date();
+      start.setDate(start.getDate() - daysBack);
+      const startStr = start.toISOString().split('T')[0];
+
+      const response = await this.apiClient.get(`/v2/stocks/${symbol}/bars`, {
+        params: {
+          timeframe,
+          start: startStr,
+          limit,
+          adjustment: 'split', // Adjust for stock splits
+        },
+      });
+
+      const bars = response.data?.bars || [];
+
+      if (bars.length === 0) {
+        this.logger.warn(`No bars returned for ${symbol}`, { timeframe });
+        return [];
+      }
+
+      this.logger.log(`Retrieved ${bars.length} bars for ${symbol}`);
+
+      // Transform to our format
+      return bars.map((bar: AlpacaBar) => ({
+        timestamp: bar.t,
+        open: bar.o,
+        high: bar.h,
+        low: bar.l,
+        close: bar.c,
+        volume: bar.v,
+      }));
+    } catch (error: any) {
+      this.logger.error(`Failed to fetch bars for ${symbol}`, {
+        error: error?.message,
+        response: error?.response?.data,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Calculate how many days back to request based on timeframe and limit
+   */
+  private calculateDaysBack(timeframe: string, limit: number): number {
+    // Add buffer for weekends/holidays
+    const buffer = 1.5;
+
+    switch (timeframe) {
+      case '1Min':
+        // 390 minutes per trading day (6.5 hours)
+        return Math.ceil((limit / 390) * buffer) + 5;
+      case '5Min':
+        return Math.ceil((limit / 78) * buffer) + 5;
+      case '15Min':
+        return Math.ceil((limit / 26) * buffer) + 5;
+      case '1Hour':
+        return Math.ceil((limit / 6.5) * buffer) + 5;
+      case '1Day':
+      default:
+        return Math.ceil(limit * buffer) + 5;
     }
   }
 

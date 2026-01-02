@@ -61,6 +61,8 @@ export class MarketStocksDbService {
                 market_cap: stock.marketCap,
                 price_usd: stock.price,
                 volume_24h: stock.volume24h,
+                change_24h: stock.change24h,
+                change_percent_24h: stock.changePercent24h,
               },
               create: {
                 rank_timestamp: now,
@@ -69,6 +71,8 @@ export class MarketStocksDbService {
                 market_cap: stock.marketCap,
                 price_usd: stock.price,
                 volume_24h: stock.volume24h,
+                change_24h: stock.change24h,
+                change_percent_24h: stock.changePercent24h,
               },
             });
           }
@@ -226,6 +230,8 @@ export class MarketStocksDbService {
     const price = Number(ranking.price_usd || 0);
     const marketCap = ranking.market_cap ? Number(ranking.market_cap) : null;
     const volume24h = Number(ranking.volume_24h || 0);
+    const change24h = Number(ranking.change_24h || 0);
+    const changePercent24h = Number(ranking.change_percent_24h || 0);
 
     return {
       rank: asset.market_cap_rank || ranking.rank,
@@ -233,8 +239,8 @@ export class MarketStocksDbService {
       name: asset.name || asset.display_name || '',
       sector: asset.sector || 'Unknown',
       price,
-      change24h: 0, // Calculate from historical data if needed
-      changePercent24h: 0, // Calculate from historical data if needed
+      change24h,
+      changePercent24h,
       marketCap,
       volume24h,
       dataSource: 'alpaca_fmp',
@@ -275,6 +281,40 @@ export class MarketStocksDbService {
       return asset?.last_seen_at || null;
     } catch (error: any) {
       this.logger.error('Failed to get last update time', {
+        error: error?.message,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Clean up old market rankings data
+   * Keeps only the last N days of data to save database storage
+   */
+  async cleanupOldRankings(daysToKeep: number = 7): Promise<number> {
+    try {
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
+
+      this.logger.log(
+        `Cleaning up market_rankings older than ${daysToKeep} days (before ${cutoffDate.toISOString()})`,
+      );
+
+      const result = await this.prisma.market_rankings.deleteMany({
+        where: {
+          rank_timestamp: {
+            lt: cutoffDate,
+          },
+        },
+      });
+
+      this.logger.log(
+        `Successfully deleted ${result.count} old market_rankings records`,
+      );
+
+      return result.count;
+    } catch (error: any) {
+      this.logger.error('Failed to cleanup old rankings', {
         error: error?.message,
       });
       throw error;
