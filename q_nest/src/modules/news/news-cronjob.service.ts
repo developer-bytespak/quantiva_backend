@@ -22,6 +22,122 @@ export class NewsCronjobService {
   ) {}
 
   /**
+   * Finnhub Trending Stocks Sync - Runs every 10 minutes
+   * Fetches top 50 trending stocks from Finnhub via Python API
+   * and stores them in trending_assets table
+   */
+  @Cron('*/10 * * * *') // Every 10 minutes
+  async syncTrendingStocksFromFinnhub(): Promise<void> {
+    this.logger.log('📈 Starting Finnhub trending stocks sync');
+    const startTime = Date.now();
+
+    try {
+      // Call Python API to fetch trending stocks
+      const response = await this.pythonApi.get('/stocks/trending', {
+        params: { limit: 50 },
+        timeout: 30000,
+      });
+
+      const trendingStocks = response.data?.stocks || response.data || [];
+
+      if (!Array.isArray(trendingStocks) || trendingStocks.length === 0) {
+        this.logger.warn('No trending stocks received from Finnhub');
+        return;
+      }
+
+      this.logger.log(`Received ${trendingStocks.length} trending stocks from Finnhub`);
+
+      let successCount = 0;
+      let errorCount = 0;
+
+      // Process each stock
+      for (const stock of trendingStocks) {
+        try {
+          const symbol = stock.symbol?.toUpperCase();
+          if (!symbol) {
+            errorCount++;
+            continue;
+          }
+
+          // Find or create asset
+          let asset = await this.prisma.assets.findFirst({
+            where: {
+              symbol: symbol,
+              asset_type: 'stock',
+            },
+          });
+
+          if (!asset) {
+            // Create new stock asset
+            asset = await this.prisma.assets.create({
+              data: {
+                symbol: symbol,
+                name: stock.name || symbol,
+                display_name: stock.name || symbol,
+                asset_type: 'stock',
+                is_active: true,
+                first_seen_at: new Date(),
+                last_seen_at: new Date(),
+              },
+            });
+          } else {
+            // Update last seen timestamp
+            await this.prisma.assets.update({
+              where: { asset_id: asset.asset_id },
+              data: { last_seen_at: new Date() },
+            });
+          }
+
+          // Insert or update trending_assets entry
+          const pollTimestamp = new Date();
+
+          await this.prisma.trending_assets.upsert({
+            where: {
+              poll_timestamp_asset_id: {
+                poll_timestamp: pollTimestamp,
+                asset_id: asset.asset_id,
+              },
+            },
+            create: {
+              poll_timestamp: pollTimestamp,
+              asset_id: asset.asset_id,
+              price_usd: stock.price || null,
+              price_change_24h: stock.change_percent || null,
+              market_volume: stock.volume || null,
+              volume_24h: stock.volume || null,
+              high_24h: stock.high || null,
+              low_24h: stock.low || null,
+              trend_rank: stock.mention_count || null,
+            },
+            update: {
+              price_usd: stock.price || null,
+              price_change_24h: stock.change_percent || null,
+              market_volume: stock.volume || null,
+              volume_24h: stock.volume || null,
+              high_24h: stock.high || null,
+              low_24h: stock.low || null,
+              trend_rank: stock.mention_count || null,
+            },
+          });
+
+          successCount++;
+        } catch (err: any) {
+          this.logger.error(`Error syncing stock ${stock.symbol}:`, err);
+          errorCount++;
+        }
+      }
+
+      const duration = Date.now() - startTime;
+      this.logger.log(
+        `✅ Finnhub sync completed: ${successCount} stocks synced, ${errorCount} errors, ${duration}ms`,
+      );
+    } catch (error: any) {
+      const duration = Date.now() - startTime;
+      this.logger.error(`❌ Finnhub sync failed after ${duration}ms:`, error);
+    }
+  }
+
+  /**
    * News Sentiment Aggregation Cronjob - OPTIMIZED FOR RATE LIMITS
    * Runs every 10 minutes to fetch and aggregate news/sentiment
    * Rate limit strategy: Max 15 assets/run = 30 API calls/10min = 4,320 calls/day (within 2000 limit with buffer)

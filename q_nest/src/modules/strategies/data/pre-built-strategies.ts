@@ -149,5 +149,152 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
     stop_loss_value: 6.0,
     take_profit_value: 12.0,
   },
+  // Stock-specific strategies with 0.5/-0.5 thresholds
+  {
+    name: 'Conservative Growth (Stocks)',
+    description:
+      'Stock-focused strategy emphasizing fundamental analysis and earnings quality. Targets stable companies with strong financials and positive earnings momentum.',
+    risk_level: 'low',
+    engine_weights: {
+      sentiment: 0.25,
+      trend: 0.2,
+      fundamental: 0.35,
+      event_risk: 0.15,
+      liquidity: 0.05,
+    },
+    entry_rules: [
+      {
+        field: 'final_score',
+        operator: '>',
+        value: 0.5, // Stock threshold
+      },
+      {
+        field: 'metadata.engine_details.fundamental.score',
+        operator: '>',
+        value: 0.3,
+      },
+    ],
+    exit_rules: [
+      {
+        field: 'final_score',
+        operator: '<',
+        value: -0.3,
+      },
+    ],
+    stop_loss_value: 5.0,
+    take_profit_value: 12.0,
+  },
+  {
+    name: 'Tech Momentum (Stocks)',
+    description:
+      'High-conviction strategy for growth stocks with strong technical momentum and positive sentiment. Ideal for tech sector and momentum plays.',
+    risk_level: 'high',
+    engine_weights: {
+      sentiment: 0.4,
+      trend: 0.35,
+      fundamental: 0.1,
+      event_risk: 0.1,
+      liquidity: 0.05,
+    },
+    entry_rules: [
+      {
+        field: 'final_score',
+        operator: '>',
+        value: 0.5, // Stock threshold
+      },
+      {
+        field: 'metadata.engine_details.sentiment.score',
+        operator: '>',
+        value: 0.4,
+      },
+      {
+        field: 'metadata.engine_details.trend.score',
+        operator: '>',
+        value: 0.3,
+      },
+    ],
+    exit_rules: [
+      {
+        field: 'final_score',
+        operator: '<',
+        value: -0.5, // Stock threshold
+      },
+    ],
+    stop_loss_value: 8.0,
+    take_profit_value: 18.0,
+  },
+  {
+    name: 'Value Investing (Stocks)',
+    description:
+      'Fundamental-driven strategy focusing on undervalued stocks with strong fundamentals. Emphasizes P/E ratios, earnings quality, and revenue growth.',
+    risk_level: 'medium',
+    engine_weights: {
+      sentiment: 0.15,
+      trend: 0.15,
+      fundamental: 0.45,
+      event_risk: 0.2,
+      liquidity: 0.05,
+    },
+    entry_rules: [
+      {
+        field: 'final_score',
+        operator: '>',
+        value: 0.5, // Stock threshold
+      },
+      {
+        field: 'metadata.engine_details.fundamental.score',
+        operator: '>',
+        value: 0.5,
+      },
+    ],
+    exit_rules: [
+      {
+        field: 'final_score',
+        operator: '<',
+        value: -0.5, // Stock threshold
+      },
+    ],
+    stop_loss_value: 6.0,
+    take_profit_value: 15.0,
+  },
+  {
+    name: 'Dividend Income (Stocks)',
+    description:
+      'Conservative strategy for dividend-paying stocks with stable fundamentals. Focuses on consistent earnings, low event risk, and strong financial health.',
+    risk_level: 'low',
+    engine_weights: {
+      sentiment: 0.2,
+      trend: 0.15,
+      fundamental: 0.4,
+      event_risk: 0.2,
+      liquidity: 0.05,
+    },
+    entry_rules: [
+      {
+        field: 'final_score',
+        operator: '>',
+        value: 0.5, // Stock threshold
+      },
+      {
+        field: 'metadata.engine_details.fundamental.score',
+        operator: '>',
+        value: 0.4,
+      },
+      {
+        field: 'metadata.engine_details.event_risk.score',
+        operator: '>',
+        value: 0.0,
+      },
+    ],
+    exit_rules: [
+      {
+        field: 'final_score',
+        operator: '<',
+        value: -0.4,
+      },
+    ],
+    stop_loss_value: 4.0,
+    take_profit_value: 10.0,
+  },
 ];
 

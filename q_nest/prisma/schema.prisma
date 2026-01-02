@@ -298,6 +298,7 @@ model assets {
   rebalanceSuggestions     rebalance_suggestions[]
 
   @@unique([symbol, asset_type], name: "symbol_asset_type")
+  @@index([asset_type, is_active])
   @@map("assets")
 }
 
@@ -337,6 +338,7 @@ model trending_assets {
   asset assets @relation(fields: [asset_id], references: [asset_id])
 
   @@id([poll_timestamp, asset_id])
+  @@index([asset_id, poll_timestamp])
   @@map("trending_assets")
 }
 
