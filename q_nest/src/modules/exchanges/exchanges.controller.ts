@@ -19,6 +19,7 @@ import { ConnectionOwnerGuard } from './guards/connection-owner.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
 import { CreateConnectionDto } from './dto/create-connection.dto';
+import { UpdateConnectionDto } from './dto/update-connection.dto';
 import { PlaceOrderDto } from './dto/place-order.dto';
 import { BinanceService } from './integrations/binance.service';
 import { BybitService } from './integrations/bybit.service';
@@ -54,11 +55,6 @@ export class ExchangesController {
   @Get()
   findAll() {
     return this.exchangesService.findAll();
-  }
-
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.exchangesService.findOne(id);
   }
 
   @Get('connections/active')
@@ -109,9 +105,48 @@ export class ExchangesController {
     }
   }
 
+  /**
+   * Get all connections for the current authenticated user
+   * This is used by the exchange configuration page
+   * MUST be before @Get('connections/:userId') to avoid route collision
+   */
+  @Get('my-connections')
+  async getUserConnectionsForCurrentUser(@CurrentUser() user: TokenPayload) {
+    console.log('[GET my-connections] Route hit');
+    console.log('[GET my-connections] User:', user);
+    
+    if (!user || !user.sub) {
+      console.error('[GET my-connections] No user in request');
+      throw new HttpException(
+        {
+          code: 'UNAUTHORIZED',
+          message: 'User not authenticated',
+        },
+        HttpStatus.UNAUTHORIZED,
+      );
+    }
+
+    console.log('[GET my-connections] Fetching connections for userId:', user.sub);
+    
+    const connections = await this.exchangesService.getUserConnections(user.sub);
+    
+    console.log('[GET my-connections] Success! Found', connections?.length || 0, 'connections');
+    console.log('[GET my-connections] Connections:', JSON.stringify(connections, null, 2).substring(0, 500));
+    
+    return {
+      success: true,
+      data: connections || [],
+    };
+  }
+
   @Get('connections/:userId')
   getUserConnections(@Param('userId') userId: string) {
     return this.exchangesService.getUserConnections(userId);
+  }
+
+  @Get(':id')
+  findOne(@Param('id') id: string) {
+    return this.exchangesService.findOne(id);
   }
 
   @Post()
@@ -140,23 +175,91 @@ export class ExchangesController {
     @Body() createConnectionDto: CreateConnectionDto,
     @CurrentUser() user: TokenPayload,
   ) {
-    const connection = await this.exchangesService.createConnection({
-      user_id: user.sub,
-      exchange_id: createConnectionDto.exchange_id,
-      auth_type: 'api_key',
-      api_key: createConnectionDto.api_key,
-      api_secret: createConnectionDto.api_secret,
-      enable_trading: createConnectionDto.enable_trading,
-    });
+    try {
+      // First, get the exchange to get its name for verification
+      const exchange = await this.exchangesService.findOne(createConnectionDto.exchange_id);
+      if (!exchange) {
+        throw new HttpException(
+          {
+            code: 'EXCHANGE_NOT_FOUND',
+            message: 'Exchange not found',
+          },
+          HttpStatus.NOT_FOUND,
+        );
+      }
 
-    return {
-      success: true,
-      data: {
-        connection_id: connection.connection_id,
-        status: connection.status,
-      },
-      message: 'Connection created successfully. Please verify your API keys.',
-    };
+      // Verify credentials with the exchange before creating connection
+      let verification;
+      const exchangeName = exchange.name.toLowerCase();
+      
+      if (exchangeName.includes('binance')) {
+        verification = await this.binanceService.verifyApiKey(
+          createConnectionDto.api_key,
+          createConnectionDto.api_secret,
+        );
+      } else if (exchangeName.includes('bybit')) {
+        verification = await this.bybitService.verifyApiKey(
+          createConnectionDto.api_key,
+          createConnectionDto.api_secret,
+        );
+      } else {
+        throw new HttpException(
+          {
+            code: 'UNSUPPORTED_EXCHANGE',
+            message: 'Exchange verification not supported',
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+
+      if (!verification.valid) {
+        throw new HttpException(
+          {
+            code: 'INVALID_CREDENTIALS',
+            message: verification.error || 'Invalid API credentials',
+          },
+          HttpStatus.UNAUTHORIZED,
+        );
+      }
+
+      // If verification passes, create the connection
+      const connection = await this.exchangesService.createConnection({
+        user_id: user.sub,
+        exchange_id: createConnectionDto.exchange_id,
+        auth_type: 'api_key',
+        api_key: createConnectionDto.api_key,
+        api_secret: createConnectionDto.api_secret,
+        enable_trading: createConnectionDto.enable_trading,
+      });
+
+      return {
+        success: true,
+        data: {
+          connection_id: connection.connection_id,
+          status: connection.status,
+        },
+        message: 'Connection created successfully. Please verify your API keys.',
+      };
+    } catch (error: any) {
+      // Re-throw HTTP exceptions
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      // Handle other errors
+      const message = error?.message || 'Failed to create connection';
+      const statusCode = message.includes('Invalid') || message.includes('Unauthorized')
+        ? HttpStatus.UNAUTHORIZED
+        : HttpStatus.BAD_REQUEST;
+
+      throw new HttpException(
+        {
+          code: 'CONNECTION_CREATION_FAILED',
+          message,
+        },
+        statusCode,
+      );
+    }
   }
 
   @Put(':id')
@@ -164,9 +267,54 @@ export class ExchangesController {
     return this.exchangesService.update(id, updateExchangeDto);
   }
 
-  @Put('connections/:id')
-  updateConnection(@Param('id') id: string, @Body() updateConnectionDto: any) {
-    return this.exchangesService.updateConnection(id, updateConnectionDto);
+  /**
+   * Update exchange connection with new API credentials
+   * Requires password verification and connection ownership
+   * 
+   * @param connectionId - Connection ID to update
+   * @param updateConnectionDto - New API credentials and password
+   * @param user - Current authenticated user
+   * @returns Updated connection details
+   */
+  @Put('connections/:connectionId')
+  @UseGuards(ConnectionOwnerGuard)
+  @HttpCode(HttpStatus.OK)
+  async updateConnection(
+    @Param('connectionId') connectionId: string,
+    @Body() updateConnectionDto: UpdateConnectionDto,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    try {
+      const result = await this.exchangesService.updateConnection(
+        connectionId,
+        user.sub,
+        updateConnectionDto.api_key,
+        updateConnectionDto.api_secret,
+        updateConnectionDto.password,
+        updateConnectionDto.passphrase,
+      );
+
+      return {
+        success: true,
+        data: result,
+        message: 'Exchange connection updated successfully',
+      };
+    } catch (error: any) {
+      // Return proper HTTP exception with meaningful error message
+      const statusCode = error?.message?.includes('password') 
+        ? HttpStatus.UNAUTHORIZED 
+        : error?.message?.includes('Unauthorized')
+        ? HttpStatus.FORBIDDEN
+        : HttpStatus.BAD_REQUEST;
+
+      throw new HttpException(
+        {
+          code: 'UPDATE_CONNECTION_FAILED',
+          message: error?.message || 'Failed to update connection',
+        },
+        statusCode,
+      );
+    }
   }
 
   @Delete(':id')

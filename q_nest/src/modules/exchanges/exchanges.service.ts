@@ -96,10 +96,47 @@ export class ExchangesService {
   }
 
   async getUserConnections(userId: string) {
-    return this.prisma.user_exchange_connections.findMany({
-      where: { user_id: userId },
-      include: { exchange: true },
-    });
+    try {
+      this.logger.debug(`[getUserConnections] Fetching connections for user: ${userId}`);
+      
+      const rawConnections = await this.prisma.user_exchange_connections.findMany({
+        where: { user_id: userId },
+        include: { exchange: true },
+      });
+
+      this.logger.debug(`[getUserConnections] Found ${rawConnections.length} connections for user: ${userId}`);
+      
+      // Serialize to plain objects with ISO string dates
+      const connections = rawConnections.map(conn => {
+        return {
+          connection_id: conn.connection_id,
+          user_id: conn.user_id,
+          exchange_id: conn.exchange_id,
+          auth_type: conn.auth_type,
+          status: conn.status,
+          connection_metadata: conn.connection_metadata,
+          last_synced_at: conn.last_synced_at ? new Date(conn.last_synced_at).toISOString() : null,
+          created_at: conn.created_at ? new Date(conn.created_at).toISOString() : null,
+          updated_at: conn.updated_at ? new Date(conn.updated_at).toISOString() : null,
+          exchange: conn.exchange ? {
+            exchange_id: conn.exchange.exchange_id,
+            name: conn.exchange.name,
+            type: conn.exchange.type,
+            supports_oauth: conn.exchange.supports_oauth,
+            created_at: conn.exchange.created_at ? new Date(conn.exchange.created_at).toISOString() : null,
+          } : null,
+        };
+      });
+
+      return connections;
+    } catch (error: any) {
+      this.logger.error(`[getUserConnections] Error fetching connections for user ${userId}:`, {
+        message: error?.message,
+        code: error?.code,
+        stack: error?.stack,
+      });
+      throw error;
+    }
   }
 
   async getActiveConnection(userId: string) {
@@ -667,28 +704,6 @@ export class ExchangesService {
     }
   }
 
-  async updateConnection(id: string, data: {
-    auth_type?: string;
-    api_key_encrypted?: string;
-    api_secret_encrypted?: string;
-    oauth_access_token?: string;
-    oauth_refresh_token?: string;
-    permissions?: any;
-    status?: ConnectionStatus;
-    connection_metadata?: any;
-  }) {
-    // Invalidate cache on update
-    this.cacheService.invalidate(id);
-
-    return this.prisma.user_exchange_connections.update({
-      where: { connection_id: id },
-      data: {
-        ...data,
-        updated_at: new Date(),
-      },
-    });
-  }
-
   async deleteConnection(id: string) {
     return this.prisma.user_exchange_connections.delete({
       where: { connection_id: id },
@@ -741,6 +756,165 @@ export class ExchangesService {
     } else {
       throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
     }
+  }
+
+  /**
+   * Verifies that the user owns a valid exchange account with the provided credentials
+   * This method tests the API credentials against the actual exchange before updating
+   * 
+   * @param exchange_name - The exchange name (binance/bybit)
+   * @param api_key - The API key to verify
+   * @param api_secret - The API secret to verify
+   * @returns Object with verification results and account info
+   */
+  async verifyExchangeAccountOwnership(
+    exchange_name: string,
+    api_key: string,
+    api_secret: string,
+    passphrase?: string, // Required for some exchanges like Bybit
+  ): Promise<{
+    valid: boolean;
+    accountType?: string;
+    permissions?: string[];
+    error?: string;
+  }> {
+    try {
+      const normalizedExchange = exchange_name.toLowerCase();
+      
+      if (normalizedExchange === 'binance') {
+        const verification = await this.binanceService.verifyApiKey(api_key, api_secret);
+        return {
+          valid: verification.valid,
+          accountType: verification.accountType,
+          permissions: verification.permissions,
+        };
+      } else if (normalizedExchange === 'bybit') {
+        const verification = await this.bybitService.verifyApiKey(api_key, api_secret);
+        return {
+          valid: verification.valid,
+          accountType: verification.accountType,
+          permissions: verification.permissions,
+        };
+      } else {
+        return {
+          valid: false,
+          error: `Unsupported exchange: ${exchange_name}`,
+        };
+      }
+    } catch (error: any) {
+      this.logger.error(`Failed to verify exchange account ownership for ${exchange_name}`, error);
+      return {
+        valid: false,
+        error: error?.message || 'Failed to verify exchange credentials',
+      };
+    }
+  }
+
+  /**
+   * Updates a user's exchange connection with new API credentials
+   * Requires password verification and account ownership validation
+   * 
+   * @param connectionId - The connection to update
+   * @param userId - The user updating the connection (for ownership check)
+   * @param api_key - New API key
+   * @param api_secret - New API secret
+   * @param password - User's password for verification
+   * @returns Updated connection object
+   */
+  async updateConnection(
+    connectionId: string,
+    userId: string,
+    api_key: string,
+    api_secret: string,
+    password: string,
+    passphrase?: string,
+  ): Promise<any> {
+    // Step 1: Verify connection exists and belongs to user
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    if (connection.user_id !== userId) {
+      throw new Error('Unauthorized: This connection does not belong to this user');
+    }
+
+    if (!connection.exchange) {
+      throw new ConnectionNotFoundException('Exchange not found for this connection');
+    }
+
+    // Step 2: Verify user password (ensures user authorization)
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+      select: { password_hash: true },
+    });
+
+    if (!user || !user.password_hash) {
+      throw new Error('User not found or password not set');
+    }
+
+    // Import bcrypt for password comparison
+    const bcrypt = require('bcryptjs');
+    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
+    if (!isPasswordValid) {
+      throw new Error('Invalid password');
+    }
+
+    // Step 3: Verify the new credentials with the exchange
+    const verification = await this.verifyExchangeAccountOwnership(
+      connection.exchange.name,
+      api_key,
+      api_secret,
+      passphrase,
+    );
+
+    if (!verification.valid) {
+      throw new Error(
+        verification.error || 'Failed to verify exchange credentials. Please check your API key and secret.',
+      );
+    }
+
+    // Step 4: Encrypt the new API credentials
+    const apiKeyEncrypted = this.encryptionService.encryptApiKey(api_key);
+    const apiSecretEncrypted = this.encryptionService.encryptApiKey(api_secret);
+
+    // Step 5: Update the connection in the database
+    const updatedConnection = await this.prisma.user_exchange_connections.update({
+      where: { connection_id: connectionId },
+      data: {
+        api_key_encrypted: apiKeyEncrypted,
+        api_secret_encrypted: apiSecretEncrypted,
+        status: ConnectionStatus.active,
+        connection_metadata: {
+          ...(connection.connection_metadata as object || {}),
+          accountType: verification.accountType,
+          permissions: verification.permissions,
+          updated_at: new Date().toISOString(),
+          last_verified: new Date().toISOString(),
+        },
+        last_synced_at: new Date(),
+      },
+      include: { exchange: true },
+    });
+
+    // Step 6: Invalidate cache for this connection
+    this.cacheService.invalidate(connectionId);
+
+    // Step 7: Return updated connection (without encrypted keys)
+    return {
+      connection_id: updatedConnection.connection_id,
+      exchange_id: updatedConnection.exchange_id,
+      exchange_name: updatedConnection.exchange?.name,
+      status: updatedConnection.status,
+      created_at: updatedConnection.created_at,
+      updated_at: updatedConnection.updated_at,
+      account_type: verification.accountType,
+      verified: true,
+    };
   }
 }
 
