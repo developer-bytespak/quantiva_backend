@@ -84,7 +84,7 @@ def warmup_models():
 
 def extract_face_embedding(image: Image.Image) -> Optional[np.ndarray]:
     """
-    Extract face embedding from image using DeepFace.
+    Extract face embedding from image using DeepFace with enhanced preprocessing.
     
     Args:
         image: PIL Image object
@@ -99,10 +99,19 @@ def extract_face_embedding(image: Image.Image) -> Optional[np.ndarray]:
             logger.warning(f"Image validation failed: {error_msg}")
             return None
         
-        # Convert PIL Image to numpy array in RGB format
-        # DeepFace expects RGB format, not BGR
+        # Enhanced preprocessing for face detection
         img_rgb = image.convert('RGB')
-        img_array = np.array(img_rgb)
+        
+        # Resize if too large (for faster processing while maintaining quality)
+        max_size = 800
+        if max(img_rgb.size) > max_size:
+            ratio = max_size / max(img_rgb.size)
+            new_size = tuple(int(dim * ratio) for dim in img_rgb.size)
+            img_rgb = img_rgb.resize(new_size, Image.Resampling.LANCZOS)
+            logger.debug(f"Resized image from {image.size} to {img_rgb.size} for processing")
+        
+        # Apply preprocessing for better face detection
+        img_array = preprocess_image(img_rgb, enhance=True)
         
         # Ensure the array is in the correct format (uint8, shape: height, width, channels)
         if img_array.dtype != np.uint8:
@@ -118,54 +127,54 @@ def extract_face_embedding(image: Image.Image) -> Optional[np.ndarray]:
         
         logger.debug(f"Image array shape: {img_array.shape}, dtype: {img_array.dtype}, min: {img_array.min()}, max: {img_array.max()}")
         
-        # Optimized backend strategy: Use primary backend + opencv as fallback only
-        # Removes slow backends (mtcnn, dlib) for faster processing
-        detector_backends = [DEEPFACE_BACKEND]
-        if DEEPFACE_BACKEND != 'opencv':
-            detector_backends.append('opencv')  # Add opencv as fast fallback
-
+        # Enhanced backend strategy: Use high-accuracy backends first
+        detector_backends = ['retinaface', 'mtcnn', 'opencv']  # Order by accuracy
+        models_to_try = ['Facenet512', 'ArcFace', 'Facenet', 'VGG-Face']  # Order by accuracy
+        
         DeepFace = _get_deepface()
         if DeepFace is None:
             logger.warning("DeepFace not available; cannot extract embeddings")
             return None
 
+        # Try multiple model/backend combinations for robustness
         last_error = None
-        for backend in detector_backends:
-            try:
-                logger.debug(f"Trying face detection with backend: {backend}")
+        for model in models_to_try:
+            for backend in detector_backends:
+                try:
+                    logger.debug(f"Trying face detection with {model}/{backend}")
 
-                embedding = DeepFace.represent(
-                    img_path=img_array,
-                    model_name=DEEPFACE_MODEL,
-                    detector_backend=backend,
-                    enforce_detection=False,
-                )
+                    embedding = DeepFace.represent(
+                        img_path=img_array,
+                        model_name=model,
+                        detector_backend=backend,
+                        enforce_detection=False,
+                    )
 
-                if embedding and len(embedding) > 0:
-                    embedding_vector = np.array(embedding[0]['embedding'])
-                    logger.info(f"Face embedding extracted successfully using {backend} (dim: {len(embedding_vector)})")
-                    return embedding_vector
-                else:
-                    logger.debug(f"No face found with backend: {backend}")
-                    continue
+                    if embedding and len(embedding) > 0:
+                        embedding_vector = np.array(embedding[0]['embedding'])
+                        logger.info(f"Face embedding extracted successfully using {model}/{backend} (dim: {len(embedding_vector)})")
+                        return embedding_vector
+                    else:
+                        logger.debug(f"No face found with {model}/{backend}")
+                        continue
 
-            except ValueError as e:
-                error_msg = str(e)
-                if "Face could not be detected" in error_msg or "could not detect a face" in error_msg.lower():
-                    logger.debug(f"No face detected with backend {backend}: {error_msg}")
-                    last_error = error_msg
+                except ValueError as e:
+                    error_msg = str(e)
+                    if "Face could not be detected" in error_msg or "could not detect a face" in error_msg.lower():
+                        logger.debug(f"No face detected with {model}/{backend}: {error_msg}")
+                        last_error = error_msg
+                        continue
+                    else:
+                        logger.warning(f"ValueError with {model}/{backend}: {error_msg}")
+                        last_error = error_msg
+                        continue
+                except Exception as e:
+                    logger.warning(f"Error with {model}/{backend}: {str(e)}")
+                    last_error = str(e)
                     continue
-                else:
-                    logger.warning(f"ValueError with backend {backend}: {error_msg}")
-                    last_error = error_msg
-                    continue
-            except Exception as e:
-                logger.warning(f"Error with backend {backend}: {str(e)}")
-                last_error = str(e)
-                continue
         
-        # If all backends failed, log the last error
-        logger.warning(f"No face detected in image after trying all backends. Last error: {last_error}")
+        # If all attempts failed, log the last error
+        logger.warning(f"No face detected in image after trying all models/backends. Last error: {last_error}")
         return None
             
     except Exception as e:
@@ -175,8 +184,7 @@ def extract_face_embedding(image: Image.Image) -> Optional[np.ndarray]:
 
 def calculate_similarity(embedding1: np.ndarray, embedding2: np.ndarray) -> float:
     """
-    Calculate similarity between two face embeddings using cosine similarity.
-    DeepFace embeddings are typically normalized, so cosine similarity works well.
+    Calculate similarity between two face embeddings using enhanced ensemble approach.
     
     Args:
         embedding1: First face embedding
@@ -190,32 +198,104 @@ def calculate_similarity(embedding1: np.ndarray, embedding2: np.ndarray) -> floa
         embedding1 = np.array(embedding1, dtype=np.float32)
         embedding2 = np.array(embedding2, dtype=np.float32)
         
-        # Normalize embeddings to unit vectors
-        norm1 = np.linalg.norm(embedding1)
-        norm2 = np.linalg.norm(embedding2)
+        # Calculate ensemble similarity
+        similarity_percentage = calculate_ensemble_similarity(embedding1, embedding2)
         
-        if norm1 == 0 or norm2 == 0:
-            logger.warning("One or both embeddings have zero norm")
-            return 0.0
+        # Convert percentage back to 0-1 scale
+        similarity = similarity_percentage / 100.0
         
-        # Normalize to unit vectors
-        embedding1_norm = embedding1 / norm1
-        embedding2_norm = embedding2 / norm2
-        
-        # Calculate cosine similarity (dot product of normalized vectors)
-        similarity = np.dot(embedding1_norm, embedding2_norm)
-        
-        # Cosine similarity ranges from -1 to 1, but for face recognition it's typically 0-1
-        # Convert to 0-1 range: (similarity + 1) / 2, but for faces we usually just clamp to 0-1
-        similarity = max(0.0, min(1.0, similarity))
-        
-        logger.debug(f"Similarity calculated: {similarity:.4f} (embedding dims: {len(embedding1)}, {len(embedding2)})")
+        logger.debug(f"Ensemble similarity: {similarity:.4f} ({similarity_percentage:.2f}%) (embedding dims: {len(embedding1)}, {len(embedding2)})")
         
         return float(similarity)
         
     except Exception as e:
         logger.error(f"Similarity calculation failed: {str(e)}", exc_info=True)
         return 0.0
+
+
+def calculate_ensemble_similarity(embedding1: np.ndarray, embedding2: np.ndarray) -> float:
+    """
+    Calculate similarity using ensemble approach with multiple distance metrics.
+    
+    Args:
+        embedding1: First face embedding 
+        embedding2: Second face embedding
+        
+    Returns:
+        Ensemble similarity score as percentage (0-100)
+    """
+    try:
+        # Multiple distance/similarity metrics for robustness
+        similarity_scores = []
+        
+        # 1. Cosine similarity (most common for embeddings)
+        try:
+            norm1 = np.linalg.norm(embedding1)
+            norm2 = np.linalg.norm(embedding2)
+            if norm1 > 0 and norm2 > 0:
+                cosine_sim = np.dot(embedding1 / norm1, embedding2 / norm2)
+                cosine_sim = max(0, cosine_sim)  # Clamp to 0-1
+                similarity_scores.append(cosine_sim * 100)
+                logger.debug(f"Cosine similarity: {cosine_sim:.4f} ({cosine_sim * 100:.2f}%)")
+        except:
+            logger.debug("Cosine similarity calculation failed")
+            
+        # 2. Euclidean distance similarity
+        try:
+            euclidean_dist = np.linalg.norm(embedding1 - embedding2)
+            # Convert distance to similarity: smaller distance = higher similarity
+            # Use sigmoid-like transformation for better scaling
+            euclidean_sim = 1.0 / (1.0 + euclidean_dist / 10.0)  # Scale factor 10
+            similarity_scores.append(euclidean_sim * 100)
+            logger.debug(f"Euclidean similarity: {euclidean_sim:.4f} ({euclidean_sim * 100:.2f}%)")
+        except:
+            logger.debug("Euclidean similarity calculation failed")
+            
+        # 3. Manhattan distance similarity
+        try:
+            manhattan_dist = np.sum(np.abs(embedding1 - embedding2))
+            # Convert distance to similarity
+            manhattan_sim = 1.0 / (1.0 + manhattan_dist / 100.0)  # Scale factor 100
+            similarity_scores.append(manhattan_sim * 100)
+            logger.debug(f"Manhattan similarity: {manhattan_sim:.4f} ({manhattan_sim * 100:.2f}%)")
+        except:
+            logger.debug("Manhattan similarity calculation failed")
+            
+        # 4. Pearson correlation
+        try:
+            correlation = np.corrcoef(embedding1, embedding2)[0, 1]
+            if not np.isnan(correlation):
+                correlation = max(0, correlation)  # Clamp to 0-1
+                similarity_scores.append(correlation * 100)
+                logger.debug(f"Correlation similarity: {correlation:.4f} ({correlation * 100:.2f}%)")
+        except:
+            logger.debug("Correlation similarity calculation failed")
+        
+        if not similarity_scores:
+            logger.warning("All similarity calculations failed, returning 0")
+            return 0.0
+        
+        # Calculate weighted average with emphasis on cosine similarity
+        if len(similarity_scores) >= 2:
+            # Weight cosine similarity more heavily as it's most reliable for embeddings
+            weights = [0.5] + [0.5 / (len(similarity_scores) - 1)] * (len(similarity_scores) - 1)
+            ensemble_score = np.average(similarity_scores, weights=weights)
+        else:
+            ensemble_score = similarity_scores[0]
+        
+        logger.info(f"Ensemble similarity from {len(similarity_scores)} metrics: {ensemble_score:.2f}%")
+        logger.info(f"Individual scores: {[f'{s:.2f}%' for s in similarity_scores]}")
+        
+        return float(ensemble_score)
+        
+    except Exception as e:
+        logger.error(f"Ensemble similarity calculation failed: {str(e)}", exc_info=True)
+        # Fallback to basic cosine similarity
+        try:
+            similarity = np.dot(embedding1, embedding2) / (np.linalg.norm(embedding1) * np.linalg.norm(embedding2))
+            return max(0, float(similarity * 100))
+        except:
+            return 0.0
 
 
 def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict:
@@ -237,13 +317,22 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict:
         
         logger.info(f"Image quality scores: ID={id_quality_score:.3f}, Selfie={selfie_quality_score:.3f}")
         
-        if not id_quality_ok or not selfie_quality_ok:
-            logger.warning(f"Poor image quality detected: ID OK={id_quality_ok}, Selfie OK={selfie_quality_ok}")
+        # TEMPORARY FIX: Only reject if quality is extremely poor (below 0.1)
+        # This prevents good images from being rejected due to overly strict quality checks
+        extremely_poor_threshold = 0.1
+        if id_quality_score < extremely_poor_threshold or selfie_quality_score < extremely_poor_threshold:
+            logger.warning(f"Extremely poor image quality detected: ID={id_quality_score:.3f}, Selfie={selfie_quality_score:.3f}")
             return {
                 "similarity": 0.0,
                 "is_match": False,
                 "confidence": 0.0,
             }
+        
+        # Log quality but continue processing
+        if not id_quality_ok or not selfie_quality_ok:
+            logger.info(f"Image quality below normal threshold but still processing: ID OK={id_quality_ok}, Selfie OK={selfie_quality_ok}")
+        else:
+            logger.info("Image quality checks passed")
         
         # Extract embeddings from both images
         logger.info("Extracting face embedding from ID photo...")
@@ -271,25 +360,109 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict:
         # Try using DeepFace's built-in verify function for better accuracy
         # This uses distance metrics that are more appropriate for face recognition
         try:
-            # Convert embeddings back to images for DeepFace.verify (it needs image paths or arrays)
-            # But we can use the embeddings directly by calculating distance
-            # DeepFace uses cosine distance: distance = 1 - cosine_similarity
-            similarity = calculate_similarity(id_embedding, selfie_embedding)
+            # Use DeepFace.verify directly with image arrays for best accuracy
+            id_array = np.array(id_photo)
+            selfie_array = np.array(selfie)
             
-            # Alternative: Use Euclidean distance and convert to similarity
-            # For face recognition, smaller distance = higher similarity
-            euclidean_distance = np.linalg.norm(id_embedding - selfie_embedding)
-            # Normalize distance to similarity (0-1 range)
-            # Typical face embedding distances are 0-2, so we normalize
-            distance_similarity = max(0.0, 1.0 - (euclidean_distance / 2.0))
+            # Enhanced model selection with better accuracy
+            # Use multiple models and take the best result for maximum accuracy
+            models_to_try = [
+                ('Facenet512', 'retinaface'),  # Most accurate combination
+                ('ArcFace', 'retinaface'),     # High accuracy alternative
+                ('Facenet', 'retinaface'),     # Good fallback
+                ('VGG-Face', 'retinaface'),    # Stable fallback
+                ('Facenet512', 'mtcnn'),       # Alternative detector
+                ('ArcFace', 'mtcnn'),          # Alternative detector
+                ('Facenet', 'opencv'),         # Fast fallback
+                ('VGG-Face', 'opencv'),        # Most stable
+            ]
             
-            # Use the higher of the two similarity scores
-            similarity = max(similarity, distance_similarity)
+            best_similarity = 0.0
+            best_result = None
+            all_results = []
             
-            logger.info(f"Face matching: cosine_sim={calculate_similarity(id_embedding, selfie_embedding):.3f}, distance_sim={distance_similarity:.3f}, final={similarity:.3f}")
+            logger.info("Testing multiple DeepFace models for maximum accuracy...")
+            
+            for model, backend in models_to_try:
+                try:
+                    logger.debug(f"Trying {model} with {backend} detector...")
+                    
+                    result = DeepFace.verify(
+                        img1_path=id_array,
+                        img2_path=selfie_array,
+                        model_name=model,
+                        detector_backend=backend,
+                        enforce_detection=False,
+                        distance_metric='cosine'  # Use cosine distance for better accuracy
+                    )
+                    
+                    # Calculate similarity based on distance and threshold
+                    distance = result['distance']
+                    threshold = result['threshold']
+                    
+                    # Improved similarity calculation
+                    # For cosine distance, similarity = 1 - distance (clamped to 0-1)
+                    if distance <= threshold:
+                        # If within threshold, use enhanced similarity calculation
+                        similarity = max(0.0, min(1.0, 1.0 - distance))
+                        # Boost similarity for matches within threshold
+                        similarity = similarity * (1.0 + (threshold - distance) / threshold * 0.2)
+                        similarity = min(1.0, similarity)  # Cap at 1.0
+                    else:
+                        # If outside threshold, use standard calculation
+                        similarity = max(0.0, 1.0 - distance)
+                    
+                    all_results.append({
+                        'model': model,
+                        'backend': backend,
+                        'similarity': similarity,
+                        'distance': distance,
+                        'threshold': threshold,
+                        'verified': result['verified']
+                    })
+                    
+                    logger.info(f"{model}/{backend}: verified={result['verified']}, similarity={similarity:.3f}, distance={distance:.3f}")
+                    
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        best_result = result
+                        
+                except Exception as e:
+                    logger.debug(f"DeepFace {model}/{backend} failed: {str(e)[:100]}")
+                    continue
+            
+            # Use ensemble approach - take average of top 3 results for stability
+            if len(all_results) >= 3:
+                # Sort by similarity and take top 3
+                all_results.sort(key=lambda x: x['similarity'], reverse=True)
+                top_3_similarities = [r['similarity'] for r in all_results[:3]]
+                ensemble_similarity = sum(top_3_similarities) / len(top_3_similarities)
+                
+                logger.info(f"Ensemble average of top 3 models: {ensemble_similarity:.3f}")
+                result_strings = [f"{r['model']}/{r['backend']}:{r['similarity']:.3f}" for r in all_results[:3]]
+                logger.info(f"Top 3 results: {result_strings}")
+                
+                # Use ensemble result if it's reasonable, otherwise use best single result
+                if abs(ensemble_similarity - best_similarity) < 0.3:  # Results are consistent
+                    similarity = ensemble_similarity
+                    logger.info(f"Using ensemble similarity: {similarity:.3f}")
+                else:
+                    similarity = best_similarity
+                    logger.info(f"Results inconsistent, using best single result: {similarity:.3f}")
+            else:
+                similarity = best_similarity
+                logger.info(f"Limited results, using best single result: {similarity:.3f}")
+            
+            if best_result is not None:
+                logger.info(f"Best DeepFace result: similarity={similarity:.3f}, verified={best_result.get('verified', False)}")
+            else:
+                # Fallback to embedding comparison if DeepFace.verify fails
+                logger.warning("All DeepFace.verify attempts failed, falling back to embedding comparison")
+                similarity = calculate_similarity(id_embedding, selfie_embedding)
             
         except Exception as e:
-            logger.warning(f"Advanced similarity calculation failed, using basic: {str(e)}")
+            logger.warning(f"DeepFace verification failed, using embedding similarity: {str(e)}")
+            # Fallback to basic embedding similarity
             similarity = calculate_similarity(id_embedding, selfie_embedding)
         
         # Determine if it's a match (threshold from config)

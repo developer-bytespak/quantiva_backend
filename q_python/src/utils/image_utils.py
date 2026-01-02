@@ -57,15 +57,22 @@ def validate_image(image: Image.Image) -> Tuple[bool, Optional[str]]:
     if width > MAX_IMAGE_WIDTH or height > MAX_IMAGE_HEIGHT:
         return False, f"Image too large. Maximum size: {MAX_IMAGE_WIDTH}x{MAX_IMAGE_HEIGHT}"
     
-    if image.format not in ALLOWED_FORMATS:
-        return False, f"Unsupported format. Allowed: {', '.join(ALLOWED_FORMATS)}"
+    # Check format if available (some programmatically created images might not have format)
+    if hasattr(image, 'format') and image.format is not None:
+        if image.format not in ALLOWED_FORMATS:
+            return False, f"Unsupported format. Allowed: {', '.join(ALLOWED_FORMATS)}"
+    else:
+        # For images without format info (e.g., created programmatically), 
+        # check if they're in a valid mode instead
+        if image.mode not in ('RGB', 'RGBA', 'L', 'P'):
+            return False, f"Unsupported image mode: {image.mode}"
     
     return True, None
 
 
 def preprocess_image(image: Image.Image, enhance: bool = True) -> np.ndarray:
     """
-    Preprocess image for ML processing.
+    Preprocess image for ML processing with enhanced face recognition optimizations.
     
     Args:
         image: PIL Image object
@@ -98,11 +105,34 @@ def preprocess_image(image: Image.Image, enhance: bool = True) -> np.ndarray:
             if len(img_array.shape) == 2:
                 img_array = np.stack([img_array] * 3, axis=-1)
     else:
+        # Enhanced preprocessing with OpenCV for better face recognition
+        if enhance:
+            # Convert to RGB for processing
+            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                # Apply histogram equalization for better contrast
+                img_yuv = cv2.cvtColor(img_array, cv2.COLOR_RGB2YUV)
+                img_yuv[:,:,0] = cv2.equalizeHist(img_yuv[:,:,0])
+                img_array = cv2.cvtColor(img_yuv, cv2.COLOR_YUV2RGB)
+                
+                # Apply slight Gaussian blur to reduce noise while preserving facial features
+                img_array = cv2.GaussianBlur(img_array, (3, 3), 0)
+                
+                # Enhance sharpness for better feature detection
+                kernel = np.array([[-1,-1,-1],
+                                 [-1, 9,-1],
+                                 [-1,-1,-1]])
+                img_array = cv2.filter2D(img_array, -1, kernel)
+                img_array = np.clip(img_array, 0, 255).astype(np.uint8)
+        
+        # Handle color space conversions
         if image.mode == 'RGBA':
-            # Convert RGBA to RGB
             img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
-        elif image.mode != 'RGB':
+        elif image.mode == 'L':  # Grayscale
             img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+        elif image.mode == 'P':  # Palette
+            # Convert palette to RGB
+            img_pil_rgb = image.convert('RGB')
+            img_array = np.array(img_pil_rgb)
     
     if enhance:
         # Apply basic enhancements

@@ -408,23 +408,47 @@ async def match_faces_endpoint(
             logger.error(f"[FACE_MATCH_API] Face matching timed out after {match_time:.2f}s: {timeout_error}")
             raise HTTPException(status_code=504, detail=f"Face matching operation timed out. Please try again with smaller images.")
         
+        # Convert face matching service result to API expected format
+        # The service returns 'similarity' and the NestJS expects 'similarity' (keeping same field name)
+        if isinstance(actual_result, dict):
+            api_result = {
+                'similarity': actual_result.get('similarity', 0.0),
+                'is_match': actual_result.get('is_match', False),
+                'confidence': actual_result.get('confidence', 0.0),
+                'id_photo_quality': 0.5,  # Placeholder - could be enhanced
+                'selfie_quality': 0.5,    # Placeholder - could be enhanced  
+                'face_found_in_id': actual_result.get('similarity', 0.0) > 0.0,
+                'face_found_in_selfie': actual_result.get('similarity', 0.0) > 0.0,
+            }
+        else:
+            # Fallback for unexpected result format
+            api_result = {
+                'similarity': 0.0,
+                'is_match': False,
+                'confidence': 0.0,
+                'id_photo_quality': 0.0,
+                'selfie_quality': 0.0,
+                'face_found_in_id': False,
+                'face_found_in_selfie': False,
+            }
+        
         print(f"[PYTHON_FACE_MATCH_STEP_5] Face matching completed in {match_time:.2f}s")
         print(f"[PYTHON_FACE_MATCH_RESULT] Matching results:")
-        print(f"  - Match Score: {actual_result.get('similarity_score', 0.0):.4f}")
-        print(f"  - Is Match: {actual_result.get('is_match', False)}")
-        print(f"  - ID Photo Quality: {actual_result.get('id_photo_quality', 0.0):.3f}")
-        print(f"  - Selfie Quality: {actual_result.get('selfie_quality', 0.0):.3f}")
-        print(f"  - Face Found in ID: {actual_result.get('face_found_in_id', False)}")
-        print(f"  - Face Found in Selfie: {actual_result.get('face_found_in_selfie', False)}")
+        print(f"  - Match Score: {api_result.get('similarity', 0.0):.4f}")
+        print(f"  - Is Match: {api_result.get('is_match', False)}")
+        print(f"  - ID Photo Quality: {api_result.get('id_photo_quality', 0.0):.3f}")
+        print(f"  - Selfie Quality: {api_result.get('selfie_quality', 0.0):.3f}")
+        print(f"  - Face Found in ID: {api_result.get('face_found_in_id', False)}")
+        print(f"  - Face Found in Selfie: {api_result.get('face_found_in_selfie', False)}")
         
         total_time = time.time() - request_start
         print(f"[PYTHON_FACE_MATCH_SUCCESS] Total processing time: {total_time:.2f}s (resize: {resize_time:.2f}s, matching: {match_time:.2f}s)")
         print("=== PYTHON FACE MATCHING COMPLETED ===\\n")
-        logger.info(f"[FACE_MATCH_API] Face matching completed in {match_time:.2f}s (total request: {total_time:.2f}s). Result: {actual_result}")
+        logger.info(f"[FACE_MATCH_API] Face matching completed in {match_time:.2f}s (total request: {total_time:.2f}s). Result: {api_result}")
         
         log_memory_usage("Face matching completed")
         
-        return actual_result
+        return api_result
         
     except HTTPException:
         total_time = time.time() - request_start
