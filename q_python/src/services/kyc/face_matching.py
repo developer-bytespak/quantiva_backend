@@ -32,6 +32,56 @@ def _get_deepface():
     return _deepface
 
 
+def warmup_models():
+    """
+    Pre-load DeepFace model at startup to avoid cold start delays on first request.
+    This ensures that the model is in memory before any API calls arrive.
+    """
+    import time
+    try:
+        logger.info("=" * 60)
+        logger.info("DEEPFACE WARMUP: Starting DeepFace model initialization...")
+        logger.info("=" * 60)
+        start_time = time.time()
+        
+        # First, get DeepFace
+        df = _get_deepface()
+        if df is None:
+            raise Exception("Failed to import DeepFace")
+        
+        logger.info(f"DeepFace library loaded successfully")
+        
+        # Create a simple PIL image with some content to trigger model loading
+        # Use a JPEG to ensure it's in a supported format
+        dummy_image = Image.new('RGB', (224, 224), color=(100, 100, 100))
+        
+        # Test face detection and embedding extraction
+        logger.info("Testing face detection and embedding extraction...")
+        test_start = time.time()
+        result = extract_face_embedding(dummy_image)
+        test_time = time.time() - test_start
+        
+        elapsed = time.time() - start_time
+        
+        if result is not None:
+            logger.info(f"✓ DeepFace embedding extraction working! Test completed in {test_time:.2f}s")
+        else:
+            logger.info(f"✓ DeepFace initialized (no face in test image - expected). Test completed in {test_time:.2f}s")
+        
+        logger.info("=" * 60)
+        logger.info(f"DEEPFACE WARMUP: Complete in {elapsed:.2f}s - Ready for face matching requests")
+        logger.info("=" * 60)
+        return True
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error("=" * 60)
+        logger.error(f"DEEPFACE WARMUP: FAILED after {elapsed:.2f}s")
+        logger.error(f"Error: {str(e)}")
+        logger.error("=" * 60)
+        logger.warning("DeepFace will attempt to load on first request (this will be SLOW)")
+        return False
+
+
 def extract_face_embedding(image: Image.Image) -> Optional[np.ndarray]:
     """
     Extract face embedding from image using DeepFace.
@@ -68,8 +118,11 @@ def extract_face_embedding(image: Image.Image) -> Optional[np.ndarray]:
         
         logger.debug(f"Image array shape: {img_array.shape}, dtype: {img_array.dtype}, min: {img_array.min()}, max: {img_array.max()}")
         
-        # Try multiple detector backends in order of preference
-        detector_backends = [DEEPFACE_BACKEND, 'mtcnn', 'retinaface', 'opencv', 'ssd', 'dlib']
+        # Optimized backend strategy: Use primary backend + opencv as fallback only
+        # Removes slow backends (mtcnn, dlib) for faster processing
+        detector_backends = [DEEPFACE_BACKEND]
+        if DEEPFACE_BACKEND != 'opencv':
+            detector_backends.append('opencv')  # Add opencv as fast fallback
 
         DeepFace = _get_deepface()
         if DeepFace is None:
@@ -177,6 +230,21 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict:
         Dictionary with similarity score, match result, and confidence
     """
     try:
+        # Check image quality early to reject poor images before expensive processing
+        logger.info("Checking image quality...")
+        id_quality_ok, id_quality_score = verify_face_quality(id_photo)
+        selfie_quality_ok, selfie_quality_score = verify_face_quality(selfie)
+        
+        logger.info(f"Image quality scores: ID={id_quality_score:.3f}, Selfie={selfie_quality_score:.3f}")
+        
+        if not id_quality_ok or not selfie_quality_ok:
+            logger.warning(f"Poor image quality detected: ID OK={id_quality_ok}, Selfie OK={selfie_quality_ok}")
+            return {
+                "similarity": 0.0,
+                "is_match": False,
+                "confidence": 0.0,
+            }
+        
         # Extract embeddings from both images
         logger.info("Extracting face embedding from ID photo...")
         id_embedding = extract_face_embedding(id_photo)

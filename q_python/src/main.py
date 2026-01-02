@@ -1,6 +1,9 @@
 # FastAPI entrypoint
 import logging
 import sys
+import signal
+import asyncio
+import gc
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -13,6 +16,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 logger.info("Starting FastAPI application...")
+
+# Global shutdown event
+shutdown_event = asyncio.Event()
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
+    logger.info(f"Received signal {signum}. Initiating graceful shutdown...")
+    shutdown_event.set()
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 # Determine ML init policy early to avoid importing ML-heavy modules
 import os
@@ -83,6 +98,29 @@ except Exception as e:
 app = FastAPI(title="Quantiva Python API", version="1.0.0")
 logger.info("FastAPI app created")
 
+# Add startup and shutdown event handlers
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services and warm up models"""
+    logger.info("Application starting up...")
+    try:
+        # Memory cleanup at startup
+        gc.collect()
+        logger.info("Memory cleanup completed at startup")
+    except Exception as e:
+        logger.error(f"Error during startup: {e}")
+
+@app.on_event("shutdown") 
+async def shutdown_event():
+    """Cleanup resources on shutdown"""
+    logger.info("Application shutting down...")
+    try:
+        # Force garbage collection
+        gc.collect()
+        logger.info("Graceful shutdown completed")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +183,7 @@ def health_check():
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("🚀 FastAPI application starting up...")
+    logger.info("FastAPI application starting up...")
     import os
     import time
     
@@ -155,12 +193,30 @@ async def startup_event():
     # Log ML init policy
     skip = os.environ.get("SKIP_ML_INIT", "").lower()
     if skip in ("1", "true", "yes"):
-        logger.info("⚠️ SKIP_ML_INIT is enabled - ML models will NOT be pre-loaded")
-        logger.info("✅ Startup complete (fast mode)")
+        logger.info("SKIP_ML_INIT is enabled - ML models will NOT be pre-loaded")
+        logger.info("Startup complete (fast mode)")
         return
     
+    # Pre-warm DeepFace model for KYC face matching
+    logger.info("Pre-warming DeepFace model for KYC...")
+    start_time = time.time()
+    
+    try:
+        from src.services.kyc.face_matching import warmup_models
+        warmup_success = warmup_models()
+        elapsed = time.time() - start_time
+        
+        if warmup_success:
+            logger.info(f"DeepFace model warmup completed in {elapsed:.2f}s")
+        else:
+            logger.warning(f"DeepFace warmup encountered issues after {elapsed:.2f}s - will load on first request")
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error(f"Error during DeepFace warmup ({elapsed:.2f}s): {str(e)}")
+        logger.info("API will start anyway - DeepFace will load on first request")
+    
     # Pre-warm FinBERT model for production
-    logger.info("🔥 Pre-warming FinBERT model for production use...")
+    logger.info("Pre-warming FinBERT model for production use...")
     start_time = time.time()
     
     try:
@@ -171,12 +227,12 @@ async def startup_event():
         elapsed = time.time() - start_time
         
         if success:
-            logger.info(f"✅ FinBERT model pre-loaded in {elapsed:.2f}s - API ready for requests")
+            logger.info(f"FinBERT model pre-loaded in {elapsed:.2f}s - API ready for requests")
         else:
-            logger.warning(f"⚠️ FinBERT initialization failed after {elapsed:.2f}s - will retry on first request")
+            logger.warning(f"FinBERT initialization failed after {elapsed:.2f}s - will retry on first request")
     except Exception as e:
         elapsed = time.time() - start_time
-        logger.error(f"❌ Error during FinBERT pre-warming ({elapsed:.2f}s): {str(e)}")
+        logger.error(f"Error during FinBERT pre-warming ({elapsed:.2f}s): {str(e)}")
         logger.info("API will start anyway - FinBERT will load on first request")
     
-    logger.info("✅ Startup complete - Ready to process requests")
+    logger.info("Startup complete - Ready to process requests")

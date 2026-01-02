@@ -21,6 +21,9 @@ export class FaceMatchingService {
     kycId: string,
     selfieFile: Express.Multer.File,
   ): Promise<{ similarity: number; is_match: boolean }> {
+    const overallStartTime = Date.now();
+    this.logger.log(`[FACE_MATCH_STEP_1] Starting face matching process for KYC ${kycId}`);
+    
     // Get ID document
     const document = await this.prisma.kyc_documents.findFirst({
       where: { kyc_id: kycId },
@@ -29,12 +32,12 @@ export class FaceMatchingService {
 
     if (!document) {
       this.logger.error(`No document found for KYC verification: ${kycId}`);
-      throw new Error('No document found for KYC verification');
+      throw new Error('DOCUMENT_ERROR: No ID document found for this KYC verification. Please upload your ID document first.');
     }
 
     if (!document.storage_url) {
       this.logger.error(`Document ${document.document_id} has no storage_url`);
-      throw new Error('Document storage URL is missing');
+      throw new Error('STORAGE_ERROR: Document storage information is missing or incomplete. Please re-upload your ID document.');
     }
 
     this.logger.debug(
@@ -44,11 +47,15 @@ export class FaceMatchingService {
     // Read ID photo from storage (assuming document contains photo)
     // For now, we'll use the document image itself
     // In production, you might extract the photo from the document
+    const readStartTime = Date.now();
+    this.logger.log(`[FACE_MATCH_STEP_2] Reading ID photo from storage...`);
     const idPhotoBuffer = await this.getDocumentImageBuffer(document.storage_url);
+    const readTime = Date.now() - readStartTime;
+    this.logger.log(`[FACE_MATCH_STEP_2_DONE] ID photo read in ${readTime}ms`);
 
     if (!idPhotoBuffer || idPhotoBuffer.length === 0) {
       this.logger.error(`ID photo buffer is empty for document: ${document.storage_url}`);
-      throw new Error('Failed to read ID photo from storage');
+      throw new Error('ID_PHOTO_ERROR: Unable to read your ID document image from storage. It may be corrupted. Please re-upload your ID document.');
     }
 
     this.logger.debug(
@@ -56,41 +63,41 @@ export class FaceMatchingService {
     );
 
     // Perform face matching
-    // COMMENTED OUT FOR TESTING: Python API call for face matching verification
-    // TODO: Uncomment when ready to enable Python server verification
     let matchResult;
-    // try {
-    //   matchResult = await this.pythonApi.matchFaces(
-    //     idPhotoBuffer,
-    //     selfieFile.buffer,
-    //     document.storage_url,
-    //     selfieFile.originalname,
-    //   );
+    try {
+      const matchStartTime = Date.now();
+      this.logger.log(`[FACE_MATCH_STEP_3] Sending request to Python face matching API...`);
       
-    //   this.logger.debug(
-    //     `Face matching result: similarity=${matchResult.similarity}, is_match=${matchResult.is_match}`,
-    //   );
+      matchResult = await this.pythonApi.matchFaces(
+        idPhotoBuffer,
+        selfieFile.buffer,
+        document.storage_url,
+        selfieFile.originalname,
+      );
       
-    //   // Check if faces were detected
-    //   if (matchResult.similarity === 0 && !matchResult.is_match) {
-    //     this.logger.warn('Face matching returned zero similarity - faces may not have been detected');
-    //   }
-    // } catch (error: any) {
-    //   this.logger.error('Face matching API call failed', {
-    //     error: error?.message,
-    //     stack: error?.stack,
-    //   });
-    //   throw new Error(
-    //     `Face matching failed: ${error?.message || 'Unknown error'}. Please ensure both images contain clear faces.`,
-    //   );
-    // }
-
-    // AUTO-APPROVE FOR TESTING: Set match result to approved values
-    matchResult = {
-      similarity: 0.95,
-      is_match: true,
-    };
-    this.logger.debug('Auto-approved face matching for testing - Python API call bypassed');
+      const matchTime = Date.now() - matchStartTime;
+      this.logger.log(`[FACE_MATCH_STEP_3_DONE] Face matching API returned in ${matchTime}ms`);
+      this.logger.debug(
+        `Face matching result: similarity=${matchResult.similarity}, is_match=${matchResult.is_match}`,
+      );
+      
+      // Check if faces were detected
+      if (matchResult.similarity === 0 && !matchResult.is_match) {
+        this.logger.warn('Face matching returned zero similarity - faces may not have been detected');
+      }
+      
+      const totalTime = Date.now() - overallStartTime;
+      this.logger.log(`[FACE_MATCH_COMPLETE] Face matching completed successfully in ${totalTime}ms total`);
+    } catch (error: any) {
+      const errorTime = Date.now() - overallStartTime;
+      this.logger.error(`[FACE_MATCH_API_ERROR] Face matching API call failed after ${errorTime}ms`, {
+        error: error?.message,
+        stack: error?.stack,
+      });
+      throw new Error(
+        `FACE_MATCH_ERROR: ${error?.message || 'Face matching service error'}. This could be caused by: (1) Face not detected in one or both images, (2) Image quality too low, (3) Poor lighting, (4) Face partially obscured. Please try with clearer, well-lit images where your face is fully visible.`,
+      );
+    }
 
     // Save selfie
     const selfiePath = await this.storage.saveFile(selfieFile, 'kyc/selfies');
@@ -155,7 +162,7 @@ export class FaceMatchingService {
       
       if (!buffer || buffer.length === 0) {
         this.logger.error(`File exists but is empty: ${fullPath}`);
-        throw new Error(`Document file is empty: ${storagePath}`);
+        throw new Error(`FILE_EMPTY_ERROR: Document file exists but is empty: ${storagePath}. The file may be corrupted. Please re-upload your document.`);
       }
       
       this.logger.debug(`Successfully read document, size: ${buffer.length} bytes`);
@@ -163,10 +170,10 @@ export class FaceMatchingService {
     } catch (error: any) {
       if (error.code === 'ENOENT') {
         this.logger.error(`Document file not found: ${fullPath}`);
-        throw new Error(`Document file not found: ${storagePath}`);
+        throw new Error(`FILE_NOT_FOUND_ERROR: Document file not found at: ${storagePath}. The file may have been deleted. Please re-upload your document.`);
       }
       this.logger.error(`Failed to read document file: ${fullPath}`, error);
-      throw new Error(`Failed to read document: ${error.message}`);
+      throw new Error(`FILE_READ_ERROR: Failed to read document file (${error.code || error.message}). Please re-upload your document or contact support if the problem persists.`);
     }
   }
 }

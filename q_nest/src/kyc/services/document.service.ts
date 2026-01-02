@@ -19,10 +19,17 @@ export class DocumentService {
     file: Express.Multer.File,
     documentType?: string,
   ): Promise<string> {
+    const startTime = Date.now();
+    this.logger.log(`[DOCUMENT_SERVICE_UPLOAD_START] Starting document service upload for KYC ${kycId}`);
+    
     // Save file to storage
+    const saveStartTime = Date.now();
     const filePath = await this.storage.saveFile(file, 'kyc/documents');
+    const saveTime = Date.now() - saveStartTime;
+    this.logger.log(`[DOCUMENT_SERVICE_UPLOAD_STEP_1] File saved to storage in ${saveTime}ms: ${filePath}`);
 
     // Create document record
+    const dbStartTime = Date.now();
     const document = await this.prisma.kyc_documents.create({
       data: {
         kyc_id: kycId,
@@ -30,20 +37,43 @@ export class DocumentService {
         document_type: documentType || null,
       },
     });
+    const dbTime = Date.now() - dbStartTime;
+    this.logger.log(`[DOCUMENT_SERVICE_UPLOAD_STEP_2] Database record created in ${dbTime}ms`);
 
-    // Perform OCR asynchronously (could be done in background job)
+    // Start OCR and authenticity checks asynchronously
+    const ocrStartTime = Date.now();
     this.performOCR(document.document_id, filePath, file.buffer, file.originalname).catch(
       (error) => {
-        this.logger.error('OCR processing failed', error);
+        const ocrTime = Date.now() - ocrStartTime;
+        this.logger.error(`[DOCUMENT_SERVICE_OCR_FAILED] OCR processing failed for document ${document.document_id} after ${ocrTime}ms`, {
+          filePath,
+          errorMessage: error?.message, 
+          errorCode: error?.code,
+        });
       },
-    );
+    ).then(() => {
+      const ocrTime = Date.now() - ocrStartTime;
+      this.logger.log(`[DOCUMENT_SERVICE_OCR_COMPLETE] OCR processing completed in ${ocrTime}ms for document ${document.document_id}`);
+    });
 
     // Check document authenticity
+    const authStartTime = Date.now();
     this.checkAuthenticity(document.document_id, filePath, file.buffer, file.originalname).catch(
       (error) => {
-        this.logger.error('Authenticity check failed', error);
+        const authTime = Date.now() - authStartTime;
+        this.logger.error(`[DOCUMENT_SERVICE_AUTH_FAILED] Authenticity check failed for document ${document.document_id} after ${authTime}ms`, {
+          filePath,
+          errorMessage: error?.message,
+          errorCode: error?.code,
+        });
       },
-    );
+    ).then(() => {
+      const authTime = Date.now() - authStartTime;
+      this.logger.log(`[DOCUMENT_SERVICE_AUTH_COMPLETE] Authenticity check completed in ${authTime}ms for document ${document.document_id}`);
+    });
+
+    const totalTime = Date.now() - startTime;
+    this.logger.log(`[DOCUMENT_SERVICE_UPLOAD_COMPLETE] Document upload completed in ${totalTime}ms (save: ${saveTime}ms, db: ${dbTime}ms). OCR and authenticity running in background.`);
 
     return document.document_id;
   }
@@ -66,8 +96,9 @@ export class DocumentService {
           mrz_text: ocrResult.mrz_text || null,
         },
       });
+      this.logger.debug(`OCR completed successfully for document ${documentId}`);
     } catch (error) {
-      this.logger.error(`OCR failed for document ${documentId}`, error);
+      this.logger.warn(`OCR processing skipped for document ${documentId}: ${error?.message || 'Unknown error'}. Document still usable for face matching.`);
     }
   }
 
@@ -101,8 +132,9 @@ export class DocumentService {
           },
         });
       }
+      this.logger.debug(`Authenticity check completed for document ${documentId}`);
     } catch (error) {
-      this.logger.error(`Authenticity check failed for document ${documentId}`, error);
+      this.logger.warn(`Authenticity check skipped for document ${documentId}: ${error?.message || 'Unknown error'}. Document still usable for face matching.`);
     }
   }
 

@@ -8,6 +8,7 @@ pandas-ta>=0.3.14b0
 opencv-python>=4.8.0
 requests>=2.31.0
 fredapi>=0.5.1
+psutil>=5.9.0  # For memory monitoring and management
 
 # News API Endpoint Dependencies (LunarCrush + FinBERT Sentiment Analysis)
 # - requests: For LunarCrush API calls (already listed above)

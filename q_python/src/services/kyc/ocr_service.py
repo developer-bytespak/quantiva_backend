@@ -61,10 +61,15 @@ def extract_text(image: Image.Image, document_type: Optional[str] = None) -> Dic
     Returns:
         Dictionary with extracted data matching OCRResponse interface
     """
+    print(f"[PYTHON_OCR_SERVICE] Starting OCR text extraction...")
+    print(f"[PYTHON_OCR_SERVICE] Document type: {document_type or 'auto-detect'}")
+    print(f"[PYTHON_OCR_SERVICE] Image size: {image.size}")
+    
     try:
         # Validate image
         is_valid, error_msg = validate_image(image)
         if not is_valid:
+            print(f"[PYTHON_OCR_SERVICE_ERROR] Image validation failed: {error_msg}")
             logger.warning(f"Image validation failed: {error_msg}")
             return {
                 "name": None,
@@ -77,7 +82,10 @@ def extract_text(image: Image.Image, document_type: Optional[str] = None) -> Dic
                 "raw_text": "",
             }
         
+        print(f"[PYTHON_OCR_SERVICE] Image validation passed")
+        
         # Preprocess image
+        print(f"[PYTHON_OCR_SERVICE] Preprocessing image for OCR...")
         img_array = preprocess_image(image, enhance=True)
         
         # Ensure image is in uint8 format for EasyOCR

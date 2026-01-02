@@ -19,7 +19,7 @@ export class PythonApiService {
     this.baseUrl = this.configService.get<string>('PYTHON_API_URL', 'http://localhost:8000');
     this.axiosInstance = axios.create({
       baseURL: this.baseUrl,
-      timeout: 120000, // 2 minutes default (increased for sentiment/news operations)
+      timeout: 150000, // 2.5 minutes - 120s for face matching + 30s buffer for I/O
       headers: {
         'Content-Type': 'application/json',
       },
@@ -108,10 +108,14 @@ export class PythonApiService {
     selfieFilename: string,
   ): Promise<FaceMatchResponse> {
     try {
+      const startTime = Date.now();
+      this.logger.log(`[FACE_MATCH_START] Initializing face matching: ID photo=${idPhotoFilename} (${idPhotoBuffer.length} bytes), Selfie=${selfieFilename} (${selfieBuffer.length} bytes)`);
+      
       const formData = new FormData();
       formData.append('id_photo', idPhotoBuffer, idPhotoFilename);
       formData.append('selfie', selfieBuffer, selfieFilename);
 
+      this.logger.log(`[FACE_MATCH_SENDING] Sending request to Python API at ${this.baseUrl}/api/v1/kyc/face-match`);
       const response = await this.axiosInstance.post<FaceMatchResponse>(
         '/api/v1/kyc/face-match',
         formData,
@@ -120,9 +124,13 @@ export class PythonApiService {
         },
       );
 
+      const elapsedTime = Date.now() - startTime;
+      this.logger.log(`[FACE_MATCH_SUCCESS] Face matching completed in ${elapsedTime}ms. Result: similarity=${response.data.similarity}, is_match=${response.data.is_match}, confidence=${response.data.confidence}`);
+      
       return response.data;
     } catch (error: any) {
-      this.logger.error('Face matching failed', {
+      const elapsedTime = Date.now() - (error.startTime || Date.now());
+      this.logger.error(`[FACE_MATCH_ERROR] Face matching failed after ${elapsedTime}ms`, {
         message: error?.message,
         code: error?.code,
         response: error?.response?.data,
