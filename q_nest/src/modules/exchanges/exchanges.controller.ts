@@ -175,23 +175,91 @@ export class ExchangesController {
     @Body() createConnectionDto: CreateConnectionDto,
     @CurrentUser() user: TokenPayload,
   ) {
-    const connection = await this.exchangesService.createConnection({
-      user_id: user.sub,
-      exchange_id: createConnectionDto.exchange_id,
-      auth_type: 'api_key',
-      api_key: createConnectionDto.api_key,
-      api_secret: createConnectionDto.api_secret,
-      enable_trading: createConnectionDto.enable_trading,
-    });
+    try {
+      // First, get the exchange to get its name for verification
+      const exchange = await this.exchangesService.findOne(createConnectionDto.exchange_id);
+      if (!exchange) {
+        throw new HttpException(
+          {
+            code: 'EXCHANGE_NOT_FOUND',
+            message: 'Exchange not found',
+          },
+          HttpStatus.NOT_FOUND,
+        );
+      }
 
-    return {
-      success: true,
-      data: {
-        connection_id: connection.connection_id,
-        status: connection.status,
-      },
-      message: 'Connection created successfully. Please verify your API keys.',
-    };
+      // Verify credentials with the exchange before creating connection
+      let verification;
+      const exchangeName = exchange.name.toLowerCase();
+      
+      if (exchangeName.includes('binance')) {
+        verification = await this.binanceService.verifyApiKey(
+          createConnectionDto.api_key,
+          createConnectionDto.api_secret,
+        );
+      } else if (exchangeName.includes('bybit')) {
+        verification = await this.bybitService.verifyApiKey(
+          createConnectionDto.api_key,
+          createConnectionDto.api_secret,
+        );
+      } else {
+        throw new HttpException(
+          {
+            code: 'UNSUPPORTED_EXCHANGE',
+            message: 'Exchange verification not supported',
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+
+      if (!verification.valid) {
+        throw new HttpException(
+          {
+            code: 'INVALID_CREDENTIALS',
+            message: verification.error || 'Invalid API credentials',
+          },
+          HttpStatus.UNAUTHORIZED,
+        );
+      }
+
+      // If verification passes, create the connection
+      const connection = await this.exchangesService.createConnection({
+        user_id: user.sub,
+        exchange_id: createConnectionDto.exchange_id,
+        auth_type: 'api_key',
+        api_key: createConnectionDto.api_key,
+        api_secret: createConnectionDto.api_secret,
+        enable_trading: createConnectionDto.enable_trading,
+      });
+
+      return {
+        success: true,
+        data: {
+          connection_id: connection.connection_id,
+          status: connection.status,
+        },
+        message: 'Connection created successfully. Please verify your API keys.',
+      };
+    } catch (error: any) {
+      // Re-throw HTTP exceptions
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      // Handle other errors
+      const message = error?.message || 'Failed to create connection';
+      const statusCode = message.includes('Invalid') || message.includes('Unauthorized')
+        ? HttpStatus.UNAUTHORIZED
+        : HttpStatus.BAD_REQUEST;
+
+      throw new HttpException(
+        {
+          code: 'CONNECTION_CREATION_FAILED',
+          message,
+        },
+        statusCode,
+      );
+    }
   }
 
   @Put(':id')
