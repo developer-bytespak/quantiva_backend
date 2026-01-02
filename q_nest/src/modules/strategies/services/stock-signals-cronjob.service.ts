@@ -247,11 +247,13 @@ export class StockSignalsCronjobService {
       const assetSymbol = asset.symbol || assetId;
       const pythonSignal = await this.pythonApi.generateSignal(strategyId, assetId, {
         strategy_data: strategyData,
-        market_data: marketData,
+        market_data: {
+          ...marketData,
+          asset_type: 'stock', // Critical: specify stock type
+        },
         connection_id: connectionId,
         exchange: exchange,
         asset_symbol: assetSymbol,
-        asset_type: 'stock', // Critical: specify stock type
         portfolio_value: 10000, // Default portfolio value for system signals
       });
 

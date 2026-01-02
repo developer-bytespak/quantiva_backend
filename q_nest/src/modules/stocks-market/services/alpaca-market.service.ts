@@ -9,6 +9,10 @@ export interface AlpacaQuote {
   changePercent24h: number;
   volume24h: number;
   timestamp: Date;
+  dayHigh?: number;
+  dayLow?: number;
+  dayOpen?: number;
+  prevClose?: number;
 }
 
 export interface AlpacaBar {
@@ -342,6 +346,10 @@ export class AlpacaMarketService {
       changePercent24h,
       volume24h,
       timestamp: new Date(snapshot.latestTrade?.t || new Date()),
+      dayHigh: snapshot.dailyBar?.h || 0,
+      dayLow: snapshot.dailyBar?.l || 0,
+      dayOpen: snapshot.dailyBar?.o || 0,
+      prevClose,
     };
   }
 

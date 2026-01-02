@@ -303,12 +303,14 @@ model assets {
 }
 
 model market_rankings {
-  rank_timestamp DateTime @db.Timestamp(6)
-  asset_id       String   @db.Uuid
-  rank           Int
-  market_cap     Decimal? @db.Decimal(30, 2)
-  price_usd      Decimal? @db.Decimal(20, 8)
-  volume_24h     Decimal? @db.Decimal(30, 2)
+  rank_timestamp     DateTime @db.Timestamp(6)
+  asset_id           String   @db.Uuid
+  rank               Int
+  market_cap         Decimal? @db.Decimal(30, 2)
+  price_usd          Decimal? @db.Decimal(20, 8)
+  volume_24h         Decimal? @db.Decimal(30, 2)
+  change_24h         Decimal? @db.Decimal(20, 8)
+  change_percent_24h Decimal? @db.Decimal(10, 4)
 
   asset assets @relation(fields: [asset_id], references: [asset_id])
 
