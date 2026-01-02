@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { StocksMarketService } from '../stocks-market.service';
+import { MarketStocksDbService } from './market-stocks-db.service';
 
 @Injectable()
 export class MarketSyncCronService implements OnModuleInit {
@@ -10,7 +11,10 @@ export class MarketSyncCronService implements OnModuleInit {
   private lastSyncStatus: 'success' | 'failed' | 'idle' = 'idle';
   private syncCount = 0;
 
-  constructor(private stocksMarketService: StocksMarketService) {}
+  constructor(
+    private stocksMarketService: StocksMarketService,
+    private dbService: MarketStocksDbService,
+  ) {}
 
   /**
    * Run initial sync when module initializes
@@ -35,6 +39,30 @@ export class MarketSyncCronService implements OnModuleInit {
   })
   async handleCron() {
     await this.syncMarketData();
+  }
+
+  /**
+   * Cron job: Clean up old market rankings data daily at 3 AM UTC
+   * Keeps only the last 7 days of data to save storage
+   */
+  @Cron('0 3 * * *', {
+    name: 'market-rankings-cleanup',
+    timeZone: 'UTC',
+  })
+  async handleCleanup() {
+    try {
+      this.logger.log('===== Starting market rankings cleanup =====');
+      const deletedCount = await this.dbService.cleanupOldRankings(7);
+      this.logger.log(
+        `✓ Cleanup completed - removed ${deletedCount} old records`,
+      );
+      this.logger.log('===== Market rankings cleanup completed =====');
+    } catch (error: any) {
+      this.logger.error('Market rankings cleanup failed', {
+        error: error?.message,
+        stack: error?.stack,
+      });
+    }
   }
 
   /**
