@@ -256,13 +256,14 @@ export class NewsCronjobService {
   }
 
   /**
-   * OLD CRONJOB - Keep for legacy asset sentiment updates
-   * Runs every 10 minutes to fetch and aggregate sentiment for assets
+   * OLD CRONJOB - Keep for legacy asset sentiment updates (CRYPTO ONLY)
+   * Runs every 10 minutes to fetch and aggregate sentiment for CRYPTO assets
+   * Stocks are handled by aggregateStockNews cronjob separately
    * Optimized: Parallel processing (5 at a time) + Skip recently updated assets
    */
   @Cron('*/10 * * * *') // Every 10 minutes
   async aggregateNewsSentiment(): Promise<void> {
-    this.logger.log('Starting news sentiment aggregation cronjob (optimized)');
+    this.logger.log('Starting news sentiment aggregation cronjob (CRYPTO ONLY)');
     const startTime = Date.now();
     let processedCount = 0;
     let skippedCount = 0;
@@ -272,9 +273,12 @@ export class NewsCronjobService {
       // Calculate cutoff time (30 minutes ago)
       const cutoffTime = new Date(Date.now() - this.UPDATE_INTERVAL_MINUTES * 60 * 1000);
 
-      // Get all active assets with their latest trending_assets record
+      // Get CRYPTO assets only (stocks handled by aggregateStockNews)
       const assets = await this.prisma.assets.findMany({
-        where: { is_active: true },
+        where: { 
+          is_active: true,
+          asset_type: 'crypto', // Only crypto assets
+        },
         include: {
           trending_assets: {
             orderBy: { poll_timestamp: 'desc' },
@@ -566,6 +570,116 @@ export class NewsCronjobService {
     }
     
     return null;
+  }
+
+  // ============== STOCK NEWS CRONJOB ==============
+
+  /**
+   * Stock News Aggregation Cronjob
+   * Runs every 15 minutes to fetch and store stock news with sentiment
+   * Similar to crypto news aggregation but for stocks
+   */
+  @Cron('*/15 * * * *') // Every 15 minutes
+  async aggregateStockNews(): Promise<void> {
+    this.logger.log('📈 Starting stock news aggregation');
+    const startTime = Date.now();
+
+    try {
+      // Popular stocks to fetch news for
+      const stockSymbols = [
+        'AAPL', 'TSLA', 'GOOGL', 'AMZN', 'MSFT',
+        'NVDA', 'META', 'AMD', 'NFLX', 'DIS'
+      ];
+
+      this.logger.log(`📊 Fetching news for ${stockSymbols.length} stocks: ${stockSymbols.join(', ')}`);
+
+      // Process stocks in small batches to avoid timeouts
+      const STOCK_BATCH_SIZE = 2;
+      let processedCount = 0;
+      let errorCount = 0;
+
+      for (let i = 0; i < stockSymbols.length; i += STOCK_BATCH_SIZE) {
+        const batch = stockSymbols.slice(i, i + STOCK_BATCH_SIZE);
+        const batchNumber = Math.floor(i / STOCK_BATCH_SIZE) + 1;
+        const totalBatches = Math.ceil(stockSymbols.length / STOCK_BATCH_SIZE);
+
+        this.logger.log(`📦 Stock batch ${batchNumber}/${totalBatches}: ${batch.join(', ')}`);
+
+        // Process each stock in the batch sequentially to avoid overloading
+        for (const symbol of batch) {
+          try {
+            await this.newsService.fetchAndStoreStockNewsFromPython(symbol, 10);
+            processedCount++;
+            this.logger.log(`  ✅ ${symbol} news fetched and stored`);
+          } catch (error: any) {
+            errorCount++;
+            this.logger.error(`  ❌ ${symbol} failed: ${error.message}`);
+          }
+        }
+
+        // Wait between batches
+        if (i + STOCK_BATCH_SIZE < stockSymbols.length) {
+          await this.sleep(3000); // 3 seconds between batches
+        }
+      }
+
+      const duration = Math.round((Date.now() - startTime) / 1000);
+      this.logger.log(
+        `✨ Stock news aggregation completed: ${processedCount} processed, ${errorCount} errors, ${duration}s elapsed`,
+      );
+    } catch (error: any) {
+      this.logger.error(`❌ Fatal error in stock news aggregation: ${error.message}`);
+    }
+  }
+
+  /**
+   * Manually trigger stock news aggregation
+   * Default is just 2 stocks to avoid timeouts during testing
+   */
+  async triggerStockNewsAggregation(symbols?: string[]): Promise<{
+    message: string;
+    processed: number;
+    errors: number;
+  }> {
+    this.logger.log('🔧 Manual stock news aggregation triggered');
+    const startTime = Date.now();
+    let processedCount = 0;
+    let errorCount = 0;
+
+    // Default to just 2 stocks to avoid overwhelming the Python server
+    const stockSymbols = symbols || ['AAPL', 'TSLA'];
+
+    try {
+      // Process sequentially with delay to avoid overwhelming Python server
+      for (const symbol of stockSymbols) {
+        try {
+          await this.newsService.fetchAndStoreStockNewsFromPython(symbol, 10);
+          processedCount++;
+          this.logger.log(`✅ ${symbol} completed`);
+          
+          // Wait 5 seconds between stocks to let FinBERT recover
+          if (stockSymbols.indexOf(symbol) < stockSymbols.length - 1) {
+            this.logger.debug('⏳ Waiting 5s before next stock...');
+            await this.sleep(5000);
+          }
+        } catch (error: any) {
+          errorCount++;
+          this.logger.error(`❌ ${symbol} failed: ${error.message}`);
+        }
+      }
+
+      const duration = Math.round((Date.now() - startTime) / 1000);
+      this.logger.log(`Manual aggregation completed in ${duration}s`);
+
+      return {
+        message: `Stock news aggregation completed in ${duration}s`,
+        processed: processedCount,
+        errors: errorCount,
+      };
+    } catch (error: any) {
+      this.logger.error(`Fatal error: ${error.message}`);
+      throw error;
+    }
   }
 }
 

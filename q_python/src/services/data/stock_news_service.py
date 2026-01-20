@@ -176,4 +176,92 @@ class StockNewsService:
             List of news dictionaries
         """
         return self.fetch_news(symbol, limit=limit, items='news')
+    
+    def fetch_general_news(self, limit: int = 50, tickers: List[str] = None) -> List[Dict[str, Any]]:
+        """
+        Fetch general stock market news for popular/trending stocks.
+        Fetches news for multiple major stocks to get a broader market view.
+        
+        Args:
+            limit: Maximum number of news items to return
+            tickers: Optional list of tickers to fetch (defaults to top 5)
+        
+        Returns:
+            List of news dictionaries with symbol included
+        """
+        if not self.api_key:
+            self.logger.error("STOCK_NEWS_API_KEY not configured")
+            return []
+        
+        # Use provided tickers or default to top 5
+        popular_tickers = tickers or ["AAPL", "TSLA", "GOOGL", "AMZN", "MSFT"]
+        
+        try:
+            # StockNewsAPI allows multiple tickers comma-separated
+            tickers_str = ",".join(popular_tickers)
+            
+            url = self.BASE_URL
+            params = {
+                'tickers': tickers_str,
+                'items': str(limit),
+                'token': self.api_key
+            }
+            
+            self.logger.info(f"Fetching general stock news for {len(popular_tickers)} tickers...")
+            response = requests.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Parse response
+            news_items = []
+            
+            if isinstance(data, dict):
+                articles = data.get('data', data.get('news', data.get('results', data.get('articles', []))))
+                if not articles and any(key in data for key in ['title', 'headline', 'text']):
+                    articles = [data]
+            elif isinstance(data, list):
+                articles = data
+            else:
+                self.logger.warning(f"Unexpected response format: {type(data)}")
+                articles = []
+            
+            for article in articles[:limit]:
+                try:
+                    title = article.get('title', article.get('headline', ''))
+                    text = article.get('text', article.get('description', article.get('summary', '')))
+                    source = article.get('source', article.get('source_name', 'unknown'))
+                    url = article.get('url', article.get('link', ''))
+                    
+                    # Extract tickers from the article
+                    tickers = article.get('tickers', article.get('symbols', []))
+                    if isinstance(tickers, str):
+                        tickers = [tickers]
+                    symbol = tickers[0] if tickers else 'GENERAL'
+                    
+                    date_str = article.get('date', article.get('published_at', article.get('published_date', '')))
+                    published_at = self._parse_date(date_str)
+                    
+                    if title or text:
+                        news_items.append({
+                            'title': title,
+                            'text': text or title,
+                            'source': source,
+                            'published_at': published_at,
+                            'url': url,
+                            'symbol': symbol
+                        })
+                except Exception as e:
+                    self.logger.warning(f"Error parsing article: {str(e)}")
+                    continue
+            
+            self.logger.info(f"Fetched {len(news_items)} general stock news items")
+            return news_items
+            
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Error fetching general stock news: {str(e)}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+            return []
 
