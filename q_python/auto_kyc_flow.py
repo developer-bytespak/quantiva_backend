@@ -35,15 +35,14 @@ CAMERA_INDEX = 0  # 0 = default camera, 1 = external camera, etc.
 CAPTURE_DELAY = 3  # seconds to wait before capturing
 PHOTO_QUALITY = 95  # JPEG quality (0-100)
 
-# Decision thresholds (same as NestJS backend)
-FACE_MATCH_THRESHOLD = 0.80  # 80%
+# Decision thresholds (optimized for practical matching)
+FACE_MATCH_THRESHOLD = 0.45  # 45% - lowered for better matching
 DOC_AUTHENTICITY_THRESHOLD = 0.75  # 75%
 
 # =====================================
 
 # Import KYC services
 try:
-    from src.services.kyc.ocr_service import extract_text
     from src.services.kyc.document_verification import check_authenticity
     from src.services.kyc.liveness_service import detect_liveness
     from src.services.kyc.face_matching import match_faces
@@ -191,38 +190,9 @@ class AutoKYCFlow:
                 pass
             return False
     
-    def extract_id_data(self):
-        """Extract text from ID document using OCR"""
-        self.print_step(1, "OCR TEXT EXTRACTION FROM ID CARD")
-        start_time = time.time()
-        
-        try:
-            print("🔍 Analyzing ID card text...")
-            result = extract_text(self.id_image)
-            processing_time = time.time() - start_time
-            
-            print(f"⏱️  Processing time: {processing_time:.2f} seconds")
-            print("\n📄 EXTRACTED INFORMATION:")
-            print("-" * 40)
-            print(f"   👤 Name: {result.get('name', 'Not found')}")
-            print(f"   🎂 Date of Birth: {result.get('dob', 'Not found')}")
-            print(f"   🆔 ID Number: {result.get('id_number', 'Not found')}")
-            print(f"   🌍 Nationality: {result.get('nationality', 'Not found')}")
-            print(f"   📅 Expiration Date: {result.get('expiration_date', 'Not found')}")
-            print(f"   📜 MRZ Text: {'Found' if result.get('mrz_text') else 'Not found'}")
-            print(f"   📊 Confidence Score: {result.get('confidence', 0.0):.3f} ({result.get('confidence', 0.0)*100:.1f}%)")
-            print(f"   📝 Raw Text Length: {len(result.get('raw_text', ''))} characters")
-            
-            self.results['ocr'] = result
-            return True
-            
-        except Exception as e:
-            print(f"❌ OCR extraction failed: {e}")
-            return False
-    
     def check_document_authenticity(self):
         """Verify document authenticity"""
-        self.print_step(2, "DOCUMENT AUTHENTICITY VERIFICATION")
+        self.print_step(1, "DOCUMENT AUTHENTICITY VERIFICATION")
         start_time = time.time()
         
         try:
@@ -259,7 +229,7 @@ class AutoKYCFlow:
     
     def detect_selfie_liveness(self):
         """Detect liveness in captured selfie"""
-        self.print_step(3, "SELFIE LIVENESS DETECTION")
+        self.print_step(2, "SELFIE LIVENESS DETECTION")
         start_time = time.time()
         
         try:
@@ -291,7 +261,7 @@ class AutoKYCFlow:
     
     def match_faces(self):
         """Match face between ID photo and selfie"""
-        self.print_step(4, "FACE MATCHING VERIFICATION")
+        self.print_step(3, "FACE MATCHING VERIFICATION")
         start_time = time.time()
         
         try:
@@ -354,7 +324,7 @@ class AutoKYCFlow:
     
     def make_final_decision(self):
         """Make final KYC decision based on all results"""
-        self.print_step(5, "FINAL KYC DECISION")
+        self.print_step(4, "FINAL KYC DECISION")
         
         # Get scores
         face_match_score = self.results.get('face_match', {}).get('similarity_score', 0.0)
@@ -422,7 +392,6 @@ class AutoKYCFlow:
         
         # Run all verification steps
         success = True
-        success &= self.extract_id_data()
         success &= self.check_document_authenticity()
         success &= self.detect_selfie_liveness()
         success &= self.match_faces()
