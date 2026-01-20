@@ -23,6 +23,7 @@ import { UpdateConnectionDto } from './dto/update-connection.dto';
 import { PlaceOrderDto } from './dto/place-order.dto';
 import { BinanceService } from './integrations/binance.service';
 import { BybitService } from './integrations/bybit.service';
+import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
 import { ExchangeType } from '@prisma/client';
 import { ForbiddenException } from '@nestjs/common';
@@ -49,6 +50,7 @@ export class ExchangesController {
     private readonly exchangesService: ExchangesService,
     private readonly binanceService: BinanceService,
     private readonly bybitService: BybitService,
+    private readonly alpacaService: AlpacaService,
     private readonly cacheService: CacheService,
   ) {}
 
@@ -199,6 +201,11 @@ export class ExchangesController {
         );
       } else if (exchangeName.includes('bybit')) {
         verification = await this.bybitService.verifyApiKey(
+          createConnectionDto.api_key,
+          createConnectionDto.api_secret,
+        );
+      } else if (exchangeName.includes('alpaca')) {
+        verification = await this.alpacaService.verifyApiKey(
           createConnectionDto.api_key,
           createConnectionDto.api_secret,
         );

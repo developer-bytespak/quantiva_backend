@@ -41,12 +41,52 @@ export interface CryptoNewsResponse {
   };
 }
 
+// Stock News Interfaces
+export interface StockNewsItem {
+  title: string;
+  description: string;
+  url: string;
+  source: string;
+  published_at: string | null;
+  sentiment: {
+    label: string;
+    score: number;
+    confidence: number;
+    layer_breakdown?: any;
+  };
+}
+
+export interface StockMarketMetrics {
+  total_news_count: number;
+  sentiment_summary: {
+    positive: number;
+    negative: number;
+    neutral: number;
+  };
+  avg_sentiment_score: number;
+}
+
+export interface StockNewsResponse {
+  symbol: string;
+  news_items: StockNewsItem[];
+  market_metrics: StockMarketMetrics;
+  timestamp: string;
+  metadata?: {
+    source: 'database' | 'python_api';
+    is_fresh: boolean;
+    last_updated_at: string;
+    freshness: string;
+    message?: string;
+    total_count?: number;
+  };
+}
+
 @Injectable()
 export class NewsService {
   private readonly logger = new Logger(NewsService.name);
   
-  // Simple in-memory cache (5 minutes TTL)
-  private cache: Map<string, { data: CryptoNewsResponse; timestamp: number }> = new Map();
+  // Simple in-memory cache (5 minutes TTL) - supports both crypto and stock news
+  private cache: Map<string, { data: CryptoNewsResponse | StockNewsResponse; timestamp: number }> = new Map();
   private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes in milliseconds
 
   constructor(
@@ -347,7 +387,7 @@ export class NewsService {
     const cached = this.cache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
       this.logger.debug(`Returning cached news for ${symbol}`);
-      return cached.data;
+      return cached.data as CryptoNewsResponse;
     }
 
     try {
@@ -391,7 +431,7 @@ export class NewsService {
       // Return cached data if available, even if expired
       if (cached) {
         this.logger.warn(`Returning expired cache for ${symbol} due to error`);
-        return cached.data;
+        return cached.data as CryptoNewsResponse;
       }
       
       // Don't throw in background jobs - return partial data
@@ -820,5 +860,784 @@ export class NewsService {
       recent_24h: recentNews,
       top_assets: topAssets,
     };
+  }
+
+  // ============== STOCK NEWS METHODS ==============
+
+  /**
+   * Get recent stock news from database (FAST - for user requests)
+   * Reads from trending_news table filtered by asset_type='stock'
+   */
+  async getRecentStockNewsFromDB(symbol: string, limit: number = 10): Promise<StockNewsResponse> {
+    try {
+      const symbolUpper = symbol.toUpperCase();
+
+      // Find stock asset
+      let asset = await this.prisma.assets.findFirst({
+        where: {
+          symbol: symbolUpper,
+          asset_type: 'stock',
+        },
+      });
+
+      if (!asset) {
+        this.logger.warn(`Stock asset ${symbolUpper} not found in database`);
+        return {
+          symbol: symbolUpper,
+          news_items: [],
+          market_metrics: {
+            total_news_count: 0,
+            sentiment_summary: { positive: 0, negative: 0, neutral: 0 },
+            avg_sentiment_score: 0,
+          },
+          timestamp: new Date().toISOString(),
+          metadata: {
+            source: 'database',
+            last_updated_at: null,
+            is_fresh: false,
+            freshness: 'no_data',
+            message: 'No data available. Please try again later.',
+          },
+        };
+      }
+
+      const assetId = asset.asset_id;
+      const now = new Date();
+      const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+      this.logger.debug(`Querying stock news for asset_id: ${assetId}, symbol: ${symbolUpper}`);
+
+      // Query trending_news for stock articles
+      let newsRecords = await this.prisma.trending_news.findMany({
+        where: {
+          asset_id: assetId,
+          poll_timestamp: {
+            gte: twentyFourHoursAgo,
+          },
+          OR: [
+            { AND: [{ heading: { not: null } }, { heading: { not: '' } }] },
+            { AND: [{ article_url: { not: null } }, { article_url: { not: '' } }] },
+          ],
+        },
+        orderBy: {
+          poll_timestamp: 'desc',
+        },
+        take: limit * 3,
+      });
+
+      // If no news in 24h, try 7 days
+      if (newsRecords.length === 0) {
+        this.logger.debug(`No stock news in 24h, trying 7 days for ${symbolUpper}`);
+        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        newsRecords = await this.prisma.trending_news.findMany({
+          where: {
+            asset_id: assetId,
+            poll_timestamp: {
+              gte: sevenDaysAgo,
+            },
+            OR: [
+              { AND: [{ heading: { not: null } }, { heading: { not: '' } }] },
+              { AND: [{ article_url: { not: null } }, { article_url: { not: '' } }] },
+            ],
+          },
+          orderBy: {
+            poll_timestamp: 'desc',
+          },
+          take: limit * 3,
+        });
+      }
+
+      // Filter and limit results
+      const filteredRecords = newsRecords
+        .filter((record) => {
+          const metadata = record.metadata as any;
+          return metadata?.note !== 'No text data available';
+        })
+        .slice(0, limit);
+
+      // Transform to response format
+      const news_items: StockNewsItem[] = filteredRecords.map((record) => {
+        const metadata = record.metadata as any;
+        const newsDetail = record.news_detail as any;
+
+        let description = '';
+        if (metadata?.description) {
+          description = metadata.description;
+        } else if (newsDetail?.description) {
+          description = newsDetail.description;
+        } else if (typeof record.news_detail === 'string') {
+          description = record.news_detail;
+        }
+
+        return {
+          title: record.heading || 'Stock News',
+          description: description,
+          url: record.article_url || '',
+          source: record.source || 'StockNewsAPI',
+          published_at: record.published_at?.toISOString() || record.poll_timestamp.toISOString(),
+          sentiment: {
+            label: record.sentiment_label || 'neutral',
+            score: Number(record.news_sentiment || 0),
+            confidence: metadata?.confidence || metadata?.sentiment?.confidence || 0.5,
+          },
+        };
+      });
+
+      // Calculate market metrics
+      const sentiment_summary = { positive: 0, negative: 0, neutral: 0 };
+      let totalScore = 0;
+
+      for (const item of news_items) {
+        const label = item.sentiment.label.toLowerCase();
+        if (label === 'positive') sentiment_summary.positive++;
+        else if (label === 'negative') sentiment_summary.negative++;
+        else sentiment_summary.neutral++;
+        totalScore += item.sentiment.score;
+      }
+
+      const market_metrics: StockMarketMetrics = {
+        total_news_count: news_items.length,
+        sentiment_summary,
+        avg_sentiment_score: news_items.length > 0 ? totalScore / news_items.length : 0,
+      };
+
+      // Calculate freshness
+      const latestNewsTime = filteredRecords[0]?.poll_timestamp;
+      const ageMinutes = latestNewsTime
+        ? (now.getTime() - new Date(latestNewsTime).getTime()) / 1000 / 60
+        : 999999;
+
+      return {
+        symbol: symbolUpper,
+        news_items,
+        market_metrics,
+        timestamp: now.toISOString(),
+        metadata: {
+          source: 'database',
+          last_updated_at: latestNewsTime?.toISOString() || null,
+          is_fresh: ageMinutes < 30,
+          freshness: ageMinutes < 30 ? 'fresh' : ageMinutes < 120 ? 'recent' : 'cached',
+          total_count: filteredRecords.length,
+        },
+      };
+    } catch (error: any) {
+      this.logger.error(`Error reading stock news from database for ${symbol}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch stock news from Python API and store in database (SLOW - for background jobs)
+   */
+  async fetchAndStoreStockNewsFromPython(symbol: string, limit: number = 20): Promise<StockNewsResponse> {
+    const cacheKey = `stock_${symbol}_${limit}`;
+
+    // Check cache first
+    const cached = this.cache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
+      this.logger.debug(`Returning cached stock news for ${symbol}`);
+      return cached.data as StockNewsResponse;
+    }
+
+    try {
+      // Call Python API endpoint for stock news
+      const response = await this.pythonApi.post<StockNewsResponse>(
+        '/api/v1/news/stocks',
+        {
+          symbol: symbol.toUpperCase(),
+          limit: limit,
+        },
+        { timeout: 300000 }, // 5 minute timeout
+      );
+
+      const data = response.data;
+
+      // Store news articles in database
+      try {
+        await this.storeStockNewsAndSentiment(symbol, data);
+        this.logger.log(`Stored ${data.news_items.length} stock news items for ${symbol}`);
+      } catch (storageError: any) {
+        this.logger.error(
+          `Error storing stock news for ${symbol}: ${storageError.message}`,
+        );
+      }
+
+      // Cache the response
+      this.cache.set(cacheKey, {
+        data,
+        timestamp: Date.now(),
+      });
+
+      this.cleanupCache();
+
+      this.logger.log(`Fetched ${data.news_items.length} stock news items from Python for ${symbol}`);
+      return data;
+    } catch (error: any) {
+      this.logger.error(`Error fetching stock news from Python for ${symbol}: ${error.message}`);
+
+      // Return cached data if available
+      if (cached) {
+        this.logger.warn(`Returning expired cache for stock ${symbol} due to error`);
+        return cached.data as StockNewsResponse;
+      }
+
+      // Return empty response
+      return {
+        symbol: symbol.toUpperCase(),
+        news_items: [],
+        market_metrics: {
+          total_news_count: 0,
+          sentiment_summary: { positive: 0, negative: 0, neutral: 0 },
+          avg_sentiment_score: 0,
+        },
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  /**
+   * Store stock news articles and sentiment data in database
+   */
+  private async storeStockNewsAndSentiment(
+    symbol: string,
+    data: StockNewsResponse,
+  ): Promise<void> {
+    // Get or create stock asset
+    let asset = await this.prisma.assets.findFirst({
+      where: {
+        symbol: symbol.toUpperCase(),
+        asset_type: 'stock',
+      },
+    });
+
+    if (!asset) {
+      this.logger.debug(`Creating new stock asset for symbol ${symbol}`);
+      asset = await this.prisma.assets.create({
+        data: {
+          symbol: symbol.toUpperCase(),
+          asset_type: 'stock',
+          is_active: true,
+          first_seen_at: new Date(),
+          last_seen_at: new Date(),
+        },
+      });
+    }
+
+    const assetId = asset.asset_id;
+    const currentTimestamp = new Date();
+
+    let storedCount = 0;
+    let skippedCount = 0;
+
+    for (const newsItem of data.news_items) {
+      // Check for duplicate
+      if (newsItem.url) {
+        const existingNews = await this.prisma.trending_news.findFirst({
+          where: {
+            asset_id: assetId,
+            article_url: newsItem.url,
+          },
+        });
+
+        if (existingNews) {
+          skippedCount++;
+          continue;
+        }
+      }
+
+      // Map source to enum
+      const sourceEnum = this.mapSourceToEnum(newsItem.source, 'stock');
+      const sentimentLabelEnum = this.mapSentimentToEnum(newsItem.sentiment.label);
+
+      // Parse published_at
+      let publishedAt: Date | null = null;
+      if (newsItem.published_at) {
+        try {
+          publishedAt = new Date(newsItem.published_at);
+          if (isNaN(publishedAt.getTime())) {
+            publishedAt = null;
+          }
+        } catch (e) {
+          publishedAt = null;
+        }
+      }
+
+      const pollTimestamp = publishedAt || currentTimestamp;
+      const uniqueTimestamp = new Date(pollTimestamp.getTime() + storedCount * 1000);
+
+      try {
+        await this.prisma.trending_news.create({
+          data: {
+            poll_timestamp: uniqueTimestamp,
+            asset_id: assetId,
+            news_sentiment: newsItem.sentiment.score,
+            news_score: newsItem.sentiment.score,
+            news_volume: 1,
+            heading: newsItem.title || null,
+            article_url: newsItem.url || null,
+            published_at: publishedAt,
+            sentiment_label: sentimentLabelEnum as any,
+            source: sourceEnum as any,
+            news_detail: {
+              description: newsItem.description,
+              source: newsItem.source,
+            },
+            metadata: {
+              sentiment: {
+                label: newsItem.sentiment.label,
+                score: newsItem.sentiment.score,
+                confidence: newsItem.sentiment.confidence,
+              },
+            },
+          } as any,
+        });
+
+        storedCount++;
+      } catch (error: any) {
+        this.logger.warn(`Error storing stock news article for ${symbol}: ${error.message}`);
+      }
+    }
+
+    this.logger.debug(
+      `Stored ${storedCount} stock news articles, skipped ${skippedCount} duplicates for ${symbol}`,
+    );
+  }
+
+  /**
+   * Fetch general stock news from Python API and store in database
+   * This fetches news for multiple popular stocks at once
+   */
+  async fetchAndStoreGeneralStockNewsFromPython(limit: number = 30): Promise<{
+    total_fetched: number;
+    total_stored: number;
+    symbols: string[];
+  }> {
+    try {
+      this.logger.log(`Fetching general stock news from Python API (limit=${limit})`);
+
+      // Call Python API endpoint for general stock news
+      const response = await this.pythonApi.post<{
+        total_count: number;
+        news_items: Array<{
+          symbol: string;
+          title: string;
+          description: string;
+          url: string;
+          source: string;
+          published_at: string | null;
+          sentiment: {
+            label: string;
+            score: number;
+            confidence: number;
+          };
+        }>;
+        timestamp: string;
+      }>(
+        '/api/v1/news/stocks/general',
+        { limit },
+        { timeout: 300000 }, // 5 minute timeout for sentiment analysis
+      );
+
+      const data = response.data;
+      const symbols = new Set<string>();
+      let storedCount = 0;
+
+      this.logger.log(`Received ${data.news_items.length} general stock news items from Python`);
+
+      // Store each news item
+      for (const newsItem of data.news_items) {
+        try {
+          const symbol = newsItem.symbol || 'GENERAL';
+          symbols.add(symbol);
+
+          // Get or create stock asset
+          let asset = await this.prisma.assets.findFirst({
+            where: {
+              symbol: symbol.toUpperCase(),
+              asset_type: 'stock',
+            },
+          });
+
+          if (!asset) {
+            asset = await this.prisma.assets.create({
+              data: {
+                symbol: symbol.toUpperCase(),
+                asset_type: 'stock',
+                is_active: true,
+                first_seen_at: new Date(),
+                last_seen_at: new Date(),
+              },
+            });
+            this.logger.debug(`Created new stock asset: ${symbol}`);
+          }
+
+          // Check for duplicate
+          if (newsItem.url) {
+            const existingNews = await this.prisma.trending_news.findFirst({
+              where: {
+                asset_id: asset.asset_id,
+                article_url: newsItem.url,
+              },
+            });
+
+            if (existingNews) {
+              continue; // Skip duplicate
+            }
+          }
+
+          // Map source and sentiment
+          const sourceEnum = this.mapSourceToEnum(newsItem.source, 'stock');
+          const sentimentLabelEnum = this.mapSentimentToEnum(newsItem.sentiment.label);
+
+          // Parse published_at
+          let publishedAt: Date | null = null;
+          if (newsItem.published_at) {
+            try {
+              publishedAt = new Date(newsItem.published_at);
+              if (isNaN(publishedAt.getTime())) publishedAt = null;
+            } catch (e) {
+              publishedAt = null;
+            }
+          }
+
+          const pollTimestamp = publishedAt || new Date();
+          const uniqueTimestamp = new Date(pollTimestamp.getTime() + storedCount * 1000);
+
+          await this.prisma.trending_news.create({
+            data: {
+              poll_timestamp: uniqueTimestamp,
+              asset_id: asset.asset_id,
+              news_sentiment: newsItem.sentiment.score,
+              news_score: newsItem.sentiment.score,
+              news_volume: 1,
+              heading: newsItem.title || null,
+              article_url: newsItem.url || null,
+              published_at: publishedAt,
+              sentiment_label: sentimentLabelEnum as any,
+              source: sourceEnum as any,
+              news_detail: {
+                description: newsItem.description,
+                source: newsItem.source,
+              },
+              metadata: {
+                sentiment: {
+                  label: newsItem.sentiment.label,
+                  score: newsItem.sentiment.score,
+                  confidence: newsItem.sentiment.confidence,
+                },
+              },
+            } as any,
+          });
+
+          storedCount++;
+        } catch (error: any) {
+          this.logger.warn(`Error storing news item: ${error.message}`);
+        }
+      }
+
+      this.logger.log(`Stored ${storedCount} general stock news items for ${symbols.size} symbols`);
+
+      return {
+        total_fetched: data.news_items.length,
+        total_stored: storedCount,
+        symbols: Array.from(symbols),
+      };
+    } catch (error: any) {
+      this.logger.error(`Error fetching general stock news: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch general stock news FAST (no sentiment analysis)
+   * Use this for initial data population
+   */
+  async fetchAndStoreGeneralStockNewsFast(limit: number = 20, tickers?: string[]): Promise<{
+    total_fetched: number;
+    total_stored: number;
+    symbols: string[];
+  }> {
+    const defaultTickers = ["AAPL", "TSLA", "GOOGL", "AMZN", "MSFT"];
+    const tickersToUse = tickers || defaultTickers;
+    
+    try {
+      this.logger.log(`Fetching stock news FAST for [${tickersToUse.join(', ')}] - limit=${limit}`);
+
+      // Call Python API endpoint for fast stock news (no sentiment)
+      const response = await this.pythonApi.post<{
+        total_count: number;
+        news_items: Array<{
+          symbol: string;
+          title: string;
+          description: string;
+          url: string;
+          source: string;
+          published_at: string | null;
+          sentiment: {
+            label: string;
+            score: number;
+            confidence: number;
+          };
+        }>;
+        timestamp: string;
+      }>(
+        '/api/v1/news/stocks/general/fast',
+        { limit, tickers: tickersToUse },
+        { timeout: 30000 }, // 30 second timeout
+      );
+
+      const data = response.data;
+      const symbols = new Set<string>();
+      let storedCount = 0;
+
+      this.logger.log(`Received ${data.news_items.length} stock news items (fast mode)`);
+
+      // Store each news item
+      for (const newsItem of data.news_items) {
+        try {
+          const symbol = newsItem.symbol || 'GENERAL';
+          symbols.add(symbol);
+
+          // Get or create stock asset
+          let asset = await this.prisma.assets.findFirst({
+            where: {
+              symbol: symbol.toUpperCase(),
+              asset_type: 'stock',
+            },
+          });
+
+          if (!asset) {
+            asset = await this.prisma.assets.create({
+              data: {
+                symbol: symbol.toUpperCase(),
+                asset_type: 'stock',
+                is_active: true,
+                first_seen_at: new Date(),
+                last_seen_at: new Date(),
+              },
+            });
+            this.logger.debug(`Created new stock asset: ${symbol}`);
+          }
+
+          // Check for duplicate by URL
+          if (newsItem.url) {
+            const existingNews = await this.prisma.trending_news.findFirst({
+              where: {
+                asset_id: asset.asset_id,
+                article_url: newsItem.url,
+              },
+            });
+
+            if (existingNews) {
+              continue; // Skip duplicate
+            }
+          }
+
+          // Parse published_at
+          let publishedAt: Date | null = null;
+          if (newsItem.published_at) {
+            try {
+              publishedAt = new Date(newsItem.published_at);
+              if (isNaN(publishedAt.getTime())) publishedAt = null;
+            } catch (e) {
+              publishedAt = null;
+            }
+          }
+
+          const pollTimestamp = publishedAt || new Date();
+          const uniqueTimestamp = new Date(pollTimestamp.getTime() + storedCount * 1000);
+
+          await this.prisma.trending_news.create({
+            data: {
+              poll_timestamp: uniqueTimestamp,
+              asset_id: asset.asset_id,
+              news_sentiment: 0, // Neutral - no sentiment analysis
+              news_score: 0,
+              news_volume: 1,
+              heading: newsItem.title || null,
+              article_url: newsItem.url || null,
+              published_at: publishedAt,
+              sentiment_label: 'neutral' as any,
+              source: 'StockNewsAPI' as any,
+              news_detail: {
+                description: newsItem.description,
+                source: newsItem.source,
+              },
+              metadata: {
+                fast_mode: true,
+                needs_sentiment: true,
+              },
+            } as any,
+          });
+
+          storedCount++;
+        } catch (error: any) {
+          this.logger.warn(`Error storing news item: ${error.message}`);
+        }
+      }
+
+      this.logger.log(`FAST: Stored ${storedCount} stock news items for ${symbols.size} symbols`);
+
+      return {
+        total_fetched: data.news_items.length,
+        total_stored: storedCount,
+        symbols: Array.from(symbols),
+      };
+    } catch (error: any) {
+      this.logger.error(`Error in fast stock news fetch: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all stock news from database
+   */
+  async getAllStockNewsFromDB(limit: number = 100) {
+    try {
+      // First, check how many stock assets exist
+      const stockAssetCount = await this.prisma.assets.count({
+        where: { asset_type: 'stock' },
+      });
+      this.logger.debug(`Total stock assets in database: ${stockAssetCount}`);
+
+      // Check total trending_news for stocks (without article filter)
+      const totalStockNews = await this.prisma.trending_news.count({
+        where: {
+          asset: {
+            asset_type: 'stock',
+          },
+        },
+      });
+      this.logger.debug(`Total stock news records (no filter): ${totalStockNews}`);
+
+      const newsRecords = await this.prisma.trending_news.findMany({
+        where: {
+          AND: [
+            { article_url: { not: null } },
+            { article_url: { not: '' } },
+            { heading: { not: null } },
+            { heading: { not: '' } },
+          ],
+          asset: {
+            asset_type: 'stock',
+          },
+        },
+        orderBy: {
+          poll_timestamp: 'desc',
+        },
+        take: limit * 3,
+        include: {
+          asset: {
+            select: {
+              symbol: true,
+              asset_type: true,
+            },
+          },
+        },
+      });
+
+      this.logger.log(`Found ${newsRecords.length} stock news records in database (with article filter)`);
+
+      // If no records with strict filter, try without article_url filter
+      if (newsRecords.length === 0 && totalStockNews > 0) {
+        this.logger.warn('No records with article_url, fetching without that filter');
+        const fallbackRecords = await this.prisma.trending_news.findMany({
+          where: {
+            heading: { not: null },
+            asset: {
+              asset_type: 'stock',
+            },
+          },
+          orderBy: {
+            poll_timestamp: 'desc',
+          },
+          take: limit,
+          include: {
+            asset: {
+              select: {
+                symbol: true,
+                asset_type: true,
+              },
+            },
+          },
+        });
+        this.logger.log(`Fallback query found ${fallbackRecords.length} records`);
+        
+        // Use fallback records if main query was empty
+        if (fallbackRecords.length > 0) {
+          const fallbackItems = fallbackRecords.map((record) => {
+            const metadata = record.metadata as any;
+            const newsDetail = record.news_detail as any;
+            
+            let description = '';
+            if (newsDetail?.description) description = newsDetail.description;
+            else if (metadata?.sentiment?.description) description = metadata.sentiment.description;
+            
+            // Confidence is stored in metadata.sentiment.confidence
+            const confidence = metadata?.sentiment?.confidence ?? metadata?.confidence ?? 0.5;
+
+            return {
+              symbol: record.asset?.symbol || 'Unknown',
+              title: record.heading || 'Stock News',
+              description: description,
+              url: record.article_url || '',
+              source: String(record.source || 'StockNewsAPI'),
+              published_at: record.published_at?.toISOString() || record.poll_timestamp.toISOString(),
+              sentiment: {
+                label: String(record.sentiment_label || 'neutral'),
+                score: Number(record.news_sentiment || 0),
+                confidence: Number(confidence),
+              },
+            };
+          });
+
+          return {
+            total_count: fallbackItems.length,
+            news_items: fallbackItems,
+            timestamp: new Date().toISOString(),
+          };
+        }
+      }
+
+      const news_items = newsRecords
+        .map((record) => {
+          const metadata = record.metadata as any;
+          const newsDetail = record.news_detail as any;
+
+          let description = '';
+          if (newsDetail?.description) {
+            description = newsDetail.description;
+          } else if (metadata?.description) {
+            description = metadata.description;
+          }
+
+          // Confidence is stored in metadata.sentiment.confidence
+          const confidence = metadata?.sentiment?.confidence ?? metadata?.confidence ?? 0.5;
+
+          return {
+            symbol: record.asset?.symbol || 'Unknown',
+            title: record.heading || 'Stock News',
+            description: description,
+            url: record.article_url || '',
+            source: String(record.source || 'StockNewsAPI'),
+            published_at: record.published_at?.toISOString() || record.poll_timestamp.toISOString(),
+            sentiment: {
+              label: String(record.sentiment_label || 'neutral'),
+              score: Number(record.news_sentiment || 0),
+              confidence: Number(confidence),
+            },
+          };
+        })
+        .slice(0, limit);
+
+      return {
+        total_count: news_items.length,
+        news_items: news_items,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error: any) {
+      this.logger.error(`Error reading all stock news from database: ${error.message}`);
+      throw error;
+    }
   }
 }
