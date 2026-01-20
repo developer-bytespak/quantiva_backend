@@ -1,171 +1,54 @@
 """
-Face Matching Service for comparing faces between ID photo and selfie.
-Uses DeepFace library for face embedding extraction and similarity calculation.
+Face Matching Service for KYC Verification
+==========================================
+Compares faces between ID photo and selfie using the unified FaceEngine.
 """
-from typing import Dict, Optional, Tuple
+
+import logging
+from typing import Dict, Optional, Tuple, Any
 from PIL import Image
 import numpy as np
-from logging import getLogger
 
-from src.utils.image_utils import preprocess_image, validate_image, calculate_image_quality
-from src.config import get_config
+from src.services.kyc.insightface_engine import get_face_engine, FaceEngine
 
-logger = getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-# DeepFace model configuration (from config)
-DEEPFACE_MODEL = get_config("deepface_model", "VGG-Face")
-DEEPFACE_BACKEND = get_config("deepface_backend", "opencv")
-FACE_MATCH_THRESHOLD = get_config("face_match_threshold", 0.6)
+# Lazy OpenCV loader
+_cv2 = None
 
-# Lazy DeepFace loader
-_deepface = None
 
-def _get_deepface():
-    global _deepface
-    if _deepface is None:
+def _get_cv2():
+    """Lazy load OpenCV"""
+    global _cv2
+    if _cv2 is None:
         try:
-            from deepface import DeepFace
-            _deepface = DeepFace
-        except Exception as e:
-            logger.error(f"DeepFace import failed: {e}")
-            _deepface = None
-    return _deepface
+            import cv2
+            _cv2 = cv2
+        except ImportError as e:
+            logger.error(f"OpenCV not available: {e}")
+    return _cv2
 
 
-def extract_face_embedding(image: Image.Image) -> Optional[np.ndarray]:
-    """
-    Extract face embedding from image using DeepFace.
+def pil_to_bgr(pil_image: Image.Image) -> np.ndarray:
+    """Convert PIL Image to BGR numpy array for OpenCV/face engine"""
+    cv2 = _get_cv2()
+    if cv2 is None:
+        raise RuntimeError("OpenCV not available")
     
-    Args:
-        image: PIL Image object
-        
-    Returns:
-        Face embedding as numpy array, or None if no face detected
-    """
-    try:
-        # Validate image
-        is_valid, error_msg = validate_image(image)
-        if not is_valid:
-            logger.warning(f"Image validation failed: {error_msg}")
-            return None
-        
-        # Convert PIL Image to numpy array in RGB format
-        # DeepFace expects RGB format, not BGR
-        img_rgb = image.convert('RGB')
-        img_array = np.array(img_rgb)
-        
-        # Ensure the array is in the correct format (uint8, shape: height, width, channels)
-        if img_array.dtype != np.uint8:
-            img_array = img_array.astype(np.uint8)
-        
-        # Ensure 3 channels (RGB)
-        if len(img_array.shape) == 2:
-            # Grayscale, convert to RGB
-            img_array = np.stack([img_array] * 3, axis=-1)
-        elif len(img_array.shape) == 3 and img_array.shape[2] == 4:
-            # RGBA, convert to RGB
-            img_array = img_array[:, :, :3]
-        
-        logger.debug(f"Image array shape: {img_array.shape}, dtype: {img_array.dtype}, min: {img_array.min()}, max: {img_array.max()}")
-        
-        # Try multiple detector backends in order of preference
-        detector_backends = [DEEPFACE_BACKEND, 'mtcnn', 'retinaface', 'opencv', 'ssd', 'dlib']
-
-        DeepFace = _get_deepface()
-        if DeepFace is None:
-            logger.warning("DeepFace not available; cannot extract embeddings")
-            return None
-
-        last_error = None
-        for backend in detector_backends:
-            try:
-                logger.debug(f"Trying face detection with backend: {backend}")
-
-                embedding = DeepFace.represent(
-                    img_path=img_array,
-                    model_name=DEEPFACE_MODEL,
-                    detector_backend=backend,
-                    enforce_detection=False,
-                )
-
-                if embedding and len(embedding) > 0:
-                    embedding_vector = np.array(embedding[0]['embedding'])
-                    logger.info(f"Face embedding extracted successfully using {backend} (dim: {len(embedding_vector)})")
-                    return embedding_vector
-                else:
-                    logger.debug(f"No face found with backend: {backend}")
-                    continue
-
-            except ValueError as e:
-                error_msg = str(e)
-                if "Face could not be detected" in error_msg or "could not detect a face" in error_msg.lower():
-                    logger.debug(f"No face detected with backend {backend}: {error_msg}")
-                    last_error = error_msg
-                    continue
-                else:
-                    logger.warning(f"ValueError with backend {backend}: {error_msg}")
-                    last_error = error_msg
-                    continue
-            except Exception as e:
-                logger.warning(f"Error with backend {backend}: {str(e)}")
-                last_error = str(e)
-                continue
-        
-        # If all backends failed, log the last error
-        logger.warning(f"No face detected in image after trying all backends. Last error: {last_error}")
-        return None
-            
-    except Exception as e:
-        logger.error(f"Face embedding extraction failed: {str(e)}", exc_info=True)
-        return None
-
-
-def calculate_similarity(embedding1: np.ndarray, embedding2: np.ndarray) -> float:
-    """
-    Calculate similarity between two face embeddings using cosine similarity.
-    DeepFace embeddings are typically normalized, so cosine similarity works well.
+    # Ensure RGB mode
+    if pil_image.mode != 'RGB':
+        pil_image = pil_image.convert('RGB')
     
-    Args:
-        embedding1: First face embedding
-        embedding2: Second face embedding
-        
-    Returns:
-        Similarity score (0.0-1.0), where 1.0 is identical
-    """
-    try:
-        # Ensure embeddings are numpy arrays
-        embedding1 = np.array(embedding1, dtype=np.float32)
-        embedding2 = np.array(embedding2, dtype=np.float32)
-        
-        # Normalize embeddings to unit vectors
-        norm1 = np.linalg.norm(embedding1)
-        norm2 = np.linalg.norm(embedding2)
-        
-        if norm1 == 0 or norm2 == 0:
-            logger.warning("One or both embeddings have zero norm")
-            return 0.0
-        
-        # Normalize to unit vectors
-        embedding1_norm = embedding1 / norm1
-        embedding2_norm = embedding2 / norm2
-        
-        # Calculate cosine similarity (dot product of normalized vectors)
-        similarity = np.dot(embedding1_norm, embedding2_norm)
-        
-        # Cosine similarity ranges from -1 to 1, but for face recognition it's typically 0-1
-        # Convert to 0-1 range: (similarity + 1) / 2, but for faces we usually just clamp to 0-1
-        similarity = max(0.0, min(1.0, similarity))
-        
-        logger.debug(f"Similarity calculated: {similarity:.4f} (embedding dims: {len(embedding1)}, {len(embedding2)})")
-        
-        return float(similarity)
-        
-    except Exception as e:
-        logger.error(f"Similarity calculation failed: {str(e)}", exc_info=True)
-        return 0.0
+    # Convert to numpy
+    rgb_array = np.array(pil_image, dtype=np.uint8)
+    
+    # Convert RGB to BGR
+    bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+    
+    return bgr_array
 
 
-def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict:
+def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
     """
     Match faces between ID photo and selfie.
     
@@ -174,69 +57,54 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict:
         selfie: PIL Image of selfie
         
     Returns:
-        Dictionary with similarity score, match result, and confidence
+        Dictionary with:
+        - similarity: float (0-1)
+        - is_match: bool
+        - decision: "accept" | "review" | "reject"
+        - confidence: float (0-1)
+        - threshold: float
+        - engine: str
+        - id_face_quality: dict
+        - selfie_face_quality: dict
+        - error: str (if failed)
     """
     try:
-        # Extract embeddings from both images
-        logger.info("Extracting face embedding from ID photo...")
-        id_embedding = extract_face_embedding(id_photo)
+        # Convert to BGR
+        id_bgr = pil_to_bgr(id_photo)
+        selfie_bgr = pil_to_bgr(selfie)
         
-        if id_embedding is None:
-            logger.warning("No face detected in ID photo")
+        # Get face engine and perform verification
+        engine = get_face_engine()
+        result = engine.verify_faces(id_bgr, selfie_bgr)
+        
+        if not result["success"]:
+            logger.warning(f"Face verification failed: {result.get('error')}")
             return {
                 "similarity": 0.0,
                 "is_match": False,
+                "decision": "reject",
                 "confidence": 0.0,
+                "error": result.get("error"),
+                "id_face_quality": result.get("face1", {}).get("quality") if result.get("face1") else None,
+                "selfie_face_quality": result.get("face2", {}).get("quality") if result.get("face2") else None,
             }
         
-        logger.info("Extracting face embedding from selfie...")
-        selfie_embedding = extract_face_embedding(selfie)
+        match_data = result["match"]
         
-        if selfie_embedding is None:
-            logger.warning("No face detected in selfie")
-            return {
-                "similarity": 0.0,
-                "is_match": False,
-                "confidence": 0.0,
-            }
-        
-        # Try using DeepFace's built-in verify function for better accuracy
-        # This uses distance metrics that are more appropriate for face recognition
-        try:
-            # Convert embeddings back to images for DeepFace.verify (it needs image paths or arrays)
-            # But we can use the embeddings directly by calculating distance
-            # DeepFace uses cosine distance: distance = 1 - cosine_similarity
-            similarity = calculate_similarity(id_embedding, selfie_embedding)
-            
-            # Alternative: Use Euclidean distance and convert to similarity
-            # For face recognition, smaller distance = higher similarity
-            euclidean_distance = np.linalg.norm(id_embedding - selfie_embedding)
-            # Normalize distance to similarity (0-1 range)
-            # Typical face embedding distances are 0-2, so we normalize
-            distance_similarity = max(0.0, 1.0 - (euclidean_distance / 2.0))
-            
-            # Use the higher of the two similarity scores
-            similarity = max(similarity, distance_similarity)
-            
-            logger.info(f"Face matching: cosine_sim={calculate_similarity(id_embedding, selfie_embedding):.3f}, distance_sim={distance_similarity:.3f}, final={similarity:.3f}")
-            
-        except Exception as e:
-            logger.warning(f"Advanced similarity calculation failed, using basic: {str(e)}")
-            similarity = calculate_similarity(id_embedding, selfie_embedding)
-        
-        # Determine if it's a match (threshold from config)
-        is_match = similarity >= FACE_MATCH_THRESHOLD
-        
-        # Calculate confidence based on similarity score
-        # Higher similarity = higher confidence
-        confidence = min(1.0, similarity * 1.2)  # Scale up slightly
-        
-        logger.info(f"Face matching completed: similarity={similarity:.3f}, is_match={is_match}, confidence={confidence:.3f}")
+        logger.info(
+            f"Face matching: similarity={match_data['similarity']:.3f}, "
+            f"decision={match_data['decision']}, engine={match_data['engine']}"
+        )
         
         return {
-            "similarity": float(similarity),
-            "is_match": bool(is_match),
-            "confidence": float(confidence),
+            "similarity": float(match_data["similarity"]),
+            "is_match": bool(match_data["is_match"]),
+            "decision": match_data["decision"],
+            "confidence": float(match_data["confidence"]),
+            "threshold": float(match_data["threshold"]),
+            "engine": match_data["engine"],
+            "id_face_quality": result.get("face1", {}).get("quality"),
+            "selfie_face_quality": result.get("face2", {}).get("quality"),
         }
         
     except Exception as e:
@@ -244,30 +112,98 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict:
         return {
             "similarity": 0.0,
             "is_match": False,
+            "decision": "reject",
             "confidence": 0.0,
+            "error": str(e)
         }
 
 
-def verify_face_quality(image: Image.Image) -> Tuple[bool, float]:
+def verify_face_quality(image: Image.Image) -> Tuple[bool, float, Optional[Dict]]:
     """
-    Verify face image quality for matching.
+    Verify face quality in an image.
     
     Args:
         image: PIL Image object
         
     Returns:
-        Tuple of (is_acceptable, quality_score)
+        Tuple of (is_acceptable, quality_score, quality_details)
     """
     try:
-        img_array = preprocess_image(image, enhance=False)
-        quality_score = calculate_image_quality(img_array)
+        # Convert to BGR
+        bgr = pil_to_bgr(image)
         
-        # Minimum quality threshold
-        min_quality = 0.5
-        is_acceptable = quality_score >= min_quality
+        # Get face engine and detect face
+        engine = get_face_engine()
+        face = engine.get_best_face(bgr)
         
-        return is_acceptable, quality_score
+        if face is None:
+            return False, 0.0, {"error": "No face detected"}
+        
+        if face.quality is None:
+            return False, 0.0, {"error": "Could not assess quality"}
+        
+        return (
+            face.quality.is_acceptable,
+            face.quality.overall_score,
+            face.quality.to_dict()
+        )
         
     except Exception as e:
         logger.error(f"Face quality verification failed: {str(e)}")
-        return False, 0.0
+        return False, 0.0, {"error": str(e)}
+
+
+def extract_face_embedding(image: Image.Image) -> Optional[np.ndarray]:
+    """
+    Extract face embedding from image.
+    
+    Args:
+        image: PIL Image object
+        
+    Returns:
+        Face embedding as numpy array, or None if no face detected
+    """
+    try:
+        # Convert to BGR
+        bgr = pil_to_bgr(image)
+        
+        # Get face engine and detect face
+        engine = get_face_engine()
+        face = engine.get_best_face(bgr)
+        
+        if face is None:
+            logger.warning("No face detected in image")
+            return None
+        
+        if face.embedding is None:
+            logger.warning("Face detected but no embedding extracted")
+            return None
+        
+        logger.info(f"Face embedding extracted (dim: {len(face.embedding)}, engine: {engine.engine_name})")
+        return face.embedding
+        
+    except Exception as e:
+        logger.error(f"Face embedding extraction failed: {str(e)}", exc_info=True)
+        return None
+
+
+def get_engine_status() -> Dict[str, Any]:
+    """
+    Get current face engine status.
+    
+    Returns:
+        Dictionary with engine name, initialization status, and thresholds
+    """
+    try:
+        engine = get_face_engine()
+        return {
+            "engine": engine.engine_name,
+            "initialized": engine._initialized,
+            "thresholds": engine.thresholds,
+        }
+    except Exception as e:
+        return {
+            "engine": "unknown",
+            "initialized": False,
+            "error": str(e)
+        }
