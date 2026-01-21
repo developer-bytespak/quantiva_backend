@@ -1,29 +1,43 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode, HttpStatus, UseGuards, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode, HttpStatus, UseGuards, NotFoundException, ForbiddenException, BadRequestException, Logger } from '@nestjs/common';
 import { StrategiesService } from './strategies.service';
 import { CreateStrategyDto, ValidateStrategyDto } from './dto/create-strategy.dto';
 import { PreBuiltStrategiesService } from './services/pre-built-strategies.service';
+import { StockTrendingService } from './services/stock-trending.service';
 import { StrategyPreviewService } from './services/strategy-preview.service';
 import { StrategyExecutionService } from './services/strategy-execution.service';
 import { PreBuiltSignalsCronjobService } from './services/pre-built-signals-cronjob.service';
+import { StockSignalsCronjobService } from './services/stock-signals-cronjob.service';
 import { NewsCronjobService } from '../news/news-cronjob.service';
+import { NewsService } from '../news/news.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AiInsightsService } from '../../ai-insights/ai-insights.service';
+import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
 
 @Controller('strategies')
 export class StrategiesController {
+  private readonly logger = new Logger(StrategiesController.name);
+  private readonly pythonApiUrl: string;
+
   constructor(
     private readonly strategiesService: StrategiesService,
     private readonly preBuiltStrategiesService: PreBuiltStrategiesService,
+    private readonly stockTrendingService: StockTrendingService,
     private readonly strategyPreviewService: StrategyPreviewService,
     private readonly strategyExecutionService: StrategyExecutionService,
     private readonly preBuiltSignalsCronjobService: PreBuiltSignalsCronjobService,
+    private readonly stockSignalsCronjobService: StockSignalsCronjobService,
     private readonly newsCronjobService: NewsCronjobService,
+    private readonly newsService: NewsService,
     private readonly prisma: PrismaService,
     private readonly aiInsightsService: AiInsightsService,
-  ) {}
+    private readonly configService: ConfigService,
+  ) {
+    this.pythonApiUrl = this.configService.get<string>('PYTHON_API_URL') || 'http://localhost:8000/api/v1';
+  }
 
   @Get()
   findAll(@Query('userId') userId?: string, @Query('type') type?: string) {
@@ -72,8 +86,19 @@ export class StrategiesController {
 
     const limitNum = limit ? parseInt(limit, 10) : 10;
     
-    // Get trending assets
-    const assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, true);
+    // Detect if this is a stock strategy by checking the name
+    const isStockStrategy = strategy.name?.toLowerCase().includes('(stocks)') || 
+                           strategy.name?.toLowerCase().includes('stock');
+    
+    // Get trending assets based on strategy type
+    let assets: any[];
+    if (isStockStrategy) {
+      this.logger.log(`Fetching trending stocks for strategy: ${strategy.name}`);
+      // Enable realtime enrichment from Alpaca API
+      assets = await this.stockTrendingService.getTopTrendingStocks(limitNum, true);
+    } else {
+      assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, true);
+    }
     
     if (assets.length === 0) {
       return { assets: [], insights: [] };
@@ -615,6 +640,185 @@ export class StrategiesController {
   @HttpCode(HttpStatus.OK)
   async triggerPreBuiltSignals(@Body() body?: { connectionId?: string }) {
     return this.preBuiltSignalsCronjobService.triggerManualGeneration(body || undefined);
+  }
+
+  /**
+   * Manual trigger for stock signals generation (for testing/debugging)
+   * This will immediately generate signals for all stock-specific strategies
+   */
+  @Post('trigger-stock-signals')
+  @HttpCode(HttpStatus.OK)
+  async triggerStockSignals(@Body() body?: { connectionId?: string }) {
+    return this.stockSignalsCronjobService.triggerManualGeneration(body || undefined);
+  }
+
+  /**
+   * Sync trending stocks from Finnhub into the database
+   * This fetches the latest trending stocks and stores them for signal generation
+   */
+  @Post('sync-trending-stocks')
+  @HttpCode(HttpStatus.OK)
+  async syncTrendingStocks() {
+    return this.stockTrendingService.syncTrendingStocksFromFinnhub();
+  }
+
+  /**
+   * Seed popular stocks directly (fallback if Finnhub is slow/unavailable)
+   * This adds AAPL, MSFT, GOOGL, TSLA, etc. to the database without API calls
+   */
+  @Post('seed-popular-stocks')
+  @HttpCode(HttpStatus.OK)
+  async seedPopularStocks() {
+    return this.stockTrendingService.seedPopularStocks();
+  }
+
+  /**
+   * Sync all stock market data from Alpaca API
+   * This refreshes trending_assets with real-time OHLCV data
+   */
+  @Post('sync-alpaca-market-data')
+  @HttpCode(HttpStatus.OK)
+  async syncAlpacaMarketData() {
+    return this.stockTrendingService.syncMarketDataFromAlpaca();
+  }
+
+  /**
+   * Get stocks for Top Trades page with real-time Alpaca data
+   * Endpoint: GET /strategies/stocks/top-trades
+   */
+  @Get('stocks/top-trades')
+  async getStocksForTopTrades(@Query('limit') limit?: string) {
+    const limitNum = limit ? parseInt(limit, 10) : 20;
+    return this.stockTrendingService.getStocksForTopTrades(limitNum);
+  }
+
+  /**
+   * Get real-time market data for a specific stock
+   * Endpoint: GET /strategies/stocks/:symbol/market-data
+   */
+  @Get('stocks/:symbol/market-data')
+  async getStockMarketData(@Param('symbol') symbol: string) {
+    const data = await this.stockTrendingService.getStockMarketData(symbol);
+    if (!data) {
+      throw new NotFoundException(`Stock ${symbol} not found`);
+    }
+    return data;
+  }
+
+  /**
+   * Test stock engines using news from database (no external API calls)
+   * This endpoint is for testing/debugging the sentiment engine output
+   * 
+   * @param symbol Stock symbol (e.g., AAPL, TSLA, GOOGL)
+   * @param limit Number of news items to use (default: 10)
+   * @returns Engine scores and detailed output
+   */
+  @Get('test-stock-engines/:symbol')
+  async testStockEngines(
+    @Param('symbol') symbol: string,
+    @Query('limit') limit?: string,
+  ) {
+    const newsLimit = limit ? parseInt(limit, 10) : 10;
+    const symbolUpper = symbol.toUpperCase();
+    
+    this.logger.log(`Testing stock engines for ${symbolUpper} with ${newsLimit} news items from DB`);
+    
+    try {
+      // 1. Fetch news from database (no API call)
+      const newsData = await this.newsService.getRecentStockNewsFromDB(symbolUpper, newsLimit);
+      
+      if (!newsData.news_items || newsData.news_items.length === 0) {
+        return {
+          symbol: symbolUpper,
+          error: 'No news found in database for this stock',
+          suggestion: 'Run the news cronjob first or check if this stock exists in the database',
+          metadata: newsData.metadata,
+        };
+      }
+      
+      // 2. Format news as text_data for Python sentiment engine
+      const textData = newsData.news_items.map(item => ({
+        text: item.title + (item.description ? ' ' + item.description : ''),
+        source: 'database',
+        news_type: 'formal',
+        original_sentiment: item.sentiment, // Include pre-calculated sentiment for comparison
+      }));
+      
+      this.logger.debug(`Formatted ${textData.length} news items for sentiment analysis`);
+      
+      // 3. Call Python /signals/generate with pre-fetched news and skip_external_apis flag
+      const response = await axios.post(`${this.pythonApiUrl}/signals/generate`, {
+        strategy_id: 'test_stock_engines',
+        asset_id: symbolUpper,
+        asset_type: 'stock',
+        strategy_data: {
+          entry_rules: [],
+          exit_rules: [],
+          timeframe: '1d',
+          risk_level: 'medium',
+        },
+        market_data: {
+          asset_type: 'stock',
+          price: 100.0, // Placeholder
+          volume_24h: 50000000, // Placeholder
+        },
+        text_data: textData, // Pre-fetched news from DB
+        skip_external_apis: true, // Skip Finnhub/StockNewsAPI calls
+      }, {
+        timeout: 120000, // 2 minute timeout for FinBERT processing
+      });
+      
+      // 4. Return detailed engine output
+      return {
+        symbol: symbolUpper,
+        news_count: textData.length,
+        news_source: 'database',
+        news_freshness: newsData.metadata?.freshness || 'unknown',
+        last_news_update: newsData.metadata?.last_updated_at,
+        
+        // Engine results
+        final_score: response.data.final_score,
+        action: response.data.action,
+        confidence: response.data.confidence,
+        
+        // Individual engine scores
+        engine_scores: {
+          sentiment: response.data.engine_scores?.sentiment?.score || 0,
+          trend: response.data.engine_scores?.trend?.score || 0,
+          fundamental: response.data.engine_scores?.fundamental?.score || 0,
+          liquidity: response.data.engine_scores?.liquidity?.score || 0,
+          event_risk: response.data.engine_scores?.event_risk?.score || 0,
+        },
+        
+        // Detailed sentiment analysis
+        sentiment_details: response.data.metadata?.engine_details?.sentiment || {},
+        
+        // News items used
+        news_items: newsData.news_items.map(item => ({
+          title: item.title,
+          source: item.source,
+          published_at: item.published_at,
+          db_sentiment: item.sentiment, // Pre-calculated sentiment from DB
+        })),
+        
+        // Full response for debugging
+        full_response: response.data,
+      };
+      
+    } catch (error: any) {
+      this.logger.error(`Error testing stock engines for ${symbolUpper}: ${error.message}`);
+      
+      if (axios.isAxiosError(error)) {
+        return {
+          symbol: symbolUpper,
+          error: 'Failed to call Python API',
+          details: error.response?.data || error.message,
+          suggestion: 'Make sure Python API is running on ' + this.pythonApiUrl,
+        };
+      }
+      
+      throw new BadRequestException(`Failed to test stock engines: ${error.message}`);
+    }
   }
 }
 
