@@ -73,6 +73,9 @@ class SignalGenerator:
             # Parse strategy
             parsed_strategy = self.parser.parse(strategy_data)
             
+            # Check if we should skip external API calls (for testing with DB data)
+            skip_external_apis = kwargs.get('skip_external_apis', False)
+            
             # Run all engines
             engine_scores = {}
             
@@ -96,16 +99,24 @@ class SignalGenerator:
             
             # Fundamental Engine
             # Pass asset_symbol for external API calls (CoinGecko, LunarCrush need symbols, not UUIDs)
-            try:
-                fundamental_result = self.fundamental_engine.calculate(
-                    asset_id=asset_id,
-                    asset_type=asset_type,
-                    asset_symbol=asset_symbol  # Pass symbol for external API calls
-                )
-                engine_scores['fundamental'] = fundamental_result if fundamental_result is not None else {'score': 0.0, 'confidence': 0.0}
-            except Exception as e:
-                logger.warning(f"Fundamental engine error for {asset_symbol} (asset_id: {asset_id}): {str(e)}")
-                engine_scores['fundamental'] = {'score': 0.0, 'confidence': 0.0, 'error': True, 'error_message': str(e)}
+            # Skip if skip_external_apis is True (for testing with DB data only)
+            if skip_external_apis:
+                engine_scores['fundamental'] = {
+                    'score': 0.0, 
+                    'confidence': 0.0, 
+                    'metadata': {'skipped': True, 'reason': 'skip_external_apis=True'}
+                }
+            else:
+                try:
+                    fundamental_result = self.fundamental_engine.calculate(
+                        asset_id=asset_id,
+                        asset_type=asset_type,
+                        asset_symbol=asset_symbol  # Pass symbol for external API calls
+                    )
+                    engine_scores['fundamental'] = fundamental_result if fundamental_result is not None else {'score': 0.0, 'confidence': 0.0}
+                except Exception as e:
+                    logger.warning(f"Fundamental engine error for {asset_symbol} (asset_id: {asset_id}): {str(e)}")
+                    engine_scores['fundamental'] = {'score': 0.0, 'confidence': 0.0, 'error': True, 'error_message': str(e)}
             
             # Liquidity Engine
             if order_book and market_data.get('price'):
@@ -123,12 +134,20 @@ class SignalGenerator:
             
             # Event Risk Engine
             # Pass asset_symbol for external API calls (LunarCrush needs symbols, not UUIDs)
-            event_risk_result = self.event_risk_engine.calculate(
-                asset_id=asset_id,
-                asset_type=asset_type,
-                asset_symbol=asset_symbol  # Pass symbol for external API calls
-            )
-            engine_scores['event_risk'] = event_risk_result
+            # Skip if skip_external_apis is True (for testing with DB data only)
+            if skip_external_apis:
+                engine_scores['event_risk'] = {
+                    'score': 0.0, 
+                    'confidence': 0.0, 
+                    'metadata': {'skipped': True, 'reason': 'skip_external_apis=True'}
+                }
+            else:
+                event_risk_result = self.event_risk_engine.calculate(
+                    asset_id=asset_id,
+                    asset_type=asset_type,
+                    asset_symbol=asset_symbol  # Pass symbol for external API calls
+                )
+                engine_scores['event_risk'] = event_risk_result
             
             # Sentiment Engine
             # Extract text_data from kwargs if provided
