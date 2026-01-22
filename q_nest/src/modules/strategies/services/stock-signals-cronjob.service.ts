@@ -14,6 +14,7 @@ export class StockSignalsCronjobService {
   private readonly BATCH_SIZE = 3; // Process 3 stocks at a time
   private readonly LLM_LIMIT = 10; // Generate LLM for top 10 signals per strategy
   private isRunning = false; // Prevent concurrent executions
+  private isMarketDataSyncing = false; // Prevent concurrent market data sync
 
   constructor(
     private prisma: PrismaService,
@@ -24,6 +25,54 @@ export class StockSignalsCronjobService {
     @Inject(forwardRef(() => ExchangesService))
     private exchangesService: ExchangesService,
   ) {}
+
+  /**
+   * Scheduled job that runs every 5 minutes
+   * Syncs stock market data from Alpaca API and stores in database
+   * This ensures frontend reads fresh data from DB without live API calls
+   */
+  @Cron('*/5 * * * *') // Every 5 minutes
+  async syncStockMarketData(): Promise<void> {
+    if (this.isMarketDataSyncing) {
+      this.logger.warn('Previous market data sync still running, skipping this execution');
+      return;
+    }
+
+    this.isMarketDataSyncing = true;
+    const startTime = Date.now();
+    this.logger.log('Starting stock market data sync cronjob');
+
+    try {
+      const result = await this.stockTrendingService.syncMarketDataFromAlpaca();
+      const duration = Date.now() - startTime;
+      
+      if (result.success) {
+        this.logger.log(
+          `Stock market data sync completed: ${result.updated} stocks updated in ${duration}ms`,
+        );
+      } else {
+        this.logger.warn(
+          `Stock market data sync completed with issues: ${result.errors.length} errors in ${duration}ms`,
+        );
+      }
+    } catch (error: any) {
+      this.logger.error(`Fatal error in stock market data sync: ${error.message}`, error.stack);
+    } finally {
+      this.isMarketDataSyncing = false;
+    }
+  }
+
+  /**
+   * Manual trigger for market data sync (for testing/debugging)
+   */
+  async triggerMarketDataSync(): Promise<{
+    success: boolean;
+    updated: number;
+    errors: string[];
+  }> {
+    this.logger.log('Manual stock market data sync triggered');
+    return this.stockTrendingService.syncMarketDataFromAlpaca();
+  }
 
   /**
    * Scheduled job that runs every 10 minutes
@@ -203,6 +252,24 @@ export class StockSignalsCronjobService {
     assetId: string,
     connectionInfo: { connectionId: string | null; exchange: string } | null,
   ): Promise<void> {
+    // Check if a signal already exists for this strategy+asset within the last 10 minutes
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    const existingSignal = await this.prisma.strategy_signals.findFirst({
+      where: {
+        strategy_id: strategyId,
+        asset_id: assetId,
+        user_id: null,
+        timestamp: { gte: tenMinutesAgo },
+      },
+    });
+
+    if (existingSignal) {
+      this.logger.debug(
+        `Skipping signal generation for strategy ${strategyId} on asset ${assetId} - recent signal exists`,
+      );
+      return;
+    }
+
     // Get strategy and asset details
     const strategy = await this.prisma.strategies.findUnique({
       where: { strategy_id: strategyId },
@@ -242,6 +309,14 @@ export class StockSignalsCronjobService {
       take_profit_value: strategy.take_profit_value,
     };
 
+    let signalData: {
+      action: string;
+      confidence: number;
+      final_score: number;
+      engine_scores: any;
+      position_sizing?: any;
+    };
+
     try {
       // Call Python API to generate signal
       const assetSymbol = asset.symbol || assetId;
@@ -257,52 +332,133 @@ export class StockSignalsCronjobService {
         portfolio_value: 10000, // Default portfolio value for system signals
       });
 
-      // Store signal in database (without LLM for now - we'll generate LLM in batch later)
-      const signal = await this.prisma.strategy_signals.create({
-        data: {
-          strategy_id: strategyId,
-          user_id: null, // System-generated signal
-          asset_id: assetId,
-          timestamp: new Date(),
-          final_score: pythonSignal.final_score,
-          action: pythonSignal.action,
-          confidence: pythonSignal.confidence,
-          sentiment_score: pythonSignal.engine_scores?.sentiment?.score || 0,
-          trend_score: pythonSignal.engine_scores?.trend?.score || 0,
-          fundamental_score: pythonSignal.engine_scores?.fundamental?.score || 0,
-          liquidity_score: pythonSignal.engine_scores?.liquidity?.score || 0,
-          event_risk_score: pythonSignal.engine_scores?.event_risk?.score || 0,
-          engine_metadata: pythonSignal.engine_scores || {},
-        },
-      });
-
-      // Store signal details if position sizing is available
-      if (pythonSignal.position_sizing) {
-        const stopLossValue = strategy.stop_loss_value ? Number(strategy.stop_loss_value) : null;
-        const takeProfitValue = strategy.take_profit_value ? Number(strategy.take_profit_value) : null;
-
-        await this.prisma.signal_details.create({
-          data: {
-            signal_id: signal.signal_id,
-            entry_price: marketData.price,
-            position_size: pythonSignal.position_sizing.position_size,
-            position_value: pythonSignal.position_sizing.position_size * marketData.price,
-            stop_loss: stopLossValue ? marketData.price * (1 - stopLossValue / 100) : null,
-            take_profit_1: takeProfitValue ? marketData.price * (1 + takeProfitValue / 100) : null,
-            metadata: pythonSignal.metadata || {},
-          },
-        });
-      }
+      signalData = {
+        action: pythonSignal.action,
+        confidence: pythonSignal.confidence,
+        final_score: pythonSignal.final_score,
+        engine_scores: pythonSignal.engine_scores || {},
+        position_sizing: pythonSignal.position_sizing,
+      };
 
       this.logger.debug(
-        `Generated signal for strategy ${strategy.name} on stock ${asset.symbol}: ${pythonSignal.action}`,
+        `Python API signal generated for ${asset.symbol}: ${pythonSignal.action}`,
       );
     } catch (error: any) {
-      this.logger.error(
-        `Error executing strategy ${strategyId} on stock ${assetId}: ${error.message}`,
+      // Fallback: Generate basic signal from price data when Python API fails
+      this.logger.warn(
+        `Python API failed for ${asset.symbol}, using fallback signal generation: ${error.message}`,
       );
-      throw error;
+
+      signalData = this.generateFallbackSignal(marketData);
+      this.logger.debug(
+        `Fallback signal generated for ${asset.symbol}: ${signalData.action}`,
+      );
     }
+
+    // Store signal in database (without LLM for now - we'll generate LLM in batch later)
+    const signal = await this.prisma.strategy_signals.create({
+      data: {
+        strategy_id: strategyId,
+        user_id: null, // System-generated signal
+        asset_id: assetId,
+        timestamp: new Date(),
+        final_score: signalData.final_score,
+        action: signalData.action,
+        confidence: signalData.confidence,
+        sentiment_score: signalData.engine_scores?.sentiment?.score || 0,
+        trend_score: signalData.engine_scores?.trend?.score || 0,
+        fundamental_score: signalData.engine_scores?.fundamental?.score || 0,
+        liquidity_score: signalData.engine_scores?.liquidity?.score || 0,
+        event_risk_score: signalData.engine_scores?.event_risk?.score || 0,
+        engine_metadata: signalData.engine_scores || {},
+      },
+    });
+
+    // Store signal details
+    const stopLossValue = strategy.stop_loss_value ? Number(strategy.stop_loss_value) : 5;
+    const takeProfitValue = strategy.take_profit_value ? Number(strategy.take_profit_value) : 10;
+
+    await this.prisma.signal_details.create({
+      data: {
+        signal_id: signal.signal_id,
+        entry_price: marketData.price,
+        position_size: signalData.position_sizing?.position_size || 1,
+        position_value: signalData.position_sizing?.position_size 
+          ? signalData.position_sizing.position_size * marketData.price 
+          : marketData.price,
+        stop_loss: marketData.price * (1 - stopLossValue / 100),
+        take_profit_1: marketData.price * (1 + takeProfitValue / 100),
+        metadata: {},
+      },
+    });
+
+    this.logger.debug(
+      `Stored signal for strategy ${strategy.name} on stock ${asset.symbol}: ${signalData.action}`,
+    );
+  }
+
+  /**
+   * Generate fallback signal based on price data when Python API fails
+   * Uses simple price change logic to determine action
+   */
+  private generateFallbackSignal(marketData: any): {
+    action: string;
+    confidence: number;
+    final_score: number;
+    engine_scores: any;
+  } {
+    const priceChange = Number(marketData.price_change_24h || 0);
+    const volume = Number(marketData.volume || 0);
+    
+    // Simple logic based on 24h price change
+    let action: string;
+    let confidence: number;
+    let finalScore: number;
+
+    if (priceChange > 3) {
+      // Strong positive momentum
+      action = 'BUY';
+      confidence = Math.min(0.7 + (priceChange / 20), 0.85);
+      finalScore = 0.6 + (priceChange / 30);
+    } else if (priceChange > 1) {
+      // Moderate positive momentum
+      action = 'BUY';
+      confidence = 0.55 + (priceChange / 15);
+      finalScore = 0.4 + (priceChange / 20);
+    } else if (priceChange < -3) {
+      // Strong negative momentum - could be opportunity or warning
+      action = 'HOLD';
+      confidence = 0.5;
+      finalScore = 0.1;
+    } else if (priceChange < -1) {
+      // Moderate negative momentum
+      action = 'HOLD';
+      confidence = 0.45;
+      finalScore = 0.2;
+    } else {
+      // Neutral / low volatility
+      action = 'HOLD';
+      confidence = 0.5;
+      finalScore = 0.3;
+    }
+
+    // Volume boost - higher volume = higher confidence
+    if (volume > 1000000) {
+      confidence = Math.min(confidence + 0.1, 0.9);
+    }
+
+    return {
+      action,
+      confidence: Number(confidence.toFixed(2)),
+      final_score: Number(Math.max(0, Math.min(1, finalScore)).toFixed(2)),
+      engine_scores: {
+        sentiment: { score: 0 },
+        trend: { score: priceChange > 0 ? 0.5 : -0.5 },
+        fundamental: { score: 0 },
+        liquidity: { score: volume > 500000 ? 0.5 : 0.2 },
+        event_risk: { score: 0 },
+      },
+    };
   }
 
   /**
@@ -471,18 +627,31 @@ export class StockSignalsCronjobService {
 
   /**
    * Manual trigger for testing/debugging
+   * Returns immediately and runs signal generation in background to avoid HTTP timeout
    */
   async triggerManualGeneration(options?: { connectionId?: string }): Promise<{
     message: string;
-    processed: number;
-    errors: number;
+    status: string;
   }> {
-    this.logger.log('Manual stock signals generation triggered');
-    await this.generateStockSignals(options);
+    if (this.isRunning) {
+      this.logger.log('Stock signal generation already in progress');
+      return {
+        message: 'Stock signal generation already in progress. Please wait for it to complete.',
+        status: 'in_progress',
+      };
+    }
+
+    this.logger.log('Manual stock signals generation triggered - running in background');
+    
+    // Run in background (don't await) to avoid HTTP timeout
+    // The method sets isRunning=true at start and isRunning=false at end
+    this.generateStockSignals(options).catch(err => {
+      this.logger.error(`Background stock signal generation failed: ${err.message}`);
+    });
+
     return {
-      message: 'Manual stock generation completed',
-      processed: 0, // Would need to track this in the method
-      errors: 0,
+      message: 'Stock signal generation started in background. Signals will appear within 1-2 minutes.',
+      status: 'started',
     };
   }
 }

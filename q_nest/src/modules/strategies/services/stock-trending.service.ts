@@ -73,7 +73,7 @@ export class StockTrendingService {
         WHERE
           a.asset_type = 'stock'
           AND ta.price_usd IS NOT NULL
-          AND ta.market_volume > 1000000
+          AND ta.market_volume > 0
           AND a.is_active = true
         ORDER BY
           ta.asset_id,
@@ -360,7 +360,9 @@ export class StockTrendingService {
         // Create trending_assets entry with real or placeholder data
         const pollTimestamp = new Date();
         const price = quote?.price || 100;
-        const volume = quote?.volume24h || 100000000;
+        // Ensure minimum volume of 10M for popular stocks (they're all high-volume by definition)
+        const rawVolume = quote?.volume24h || 0;
+        const volume = rawVolume > 0 ? rawVolume : 10000000; // Default 10M if no data
         const priceChange = quote?.changePercent24h || 0;
         const high = quote?.dayHigh || price;
         const low = quote?.dayLow || price;
@@ -599,17 +601,22 @@ export class StockTrendingService {
   }
 
   /**
-   * Get all stocks with real-time market data for Top Trades page
-   * Returns enriched stock data ready for frontend display
+   * Get all stocks with market data for Top Trades page
+   * Returns stock data from database (synced by cronjob every 5 minutes)
+   * 
+   * @param limit Maximum number of stocks to return
+   * @param forceRealtime If true, fetches live data from Alpaca (default: false, uses DB cache)
    */
-  async getStocksForTopTrades(limit: number = 20): Promise<{
+  async getStocksForTopTrades(limit: number = 20, forceRealtime: boolean = false): Promise<{
     stocks: StockMarketData[];
     source: 'alpaca' | 'database';
     updated_at: Date;
   }> {
     try {
       // Get trending stocks from database
-      const trendingStocks = await this.getTopTrendingStocks(limit, true); // Enable Alpaca enrichment
+      // By default, use cached DB data (synced by cronjob every 5 minutes)
+      // Only fetch live Alpaca data if explicitly requested
+      const trendingStocks = await this.getTopTrendingStocks(limit, forceRealtime);
       
       if (trendingStocks.length === 0) {
         return {
