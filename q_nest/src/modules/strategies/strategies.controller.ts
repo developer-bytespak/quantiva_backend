@@ -91,11 +91,12 @@ export class StrategiesController {
                            strategy.name?.toLowerCase().includes('stock');
     
     // Get trending assets based on strategy type
+    // Use database cached data (synced by cronjob) - no live API calls
     let assets: any[];
     if (isStockStrategy) {
       this.logger.log(`Fetching trending stocks for strategy: ${strategy.name}`);
-      // Enable realtime enrichment from Alpaca API
-      assets = await this.stockTrendingService.getTopTrendingStocks(limitNum, true);
+      // Use DB cached data (synced every 5 minutes by cronjob)
+      assets = await this.stockTrendingService.getTopTrendingStocks(limitNum, false);
     } else {
       assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, true);
     }
@@ -683,13 +684,22 @@ export class StrategiesController {
   }
 
   /**
-   * Get stocks for Top Trades page with real-time Alpaca data
+   * Get stocks for Top Trades page
+   * Data is served from database (synced by cronjob every 5 minutes)
+   * 
+   * @param limit Number of stocks to return (default: 20)
+   * @param realtime If 'true', force fetch live data from Alpaca (slower, use sparingly)
+   * 
    * Endpoint: GET /strategies/stocks/top-trades
    */
   @Get('stocks/top-trades')
-  async getStocksForTopTrades(@Query('limit') limit?: string) {
+  async getStocksForTopTrades(
+    @Query('limit') limit?: string,
+    @Query('realtime') realtime?: string,
+  ) {
     const limitNum = limit ? parseInt(limit, 10) : 20;
-    return this.stockTrendingService.getStocksForTopTrades(limitNum);
+    const forceRealtime = realtime === 'true' || realtime === '1';
+    return this.stockTrendingService.getStocksForTopTrades(limitNum, forceRealtime);
   }
 
   /**
