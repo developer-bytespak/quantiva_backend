@@ -164,11 +164,21 @@ export class StocksMarketController {
     } catch (error: any) {
       this.logger.error(`Failed to get stock detail for ${symbol}`, {
         error: error?.message,
+        stack: error?.stack,
+        symbol,
       });
 
+      // Return more detailed error information for debugging
+      const errorMessage = error?.message || 'Unknown error';
+      const statusCode = error?.status || HttpStatus.INTERNAL_SERVER_ERROR;
+
       throw new HttpException(
-        `Failed to get stock detail for ${symbol}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
+        {
+          message: `Failed to get stock detail for ${symbol}`,
+          error: errorMessage,
+          symbol,
+        },
+        statusCode,
       );
     }
   }

@@ -196,41 +196,60 @@ export class FmpService {
       
       if (symbols.length === 1) {
         // Single symbol - use profile endpoint
-        const response = await this.apiClient.get<any>(`/profile`, {
-          params: {
-            symbol: symbols[0],
-            ...(this.apiKey ? { apikey: this.apiKey } : {}),
-          },
-        });
+        try {
+          const response = await this.apiClient.get<any>(`/profile`, {
+            params: {
+              symbol: symbols[0],
+              ...(this.apiKey ? { apikey: this.apiKey } : {}),
+            },
+          });
 
-        if (response.data && Array.isArray(response.data) && response.data.length > 0) {
-          const profile = response.data[0];
-          // Convert profile to FmpQuote format
-          const quote: FmpQuote = {
-            symbol: profile.symbol,
-            name: profile.companyName || profile.name,
-            price: profile.price || 0,
-            changesPercentage: profile.changesPercentage || 0,
-            change: profile.changes || 0,
-            dayLow: profile.range?.split('-')[0] || profile.dayLow || 0,
-            dayHigh: profile.range?.split('-')[1] || profile.dayHigh || 0,
-            yearHigh: profile.range52Week?.split('-')[1] || profile.yearHigh || 0,
-            yearLow: profile.range52Week?.split('-')[0] || profile.yearLow || 0,
-            marketCap: profile.mktCap || profile.marketCap || 0,
-            priceAvg50: profile.priceAvg50 || 0,
-            priceAvg200: profile.priceAvg200 || 0,
-            volume: profile.volume || 0,
-            avgVolume: profile.avgVolume || 0,
-            open: profile.open || 0,
-            previousClose: profile.previousClose || 0,
-            eps: profile.eps || 0,
-            pe: profile.pe || 0,
-            earningsAnnouncement: profile.earningsAnnouncement || '',
-            sharesOutstanding: profile.sharesOutstanding || 0,
-            timestamp: Date.now(),
-          };
-          results.set(quote.symbol, quote);
-          this.logger.log(`FMP profile data for ${quote.symbol}: marketCap=${quote.marketCap}, price=${quote.price}`);
+          // Handle different response formats
+          let profile: any = null;
+          if (Array.isArray(response.data) && response.data.length > 0) {
+            profile = response.data[0];
+          } else if (response.data && typeof response.data === 'object' && !Array.isArray(response.data)) {
+            // Single object response
+            profile = response.data;
+          }
+
+          if (profile && profile.symbol) {
+            // Convert profile to FmpQuote format
+            const quote: FmpQuote = {
+              symbol: profile.symbol,
+              name: profile.companyName || profile.name || profile.symbol,
+              price: Number(profile.price) || 0,
+              changesPercentage: Number(profile.changesPercentage) || 0,
+              change: Number(profile.changes) || 0,
+              dayLow: profile.range ? Number(profile.range.split('-')[0]) : (Number(profile.dayLow) || 0),
+              dayHigh: profile.range ? Number(profile.range.split('-')[1]) : (Number(profile.dayHigh) || 0),
+              yearHigh: profile.range52Week ? Number(profile.range52Week.split('-')[1]) : (Number(profile.yearHigh) || 0),
+              yearLow: profile.range52Week ? Number(profile.range52Week.split('-')[0]) : (Number(profile.yearLow) || 0),
+              marketCap: Number(profile.mktCap || profile.marketCap || 0),
+              priceAvg50: Number(profile.priceAvg50) || 0,
+              priceAvg200: Number(profile.priceAvg200) || 0,
+              volume: Number(profile.volume) || 0,
+              avgVolume: Number(profile.avgVolume) || 0,
+              open: Number(profile.open) || 0,
+              previousClose: Number(profile.previousClose) || 0,
+              eps: Number(profile.eps) || 0,
+              pe: Number(profile.pe) || 0,
+              earningsAnnouncement: profile.earningsAnnouncement || '',
+              sharesOutstanding: Number(profile.sharesOutstanding) || 0,
+              timestamp: Date.now(),
+            };
+            results.set(quote.symbol, quote);
+            this.logger.log(`FMP profile data for ${quote.symbol}: marketCap=${quote.marketCap}, price=${quote.price}`);
+          } else {
+            this.logger.warn(`FMP profile response for ${symbols[0]} is invalid or empty:`, response.data);
+          }
+        } catch (profileError: any) {
+          this.logger.error(`Failed to fetch FMP profile for ${symbols[0]}:`, {
+            error: profileError?.message,
+            status: profileError?.response?.status,
+            data: profileError?.response?.data,
+          });
+          // Don't throw - gracefully return empty results
         }
       } else {
         // Multiple symbols - fetch individually (FMP profile might not support batch)
@@ -244,29 +263,36 @@ export class FmpService {
               },
             });
 
-            if (response.data && Array.isArray(response.data) && response.data.length > 0) {
-              const profile = response.data[0];
+            // Handle different response formats
+            let profile: any = null;
+            if (Array.isArray(response.data) && response.data.length > 0) {
+              profile = response.data[0];
+            } else if (response.data && typeof response.data === 'object' && !Array.isArray(response.data)) {
+              profile = response.data;
+            }
+
+            if (profile && profile.symbol) {
               const quote: FmpQuote = {
                 symbol: profile.symbol,
-                name: profile.companyName || profile.name,
-                price: profile.price || 0,
-                changesPercentage: profile.changesPercentage || 0,
-                change: profile.changes || 0,
-                dayLow: profile.range?.split('-')[0] || profile.dayLow || 0,
-                dayHigh: profile.range?.split('-')[1] || profile.dayHigh || 0,
-                yearHigh: profile.range52Week?.split('-')[1] || profile.yearHigh || 0,
-                yearLow: profile.range52Week?.split('-')[0] || profile.yearLow || 0,
-                marketCap: profile.mktCap || profile.marketCap || 0,
-                priceAvg50: profile.priceAvg50 || 0,
-                priceAvg200: profile.priceAvg200 || 0,
-                volume: profile.volume || 0,
-                avgVolume: profile.avgVolume || 0,
-                open: profile.open || 0,
-                previousClose: profile.previousClose || 0,
-                eps: profile.eps || 0,
-                pe: profile.pe || 0,
+                name: profile.companyName || profile.name || profile.symbol,
+                price: Number(profile.price) || 0,
+                changesPercentage: Number(profile.changesPercentage) || 0,
+                change: Number(profile.changes) || 0,
+                dayLow: profile.range ? Number(profile.range.split('-')[0]) : (Number(profile.dayLow) || 0),
+                dayHigh: profile.range ? Number(profile.range.split('-')[1]) : (Number(profile.dayHigh) || 0),
+                yearHigh: profile.range52Week ? Number(profile.range52Week.split('-')[1]) : (Number(profile.yearHigh) || 0),
+                yearLow: profile.range52Week ? Number(profile.range52Week.split('-')[0]) : (Number(profile.yearLow) || 0),
+                marketCap: Number(profile.mktCap || profile.marketCap || 0),
+                priceAvg50: Number(profile.priceAvg50) || 0,
+                priceAvg200: Number(profile.priceAvg200) || 0,
+                volume: Number(profile.volume) || 0,
+                avgVolume: Number(profile.avgVolume) || 0,
+                open: Number(profile.open) || 0,
+                previousClose: Number(profile.previousClose) || 0,
+                eps: Number(profile.eps) || 0,
+                pe: Number(profile.pe) || 0,
                 earningsAnnouncement: profile.earningsAnnouncement || '',
-                sharesOutstanding: profile.sharesOutstanding || 0,
+                sharesOutstanding: Number(profile.sharesOutstanding) || 0,
                 timestamp: Date.now(),
               };
               return quote;

@@ -261,14 +261,23 @@ export class StocksMarketService {
       }
 
       // Fetch from Alpaca (free tier) and FMP (for market cap) in parallel
-      const [quotesMap, fmpData, dbStock] = await Promise.all([
+      // Use Promise.allSettled to ensure Alpaca data is always fetched even if FMP fails
+      const [alpacaResult, fmpResult, dbResult] = await Promise.allSettled([
         this.alpacaService.getBatchQuotes([symbol.toUpperCase()]),
         this.fmpService.getBatchProfiles([symbol.toUpperCase()]).catch((err) => {
           this.logger.warn(`FMP fetch failed for ${symbol}: ${err?.message}`);
           return new Map();
         }),
-        this.dbService.getBySymbols([symbol.toUpperCase()]),
+        this.dbService.getBySymbols([symbol.toUpperCase()]).catch((err) => {
+          this.logger.warn(`Database fetch failed for ${symbol}: ${err?.message}`);
+          return [];
+        }),
       ]);
+
+      // Extract results
+      const quotesMap = alpacaResult.status === 'fulfilled' ? alpacaResult.value : new Map();
+      const fmpData = fmpResult.status === 'fulfilled' ? fmpResult.value : new Map();
+      const dbStock = dbResult.status === 'fulfilled' ? dbResult.value : [];
 
       const stock = quotesMap.get(symbol.toUpperCase());
       if (!stock) {
