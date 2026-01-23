@@ -332,8 +332,8 @@ class FaceEngine:
             "review": 0.32,     # Manual review needed
         },
         "deepface": {
-            "accept": 0.65,     # High confidence match
-            "review": 0.50,     # Manual review needed
+            "accept": 0.50,     # High confidence match
+            "review": 0.40,     # Manual review needed
         }
     }
     
@@ -476,7 +476,7 @@ class FaceEngine:
                             
                             results.append(FaceDetectionResult(
                                 bbox=bbox,
-                                confidence=0.95,  # DeepFace doesn't return confidence
+                                confidence=quality.overall_score,  # Use quality score as confidence
                                 landmarks=None,
                                 embedding=np.array(face_data['embedding']),
                                 quality=quality

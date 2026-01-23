@@ -19,7 +19,7 @@ export class PythonApiService {
     this.baseUrl = this.configService.get<string>('PYTHON_API_URL', 'http://localhost:8000');
     this.axiosInstance = axios.create({
       baseURL: this.baseUrl,
-      timeout: 120000, // 2 minutes default (increased for sentiment/news operations)
+      timeout: 300000, // 5 minutes - increased for face matching (embedding + comparison is CPU-intensive)
       headers: {
         'Content-Type': 'application/json',
       },
@@ -112,11 +112,13 @@ export class PythonApiService {
       formData.append('id_photo', idPhotoBuffer, idPhotoFilename);
       formData.append('selfie', selfieBuffer, selfieFilename);
 
+      // Extended timeout for face matching (5 minutes) - embedding + comparison is CPU intensive
       const response = await this.axiosInstance.post<FaceMatchResponse>(
         '/api/v1/kyc/face-match',
         formData,
         {
           headers: formData.getHeaders(),
+          timeout: 300000, // 5 minutes for face matching
         },
       );
 

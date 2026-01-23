@@ -174,7 +174,7 @@ PHASE 3: FACE COMPARISON (THE CRITICAL STEP)
     │  • 0.0 = orthogonal                     │
     │  • -1.0 = opposite                      │
     │                                          │
-    │  Example: 0.65 (good match)             │
+    │  Example: 0.55 (good match)             │
     └──────────┬─────────────────────────────┘
                │
                ▼
@@ -222,7 +222,7 @@ PHASE 3: FACE COMPARISON (THE CRITICAL STEP)
     │  • Euclidean = good backup (20%)        │
     │  • Correlation = pattern check (10%)    │
     │                                          │
-    │  Example: (0.65×0.7 + 0.58×0.2 + ...) = │
+    │  Example: (0.55×0.7 + 0.58×0.2 + ...) = │
     │           0.635 ≈ 0.64 final score      │
     └──────────┬─────────────────────────────┘
                │
@@ -636,13 +636,13 @@ doc_norm = doc_embedding / np.linalg.norm(doc_embedding)
 selfie_norm = selfie_embedding / np.linalg.norm(selfie_embedding)
 
 # Calculate metrics
-cosine_sim = np.dot(doc_norm, selfie_norm)          # 0.65
+cosine_sim = np.dot(doc_norm, selfie_norm)          # 0.55
 euclidean_dist = np.linalg.norm(doc_norm - selfie_norm)  # 0.45
 euclidean_sim = 1 / (1 + euclidean_dist)            # 0.58
 correlation = np.corrcoef(doc_norm, selfie_norm)[0,1]  # 0.62
 
 # Combine
-combined = (0.65 * 0.7) + (0.58 * 0.2) + (0.62 * 0.1)  # 0.633
+combined = (0.55 * 0.7) + (0.58 * 0.2) + (0.62 * 0.1)  # 0.633
 
 # Decision
 is_match = 0.633 >= 0.35  # TRUE ✅

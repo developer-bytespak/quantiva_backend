@@ -65,29 +65,43 @@ export class KycService {
     }
 
     try {
-      // COMMENTED OUT FOR TESTING: Python API verification bypassed
-      // Match faces using Python API - now auto-approves for testing
-      await this.faceMatchingService.matchFaces(verification.kyc_id, file);
+      // Match faces using Python API
+      const matchResult = await this.faceMatchingService.matchFaces(verification.kyc_id, file);
 
-      // AUTO-APPROVE FOR TESTING: Auto-approve the verification (bypasses decision engine)
+      // Apply decision engine based on face matching result
+      let kycStatus = 'rejected';
+      let decisionReason = 'Face matching threshold not met';
+
+      if (matchResult.is_match && matchResult.similarity >= 0.50) {
+        kycStatus = 'approved';
+        decisionReason = `Face match successful (similarity: ${(matchResult.similarity * 100).toFixed(1)}%)`;
+      } else if (matchResult.similarity >= 0.50) {
+        kycStatus = 'review';
+        decisionReason = `Face similarity borderline (${(matchResult.similarity * 100).toFixed(1)}%) - manual review needed`;
+      } else {
+        kycStatus = 'rejected';
+        decisionReason = `Face match failed (similarity: ${(matchResult.similarity * 100).toFixed(1)}% < 50%)`;
+      }
+
+      // Update verification with decision
       await this.prisma.kyc_verifications.update({
         where: { kyc_id: verification.kyc_id },
         data: {
-          status: 'approved',
-          decision_reason: 'Auto-approved for testing (Python verification bypassed)',
-          doc_authenticity_score: 0.95, // Set doc authenticity score for auto-approval
+          status: kycStatus,
+          decision_reason: decisionReason,
+          doc_authenticity_score: matchResult.similarity,
         },
       });
 
-      // Update user's KYC status to approved
-      await this.prisma.users.update({
-        where: { user_id: userId },
-        data: { kyc_status: 'approved' },
-      });
+      // Update user's KYC status
+      if (kycStatus === 'approved') {
+        await this.prisma.users.update({
+          where: { user_id: userId },
+          data: { kyc_status: 'approved' },
+        });
+      }
 
-      // Run decision engine to evaluate verification (bypassed in testing mode)
-      // await this.decisionEngine.applyDecision(verification.kyc_id);
-      this.logger.debug(`KYC auto-approved for user ${userId} - Python verification bypassed`);
+      this.logger.debug(`KYC decision for user ${userId}: ${kycStatus} - ${decisionReason}`);
     } catch (error: any) {
       this.logger.error('KYC verification step failed', {
         kycId: verification.kyc_id,

@@ -37,7 +37,7 @@ def _get_cv2():
 
 
 # Liveness thresholds
-LIVENESS_THRESHOLD_LIVE = 0.65      # Above this = live
+LIVENESS_THRESHOLD_LIVE = 0.55      # Above this = live
 LIVENESS_THRESHOLD_SPOOF = 0.35    # Below this = spoof
 
 

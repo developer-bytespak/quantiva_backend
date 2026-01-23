@@ -68,15 +68,55 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
         - selfie_face_quality: dict
         - error: str (if failed)
     """
+    import os
+    import uuid
     try:
         # Convert to BGR
         id_bgr = pil_to_bgr(id_photo)
         selfie_bgr = pil_to_bgr(selfie)
-        
+
         # Get face engine and perform verification
         engine = get_face_engine()
         result = engine.verify_faces(id_bgr, selfie_bgr)
-        
+
+        # Save cropped faces if detected
+        output_dir = os.environ.get("KYC_FACE_CROP_DIR", "./kyc_face_crops")
+        os.makedirs(output_dir, exist_ok=True)
+
+        def save_crop(bgr_img, face_result, prefix):
+            if not face_result or not face_result.get("bbox"):
+                print(f"[KYC] No face detected for {prefix}, skipping crop save.")
+                return None
+            bbox = face_result["bbox"]
+            x1, y1, x2, y2 = [int(c) for c in bbox]
+            crop = bgr_img[y1:y2, x1:x2]
+            crop_path = os.path.join(output_dir, f"{prefix}_crop_{uuid.uuid4().hex[:8]}.jpg")
+            try:
+                import cv2
+                cv2.imwrite(crop_path, crop)
+                print(f"[KYC] Saved cropped face for {prefix} at: {crop_path}")
+                return crop_path
+            except Exception as e:
+                print(f"[KYC] Failed to save crop for {prefix}: {e}")
+                return None
+
+        id_crop_path = save_crop(id_bgr, result.get("face1"), "document")
+        selfie_crop_path = save_crop(selfie_bgr, result.get("face2"), "selfie")
+
+        # Log details to console
+        print("[KYC] Face match details:")
+        print(f"  Document face bbox: {result.get('face1', {}).get('bbox')}")
+        print(f"  Selfie face bbox: {result.get('face2', {}).get('bbox')}")
+        print(f"  Document crop path: {id_crop_path}")
+        print(f"  Selfie crop path: {selfie_crop_path}")
+        if result.get("match"):
+            match_data = result["match"]
+            print(f"  Similarity: {match_data['similarity']:.3f}")
+            print(f"  Decision: {match_data['decision']}")
+            print(f"  Engine: {match_data['engine']}")
+        else:
+            print(f"  Face match failed: {result.get('error')}")
+
         if not result["success"]:
             logger.warning(f"Face verification failed: {result.get('error')}")
             return {
@@ -87,15 +127,17 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
                 "error": result.get("error"),
                 "id_face_quality": result.get("face1", {}).get("quality") if result.get("face1") else None,
                 "selfie_face_quality": result.get("face2", {}).get("quality") if result.get("face2") else None,
+                "document_crop_path": id_crop_path,
+                "selfie_crop_path": selfie_crop_path,
             }
-        
+
         match_data = result["match"]
-        
+
         logger.info(
             f"Face matching: similarity={match_data['similarity']:.3f}, "
             f"decision={match_data['decision']}, engine={match_data['engine']}"
         )
-        
+
         return {
             "similarity": float(match_data["similarity"]),
             "is_match": bool(match_data["is_match"]),
@@ -105,10 +147,13 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
             "engine": match_data["engine"],
             "id_face_quality": result.get("face1", {}).get("quality"),
             "selfie_face_quality": result.get("face2", {}).get("quality"),
+            "document_crop_path": id_crop_path,
+            "selfie_crop_path": selfie_crop_path,
         }
-        
+
     except Exception as e:
         logger.error(f"Face matching failed: {str(e)}", exc_info=True)
+        print(f"[KYC] Face matching failed: {e}")
         return {
             "similarity": 0.0,
             "is_match": False,

@@ -255,7 +255,7 @@ if use_kelly:
    
 5. Python returns complete signal object:
    {
-     "final_score": 0.65,
+     "final_score": 055,
      "action": "BUY",
      "confidence": 0.78,
      "engine_scores": {...},
