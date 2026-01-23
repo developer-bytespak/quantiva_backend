@@ -427,7 +427,7 @@ export class AlpacaMarketService {
    * Used by Python technical engine for multi-timeframe analysis
    * 
    * @param symbol Stock symbol (e.g., 'AAPL')
-   * @param timeframe Timeframe ('1d', '4h', '1h', '15m', etc.)
+   * @param timeframe Timeframe ('1d', '4h', '1h', '15m', etc.) or Alpaca format ('1Day', '1Hour')
    * @param limit Number of bars to fetch (default: 100)
    * @returns Array of OHLCV bars
    */
@@ -437,20 +437,23 @@ export class AlpacaMarketService {
     limit: number = 100,
   ): Promise<AlpacaBar[]> {
     try {
-      // Map timeframe to Alpaca format
+      // Map timeframe to Alpaca format (handles both lowercase and already-formatted)
       const alpacaTimeframe = this.mapTimeframeToAlpaca(timeframe);
       
       // Calculate start date based on timeframe and limit
-      const start = this.calculateStartDate(timeframe, limit);
+      const start = this.calculateStartDate(alpacaTimeframe.toLowerCase(), limit);
       
       this.logger.debug(
         `Fetching ${limit} bars for ${symbol} (timeframe: ${alpacaTimeframe}, start: ${start.toISOString()})`,
       );
 
+      // Use multi-symbol endpoint for consistent response format
       const response = await this.apiClient.get<{
         bars: Record<string, AlpacaBar[]>;
-      }>(`/v2/stocks/${symbol}/bars`, {
+        next_page_token?: string;
+      }>(`/v2/stocks/bars`, {
         params: {
+          symbols: symbol.toUpperCase(),
           timeframe: alpacaTimeframe,
           start: start.toISOString(),
           limit: limit,
@@ -458,7 +461,8 @@ export class AlpacaMarketService {
         },
       });
 
-      const bars = response.data?.bars?.[symbol] || [];
+      // Multi-symbol endpoint returns { bars: { SYMBOL: [...] } }
+      const bars = response.data?.bars?.[symbol.toUpperCase()] || [];
       
       this.logger.debug(
         `Retrieved ${bars.length} bars for ${symbol} (${timeframe})`,
@@ -480,43 +484,59 @@ export class AlpacaMarketService {
 
   /**
    * Map internal timeframe format to Alpaca API format
-   * @param timeframe Internal format ('1d', '4h', '1h', '15m')
+   * Handles both internal format ('1d', '4h') and already-formatted ('1Day', '1Hour')
+   * @param timeframe Internal format ('1d', '4h', '1h', '15m') or Alpaca format ('1Day', '1Hour')
    * @returns Alpaca API format ('1Day', '4Hour', '1Hour', '15Min')
    */
   private mapTimeframeToAlpaca(timeframe: string): string {
     const mapping: Record<string, string> = {
+      // Lowercase internal format
       '1d': '1Day',
       '4h': '4Hour',
       '1h': '1Hour',
       '15m': '15Min',
       '5m': '5Min',
       '1m': '1Min',
+      // Already formatted (pass through)
+      '1Day': '1Day',
+      '4Hour': '4Hour',
+      '1Hour': '1Hour',
+      '15Min': '15Min',
+      '5Min': '5Min',
+      '1Min': '1Min',
     };
     
-    return mapping[timeframe] || '1Day';
+    return mapping[timeframe] || timeframe || '1Day';
   }
 
   /**
    * Calculate start date for historical bars query
-   * @param timeframe Timeframe string
+   * @param timeframe Timeframe string (lowercase format: '1d', '1h', '1day', '1hour')
    * @param limit Number of bars
    * @returns Start date
    */
   private calculateStartDate(timeframe: string, limit: number): Date {
     const now = new Date();
     let daysBack = 0;
+    
+    // Normalize timeframe to lowercase for comparison
+    const tf = timeframe.toLowerCase();
 
     // Estimate days needed based on timeframe
-    if (timeframe === '1d') {
-      daysBack = limit + 5; // Add buffer for weekends
-    } else if (timeframe === '4h') {
-      daysBack = Math.ceil((limit * 4) / 6) + 5; // ~6 trading hours/day
-    } else if (timeframe === '1h') {
-      daysBack = Math.ceil(limit / 6) + 5;
-    } else if (timeframe === '15m') {
-      daysBack = Math.ceil(limit / 26) + 5; // ~26 15-min bars/day
+    if (tf === '1d' || tf === '1day') {
+      daysBack = limit + 10; // Add buffer for weekends and holidays
+    } else if (tf === '4h' || tf === '4hour') {
+      daysBack = Math.ceil((limit * 4) / 6) + 10; // ~6 trading hours/day
+    } else if (tf === '1h' || tf === '1hour') {
+      daysBack = Math.ceil(limit / 6) + 10;
+    } else if (tf === '15m' || tf === '15min') {
+      daysBack = Math.ceil(limit / 26) + 10; // ~26 15-min bars/day
+    } else if (tf === '5m' || tf === '5min') {
+      daysBack = Math.ceil(limit / 78) + 10; // ~78 5-min bars/day
+    } else if (tf === '1m' || tf === '1min') {
+      daysBack = Math.ceil(limit / 390) + 10; // ~390 1-min bars/day
     } else {
-      daysBack = limit + 5; // Default
+      daysBack = limit + 10; // Default
     }
 
     const startDate = new Date(now);

@@ -29,14 +29,21 @@ export class MarketAggregatorService {
     try {
       this.logger.log(`Aggregating market data for ${symbols.length} symbols`);
 
-      // Fetch from Alpaca (FMP not available for free tier)
+      // Fetch from Alpaca
       const alpacaQuotes = await this.alpacaService.getBatchQuotes(symbols);
       const alpacaData = alpacaQuotes;
 
-      // Note: FMP API endpoints are legacy and not available for free tier
-      // Market cap will be set to null, can be added later from other sources
-      warnings.push('Market cap data not available (FMP API requires paid subscription)');
-      const fmpData = new Map<string, any>();
+      // Try to fetch from FMP for market cap data
+      let fmpData = new Map<string, any>();
+      try {
+        fmpData = await this.fmpService.getBatchProfiles(symbols);
+        if (fmpData.size > 0) {
+          this.logger.log(`Retrieved FMP data for ${fmpData.size} symbols`);
+        }
+      } catch (fmpError: any) {
+        this.logger.warn(`FMP data fetch failed: ${fmpError?.message}`);
+        warnings.push(`Market cap data unavailable: ${fmpError?.message || 'FMP API error'}`);
+      }
 
       // Merge data
       const stocks: MarketStock[] = [];
