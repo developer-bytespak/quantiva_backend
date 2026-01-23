@@ -3,6 +3,7 @@ import { MarketAggregatorService } from './services/market-aggregator.service';
 import { MarketStocksDbService } from './services/market-stocks-db.service';
 import { CacheManagerService } from './services/cache-manager.service';
 import { AlpacaMarketService } from './services/alpaca-market.service';
+import { FmpService } from './services/fmp.service';
 import { MarketDataResponse, MarketStock } from './types/market.types';
 import SP500_SYMBOLS from './data/sp500-symbols';
 import SP500_TOP50 from './data/sp500-top50';
@@ -23,6 +24,7 @@ export class StocksMarketService {
     private dbService: MarketStocksDbService,
     private cacheManager: CacheManagerService,
     private alpacaService: AlpacaMarketService,
+    private fmpService: FmpService,
   ) {}
 
   /**
@@ -231,7 +233,7 @@ export class StocksMarketService {
 
   /**
    * Get individual stock detail
-   * Uses Alpaca free tier snapshot API
+   * Uses Alpaca free tier snapshot API + FMP for market cap
    */
   async getStockDetail(symbol: string): Promise<{
     symbol: string;
@@ -258,9 +260,14 @@ export class StocksMarketService {
         return cached;
       }
 
-      // Fetch from Alpaca (free tier)
-      const quotesMap = await this.alpacaService.getBatchQuotes([
-        symbol.toUpperCase(),
+      // Fetch from Alpaca (free tier) and FMP (for market cap) in parallel
+      const [quotesMap, fmpData, dbStock] = await Promise.all([
+        this.alpacaService.getBatchQuotes([symbol.toUpperCase()]),
+        this.fmpService.getBatchProfiles([symbol.toUpperCase()]).catch((err) => {
+          this.logger.warn(`FMP fetch failed for ${symbol}: ${err?.message}`);
+          return new Map();
+        }),
+        this.dbService.getBySymbols([symbol.toUpperCase()]),
       ]);
 
       const stock = quotesMap.get(symbol.toUpperCase());
@@ -268,19 +275,40 @@ export class StocksMarketService {
         throw new Error(`Stock ${symbol} not found`);
       }
 
-      // Get stock metadata from database
-      const dbStock = await this.dbService.getBySymbols([symbol.toUpperCase()]);
+      const fmpQuote = fmpData.get(symbol.toUpperCase());
       const metadata = dbStock[0] || null;
+
+      // Log FMP data for debugging
+      if (fmpQuote) {
+        this.logger.log(`FMP quote found for ${symbol}: marketCap=${fmpQuote.marketCap}, name=${fmpQuote.name}`);
+      } else {
+        this.logger.warn(`No FMP quote found for ${symbol} (fmpData.size=${fmpData.size})`);
+      }
+
+      // Get market cap: prefer FMP (real-time), fallback to database
+      const marketCap = fmpQuote?.marketCap || metadata?.marketCap || null;
+      
+      if (marketCap) {
+        this.logger.log(`Market cap for ${symbol}: ${marketCap} (source: ${fmpQuote ? 'FMP' : 'database'})`);
+      } else {
+        this.logger.warn(`Market cap is null for ${symbol} (fmpQuote=${!!fmpQuote}, metadata=${!!metadata})`);
+      }
+
+      // Get name: prefer FMP, then database, fallback to symbol
+      const name = fmpQuote?.name || metadata?.name || stock.symbol;
+
+      // Get sector from database (FMP profile might have it too)
+      const sector = metadata?.sector || 'Unknown';
 
       const detail = {
         symbol: stock.symbol,
-        name: metadata?.name || stock.symbol,
+        name,
         price: stock.price,
         change24h: stock.change24h,
         changePercent24h: stock.changePercent24h,
         volume24h: stock.volume24h,
-        marketCap: metadata?.marketCap || null,
-        sector: metadata?.sector || 'Unknown',
+        marketCap,
+        sector,
         high24h: stock.dayHigh || 0,
         low24h: stock.dayLow || 0,
         prevClose: stock.prevClose || 0,
@@ -288,8 +316,16 @@ export class StocksMarketService {
         timestamp: new Date().toISOString(),
       };
 
-      // Cache for 30s
-      this.cacheManager.setPrice(cacheKey, detail);
+      // Cache for 30s (only if we have valid data)
+      // If marketCap is null and FMP failed, use shorter cache to retry sooner
+      if (marketCap === null && fmpData.size === 0) {
+        // FMP failed - cache for only 5 seconds to allow retry
+        this.cacheManager.set(cacheKey, detail, 5);
+        this.logger.warn(`Caching ${symbol} with null marketCap (FMP failed) - short cache TTL`);
+      } else {
+        // Normal cache
+        this.cacheManager.setPrice(cacheKey, detail);
+      }
 
       return detail;
     } catch (error: any) {
