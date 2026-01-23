@@ -1,25 +1,22 @@
 """
 Face Recognition Engine for KYC Verification
 =============================================
-Enhanced production-grade face detection and recognition using InsightFace (primary)
-with DeepFace fallback. Includes advanced preprocessing, quality assessment, and
-multiple similarity metrics for maximum accuracy.
+Production-grade face detection and recognition using InsightFace (primary)
+with DeepFace fallback for maximum compatibility.
 
 Engine Selection:
 - InsightFace (buffalo_l model): High accuracy, requires model download
-- DeepFace (VGG-Face/Facenet512): Good fallback, widely compatible
+- DeepFace (VGG-Face): Good fallback, widely compatible
 
-Adaptive Thresholds (based on embedding dimension):
-- High-dim (512D+): accept >= 0.35, review >= 0.25  
-- Medium-dim (128D+): accept >= 0.4, review >= 0.3
-- Low-dim (<128D): accept >= 0.45, review >= 0.35
+Thresholds (calibrated for KYC):
+- InsightFace: accept >= 0.45, review >= 0.32
+- DeepFace: accept >= 0.65, review >= 0.50
 """
 
 import logging
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 import numpy as np
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -77,15 +74,15 @@ def _get_deepface():
 # =============================================================================
 
 @dataclass
-class QualityMetrics:
-    """Enhanced image quality assessment results"""
-    blur_score: float  # Higher = sharper (Laplacian variance)
-    brightness: float  # Mean brightness (0-255)
-    contrast: float    # Std deviation of brightness
-    resolution_ok: bool
-    width: int
-    height: int
-    overall_quality: str  # "good", "acceptable", "poor"
+class FaceQuality:
+    """Face quality assessment results based on ICAO standards"""
+    blur_score: float           # Laplacian variance (higher = sharper)
+    brightness: float           # Mean brightness (0-255)
+    contrast: float             # Std deviation of brightness
+    pose_quality: float         # Pose frontal quality (0-1)
+    occlusion_score: float      # Face visibility (0-1, higher = less occluded)
+    overall_score: float        # Combined quality score (0-1)
+    is_acceptable: bool         # Meets minimum requirements
     rejection_reason: Optional[str] = None
     
     def to_dict(self) -> Dict:
@@ -93,21 +90,22 @@ class QualityMetrics:
             "blur_score": self.blur_score,
             "brightness": self.brightness,
             "contrast": self.contrast,
-            "resolution_ok": self.resolution_ok,
-            "width": self.width,
-            "height": self.height,
-            "overall_quality": self.overall_quality,
+            "pose_quality": self.pose_quality,
+            "occlusion_score": self.occlusion_score,
+            "overall_score": self.overall_score,
+            "is_acceptable": self.is_acceptable,
             "rejection_reason": self.rejection_reason,
         }
 
 
 @dataclass
-class FaceDetection:
-    """Face detection result"""
-    bbox: List[float]  # [x1, y1, x2, y2]
-    confidence: float
-    landmarks: Optional[List[List[float]]] = None  # 5-point landmarks
-    embedding: Optional[np.ndarray] = None
+class FaceDetectionResult:
+    """Face detection result with embedding and quality"""
+    bbox: List[float]                           # [x1, y1, x2, y2]
+    confidence: float                           # Detection confidence (0-1)
+    landmarks: Optional[List[List[float]]]      # Facial landmarks
+    embedding: Optional[np.ndarray]             # Face embedding vector
+    quality: Optional[FaceQuality] = None       # Quality assessment
     
     def to_dict(self) -> Dict:
         return {
@@ -115,47 +113,28 @@ class FaceDetection:
             "confidence": self.confidence,
             "has_embedding": self.embedding is not None,
             "embedding_dim": len(self.embedding) if self.embedding is not None else 0,
-            "landmarks": self.landmarks
+            "quality": self.quality.to_dict() if self.quality else None,
         }
 
 
 @dataclass
-class MatchResult:
-    """Enhanced face matching result"""
-    similarity: float
-    is_match: bool
-    confidence: float
-    threshold_used: float
-    metrics: Optional[Dict[str, float]] = None  # Individual similarity metrics
+class FaceMatchResult:
+    """Face matching result"""
+    similarity: float           # Cosine similarity (0-1)
+    is_match: bool              # Faces match
+    decision: str               # "accept", "review", "reject"
+    confidence: float           # Decision confidence (0-1)
+    threshold: float            # Threshold used
+    engine: str                 # Engine used
     
     def to_dict(self) -> Dict:
         return {
             "similarity": self.similarity,
             "is_match": self.is_match,
+            "decision": self.decision,
             "confidence": self.confidence,
-            "threshold_used": self.threshold_used,
-            "metrics": self.metrics or {}
-        }
-
-
-@dataclass
-class LivenessResult:
-    """Liveness detection result"""
-    is_live: bool
-    confidence: float
-    texture_score: float
-    depth_score: float
-    reflection_score: float
-    spoof_type: Optional[str] = None
-    
-    def to_dict(self) -> Dict:
-        return {
-            "is_live": self.is_live,
-            "confidence": self.confidence,
-            "texture_score": self.texture_score,
-            "depth_score": self.depth_score,
-            "reflection_score": self.reflection_score,
-            "spoof_type": self.spoof_type
+            "threshold": self.threshold,
+            "engine": self.engine,
         }
 
 
@@ -451,7 +430,6 @@ class LivenessDetector:
                 spoof_type="error"
             )
 
-
 # =============================================================================
 # FACE ENGINE (Enhanced with Preprocessing)
 # =============================================================================
@@ -617,9 +595,6 @@ class FaceEngine:
             area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
             return f.confidence * 0.5 + (area / 1000000) * 0.5
         
-        faces.sort(key=face_score, reverse=True)
-        return faces[0]
-
     def enhance_image_quality(self, image: np.ndarray) -> np.ndarray:
         """
         Simple image enhancement for poor camera quality
@@ -870,7 +845,7 @@ class FaceEngine:
         emb1 = emb1 / np.linalg.norm(emb1)
         emb2 = emb2 / np.linalg.norm(emb2)
         return float(np.dot(emb1, emb2))
-
+    
     def verify_faces(self, image1: np.ndarray, image2: np.ndarray) -> Dict[str, Any]:
         """
         Full face verification between two images with enhanced preprocessing.

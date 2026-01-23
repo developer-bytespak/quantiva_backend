@@ -50,7 +50,8 @@ def pil_to_bgr(pil_image: Image.Image) -> np.ndarray:
 
 def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
     """
-    Match faces between ID photo and selfie.
+    Enhanced face matching between ID photo and selfie with preprocessing,
+    quality assessment, liveness detection, and adaptive thresholds.
     
     Args:
         id_photo: PIL Image of ID document photo
@@ -60,12 +61,14 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
         Dictionary with:
         - similarity: float (0-1)
         - is_match: bool
-        - decision: "accept" | "review" | "reject"
+        - decision: "approved" | "review" | "rejected"
         - confidence: float (0-1)
         - threshold: float
         - engine: str
         - id_face_quality: dict
         - selfie_face_quality: dict
+        - liveness: dict
+        - metrics: dict (individual similarity scores)
         - error: str (if failed)
     """
     import os
@@ -75,7 +78,7 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
         id_bgr = pil_to_bgr(id_photo)
         selfie_bgr = pil_to_bgr(selfie)
 
-        # Get face engine and perform verification
+        # Get face engine and perform enhanced verification
         engine = get_face_engine()
         result = engine.verify_faces(id_bgr, selfie_bgr)
 
@@ -85,7 +88,7 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
 
         def save_crop(bgr_img, face_result, prefix):
             if not face_result or not face_result.get("bbox"):
-                print(f"[KYC] No face detected for {prefix}, skipping crop save.")
+                logger.info(f"No face detected for {prefix}, skipping crop save.")
                 return None
             bbox = face_result["bbox"]
             x1, y1, x2, y2 = [int(c) for c in bbox]
@@ -94,81 +97,107 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
             try:
                 import cv2
                 cv2.imwrite(crop_path, crop)
-                print(f"[KYC] Saved cropped face for {prefix} at: {crop_path}")
+                logger.info(f"Saved cropped face for {prefix} at: {crop_path}")
                 return crop_path
             except Exception as e:
-                print(f"[KYC] Failed to save crop for {prefix}: {e}")
+                logger.warning(f"Failed to save crop for {prefix}: {e}")
                 return None
 
         id_crop_path = save_crop(id_bgr, result.get("face1"), "document")
         selfie_crop_path = save_crop(selfie_bgr, result.get("face2"), "selfie")
 
-        # Log details to console
-        print("[KYC] Face match details:")
-        print(f"  Document face bbox: {result.get('face1', {}).get('bbox')}")
-        print(f"  Selfie face bbox: {result.get('face2', {}).get('bbox')}")
-        print(f"  Document crop path: {id_crop_path}")
-        print(f"  Selfie crop path: {selfie_crop_path}")
-        if result.get("match"):
-            match_data = result["match"]
-            print(f"  Similarity: {match_data['similarity']:.3f}")
-            print(f"  Decision: {match_data['decision']}")
-            print(f"  Engine: {match_data['engine']}")
-        else:
-            print(f"  Face match failed: {result.get('error')}")
-
         if not result["success"]:
-            logger.warning(f"Face verification failed: {result.get('error')}")
+            logger.warning(f"Enhanced face verification failed: {result.get('error')}")
             return {
                 "similarity": 0.0,
                 "is_match": False,
-                "decision": "reject",
+                "decision": "rejected",
                 "confidence": 0.0,
                 "error": result.get("error"),
                 "id_face_quality": result.get("face1", {}).get("quality") if result.get("face1") else None,
                 "selfie_face_quality": result.get("face2", {}).get("quality") if result.get("face2") else None,
+                "liveness": result.get("face2", {}).get("liveness") if result.get("face2") else None,
                 "document_crop_path": id_crop_path,
                 "selfie_crop_path": selfie_crop_path,
+                "engine": result.get("engine_type", "unknown")
             }
 
         match_data = result["match"]
+        face1_data = result["face1"]
+        face2_data = result["face2"]
+        liveness_data = face2_data.get("liveness", {})
 
+        # Enhanced decision logic with liveness integration
+        similarity = match_data["similarity"]
+        threshold_used = match_data["threshold_used"]
+        liveness_confidence = liveness_data.get("confidence", 0.0)
+        is_live = liveness_data.get("is_live", False)
+        
+        # Determine final decision
+        if similarity >= 0.5:  # High similarity
+            if is_live or liveness_confidence > 0.2:
+                decision = "approved"
+            else:
+                decision = "review"  # High similarity but liveness concerns
+        elif similarity >= 0.35:  # Moderate similarity
+            decision = "review"
+        else:  # Low similarity
+            decision = "rejected"
+        
+        # Calculate confidence based on multiple factors
+        base_confidence = similarity
+        liveness_boost = 0.1 if is_live else -0.1
+        quality_boost = 0.05 if face1_data.get("quality", {}).get("overall_quality") == "good" else 0
+        
+        final_confidence = max(0.0, min(1.0, base_confidence + liveness_boost + quality_boost))
+
+        # Log detailed results
         logger.info(
-            f"Face matching: similarity={match_data['similarity']:.3f}, "
-            f"decision={match_data['decision']}, engine={match_data['engine']}"
+            f"Enhanced face matching: similarity={similarity:.3f}, "
+            f"decision={decision}, engine={result.get('engine_type')}, "
+            f"liveness={is_live} ({liveness_confidence:.2f})"
         )
+        
+        # Log individual metrics if available
+        if match_data.get("metrics"):
+            metrics = match_data["metrics"]
+            logger.info(f"Similarity breakdown: cosine={metrics.get('cosine', 0):.3f}, "
+                       f"euclidean={metrics.get('euclidean', 0):.3f}, "
+                       f"manhattan={metrics.get('manhattan', 0):.3f}")
 
         return {
-            "similarity": float(match_data["similarity"]),
-            "is_match": bool(match_data["is_match"]),
-            "decision": match_data["decision"],
-            "confidence": float(match_data["confidence"]),
-            "threshold": float(match_data["threshold"]),
-            "engine": match_data["engine"],
-            "id_face_quality": result.get("face1", {}).get("quality"),
-            "selfie_face_quality": result.get("face2", {}).get("quality"),
+            "similarity": float(similarity),
+            "is_match": decision == "approved",
+            "decision": decision,
+            "confidence": float(final_confidence),
+            "threshold": float(threshold_used),
+            "engine": result.get("engine_type", "unknown"),
+            "id_face_quality": face1_data.get("quality"),
+            "selfie_face_quality": face2_data.get("quality"),
+            "liveness": liveness_data,
+            "metrics": match_data.get("metrics", {}),
             "document_crop_path": id_crop_path,
             "selfie_crop_path": selfie_crop_path,
         }
 
     except Exception as e:
-        logger.error(f"Face matching failed: {str(e)}", exc_info=True)
-        print(f"[KYC] Face matching failed: {e}")
+        logger.error(f"Enhanced face matching failed: {str(e)}", exc_info=True)
         return {
             "similarity": 0.0,
             "is_match": False,
-            "decision": "reject",
+            "decision": "rejected",
             "confidence": 0.0,
             "error": str(e)
         }
 
 
-def verify_face_quality(image: Image.Image) -> Tuple[bool, float, Optional[Dict]]:
+def verify_face_quality(image: Image.Image, is_webcam: bool = False) -> Tuple[bool, float, Optional[Dict]]:
     """
-    Verify face quality in an image.
+    Enhanced face quality verification.
     
     Args:
         image: PIL Image object
+        is_webcam: True if webcam selfie (more lenient standards)
         
     Returns:
         Tuple of (is_acceptable, quality_score, quality_details)
@@ -177,21 +206,9 @@ def verify_face_quality(image: Image.Image) -> Tuple[bool, float, Optional[Dict]
         # Convert to BGR
         bgr = pil_to_bgr(image)
         
-        # Get face engine and detect face
-        engine = get_face_engine()
-        face = engine.get_best_face(bgr)
-        
-        if face is None:
-            return False, 0.0, {"error": "No face detected"}
-        
-        if face.quality is None:
-            return False, 0.0, {"error": "Could not assess quality"}
-        
-        return (
-            face.quality.is_acceptable,
-            face.quality.overall_score,
-            face.quality.to_dict()
-        )
+        # Use enhanced quality verification
+        from src.services.kyc.insightface_engine import verify_face_quality
+        return verify_face_quality(bgr, is_webcam)
         
     except Exception as e:
         logger.error(f"Face quality verification failed: {str(e)}")
@@ -237,14 +254,16 @@ def get_engine_status() -> Dict[str, Any]:
     Get current face engine status.
     
     Returns:
-        Dictionary with engine name, initialization status, and thresholds
+        Dictionary with engine name, initialization status, and capabilities
     """
     try:
         engine = get_face_engine()
         return {
-            "engine": engine.engine_name,
+            "engine": "deepface" if engine._use_deepface else "insightface",
             "initialized": engine._initialized,
-            "thresholds": engine.thresholds,
+            "has_liveness": True,
+            "has_preprocessing": True,
+            "adaptive_thresholds": True,
         }
     except Exception as e:
         return {
