@@ -9,7 +9,7 @@ from typing import Dict, Optional, Tuple, Any
 from PIL import Image
 import numpy as np
 
-from src.services.kyc.insightface_engine import get_face_engine, FaceEngine
+from src.services.kyc.face_engine import get_face_engine, FaceEngine
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,16 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
         output_dir = os.environ.get("KYC_FACE_CROP_DIR", "./kyc_face_crops")
         os.makedirs(output_dir, exist_ok=True)
 
+        # Clean old crops before saving new ones
+        try:
+            for old_file in os.listdir(output_dir):
+                if old_file.endswith('.jpg') or old_file.endswith('.jpeg'):
+                    old_path = os.path.join(output_dir, old_file)
+                    os.remove(old_path)
+            logger.info(f"Cleaned old face crops from {output_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to clean old crops: {e}")
+
         def save_crop(bgr_img, face_result, prefix):
             if not face_result or not face_result.get("bbox"):
                 logger.info(f"No face detected for {prefix}, skipping crop save.")
@@ -93,11 +103,15 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
             bbox = face_result["bbox"]
             x1, y1, x2, y2 = [int(c) for c in bbox]
             crop = bgr_img[y1:y2, x1:x2]
-            crop_path = os.path.join(output_dir, f"{prefix}_crop_{uuid.uuid4().hex[:8]}.jpg")
+            
+            # Convert to grayscale for consistency with face matching
+            import cv2
+            crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            
+            crop_path = os.path.join(output_dir, f"{prefix}_crop.jpg")
             try:
-                import cv2
-                cv2.imwrite(crop_path, crop)
-                logger.info(f"Saved cropped face for {prefix} at: {crop_path}")
+                cv2.imwrite(crop_path, crop_gray)
+                logger.info(f"Saved grayscale cropped face for {prefix} at: {crop_path}")
                 return crop_path
             except Exception as e:
                 logger.warning(f"Failed to save crop for {prefix}: {e}")
@@ -207,7 +221,7 @@ def verify_face_quality(image: Image.Image, is_webcam: bool = False) -> Tuple[bo
         bgr = pil_to_bgr(image)
         
         # Use enhanced quality verification
-        from src.services.kyc.insightface_engine import verify_face_quality
+        from src.services.kyc.face_engine import verify_face_quality
         return verify_face_quality(bgr, is_webcam)
         
     except Exception as e:
@@ -259,7 +273,7 @@ def get_engine_status() -> Dict[str, Any]:
     try:
         engine = get_face_engine()
         return {
-            "engine": "deepface" if engine._use_deepface else "insightface",
+            "engine": "deepface-facenet512",
             "initialized": engine._initialized,
             "has_liveness": True,
             "has_preprocessing": True,

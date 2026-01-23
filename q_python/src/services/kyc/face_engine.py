@@ -1,13 +1,11 @@
 """
 Face Recognition Engine for KYC Verification
 =============================================
-Enhanced production-grade face detection and recognition using InsightFace (primary)
-with DeepFace fallback. Includes advanced preprocessing, quality assessment, and
+Production-grade face detection and recognition using DeepFace.
+Includes advanced preprocessing, quality assessment, and
 multiple similarity metrics for maximum accuracy.
 
-Engine Selection:
-- InsightFace (buffalo_l model): High accuracy, requires model download
-- DeepFace (VGG-Face/Facenet512): Good fallback, widely compatible
+Engine: DeepFace (Facenet512) - 512D embeddings, high accuracy
 
 Adaptive Thresholds (based on embedding dimension):
 - High-dim (512D+): accept >= 0.35, review >= 0.25  
@@ -28,7 +26,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 _cv2 = None
-_insightface_app = None
 _deepface = None
 
 
@@ -42,21 +39,6 @@ def _get_cv2():
         except ImportError as e:
             logger.error(f"OpenCV not available: {e}")
     return _cv2
-
-
-def _get_insightface():
-    """Lazy load InsightFace FaceAnalysis"""
-    global _insightface_app
-    if _insightface_app is None:
-        try:
-            from insightface.app import FaceAnalysis
-            _insightface_app = FaceAnalysis
-            logger.info("InsightFace FaceAnalysis loaded successfully")
-        except ImportError:
-            logger.debug("InsightFace not available")
-        except Exception as e:
-            logger.debug(f"InsightFace import error: {e}")
-    return _insightface_app
 
 
 def _get_deepface():
@@ -459,15 +441,12 @@ class LivenessDetector:
 class FaceEngine:
     """
     Face detection and recognition engine with enhanced preprocessing.
-    Primary: InsightFace (RetinaFace/SCRFD + ArcFace)
-    Fallback: DeepFace (if InsightFace fails)
+    Uses DeepFace (Facenet512) for face detection and recognition.
     """
     
     def __init__(self, det_size: Tuple[int, int] = (640, 640)):
         self.det_size = det_size
-        self.app = None
         self._initialized = False
-        self._use_deepface = False  # Fallback flag
         self._deepface = None
         self._quality_assessor = QualityAssessor()
         self._liveness_detector = LivenessDetector()
@@ -477,38 +456,18 @@ class FaceEngine:
         if self._initialized:
             return True
         
-        # Try InsightFace first (newer API)
-        try:
-            FaceAnalysis = _get_insightface()
-            if FaceAnalysis is not None:
-                logger.info("Trying InsightFace (FaceAnalysis API)...")
-                
-                self.app = FaceAnalysis(
-                    name="buffalo_l",
-                    providers=['CPUExecutionProvider']
-                )
-                self.app.prepare(ctx_id=-1, det_size=self.det_size)
-                
-                self._initialized = True
-                self._use_deepface = False
-                logger.info("✓ InsightFace (buffalo_l) initialized successfully")
-                return True
-        except Exception as e1:
-            logger.info(f"InsightFace FaceAnalysis failed: {e1}")
-        
-        # Fallback to DeepFace
+        # Initialize DeepFace
         try:
             DeepFace = _get_deepface()
             if DeepFace is not None:
                 self._deepface = DeepFace
                 self._initialized = True
-                self._use_deepface = True
-                logger.info("✓ Using DeepFace as fallback (VGG-Face model)")
+                logger.info("✓ DeepFace (Facenet512) initialized successfully")
                 return True
         except ImportError as e:
             logger.error(f"DeepFace not installed: {e}")
         except Exception as e:
-            logger.error(f"Failed to initialize any face engine: {e}")
+            logger.error(f"Failed to initialize DeepFace: {e}")
             
         return False
     
@@ -525,32 +484,7 @@ class FaceEngine:
         if not self._initialized and not self.initialize():
             return []
         
-        if self._use_deepface:
-            return self._detect_faces_deepface(image)
-        else:
-            return self._detect_faces_insightface(image)
-    
-    def _detect_faces_insightface(self, image: np.ndarray) -> List[FaceDetection]:
-        """Detect faces using InsightFace"""
-        try:
-            faces = self.app.get(image)
-            
-            detections = []
-            for face in faces:
-                detection = FaceDetection(
-                    bbox=face.bbox.tolist(),
-                    confidence=float(face.det_score),
-                    landmarks=face.kps.tolist() if face.kps is not None else None,
-                    embedding=face.embedding
-                )
-                detections.append(detection)
-            
-            detections.sort(key=lambda x: x.confidence, reverse=True)
-            return detections
-            
-        except Exception as e:
-            logger.error(f"InsightFace detection error: {e}")
-            return []
+        return self._detect_faces_deepface(image)
     
     def _detect_faces_deepface(self, image: np.ndarray) -> List[FaceDetection]:
         """Detect faces using DeepFace"""
@@ -692,27 +626,28 @@ class FaceEngine:
             if face_img.size == 0:
                 return image
             
-            # Save original cropped face before processing
-            if save_path:
-                cv2.imwrite(save_path, face_img)
-                logger.info(f"Cropped face saved to: {save_path}")
+            # Convert to grayscale to eliminate color variations
+            # This improves accuracy by focusing on structural features only
+            face_gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
             
             # Resize to standard size (224x224 for better feature extraction)
-            face_img = cv2.resize(face_img, (224, 224))
+            face_gray = cv2.resize(face_gray, (224, 224))
             
-            # Convert to LAB for better lighting normalization
-            lab = cv2.cvtColor(face_img, cv2.COLOR_BGR2LAB)
-            
-            # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to L channel
+            # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            face_gray = clahe.apply(face_gray)
             
-            # Convert back to BGR
-            face_img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-            
-            # Additional sharpening
+            # Additional sharpening for better feature detection
             kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-            face_img = cv2.filter2D(face_img, -1, kernel)
+            face_gray = cv2.filter2D(face_gray, -1, kernel)
+            
+            # Save processed grayscale face
+            if save_path:
+                cv2.imwrite(save_path, face_gray)
+                logger.info(f"Processed grayscale face saved to: {save_path}")
+            
+            # Convert back to BGR (3 channels) for DeepFace compatibility
+            face_img = cv2.cvtColor(face_gray, cv2.COLOR_GRAY2BGR)
             
             return face_img
             
@@ -733,54 +668,46 @@ class FaceEngine:
             # Preprocess the face image
             processed_face = self.preprocess_face_image(image, face_bbox, save_path)
             
-            if self._use_deepface:
-                cv2 = _get_cv2()
-                if cv2 is None:
-                    return None
+            cv2 = _get_cv2()
+            if cv2 is None:
+                return None
+                
+            # Convert BGR to RGB for DeepFace
+            face_rgb = cv2.cvtColor(processed_face, cv2.COLOR_BGR2RGB)
+            
+            # Try multiple models for better accuracy - prioritize newer/better models
+            models_to_try = [
+                "Facenet512",      # 512-dim, very accurate
+                "Facenet",         # 128-dim, fast and accurate  
+                "ArcFace",         # 512-dim, state-of-the-art
+                "DeepFace",        # 4096-dim, good accuracy
+                "VGG-Face",        # 2622-dim, fallback
+            ]
+            
+            best_embedding = None
+            best_model = None
+            
+            for model_name in models_to_try:
+                try:
+                    logger.debug(f"Trying {model_name} model...")
+                    result = self._deepface.represent(
+                        img_path=face_rgb,
+                        model_name=model_name,
+                        detector_backend="opencv",
+                        enforce_detection=False
+                    )
                     
-                # Convert BGR to RGB for DeepFace
-                face_rgb = cv2.cvtColor(processed_face, cv2.COLOR_BGR2RGB)
-                
-                # Try multiple models for better accuracy - prioritize newer/better models
-                models_to_try = [
-                    "Facenet512",      # 512-dim, very accurate
-                    "Facenet",         # 128-dim, fast and accurate  
-                    "ArcFace",         # 512-dim, state-of-the-art
-                    "DeepFace",        # 4096-dim, good accuracy
-                    "VGG-Face",        # 2622-dim, fallback
-                ]
-                
-                best_embedding = None
-                best_model = None
-                
-                for model_name in models_to_try:
-                    try:
-                        logger.debug(f"Trying {model_name} model...")
-                        result = self._deepface.represent(
-                            img_path=face_rgb,
-                            model_name=model_name,
-                            detector_backend="opencv",
-                            enforce_detection=False
-                        )
+                    if result and len(result) > 0:
+                        best_embedding = np.array(result[0]['embedding'])
+                        best_model = model_name
+                        logger.info(f"✓ Successfully used {model_name} model ({len(best_embedding)}D)")
+                        break  # Use first working model (best priority)
                         
-                        if result and len(result) > 0:
-                            best_embedding = np.array(result[0]['embedding'])
-                            best_model = model_name
-                            logger.info(f"✓ Successfully used {model_name} model ({len(best_embedding)}D)")
-                            break  # Use first working model (best priority)
-                            
-                    except Exception as model_error:
-                        logger.debug(f"{model_name} failed: {model_error}")
-                        continue
-                
-                return best_embedding
-            else:
-                # Use InsightFace with processed image
-                faces = self.app.get(processed_face)
-                if faces:
-                    return faces[0].embedding
-                    
-            return None
+                except Exception as model_error:
+                    logger.debug(f"{model_name} failed: {model_error}")
+                    continue
+            
+            return best_embedding
             
         except Exception as e:
             logger.error(f"Enhanced embedding error: {e}")
@@ -959,7 +886,7 @@ class FaceEngine:
             "face1": face1_dict,
             "face2": face2_dict,
             "match": match_result.to_dict(),
-            "engine_type": "deepface" if self._use_deepface else "insightface"
+            "engine_type": "deepface-facenet512"
         }
 
 

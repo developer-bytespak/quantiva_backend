@@ -16,7 +16,7 @@ from typing import Dict, Optional, Any
 from PIL import Image
 import numpy as np
 
-from src.services.kyc.insightface_engine import get_face_engine
+from src.services.kyc.face_engine import get_face_engine
 
 logger = logging.getLogger(__name__)
 
