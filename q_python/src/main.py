@@ -162,15 +162,22 @@ async def startup_event():
     
     port = os.environ.get("PORT", "8000")
     logger.info(f"Server will listen on port {port}")
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"Environment: {os.environ.get('RENDER', 'local')}")
     
     # Log ML init policy
     skip = os.environ.get("SKIP_ML_INIT", "").lower()
     if skip in ("1", "true", "yes"):
         logger.info("⚠️ SKIP_ML_INIT is enabled - ML models will NOT be pre-loaded")
-        logger.info("✅ Startup complete (fast mode)")
+        logger.info("✅ Startup complete (fast mode) - Server is ready!")
         return
     
-    # Pre-warm FinBERT model for production
+    # Pre-warm FinBERT model for production (skip on Render to avoid timeout)
+    if os.environ.get("RENDER"):
+        logger.info("⚠️ Running on Render - skipping model pre-loading to avoid timeout")
+        logger.info("✅ Startup complete (fast mode) - Server is ready!")
+        return
+    
     logger.info("🔥 Pre-warming FinBERT model for production use...")
     start_time = time.time()
     
