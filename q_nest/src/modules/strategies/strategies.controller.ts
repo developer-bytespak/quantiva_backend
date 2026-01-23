@@ -616,5 +616,64 @@ export class StrategiesController {
   async triggerPreBuiltSignals(@Body() body?: { connectionId?: string }) {
     return this.preBuiltSignalsCronjobService.triggerManualGeneration(body || undefined);
   }
+
+  /**
+   * Get paper trading statistics for a strategy
+   * @route GET /strategies/:id/paper-trading-stats
+   */
+  @Get(':id/paper-trading-stats')
+  @UseGuards(JwtAuthGuard)
+  async getPaperTradingStats(
+    @Param('id') strategyId: string,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    const strategy = await this.strategiesService.findOne(strategyId);
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${strategyId} not found`);
+    }
+
+    // Verify ownership
+    if (strategy.user_id && strategy.user_id !== user.sub) {
+      throw new ForbiddenException('You do not own this strategy');
+    }
+
+    // Get stats from paper trading service
+    const paperTradingService = this.strategyExecutionService['paperTradingService'];
+    if (!paperTradingService) {
+      throw new BadRequestException('Paper trading service not initialized');
+    }
+
+    return paperTradingService.getPaperTradingStats(strategyId);
+  }
+
+  /**
+   * Manually sync paper trading positions
+   * @route POST /strategies/:id/sync-positions
+   */
+  @Post(':id/sync-positions')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async syncPaperTradingPositions(
+    @Param('id') strategyId: string,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    const strategy = await this.strategiesService.findOne(strategyId);
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${strategyId} not found`);
+    }
+
+    // Verify ownership
+    if (strategy.user_id && strategy.user_id !== user.sub) {
+      throw new ForbiddenException('You do not own this strategy');
+    }
+
+    const positionSyncService = this.strategyExecutionService['positionSyncService'];
+    if (!positionSyncService) {
+      throw new BadRequestException('Position sync service not initialized');
+    }
+
+    await positionSyncService.syncAllPositions();
+    return { message: 'Position sync completed' };
+  }
 }
 

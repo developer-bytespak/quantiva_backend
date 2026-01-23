@@ -72,14 +72,14 @@ export class CreateStrategyDto {
   @IsString()
   name: string;
 
-  @IsEnum(StrategyType)
+  // @IsEnum(StrategyType)
   type: StrategyType;
 
   @IsOptional()
   @IsString()
   description?: string;
 
-  @IsEnum(RiskLevel)
+  // @IsEnum(RiskLevel)
   risk_level: RiskLevel;
 
   @IsOptional()

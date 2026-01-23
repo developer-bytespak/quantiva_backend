@@ -196,7 +196,12 @@ def display_results(data, asset_name):
     # Engine Scores
     print(f"\n[ENGINE SCORES]")
     engine_scores = data.get('engine_scores', {})
-    for engine, score in engine_scores.items():
+    for engine, score_data in engine_scores.items():
+        # Handle both dict format (with 'score' key) and direct numeric format
+        if isinstance(score_data, dict):
+            score = score_data.get('score', 0)
+        else:
+            score = score_data
         status = "[OK]" if abs(score) > 0.1 else "[--]"
         print(f"   {status} {engine.upper():15s}: {score:7.4f}")
     

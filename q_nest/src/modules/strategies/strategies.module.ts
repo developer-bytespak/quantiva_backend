@@ -11,6 +11,7 @@ import { LLMExplanationProcessorService } from './services/llm-explanation-proce
 import { PreBuiltSignalsCronjobService } from './services/pre-built-signals-cronjob.service';
 import { StockSignalsCronjobService } from './services/stock-signals-cronjob.service';
 import { StockTrendingService } from './services/stock-trending.service';
+import { PaperTradingService } from './services/paper-trading.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { KycModule } from '../../kyc/kyc.module';
 import { SignalsModule } from '../signals/signals.module';
@@ -18,9 +19,11 @@ import { NewsModule } from '../news/news.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 import { BinanceModule } from '../binance/binance.module';
 import { AiInsightsModule } from '../../ai-insights/ai-insights.module';
+import { BinanceTestnetModule } from '../binance-testnet/binance-testnet.module';
+import { PortfolioModule } from '../portfolio/portfolio.module';
 
 @Module({
-  imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule), NewsModule, forwardRef(() => ExchangesModule), BinanceModule, ScheduleModule, AiInsightsModule],
+  imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule), NewsModule, forwardRef(() => ExchangesModule), BinanceModule, ScheduleModule, AiInsightsModule, BinanceTestnetModule, PortfolioModule],
   controllers: [StrategiesController],
   providers: [
     StrategiesService,
@@ -33,6 +36,7 @@ import { AiInsightsModule } from '../../ai-insights/ai-insights.module';
     PreBuiltSignalsCronjobService,
     StockSignalsCronjobService,
     StockTrendingService,
+    PaperTradingService,
   ],
   exports: [
     StrategiesService,
@@ -45,6 +49,7 @@ import { AiInsightsModule } from '../../ai-insights/ai-insights.module';
     PreBuiltSignalsCronjobService,
     StockSignalsCronjobService,
     StockTrendingService,
+    PaperTradingService,
   ],
 })
 export class StrategiesModule {}
