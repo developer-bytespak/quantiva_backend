@@ -25,3 +25,6 @@ __pycache__/
 *$py.class
 *.so
 .Python
+
+# KYC standalone test folder (local testing only)
+kyc_standalone_test/

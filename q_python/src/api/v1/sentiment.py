@@ -152,7 +152,7 @@ async def analyze_sentiment_batch(request_data: Dict[str, Any] = Body(...)):
             {
                 "text": "Bitcoin is bullish",
                 "sentiment": "positive",
-                "score": 0.65,
+                "score": 0.55,
                 "confidence": 0.75
             },
             ...
