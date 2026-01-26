@@ -50,8 +50,9 @@ def main() -> int:
         
         # Use PORT environment variable for Render compatibility, default to 8000 for local dev
         port = int(os.environ.get("PORT", 8000))
-        # Default to 0.0.0.0 if PORT is set (production), otherwise 127.0.0.1 for local dev
-        host = "0.0.0.0" if os.environ.get("PORT") else os.environ.get("HOST", "127.0.0.1")
+        # Prefer an explicit HOST env var. If HOST is not set, default to
+        # 0.0.0.0 when PORT is present (production), otherwise 127.0.0.1
+        host = os.environ.get("HOST") or ("0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
         uvicorn.run("main:app", host=host, port=port, reload=use_reload, app_dir="src")
     except KeyboardInterrupt:
         print("\n\nShutting down server...")
