@@ -252,65 +252,111 @@ export class FmpService {
           // Don't throw - gracefully return empty results
         }
       } else {
-        // Multiple symbols - fetch individually (FMP profile might not support batch)
-        this.logger.log(`Fetching ${symbols.length} symbols individually...`);
-        const profilePromises = symbols.map(async (symbol) => {
-          try {
-            const response = await this.apiClient.get<any>(`/profile`, {
-              params: {
-                symbol,
-                ...(this.apiKey ? { apikey: this.apiKey } : {}),
-              },
-            });
-
-            // Handle different response formats
-            let profile: any = null;
-            if (Array.isArray(response.data) && response.data.length > 0) {
-              profile = response.data[0];
-            } else if (response.data && typeof response.data === 'object' && !Array.isArray(response.data)) {
-              profile = response.data;
+        // Multiple symbols - fetch in smaller batches with rate limiting
+        // FMP free tier has strict rate limits (typically 250 requests/day)
+        // Process in batches of 5 with delays to avoid hitting limits
+        this.logger.log(`Fetching ${symbols.length} symbols in batches with rate limiting...`);
+        
+        const batchSize = 5; // Process 5 at a time
+        const delayBetweenBatches = 2000; // 2 seconds between batches
+        
+        for (let i = 0; i < symbols.length; i += batchSize) {
+          const batch = symbols.slice(i, i + batchSize);
+          this.logger.log(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(symbols.length / batchSize)} (${batch.length} symbols)`);
+          
+          const batchPromises = batch.map(async (symbol, batchIndex) => {
+            // Add small delay between requests in same batch
+            if (batchIndex > 0) {
+              await this.sleep(200);
             }
+            
+            // Retry logic for rate limit errors
+            let lastError: any = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                const response = await this.apiClient.get<any>(`/profile`, {
+                  params: {
+                    symbol,
+                    ...(this.apiKey ? { apikey: this.apiKey } : {}),
+                  },
+                });
 
-            if (profile && profile.symbol) {
-              const quote: FmpQuote = {
-                symbol: profile.symbol,
-                name: profile.companyName || profile.name || profile.symbol,
-                price: Number(profile.price) || 0,
-                changesPercentage: Number(profile.changesPercentage) || 0,
-                change: Number(profile.changes) || 0,
-                dayLow: profile.range ? Number(profile.range.split('-')[0]) : (Number(profile.dayLow) || 0),
-                dayHigh: profile.range ? Number(profile.range.split('-')[1]) : (Number(profile.dayHigh) || 0),
-                yearHigh: profile.range52Week ? Number(profile.range52Week.split('-')[1]) : (Number(profile.yearHigh) || 0),
-                yearLow: profile.range52Week ? Number(profile.range52Week.split('-')[0]) : (Number(profile.yearLow) || 0),
-                marketCap: Number(profile.mktCap || profile.marketCap || 0),
-                priceAvg50: Number(profile.priceAvg50) || 0,
-                priceAvg200: Number(profile.priceAvg200) || 0,
-                volume: Number(profile.volume) || 0,
-                avgVolume: Number(profile.avgVolume) || 0,
-                open: Number(profile.open) || 0,
-                previousClose: Number(profile.previousClose) || 0,
-                eps: Number(profile.eps) || 0,
-                pe: Number(profile.pe) || 0,
-                earningsAnnouncement: profile.earningsAnnouncement || '',
-                sharesOutstanding: Number(profile.sharesOutstanding) || 0,
-                timestamp: Date.now(),
-              };
-              return quote;
+              // Handle different response formats
+              let profile: any = null;
+              if (Array.isArray(response.data) && response.data.length > 0) {
+                profile = response.data[0];
+              } else if (response.data && typeof response.data === 'object' && !Array.isArray(response.data)) {
+                profile = response.data;
+              }
+
+              if (profile && profile.symbol) {
+                const quote: FmpQuote = {
+                  symbol: profile.symbol,
+                  name: profile.companyName || profile.name || profile.symbol,
+                  price: Number(profile.price) || 0,
+                  changesPercentage: Number(profile.changesPercentage) || 0,
+                  change: Number(profile.changes) || 0,
+                  dayLow: profile.range ? Number(profile.range.split('-')[0]) : (Number(profile.dayLow) || 0),
+                  dayHigh: profile.range ? Number(profile.range.split('-')[1]) : (Number(profile.dayHigh) || 0),
+                  yearHigh: profile.range52Week ? Number(profile.range52Week.split('-')[1]) : (Number(profile.yearHigh) || 0),
+                  yearLow: profile.range52Week ? Number(profile.range52Week.split('-')[0]) : (Number(profile.yearLow) || 0),
+                  marketCap: Number(profile.mktCap || profile.marketCap || 0),
+                  priceAvg50: Number(profile.priceAvg50) || 0,
+                  priceAvg200: Number(profile.priceAvg200) || 0,
+                  volume: Number(profile.volume) || 0,
+                  avgVolume: Number(profile.avgVolume) || 0,
+                  open: Number(profile.open) || 0,
+                  previousClose: Number(profile.previousClose) || 0,
+                  eps: Number(profile.eps) || 0,
+                  pe: Number(profile.pe) || 0,
+                  earningsAnnouncement: profile.earningsAnnouncement || '',
+                  sharesOutstanding: Number(profile.sharesOutstanding) || 0,
+                  timestamp: Date.now(),
+                };
+                return quote;
+              }
+              return null;
+            } catch (err: any) {
+              lastError = err;
+              
+                // If rate limited, wait longer before retry
+                if (err?.response?.status === 429) {
+                  const waitTime = Math.min(2000 * Math.pow(2, attempt - 1), 15000); // Exponential backoff, max 15s
+                  if (attempt < 3) {
+                    this.logger.warn(
+                      `Rate limited for ${symbol}, waiting ${waitTime}ms before retry ${attempt + 1}/3`,
+                    );
+                    await this.sleep(waitTime);
+                    continue;
+                  }
+                }
+                
+                // For other errors or final attempt, break
+                break;
+              }
             }
-          } catch (err: any) {
-            this.logger.warn(`Failed to fetch profile for ${symbol}: ${err?.message}`);
+            
+            // If all retries failed, log and return null
+            if (lastError) {
+              this.logger.warn(`Failed to fetch profile for ${symbol} after 3 attempts: ${lastError?.message}`);
+            }
             return null;
-          }
-          return null;
-        });
+          });
 
-        const quotes = await Promise.all(profilePromises);
-        quotes.forEach((quote) => {
-          if (quote) {
-            results.set(quote.symbol, quote);
-            this.logger.log(`FMP profile data for ${quote.symbol}: marketCap=${quote.marketCap}`);
+          const batchQuotes = await Promise.all(batchPromises);
+          batchQuotes.forEach((quote) => {
+            if (quote) {
+              results.set(quote.symbol, quote);
+            }
+          });
+          
+          // Wait between batches to avoid rate limits
+          if (i + batchSize < symbols.length) {
+            await this.sleep(delayBetweenBatches);
           }
-        });
+        }
+        
+        this.logger.log(`Completed batch processing: ${results.size}/${symbols.length} profiles fetched`);
       }
 
       this.logger.log(`Successfully fetched FMP data for ${results.size}/${symbols.length} symbols`);
@@ -466,6 +512,157 @@ export class FmpService {
       chunks.push(array.slice(i, i + size));
     }
     return chunks;
+  }
+
+  /**
+   * Fetch S&P 500 constituents list from FMP API
+   * Returns array of stock symbols with name and sector
+   * Tries multiple FMP API endpoints to find the correct one
+   */
+  async getSP500Constituents(): Promise<Array<{
+    symbol: string;
+    name: string;
+    sector: string;
+  }>> {
+    if (!this.apiKey) {
+      this.logger.warn('FMP API key not configured - cannot fetch S&P 500 list');
+      return [];
+    }
+
+    try {
+      this.logger.log('Fetching S&P 500 constituents from FMP API...');
+      
+      // Try multiple endpoints in order of preference
+      const endpoints = [
+        { path: '/sp500_constituent', description: 'S&P 500 specific endpoint' },
+        { path: '/stock/list', params: { exchange: 'NASDAQ,NYSE' }, description: 'Stock list endpoint' },
+        { path: '/stock-screener', params: { marketCapMoreThan: 1000000000 }, description: 'Stock screener endpoint' },
+      ];
+
+      let response: any = null;
+      let lastError: any = null;
+
+      for (const endpoint of endpoints) {
+        try {
+          this.logger.log(`Trying FMP endpoint: ${endpoint.path} (${endpoint.description})`);
+          
+          // Retry logic for rate limit errors
+          let retryCount = 0;
+          const maxRetries = 3;
+          
+          while (retryCount < maxRetries) {
+            try {
+              response = await this.apiClient.get<any>(endpoint.path, {
+                params: {
+                  ...(endpoint.params || {}),
+                  ...(this.apiKey ? { apikey: this.apiKey } : {}),
+                },
+              });
+
+              if (response && response.data) {
+                this.logger.log(`Successfully fetched data from ${endpoint.path}`);
+                break;
+              }
+              break; // Success, exit retry loop
+            } catch (error: any) {
+              lastError = error;
+              
+              // If rate limited, wait and retry
+              if (error?.response?.status === 429 && retryCount < maxRetries - 1) {
+                const waitTime = Math.min(2000 * Math.pow(2, retryCount), 10000); // Exponential backoff
+                this.logger.warn(
+                  `Rate limited on ${endpoint.path}, waiting ${waitTime}ms before retry ${retryCount + 2}/${maxRetries}`,
+                );
+                await this.sleep(waitTime);
+                retryCount++;
+                continue;
+              }
+              
+              // Other errors or final retry failed
+              this.logger.warn(`Endpoint ${endpoint.path} failed: ${error?.message}`);
+              break; // Exit retry loop, try next endpoint
+            }
+          }
+          
+          // If we got a successful response, break out of endpoint loop
+          if (response && response.data) {
+            break;
+          }
+        } catch (error: any) {
+          lastError = error;
+          this.logger.warn(`Endpoint ${endpoint.path} failed: ${error?.message}`);
+          // Continue to next endpoint
+          continue;
+        }
+      }
+
+      if (!response || !response.data) {
+        throw new Error(
+          `All FMP endpoints failed. Last error: ${lastError?.message || 'Unknown'}`,
+        );
+      }
+
+      let stocks: any[] = [];
+      
+      // Handle different response formats
+      if (Array.isArray(response.data)) {
+        stocks = response.data;
+      } else if (response.data && typeof response.data === 'object') {
+        // Single object or wrapped response
+        if (Array.isArray(response.data.data)) {
+          stocks = response.data.data;
+        } else if (Array.isArray(response.data.stocks)) {
+          stocks = response.data.stocks;
+        } else if (Array.isArray(response.data.symbols)) {
+          stocks = response.data.symbols;
+        } else {
+          stocks = [response.data];
+        }
+      }
+
+      if (stocks.length === 0) {
+        this.logger.warn('No stocks returned from FMP API');
+        return [];
+      }
+
+      // Map to our format and filter valid symbols
+      const constituents = stocks
+        .filter((stock: any) => {
+          const symbol = stock.symbol || stock.Symbol || stock.ticker;
+          return symbol && typeof symbol === 'string' && symbol.length > 0 && symbol.length <= 10;
+        })
+        .map((stock: any) => {
+          const symbol = (stock.symbol || stock.Symbol || stock.ticker || '').toUpperCase().trim();
+          const name = stock.name || stock.Name || stock.companyName || stock.company_name || symbol;
+          const sector = stock.sector || stock.Sector || stock.industry || stock.Industry || 'Unknown';
+          
+          return {
+            symbol,
+            name: String(name),
+            sector: String(sector),
+          };
+        })
+        // Remove duplicates by symbol
+        .filter((stock, index, self) => 
+          index === self.findIndex((s) => s.symbol === stock.symbol)
+        );
+
+      this.logger.log(
+        `Successfully fetched ${constituents.length} S&P 500 constituents from FMP`,
+      );
+      
+      return constituents;
+    } catch (error: any) {
+      this.logger.error('Failed to fetch S&P 500 constituents from FMP', {
+        error: error?.message,
+        status: error?.response?.status,
+        url: error?.config?.url,
+        responseData: error?.response?.data,
+      });
+      
+      // Return empty array on error - will fallback to hardcoded list
+      return [];
+    }
   }
 
   /**

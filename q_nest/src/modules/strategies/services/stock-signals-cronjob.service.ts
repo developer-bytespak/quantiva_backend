@@ -107,14 +107,16 @@ export class StockSignalsCronjobService {
 
       this.logger.log(`Found ${stockStrategies.length} stock-specific strategies`);
 
-      // Step 2: Fetch trending stocks from database
-      const trendingStocks = await this.stockTrendingService.getTopTrendingStocks(50);
-      if (trendingStocks.length === 0) {
-        this.logger.warn('No trending stocks found, skipping signal generation');
+      // Step 2: Fetch stocks to process (use rotation strategy to process all stocks over time)
+      // Process 50 stocks per run (every 10 minutes) to avoid overwhelming the system
+      // This ensures all ~500 stocks get processed over ~100 minutes (10 runs)
+      const stocksToProcess = await this.getStocksToProcess(50);
+      if (stocksToProcess.length === 0) {
+        this.logger.warn('No stocks found to process, skipping signal generation');
         return;
       }
 
-      this.logger.log(`Processing ${trendingStocks.length} trending stocks`);
+      this.logger.log(`Processing ${stocksToProcess.length} stocks (rotating through all active stocks)`);
 
       // Step 3: Get Alpaca connection for OHLCV data (or use provided override)
       let connectionInfo = null;
@@ -147,10 +149,10 @@ export class StockSignalsCronjobService {
       let errorCount = 0;
 
       // Process stocks in batches
-      for (let i = 0; i < trendingStocks.length; i += this.BATCH_SIZE) {
-        const batch = trendingStocks.slice(i, i + this.BATCH_SIZE);
+      for (let i = 0; i < stocksToProcess.length; i += this.BATCH_SIZE) {
+        const batch = stocksToProcess.slice(i, i + this.BATCH_SIZE);
         const batchNum = Math.floor(i / this.BATCH_SIZE) + 1;
-        const totalBatches = Math.ceil(trendingStocks.length / this.BATCH_SIZE);
+        const totalBatches = Math.ceil(stocksToProcess.length / this.BATCH_SIZE);
 
         this.logger.log(`Processing batch ${batchNum}/${totalBatches} (${batch.length} stocks)`);
 
@@ -169,7 +171,7 @@ export class StockSignalsCronjobService {
         );
 
         // Small delay between batches to avoid overwhelming APIs
-        if (i + this.BATCH_SIZE < trendingStocks.length) {
+        if (i + this.BATCH_SIZE < stocksToProcess.length) {
           await this.sleep(500);
         }
       }
@@ -653,5 +655,138 @@ export class StockSignalsCronjobService {
       message: 'Stock signal generation started in background. Signals will appear within 1-2 minutes.',
       status: 'started',
     };
+  }
+
+  /**
+   * Get stocks to process for signal generation
+   * Uses rotation strategy: prioritizes stocks with oldest or no signals
+   * Processes a limited number per run (50) to avoid overwhelming the system
+   * Over time, all ~500 stocks will be processed
+   */
+  private async getStocksToProcess(limit: number = 50): Promise<Array<{
+    asset_id: string;
+    symbol: string;
+    name: string;
+    display_name: string;
+    logo_url: string | null;
+    asset_type: string;
+    sector: string | null;
+    price_usd: number;
+    price_change_24h: number;
+    price_change_24h_usd: number;
+    market_cap: number | null;
+    volume_24h: number;
+    high_24h: number;
+    low_24h: number;
+    market_volume: number;
+    market_cap_rank: number | null;
+    poll_timestamp: Date;
+  }>> {
+    try {
+      // Get stocks with their latest signal timestamp (if any)
+      // Prioritize stocks that haven't been processed recently or never processed
+      const stocks = await this.prisma.$queryRaw<Array<{
+        asset_id: string;
+        symbol: string;
+        name: string;
+        display_name: string;
+        logo_url: string | null;
+        asset_type: string;
+        sector: string | null;
+        price_usd: number;
+        price_change_24h: number;
+        price_change_24h_usd: number;
+        market_cap: number | null;
+        volume_24h: number;
+        high_24h: number;
+        low_24h: number;
+        market_volume: number;
+        market_cap_rank: number | null;
+        poll_timestamp: Date;
+        last_signal_time: Date | null;
+      }>>`
+        WITH stock_signals AS (
+          SELECT 
+            asset_id,
+            MAX(timestamp) as last_signal_time
+          FROM strategy_signals
+          WHERE user_id IS NULL
+          GROUP BY asset_id
+        )
+        SELECT DISTINCT ON (a.asset_id)
+          a.asset_id,
+          a.symbol,
+          a.name,
+          a.display_name,
+          a.logo_url,
+          a.asset_type,
+          a.sector,
+          COALESCE(mr.price_usd, 0) as price_usd,
+          COALESCE(mr.change_percent_24h, 0) as price_change_24h,
+          COALESCE(mr.change_24h, 0) as price_change_24h_usd,
+          COALESCE(mr.market_cap, NULL) as market_cap,
+          COALESCE(mr.volume_24h, 0) as volume_24h,
+          COALESCE(ta.high_24h, 0) as high_24h,
+          COALESCE(ta.low_24h, 0) as low_24h,
+          COALESCE(ta.market_volume, 0) as market_volume,
+          a.market_cap_rank,
+          COALESCE(ta.poll_timestamp, NOW()) as poll_timestamp,
+          ss.last_signal_time
+        FROM assets a
+        LEFT JOIN market_rankings mr ON mr.asset_id = a.asset_id
+          AND mr.rank_timestamp = (
+            SELECT MAX(rank_timestamp) 
+            FROM market_rankings 
+            WHERE asset_id = a.asset_id
+          )
+        LEFT JOIN trending_assets ta ON ta.asset_id = a.asset_id
+          AND ta.poll_timestamp = (
+            SELECT MAX(poll_timestamp) 
+            FROM trending_assets 
+            WHERE asset_id = a.asset_id
+          )
+        LEFT JOIN stock_signals ss ON ss.asset_id = a.asset_id
+        WHERE a.asset_type = 'stock'
+          AND a.is_active = true
+        ORDER BY 
+          a.asset_id,
+          COALESCE(ss.last_signal_time, '1970-01-01'::timestamp) ASC, -- Oldest signals first (or never processed)
+          a.market_cap_rank ASC NULLS LAST -- Then by market cap
+        LIMIT ${limit}
+      `;
+
+      if (!stocks || stocks.length === 0) {
+        this.logger.warn('No stocks found to process, falling back to trending stocks');
+        // Fallback to trending stocks if query returns nothing
+        return this.stockTrendingService.getTopTrendingStocks(limit);
+      }
+
+      this.logger.log(`Selected ${stocks.length} stocks to process (prioritizing those without recent signals)`);
+
+      // Transform to match expected format
+      return stocks.map((stock) => ({
+        asset_id: stock.asset_id,
+        symbol: stock.symbol,
+        name: stock.name,
+        display_name: stock.display_name || stock.name || stock.symbol,
+        logo_url: stock.logo_url,
+        asset_type: stock.asset_type,
+        sector: stock.sector,
+        price_usd: Number(stock.price_usd || 0),
+        price_change_24h: Number(stock.price_change_24h || 0),
+        price_change_24h_usd: Number(stock.price_change_24h_usd || 0),
+        market_cap: stock.market_cap ? Number(stock.market_cap) : null,
+        volume_24h: Number(stock.volume_24h || 0),
+        high_24h: Number(stock.high_24h || 0),
+        low_24h: Number(stock.low_24h || 0),
+        market_volume: Number(stock.market_volume || 0),
+        market_cap_rank: stock.market_cap_rank,
+        poll_timestamp: stock.poll_timestamp,
+      }));
+    } catch (error: any) {
+      this.logger.error(`Failed to get stocks to process: ${error.message}`);
+      // Fallback to trending stocks if query fails
+      return this.stockTrendingService.getTopTrendingStocks(limit);
+    }
   }
 }

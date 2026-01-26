@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AlpacaMarketService, AlpacaQuote } from '../../stocks-market/services/alpaca-market.service';
+import { MarketStocksDbService } from '../../stocks-market/services/market-stocks-db.service';
 import axios from 'axios';
 
 export interface StockMarketData {
@@ -33,6 +34,7 @@ export class StockTrendingService {
   constructor(
     private prisma: PrismaService,
     private alpacaMarketService: AlpacaMarketService,
+    private marketStocksDbService: MarketStocksDbService,
   ) {
     this.pythonApiUrl = process.env.PYTHON_API_URL || 'http://localhost:8000';
   }
@@ -602,23 +604,24 @@ export class StockTrendingService {
 
   /**
    * Get all stocks with market data for Top Trades page
-   * Returns stock data from database (synced by cronjob every 5 minutes)
+   * Returns stock data from the same database source as the market page
+   * Uses market_rankings table (synced by cronjob every 20 minutes)
    * 
-   * @param limit Maximum number of stocks to return
+   * @param limit Maximum number of stocks to return (default: 500 to match market page)
    * @param forceRealtime If true, fetches live data from Alpaca (default: false, uses DB cache)
    */
-  async getStocksForTopTrades(limit: number = 20, forceRealtime: boolean = false): Promise<{
+  async getStocksForTopTrades(limit: number = 500, forceRealtime: boolean = false): Promise<{
     stocks: StockMarketData[];
     source: 'alpaca' | 'database';
     updated_at: Date;
   }> {
     try {
-      // Get trending stocks from database
-      // By default, use cached DB data (synced by cronjob every 5 minutes)
-      // Only fetch live Alpaca data if explicitly requested
-      const trendingStocks = await this.getTopTrendingStocks(limit, forceRealtime);
+      // Get stocks from the same database source as the market page
+      // This ensures top trades shows the same stocks that are synced by the market cronjob
+      const marketStocks = await this.marketStocksDbService.getAllWithAssetId(limit);
       
-      if (trendingStocks.length === 0) {
+      if (marketStocks.length === 0) {
+        this.logger.warn('No stocks found in market database for top trades');
         return {
           stocks: [],
           source: 'database',
@@ -627,22 +630,54 @@ export class StockTrendingService {
       }
 
       // Transform to StockMarketData format
-      const stocks: StockMarketData[] = trendingStocks.map(stock => ({
+      let stocks: StockMarketData[] = marketStocks.map(stock => ({
         symbol: stock.symbol,
         asset_id: stock.asset_id,
         name: stock.name,
         sector: stock.sector || undefined,
-        price_usd: stock.price_usd,
-        price_change_24h: stock.price_change_24h,
-        price_change_24h_usd: stock.price_change_24h_usd || stock.price_usd * (stock.price_change_24h / 100),
-        volume_24h: stock.volume_24h,
-        high_24h: stock.high_24h || stock.price_usd,
-        low_24h: stock.low_24h || stock.price_usd,
-        day_open: stock.price_usd, // Will be updated if we have realtime data
-        prev_close: stock.price_usd, // Will be updated if we have realtime data
-        is_realtime: (stock as any).realtime === true,
-        last_updated: stock.poll_timestamp || new Date(),
+        price_usd: stock.price,
+        price_change_24h: stock.changePercent24h,
+        price_change_24h_usd: stock.change24h || stock.price * (stock.changePercent24h / 100),
+        volume_24h: stock.volume24h,
+        high_24h: stock.price, // market_rankings doesn't have high/low, use price as fallback
+        low_24h: stock.price,
+        day_open: stock.price,
+        prev_close: stock.price,
+        market_cap: stock.marketCap || undefined,
+        is_realtime: false,
+        last_updated: new Date(),
       }));
+
+      // Optionally enrich with real-time Alpaca data if requested
+      if (forceRealtime && stocks.length > 0) {
+        try {
+          const symbols = stocks.map(s => s.symbol);
+          const realtimeQuotesMap = await this.alpacaMarketService.getBatchQuotes(symbols);
+          
+          // Update stocks with real-time data
+          stocks = stocks.map(stock => {
+            const quote = realtimeQuotesMap.get(stock.symbol);
+            if (quote) {
+              return {
+                ...stock,
+                price_usd: quote.price,
+                price_change_24h: quote.changePercent24h || stock.price_change_24h,
+                price_change_24h_usd: quote.change24h || stock.price_change_24h_usd,
+                volume_24h: quote.volume24h || stock.volume_24h,
+                high_24h: quote.dayHigh || stock.high_24h,
+                low_24h: quote.dayLow || stock.low_24h,
+                day_open: quote.dayOpen || stock.day_open,
+                prev_close: quote.prevClose || stock.prev_close,
+                is_realtime: true,
+                last_updated: quote.timestamp || new Date(),
+              };
+            }
+            return stock;
+          });
+        } catch (realtimeError: any) {
+          this.logger.warn(`Failed to fetch real-time data: ${realtimeError.message}. Using database data.`);
+        }
+      }
 
       return {
         stocks,

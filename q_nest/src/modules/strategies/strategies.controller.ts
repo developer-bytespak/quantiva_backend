@@ -84,7 +84,10 @@ export class StrategiesController {
       throw new NotFoundException(`Strategy ${strategyId} is not a pre-built strategy`);
     }
 
-    const limitNum = limit ? parseInt(limit, 10) : 10;
+    // Use a very high limit (10000) to effectively get all available stocks
+    // This matches the market page behavior which uses limit 500 but we want all stocks
+    const limitNum = limit ? parseInt(limit, 10) : 10000;
+    this.logger.log(`getTrendingAssetsWithInsights called with limit=${limit}, parsed=${limitNum} for strategy ${strategyId}`);
     
     // Detect if this is a stock strategy by checking the name
     const isStockStrategy = strategy.name?.toLowerCase().includes('(stocks)') || 
@@ -94,14 +97,18 @@ export class StrategiesController {
     // Use database cached data (synced by cronjob) - no live API calls
     let assets: any[];
     if (isStockStrategy) {
-      this.logger.log(`Fetching trending stocks for strategy: ${strategy.name}`);
-      // Use DB cached data (synced every 5 minutes by cronjob)
-      assets = await this.stockTrendingService.getTopTrendingStocks(limitNum, false);
+      this.logger.log(`Fetching stocks for strategy: ${strategy.name} (limit: ${limitNum})`);
+      // Use the same data source as market page (market_rankings table via getAllWithAssetId)
+      // This ensures we get the same stocks available on the market page
+      assets = await this.preBuiltStrategiesService.getTopStocks(limitNum);
+      this.logger.log(`Retrieved ${assets.length} stocks from market database`);
     } else {
       assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, true);
+      this.logger.log(`Retrieved ${assets.length} crypto assets`);
     }
     
     if (assets.length === 0) {
+      this.logger.warn(`No assets found for strategy ${strategyId}`);
       return { assets: [], insights: [] };
     }
 
@@ -161,19 +168,23 @@ export class StrategiesController {
       signal: signalMap.get(asset.asset_id) || null,
     }));
 
+    const finalAssets = [
+      ...assetsWithInsights.map(a => ({
+        ...a,
+        signal: signalMap.get(a.asset_id) || null,
+      })),
+      ...remaining,
+    ];
+    
+    this.logger.log(`Returning ${finalAssets.length} assets (${assetsWithInsights.length} with insights, ${remaining.length} without)`);
+    
     return {
       strategy: {
         id: strategy.strategy_id,
         name: strategy.name,
         description: strategy.description,
       },
-      assets: [
-        ...assetsWithInsights.map(a => ({
-          ...a,
-          signal: signalMap.get(a.asset_id) || null,
-        })),
-        ...remaining,
-      ],
+      assets: finalAssets,
     };
   }
 
@@ -404,10 +415,20 @@ export class StrategiesController {
   async previewStrategy(
     @Param('id') id: string,
     @Query('limit') limit?: string,
+    @Query('asset_type') assetType?: string, // 'stock' or 'crypto'
     @CurrentUser() user?: TokenPayload, // Optional: use if authenticated
   ) {
-    const limitNum = limit ? parseInt(limit, 10) : 50;
-    const assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum);
+    const limitNum = limit ? parseInt(limit, 10) : 500; // Default to 500 for stocks
+    let assets;
+    
+    // Use stocks from market database if asset_type is 'stock' or if no asset_type specified, try to detect
+    if (assetType === 'stock') {
+      assets = await this.preBuiltStrategiesService.getTopStocks(limitNum);
+    } else {
+      // For crypto or default, use trending assets
+      assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum);
+    }
+    
     const assetIds = assets.map((a) => a.asset_id);
     return this.strategyPreviewService.previewStrategy(id, assetIds, user?.sub);
   }
@@ -417,10 +438,20 @@ export class StrategiesController {
   async previewUserStrategy(
     @Param('id') id: string,
     @Query('limit') limit?: string,
+    @Query('asset_type') assetType?: string, // 'stock' or 'crypto'
     @CurrentUser() user?: TokenPayload, // Optional: use if authenticated
   ) {
-    const limitNum = limit ? parseInt(limit, 10) : 50;
-    const assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum);
+    const limitNum = limit ? parseInt(limit, 10) : 500; // Default to 500 for stocks
+    let assets;
+    
+    // Use stocks from market database if asset_type is 'stock' or if no asset_type specified, try to detect
+    if (assetType === 'stock') {
+      assets = await this.preBuiltStrategiesService.getTopStocks(limitNum);
+    } else {
+      // For crypto or default, use trending assets
+      assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum);
+    }
+    
     const assetIds = assets.map((a) => a.asset_id);
     return this.strategyPreviewService.previewStrategy(id, assetIds, user?.sub);
   }
@@ -685,9 +716,10 @@ export class StrategiesController {
 
   /**
    * Get stocks for Top Trades page
-   * Data is served from database (synced by cronjob every 5 minutes)
+   * Data is served from database (synced by cronjob every 20 minutes)
+   * Uses the same data source as the market page (market_rankings table)
    * 
-   * @param limit Number of stocks to return (default: 20)
+   * @param limit Number of stocks to return (default: 500 to match market page)
    * @param realtime If 'true', force fetch live data from Alpaca (slower, use sparingly)
    * 
    * Endpoint: GET /strategies/stocks/top-trades
@@ -697,7 +729,7 @@ export class StrategiesController {
     @Query('limit') limit?: string,
     @Query('realtime') realtime?: string,
   ) {
-    const limitNum = limit ? parseInt(limit, 10) : 20;
+    const limitNum = limit ? parseInt(limit, 10) : 500;
     const forceRealtime = realtime === 'true' || realtime === '1';
     return this.stockTrendingService.getStocksForTopTrades(limitNum, forceRealtime);
   }
