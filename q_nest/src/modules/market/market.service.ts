@@ -277,9 +277,11 @@ export class MarketService {
       });
 
       if (!latestRanking) {
-        this.logger.warn('No market rankings found in database');
+        this.logger.warn('No market rankings found in database - waiting for first sync');
         return { coins: [], lastSyncTime: null };
       }
+
+      this.logger.log(`Fetching cached market data from timestamp: ${latestRanking.rank_timestamp}`);
 
       // Build search filter
       const searchFilter = search
@@ -303,6 +305,9 @@ export class MarketService {
             where: {
               rank_timestamp: latestRanking.rank_timestamp,
             },
+            orderBy: {
+              rank_timestamp: 'desc',
+            },
             take: 1,
           },
         },
@@ -312,6 +317,8 @@ export class MarketService {
         take: limit,
       });
 
+      this.logger.log(`Found ${assets.length} assets with market rankings`);
+
       // Transform to CoinGeckoCoin format
       const coins: CoinGeckoCoin[] = assets
         .filter((asset) => asset.market_rankings.length > 0)
@@ -320,8 +327,9 @@ export class MarketService {
           const currentPrice = Number(ranking.price_usd || 0);
           const marketCap = Number(ranking.market_cap || 0);
           const volume = Number(ranking.volume_24h || 0);
+          const change24h = Number(ranking.change_24h || 0);
+          const changePercent24h = Number(ranking.change_percent_24h || 0);
 
-          // Calculate 24h changes (simplified - would need historical data for accurate calc)
           return {
             id: asset.coingecko_id || asset.asset_id,
             symbol: asset.symbol?.toUpperCase() || '',
@@ -332,10 +340,10 @@ export class MarketService {
             market_cap_rank: asset.market_cap_rank || ranking.rank,
             fully_diluted_valuation: null,
             total_volume: volume,
-            high_24h: currentPrice * 1.02, // Approximate
-            low_24h: currentPrice * 0.98, // Approximate
-            price_change_24h: 0, // Would need historical data
-            price_change_percentage_24h: 0, // Would need historical data
+            high_24h: currentPrice * 1.02,
+            low_24h: currentPrice * 0.98,
+            price_change_24h: change24h,
+            price_change_percentage_24h: changePercent24h,
             market_cap_change_24h: 0,
             market_cap_change_percentage_24h: 0,
             circulating_supply: 0,
@@ -350,6 +358,8 @@ export class MarketService {
             last_updated: ranking.rank_timestamp.toISOString(),
           };
         });
+
+      this.logger.log(`Returning ${coins.length} coins with 24h price changes from database`);
 
       return {
         coins,
