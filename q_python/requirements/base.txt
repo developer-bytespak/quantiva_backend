@@ -8,6 +8,7 @@ pandas-ta>=0.3.14b0
 opencv-python>=4.8.0
 requests>=2.31.0
 fredapi>=0.5.1
+gunicorn>=20.1.0
 
 # News API Endpoint Dependencies (LunarCrush + FinBERT Sentiment Analysis)
 # - requests: For LunarCrush API calls (already listed above)
