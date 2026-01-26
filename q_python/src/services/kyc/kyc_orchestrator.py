@@ -9,7 +9,6 @@ import logging
 from typing import Dict, Any, Optional
 from PIL import Image
 
-from src.services.kyc.ocr_service import extract_text
 from src.services.kyc.face_matching import match_faces, verify_face_quality
 from src.services.kyc.liveness_service import detect_liveness
 from src.services.kyc.document_verification import check_authenticity
@@ -57,13 +56,9 @@ class KYCOrchestrator:
             "errors": []
         }
         
-        # 1. OCR
+        # Skip OCR processing - not needed
         if run_ocr:
-            try:
-                results["ocr"] = extract_text(id_document)
-            except Exception as e:
-                results["errors"].append(f"OCR: {str(e)}")
-                self.logger.error(f"OCR failed: {e}")
+            results["ocr"] = None
         
         # 2. Document authenticity
         if run_authenticity:

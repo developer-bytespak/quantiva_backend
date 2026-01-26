@@ -15,8 +15,8 @@ fredapi>=0.5.1
 # - python-dotenv: For loading LUNARCRUSH_API_KEY from .env file (already listed below)
 python-dateutil>=2.8.2
 
-# OCR libraries
-easyocr>=1.7.0
+# OCR libraries (disabled for memory optimization)
+# easyocr>=1.7.0  # Removed - too heavy for 512MB limit
 # pytesseract>=0.3.10  # Requires Tesseract OCR to be installed on system
 
 # Face recognition (DeepFace only - InsightFace removed)
