@@ -14,78 +14,19 @@ logger = logging.getLogger(__name__)
 
 logger.info("Starting FastAPI application...")
 
-# Determine ML init policy early to avoid importing ML-heavy modules
+# Keep module import light: router imports are delayed to startup to avoid blocking
 import os
-_skip_ml_init = os.environ.get("SKIP_ML_INIT", "").lower() in ("1", "true", "yes")
 
-# Import routers with error handling
-# Skip importing KYC (and other ML-heavy routers) when SKIP_ML_INIT is enabled
-if _skip_ml_init:
-    logger.info("SKIP_ML_INIT is enabled - skipping KYC router import to avoid ML libs loading")
-    kyc_router = None
-else:
+def _safe_import_router(import_path, alias_name=None):
     try:
-        from src.api.v1.kyc import router as kyc_router
-        logger.info("KYC router loaded")
+        module = __import__(import_path, fromlist=["router"])  # type: ignore
+        router = getattr(module, "router", None)
+        if router is not None:
+            logger.info(f"{import_path} loaded")
+        return router
     except Exception as e:
-        logger.error(f"Failed to load KYC router: {e}", exc_info=True)
-        kyc_router = None
-
-try:
-    from src.api.v1.strategies import router as strategies_router
-    logger.info("Strategies router loaded")
-except Exception as e:
-    logger.error(f"Failed to load Strategies router: {e}", exc_info=True)
-    strategies_router = None
-
-try:
-    from src.api.v1.signals import router as signals_router
-    logger.info("Signals router loaded")
-except Exception as e:
-    logger.error(f"Failed to load Signals router: {e}", exc_info=True)
-    signals_router = None
-
-try:
-    from src.api.v1.macro import router as macro_router
-    logger.info("Macro router loaded")
-except Exception as e:
-    logger.error(f"Failed to load Macro router: {e}", exc_info=True)
-    macro_router = None
-
-try:
-    from src.api.v1.news import router as news_router
-    logger.info("News router loaded")
-except Exception as e:
-    logger.error(f"Failed to load News router: {e}", exc_info=True)
-    news_router = None
-
-try:
-    from src.api.v1.sentiment import router as sentiment_router
-    logger.info("Sentiment router loaded")
-except Exception as e:
-    logger.error(f"Failed to load Sentiment router: {e}", exc_info=True)
-    sentiment_router = None
-
-try:
-    from src.api.v1.llm import router as llm_router
-    logger.info("LLM router loaded")
-except Exception as e:
-    logger.error(f"Failed to load LLM router: {e}", exc_info=True)
-    llm_router = None
-
-try:
-    from src.api.v1.admin import router as admin_router
-    logger.info("Admin router loaded")
-except Exception as e:
-    logger.error(f"Failed to load Admin router: {e}", exc_info=True)
-    admin_router = None
-
-try:
-    from src.api.v1.routes.stocks import router as stocks_router
-    logger.info("Stocks router loaded")
-except Exception as e:
-    logger.error(f"Failed to load Stocks router: {e}", exc_info=True)
-    stocks_router = None
+        logger.error(f"Failed to load {import_path}: {e}", exc_info=True)
+        return None
 
 app = FastAPI(title="Quantiva Python API", version="1.0.0")
 logger.info("FastAPI app created")
@@ -99,38 +40,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-if kyc_router:
-    app.include_router(kyc_router, prefix="/api/v1")
-    logger.info("KYC router included")
-if strategies_router:
-    app.include_router(strategies_router, prefix="/api/v1")
-    logger.info("Strategies router included")
-if signals_router:
-    app.include_router(signals_router, prefix="/api/v1")
-    logger.info("Signals router included")
-if macro_router:
-    app.include_router(macro_router, prefix="/api/v1")
-    logger.info("Macro router included")
-if news_router:
-    app.include_router(news_router, prefix="/api/v1")
-    logger.info("News router included")
-if sentiment_router:
-    app.include_router(sentiment_router, prefix="/api/v1")
-    logger.info("Sentiment router included")
-if llm_router:
-    app.include_router(llm_router, prefix="/api/v1")
-    logger.info("LLM router included")
+logger.info("Application module imported (routers will be registered at startup)")
 
-if admin_router:
-    app.include_router(admin_router, prefix="/api/v1")
-    logger.info("Admin router included")
 
-if stocks_router:
-    app.include_router(stocks_router, prefix="/api/v1/stocks", tags=["stocks"])
-    logger.info("Stocks router included")
+def register_routers(skip_ml_init: bool = False):
+    """Import and include routers. `skip_ml_init` can be used to avoid ML-heavy routers."""
+    # KYC router may pull heavy ML deps
+    if not skip_ml_init:
+        kyc_router = _safe_import_router("src.api.v1.kyc")
+        if kyc_router:
+            app.include_router(kyc_router, prefix="/api/v1")
+            logger.info("KYC router included")
+    else:
+        logger.info("SKIP_ML_INIT enabled - skipping KYC router registration")
 
-logger.info("All routers included, application ready")
+    # Other routers
+    for path, prefix, tags in [
+        ("src.api.v1.strategies", "/api/v1", None),
+        ("src.api.v1.signals", "/api/v1", None),
+        ("src.api.v1.macro", "/api/v1", None),
+        ("src.api.v1.news", "/api/v1", None),
+        ("src.api.v1.sentiment", "/api/v1", None),
+        ("src.api.v1.llm", "/api/v1", None),
+        ("src.api.v1.admin", "/api/v1", None),
+        ("src.api.v1.routes.stocks", "/api/v1/stocks", ["stocks"]),
+    ]:
+        router = _safe_import_router(path)
+        if router:
+            if tags:
+                app.include_router(router, prefix=prefix, tags=tags)
+            else:
+                app.include_router(router, prefix=prefix)
+            logger.info(f"{path} included")
+
+    logger.info("All available routers registered")
 
 @app.get('/')
 def read_root():
@@ -165,9 +108,15 @@ async def startup_event():
     logger.info(f"Python version: {sys.version}")
     logger.info(f"Environment: {os.environ.get('RENDER', 'local')}")
     
-    # Log ML init policy
+    # Determine ML init policy and register routers
     skip = os.environ.get("SKIP_ML_INIT", "").lower()
-    if skip in ("1", "true", "yes"):
+    skip_bool = skip in ("1", "true", "yes")
+    try:
+        register_routers(skip_ml_init=skip_bool)
+    except Exception:
+        logger.exception("Error while registering routers")
+
+    if skip_bool:
         logger.info("⚠️ SKIP_ML_INIT is enabled - ML models will NOT be pre-loaded")
         logger.info("✅ Startup complete (fast mode) - Server is ready!")
         return
