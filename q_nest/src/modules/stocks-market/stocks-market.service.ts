@@ -36,10 +36,12 @@ export class StocksMarketService {
     const { limit, symbols, search, sector } = options;
 
     try {
-      // Generate cache key
+      // Generate cache key (includes all query parameters)
       const cacheKey = CacheManagerService.generateMarketDataKey(
         symbols || [],
         limit,
+        search,
+        sector,
       );
 
       // Check cache first
@@ -89,18 +91,38 @@ export class StocksMarketService {
 
   /**
    * Sync market data from external APIs and store in database
-   * This is called by the cron job
+   * This is called by the cron job once per day
+   * Syncs all available stocks in one batch to minimize FMP API calls
+   * Since we only call once per day, we can sync all stocks at once
    */
   async syncMarketData(): Promise<{
     success: boolean;
     synced: number;
     warnings: string[];
+    totalStocks: number;
+    syncedToday: number;
   }> {
     try {
       this.logger.log('Starting market data sync...');
 
-      // Use top 50 for faster sync (you can change to SP500_SYMBOLS for full list)
-      const symbolsToSync = SP500_TOP50;
+      // Get total count of active stocks
+      const totalStocks = await this.dbService.getCount();
+      
+      // Since we're syncing once per day, sync all available stocks at once
+      // This minimizes FMP API calls while keeping data fresh
+      let symbolsToSync = await this.dbService.getActiveStockSymbols();
+
+      // If database is empty, fallback to hardcoded list
+      if (symbolsToSync.length === 0) {
+        this.logger.warn(
+          'No stocks found in database, using hardcoded SP500_TOP50 as fallback',
+        );
+        symbolsToSync = SP500_TOP50;
+      } else {
+        this.logger.log(
+          `Syncing all ${symbolsToSync.length} stocks in one batch (daily sync).`,
+        );
+      }
 
       // Fetch aggregated data from APIs
       const { stocks, warnings } =
@@ -117,13 +139,15 @@ export class StocksMarketService {
       this.cacheManager.invalidatePattern('^market:');
 
       this.logger.log(
-        `Market data sync completed - ${stocks.length}/${symbolsToSync.length} stocks synced`,
+        `Market data sync completed - ${stocks.length}/${symbolsToSync.length} stocks synced today (${totalStocks} total in database)`,
       );
 
       return {
         success: true,
         synced: stocks.length,
         warnings,
+        totalStocks,
+        syncedToday: stocks.length,
       };
     } catch (error: any) {
       this.logger.error('Market data sync failed', {
@@ -134,6 +158,8 @@ export class StocksMarketService {
         success: false,
         synced: 0,
         warnings: [error?.message || 'Unknown error'],
+        totalStocks: 0,
+        syncedToday: 0,
       };
     }
   }
@@ -143,6 +169,107 @@ export class StocksMarketService {
    */
   async forceSyncNow(): Promise<void> {
     await this.syncMarketData();
+  }
+
+  /**
+   * Refresh S&P 500 list from FMP API and store in database
+   * This should be called periodically (e.g., monthly) to keep the list up-to-date
+   * Returns the number of stocks stored
+   * Optionally triggers a sync after refreshing
+   */
+  async refreshSP500ListFromFMP(
+    triggerSync: boolean = false,
+  ): Promise<{
+    success: boolean;
+    stored: number;
+    updated: number;
+    deactivated: number;
+    total: number;
+    message: string;
+    syncTriggered?: boolean;
+  }> {
+    try {
+      this.logger.log('Refreshing S&P 500 list from FMP API...');
+
+      // Fetch S&P 500 constituents from FMP
+      let constituents = await this.fmpService.getSP500Constituents();
+
+      // If FMP fails (rate limit, etc.), fallback to hardcoded list
+      if (constituents.length === 0) {
+        this.logger.warn(
+          'No S&P 500 constituents fetched from FMP (likely rate limited). Using hardcoded SP500_SYMBOLS as fallback.',
+        );
+        // Use hardcoded list as fallback
+        constituents = SP500_SYMBOLS.map((stock) => ({
+          symbol: stock.symbol,
+          name: stock.name,
+          sector: stock.sector,
+        }));
+        this.logger.log(
+          `Using ${constituents.length} stocks from hardcoded SP500_SYMBOLS list`,
+        );
+      }
+
+      // Store in database (automatically handles removed stocks)
+      const { stored, updated, deactivated } =
+        await this.dbService.storeSP500Symbols(constituents);
+
+      let updateMessage = `S&P 500 list refreshed: ${stored} new, ${updated} updated, ${constituents.length} total`;
+      if (deactivated > 0) {
+        updateMessage += `, ${deactivated} removed stocks deactivated`;
+      }
+      this.logger.log(updateMessage);
+
+      // Invalidate cache to ensure fresh data
+      this.cacheManager.invalidatePattern('^market:');
+
+      let syncTriggered = false;
+      // Optionally trigger sync to fetch market data for all stocks
+      if (triggerSync) {
+        this.logger.log('Triggering market data sync after S&P 500 refresh...');
+        try {
+          await this.syncMarketData();
+          syncTriggered = true;
+        } catch (syncError: any) {
+          this.logger.warn('Sync after refresh failed', {
+            error: syncError?.message,
+          });
+        }
+      }
+
+      let message = `Successfully refreshed S&P 500 list: ${stored} new stocks, ${updated} updated`;
+      if (deactivated > 0) {
+        message += `, ${deactivated} removed stocks deactivated`;
+      }
+      message += `. ${
+        triggerSync && syncTriggered
+          ? 'Market data sync triggered.'
+          : 'Call /api/stocks-market/force-sync to fetch market data for all stocks.'
+      }`;
+
+      return {
+        success: true,
+        stored,
+        updated,
+        deactivated,
+        total: constituents.length,
+        message,
+        syncTriggered,
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to refresh S&P 500 list from FMP', {
+        error: error?.message,
+      });
+
+      return {
+        success: false,
+        stored: 0,
+        updated: 0,
+        deactivated: 0,
+        total: 0,
+        message: `Failed to refresh S&P 500 list: ${error?.message || 'Unknown error'}`,
+      };
+    }
   }
 
   /**
@@ -168,6 +295,21 @@ export class StocksMarketService {
         error: error?.message,
       });
       throw error;
+    }
+  }
+
+  /**
+   * Get count of active stock symbols (for sync status)
+   */
+  async getActiveStockSymbolsCount(): Promise<number> {
+    try {
+      const symbols = await this.dbService.getActiveStockSymbols();
+      return symbols.length;
+    } catch (error: any) {
+      this.logger.error('Failed to get active stock symbols count', {
+        error: error?.message,
+      });
+      return 0;
     }
   }
 

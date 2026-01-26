@@ -215,16 +215,36 @@ export class CacheManagerService {
 
   /**
    * Generate cache key for market data
+   * Includes all query parameters to ensure proper cache separation
    */
   static generateMarketDataKey(
     symbols: string[],
     limit?: number,
+    search?: string,
+    sector?: string,
   ): string {
-    if (symbols.length === 0) {
-      return `market:all:${limit || 'all'}`;
+    const parts: string[] = ['market'];
+    
+    if (symbols.length > 0) {
+      const sortedSymbols = symbols.sort().join(',');
+      parts.push(`symbols:${sortedSymbols}`);
+    } else {
+      parts.push('all');
     }
-    const sortedSymbols = symbols.sort().join(',');
-    return `market:${sortedSymbols}:${limit || 'all'}`;
+    
+    if (limit) {
+      parts.push(`limit:${limit}`);
+    }
+    
+    if (search) {
+      parts.push(`search:${search.toLowerCase().trim()}`);
+    }
+    
+    if (sector) {
+      parts.push(`sector:${sector.toLowerCase().trim()}`);
+    }
+    
+    return parts.join(':');
   }
 
   /**
