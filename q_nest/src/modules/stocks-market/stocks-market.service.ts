@@ -3,6 +3,7 @@ import { MarketAggregatorService } from './services/market-aggregator.service';
 import { MarketStocksDbService } from './services/market-stocks-db.service';
 import { CacheManagerService } from './services/cache-manager.service';
 import { AlpacaMarketService } from './services/alpaca-market.service';
+import { FmpService } from './services/fmp.service';
 import { MarketDataResponse, MarketStock } from './types/market.types';
 import SP500_SYMBOLS from './data/sp500-symbols';
 import SP500_TOP50 from './data/sp500-top50';
@@ -23,6 +24,7 @@ export class StocksMarketService {
     private dbService: MarketStocksDbService,
     private cacheManager: CacheManagerService,
     private alpacaService: AlpacaMarketService,
+    private fmpService: FmpService,
   ) {}
 
   /**
@@ -34,10 +36,12 @@ export class StocksMarketService {
     const { limit, symbols, search, sector } = options;
 
     try {
-      // Generate cache key
+      // Generate cache key (includes all query parameters)
       const cacheKey = CacheManagerService.generateMarketDataKey(
         symbols || [],
         limit,
+        search,
+        sector,
       );
 
       // Check cache first
@@ -87,18 +91,38 @@ export class StocksMarketService {
 
   /**
    * Sync market data from external APIs and store in database
-   * This is called by the cron job
+   * This is called by the cron job once per day
+   * Syncs all available stocks in one batch to minimize FMP API calls
+   * Since we only call once per day, we can sync all stocks at once
    */
   async syncMarketData(): Promise<{
     success: boolean;
     synced: number;
     warnings: string[];
+    totalStocks: number;
+    syncedToday: number;
   }> {
     try {
       this.logger.log('Starting market data sync...');
 
-      // Use top 50 for faster sync (you can change to SP500_SYMBOLS for full list)
-      const symbolsToSync = SP500_TOP50;
+      // Get total count of active stocks
+      const totalStocks = await this.dbService.getCount();
+      
+      // Since we're syncing once per day, sync all available stocks at once
+      // This minimizes FMP API calls while keeping data fresh
+      let symbolsToSync = await this.dbService.getActiveStockSymbols();
+
+      // If database is empty, fallback to hardcoded list
+      if (symbolsToSync.length === 0) {
+        this.logger.warn(
+          'No stocks found in database, using hardcoded SP500_TOP50 as fallback',
+        );
+        symbolsToSync = SP500_TOP50;
+      } else {
+        this.logger.log(
+          `Syncing all ${symbolsToSync.length} stocks in one batch (daily sync).`,
+        );
+      }
 
       // Fetch aggregated data from APIs
       const { stocks, warnings } =
@@ -115,13 +139,15 @@ export class StocksMarketService {
       this.cacheManager.invalidatePattern('^market:');
 
       this.logger.log(
-        `Market data sync completed - ${stocks.length}/${symbolsToSync.length} stocks synced`,
+        `Market data sync completed - ${stocks.length}/${symbolsToSync.length} stocks synced today (${totalStocks} total in database)`,
       );
 
       return {
         success: true,
         synced: stocks.length,
         warnings,
+        totalStocks,
+        syncedToday: stocks.length,
       };
     } catch (error: any) {
       this.logger.error('Market data sync failed', {
@@ -132,6 +158,8 @@ export class StocksMarketService {
         success: false,
         synced: 0,
         warnings: [error?.message || 'Unknown error'],
+        totalStocks: 0,
+        syncedToday: 0,
       };
     }
   }
@@ -141,6 +169,107 @@ export class StocksMarketService {
    */
   async forceSyncNow(): Promise<void> {
     await this.syncMarketData();
+  }
+
+  /**
+   * Refresh S&P 500 list from FMP API and store in database
+   * This should be called periodically (e.g., monthly) to keep the list up-to-date
+   * Returns the number of stocks stored
+   * Optionally triggers a sync after refreshing
+   */
+  async refreshSP500ListFromFMP(
+    triggerSync: boolean = false,
+  ): Promise<{
+    success: boolean;
+    stored: number;
+    updated: number;
+    deactivated: number;
+    total: number;
+    message: string;
+    syncTriggered?: boolean;
+  }> {
+    try {
+      this.logger.log('Refreshing S&P 500 list from FMP API...');
+
+      // Fetch S&P 500 constituents from FMP
+      let constituents = await this.fmpService.getSP500Constituents();
+
+      // If FMP fails (rate limit, etc.), fallback to hardcoded list
+      if (constituents.length === 0) {
+        this.logger.warn(
+          'No S&P 500 constituents fetched from FMP (likely rate limited). Using hardcoded SP500_SYMBOLS as fallback.',
+        );
+        // Use hardcoded list as fallback
+        constituents = SP500_SYMBOLS.map((stock) => ({
+          symbol: stock.symbol,
+          name: stock.name,
+          sector: stock.sector,
+        }));
+        this.logger.log(
+          `Using ${constituents.length} stocks from hardcoded SP500_SYMBOLS list`,
+        );
+      }
+
+      // Store in database (automatically handles removed stocks)
+      const { stored, updated, deactivated } =
+        await this.dbService.storeSP500Symbols(constituents);
+
+      let updateMessage = `S&P 500 list refreshed: ${stored} new, ${updated} updated, ${constituents.length} total`;
+      if (deactivated > 0) {
+        updateMessage += `, ${deactivated} removed stocks deactivated`;
+      }
+      this.logger.log(updateMessage);
+
+      // Invalidate cache to ensure fresh data
+      this.cacheManager.invalidatePattern('^market:');
+
+      let syncTriggered = false;
+      // Optionally trigger sync to fetch market data for all stocks
+      if (triggerSync) {
+        this.logger.log('Triggering market data sync after S&P 500 refresh...');
+        try {
+          await this.syncMarketData();
+          syncTriggered = true;
+        } catch (syncError: any) {
+          this.logger.warn('Sync after refresh failed', {
+            error: syncError?.message,
+          });
+        }
+      }
+
+      let message = `Successfully refreshed S&P 500 list: ${stored} new stocks, ${updated} updated`;
+      if (deactivated > 0) {
+        message += `, ${deactivated} removed stocks deactivated`;
+      }
+      message += `. ${
+        triggerSync && syncTriggered
+          ? 'Market data sync triggered.'
+          : 'Call /api/stocks-market/force-sync to fetch market data for all stocks.'
+      }`;
+
+      return {
+        success: true,
+        stored,
+        updated,
+        deactivated,
+        total: constituents.length,
+        message,
+        syncTriggered,
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to refresh S&P 500 list from FMP', {
+        error: error?.message,
+      });
+
+      return {
+        success: false,
+        stored: 0,
+        updated: 0,
+        deactivated: 0,
+        total: 0,
+        message: `Failed to refresh S&P 500 list: ${error?.message || 'Unknown error'}`,
+      };
+    }
   }
 
   /**
@@ -166,6 +295,21 @@ export class StocksMarketService {
         error: error?.message,
       });
       throw error;
+    }
+  }
+
+  /**
+   * Get count of active stock symbols (for sync status)
+   */
+  async getActiveStockSymbolsCount(): Promise<number> {
+    try {
+      const symbols = await this.dbService.getActiveStockSymbols();
+      return symbols.length;
+    } catch (error: any) {
+      this.logger.error('Failed to get active stock symbols count', {
+        error: error?.message,
+      });
+      return 0;
     }
   }
 
@@ -231,7 +375,7 @@ export class StocksMarketService {
 
   /**
    * Get individual stock detail
-   * Uses Alpaca free tier snapshot API
+   * Uses Alpaca free tier snapshot API + FMP for market cap
    */
   async getStockDetail(symbol: string): Promise<{
     symbol: string;
@@ -258,29 +402,64 @@ export class StocksMarketService {
         return cached;
       }
 
-      // Fetch from Alpaca (free tier)
-      const quotesMap = await this.alpacaService.getBatchQuotes([
-        symbol.toUpperCase(),
+      // Fetch from Alpaca (free tier) and FMP (for market cap) in parallel
+      // Use Promise.allSettled to ensure Alpaca data is always fetched even if FMP fails
+      const [alpacaResult, fmpResult, dbResult] = await Promise.allSettled([
+        this.alpacaService.getBatchQuotes([symbol.toUpperCase()]),
+        this.fmpService.getBatchProfiles([symbol.toUpperCase()]).catch((err) => {
+          this.logger.warn(`FMP fetch failed for ${symbol}: ${err?.message}`);
+          return new Map();
+        }),
+        this.dbService.getBySymbols([symbol.toUpperCase()]).catch((err) => {
+          this.logger.warn(`Database fetch failed for ${symbol}: ${err?.message}`);
+          return [];
+        }),
       ]);
+
+      // Extract results
+      const quotesMap = alpacaResult.status === 'fulfilled' ? alpacaResult.value : new Map();
+      const fmpData = fmpResult.status === 'fulfilled' ? fmpResult.value : new Map();
+      const dbStock = dbResult.status === 'fulfilled' ? dbResult.value : [];
 
       const stock = quotesMap.get(symbol.toUpperCase());
       if (!stock) {
         throw new Error(`Stock ${symbol} not found`);
       }
 
-      // Get stock metadata from database
-      const dbStock = await this.dbService.getBySymbols([symbol.toUpperCase()]);
+      const fmpQuote = fmpData.get(symbol.toUpperCase());
       const metadata = dbStock[0] || null;
+
+      // Log FMP data for debugging
+      if (fmpQuote) {
+        this.logger.log(`FMP quote found for ${symbol}: marketCap=${fmpQuote.marketCap}, name=${fmpQuote.name}`);
+      } else {
+        this.logger.warn(`No FMP quote found for ${symbol} (fmpData.size=${fmpData.size})`);
+      }
+
+      // Get market cap: prefer FMP (real-time), fallback to database
+      const marketCap = fmpQuote?.marketCap || metadata?.marketCap || null;
+      
+      if (marketCap) {
+        this.logger.log(`Market cap for ${symbol}: ${marketCap} (source: ${fmpQuote ? 'FMP' : 'database'})`);
+      } else {
+        this.logger.warn(`Market cap is null for ${symbol} (fmpQuote=${!!fmpQuote}, metadata=${!!metadata})`);
+      }
+
+      // Get name: prefer FMP, then database, fallback to symbol
+      const name = fmpQuote?.name || metadata?.name || stock.symbol;
+
+      // Get sector from database (FMP profile might have it too)
+      const sector = metadata?.sector || 'Unknown';
 
       const detail = {
         symbol: stock.symbol,
-        name: metadata?.name || stock.symbol,
+        name,
         price: stock.price,
         change24h: stock.change24h,
         changePercent24h: stock.changePercent24h,
         volume24h: stock.volume24h,
-        marketCap: metadata?.marketCap || null,
-        sector: metadata?.sector || 'Unknown',
+        marketCap,
+        sector,
         high24h: stock.dayHigh || 0,
         low24h: stock.dayLow || 0,
         prevClose: stock.prevClose || 0,
@@ -288,8 +467,16 @@ export class StocksMarketService {
         timestamp: new Date().toISOString(),
       };
 
-      // Cache for 30s
-      this.cacheManager.setPrice(cacheKey, detail);
+      // Cache for 30s (only if we have valid data)
+      // If marketCap is null and FMP failed, use shorter cache to retry sooner
+      if (marketCap === null && fmpData.size === 0) {
+        // FMP failed - cache for only 5 seconds to allow retry
+        this.cacheManager.set(cacheKey, detail, 5);
+        this.logger.warn(`Caching ${symbol} with null marketCap (FMP failed) - short cache TTL`);
+      } else {
+        // Normal cache
+        this.cacheManager.setPrice(cacheKey, detail);
+      }
 
       return detail;
     } catch (error: any) {

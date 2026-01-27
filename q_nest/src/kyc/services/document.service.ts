@@ -32,11 +32,12 @@ export class DocumentService {
     });
 
     // Perform OCR asynchronously (could be done in background job)
-    this.performOCR(document.document_id, filePath, file.buffer, file.originalname).catch(
-      (error) => {
-        this.logger.error('OCR processing failed', error);
-      },
-    );
+    // PAUSED: OCR temporarily disabled
+    // this.performOCR(document.document_id, filePath, file.buffer, file.originalname).catch(
+    //   (error) => {
+    //     this.logger.error('OCR processing failed', error);
+    //   },
+    // );
 
     // Check document authenticity
     this.checkAuthenticity(document.document_id, filePath, file.buffer, file.originalname).catch(

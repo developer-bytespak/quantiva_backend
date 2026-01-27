@@ -36,9 +36,9 @@ ML_CONFIG: Dict[str, Any] = {
     "deepface_model": os.getenv("DEEPFACE_MODEL", "VGG-Face"),  # VGG-Face, Facenet, OpenFace, DeepFace, ArcFace
     "deepface_backend": os.getenv("DEEPFACE_BACKEND", "opencv"),  # opencv, ssd, dlib, mtcnn, retinaface
     
-    # OCR configuration
-    "ocr_languages": ["en"],  # EasyOCR languages
-    "ocr_gpu": os.getenv("OCR_GPU", "false").lower() == "true",
+    # OCR configuration (disabled for memory optimization)
+    # "ocr_languages": ["en"],  # EasyOCR languages (disabled)
+    # "ocr_gpu": os.getenv("OCR_GPU", "false").lower() == "true",
     
     # Face matching thresholds
     "face_match_threshold": float(os.getenv("FACE_MATCH_THRESHOLD", "0.6")),

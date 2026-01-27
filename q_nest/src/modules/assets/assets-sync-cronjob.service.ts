@@ -45,6 +45,21 @@ export class AssetsSyncCronjobService implements OnModuleInit {
       const coins = await this.marketService.getTop500Coins();
 
       this.logger.log(`Fetched ${coins.length} coins from CoinGecko`);
+      
+      // Log first coin to see structure
+      if (coins.length > 0) {
+        const firstCoin = coins[0];
+        this.logger.debug(`First coin structure:`, {
+          id: firstCoin.id,
+          symbol: firstCoin.symbol,
+          name: firstCoin.name,
+          current_price: firstCoin.current_price,
+          market_cap_rank: firstCoin.market_cap_rank,
+          price_change_percentage_24h: firstCoin.price_change_percentage_24h,
+          price_change_24h: firstCoin.price_change_24h,
+        });
+      }
+      
       const rankTimestamp = new Date();
 
       for (const coin of coins) {
@@ -196,6 +211,14 @@ export class AssetsSyncCronjobService implements OnModuleInit {
     rankTimestamp: Date,
   ): Promise<void> {
     try {
+      // Log the values being saved
+      this.logger.debug(`Saving market ranking for ${coin.symbol}:`, {
+        price_change_percentage_24h: coin.price_change_percentage_24h,
+        price_change_24h: coin.price_change_24h,
+        current_price: coin.current_price,
+        market_cap_rank: coin.market_cap_rank,
+      });
+
       await this.prisma.market_rankings.upsert({
         where: {
           rank_timestamp_asset_id: {
@@ -210,12 +233,16 @@ export class AssetsSyncCronjobService implements OnModuleInit {
           market_cap: coin.market_cap,
           price_usd: coin.current_price,
           volume_24h: coin.total_volume,
+          change_percent_24h: coin.price_change_percentage_24h || 0,
+          change_24h: coin.price_change_24h || 0,
         },
         update: {
           rank: coin.market_cap_rank,
           market_cap: coin.market_cap,
           price_usd: coin.current_price,
           volume_24h: coin.total_volume,
+          change_percent_24h: coin.price_change_percentage_24h || 0,
+          change_24h: coin.price_change_24h || 0,
         },
       });
     } catch (error: any) {

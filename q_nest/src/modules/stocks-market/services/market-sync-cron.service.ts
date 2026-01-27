@@ -18,22 +18,80 @@ export class MarketSyncCronService implements OnModuleInit {
 
   /**
    * Run initial sync when module initializes
+   * Automatically fetches S&P 500 list from FMP if database is empty or has too few stocks
    */
   async onModuleInit() {
     this.logger.log('Market Sync Cron Service initialized');
 
-    // Run initial sync after 10 seconds
+    // Wait 10 seconds for services to be ready, then check and initialize
     setTimeout(async () => {
-      this.logger.log('Running initial market data sync...');
-      await this.syncMarketData();
+      try {
+        const stockCount = await this.dbService.getCount();
+        const activeSymbolsCount =
+          await this.stocksMarketService.getActiveStockSymbolsCount();
+
+        // If we have very few stocks (< 100), automatically fetch from FMP
+        if (activeSymbolsCount < 100) {
+          this.logger.log(
+            `Found only ${activeSymbolsCount} stocks in database. Automatically fetching S&P 500 list from FMP...`,
+          );
+
+          try {
+            // Fetch S&P 500 list from FMP and trigger sync automatically
+            const refreshResult =
+              await this.stocksMarketService.refreshSP500ListFromFMP(true);
+
+            if (refreshResult.success) {
+              let logMessage = `✓ S&P 500 list fetched: ${refreshResult.stored} new, ${refreshResult.updated} updated, ${refreshResult.total} total`;
+              if (refreshResult.deactivated > 0) {
+                logMessage += `, ${refreshResult.deactivated} removed stocks deactivated`;
+              }
+              this.logger.log(logMessage);
+              if (refreshResult.syncTriggered) {
+                this.logger.log(
+                  '✓ Market data sync completed for all S&P 500 stocks',
+                );
+              }
+            } else {
+              this.logger.warn(
+                `⚠ Failed to fetch S&P 500 list: ${refreshResult.message}. Using existing stocks.`,
+              );
+            }
+          } catch (refreshError: any) {
+            this.logger.error(
+              'Failed to automatically fetch S&P 500 list on startup',
+              {
+                error: refreshError?.message,
+              },
+            );
+            // Continue with existing stocks - don't fail startup
+          }
+        } else {
+          this.logger.log(
+            `Found ${activeSymbolsCount} stocks in database. Sync will use these stocks.`,
+          );
+        }
+
+        // Run initial sync after refresh (or if refresh wasn't needed)
+        this.logger.log('Running initial market data sync...');
+        await this.syncMarketData();
+      } catch (error: any) {
+        this.logger.error('Error during module initialization', {
+          error: error?.message,
+          stack: error?.stack,
+        });
+        // Don't throw - allow service to continue running
+      }
     }, 10000);
   }
 
   /**
-   * Cron job: Sync market data every 20 minutes
-   * Runs every 20 minutes at 0, 20, and 40 minutes past each hour
+   * Cron job: Sync market data once per day
+   * Runs daily at 2:00 AM UTC (after market close in US)
+   * Note: Syncs all available stocks in one batch to minimize FMP API calls
+   * This reduces FMP API usage from every 20 minutes to once per day
    */
-  @Cron('*/20 * * * *', {
+  @Cron('0 2 * * *', {
     name: 'market-data-sync',
     timeZone: 'UTC',
   })
@@ -66,6 +124,40 @@ export class MarketSyncCronService implements OnModuleInit {
   }
 
   /**
+   * Cron job: Refresh S&P 500 list from FMP API monthly
+   * Runs on the 1st day of each month at 2 AM UTC
+   * This ensures the S&P 500 list stays up-to-date with any changes
+   */
+  @Cron('0 2 1 * *', {
+    name: 'sp500-list-refresh',
+    timeZone: 'UTC',
+  })
+  async handleSP500ListRefresh() {
+    try {
+      this.logger.log('===== Starting monthly S&P 500 list refresh =====');
+      
+      const result = await this.stocksMarketService.refreshSP500ListFromFMP();
+      
+      if (result.success) {
+        this.logger.log(
+          `✓ S&P 500 list refreshed: ${result.stored} new, ${result.updated} updated, ${result.total} total`,
+        );
+      } else {
+        this.logger.warn(
+          `⚠ S&P 500 list refresh failed: ${result.message}`,
+        );
+      }
+      
+      this.logger.log('===== Monthly S&P 500 list refresh completed =====');
+    } catch (error: any) {
+      this.logger.error('Monthly S&P 500 list refresh failed', {
+        error: error?.message,
+        stack: error?.stack,
+      });
+    }
+  }
+
+  /**
    * Execute market data sync with locking to prevent overlapping runs
    */
   private async syncMarketData(): Promise<void> {
@@ -90,9 +182,11 @@ export class MarketSyncCronService implements OnModuleInit {
 
       if (result.success) {
         this.lastSyncStatus = 'success';
-        this.logger.log(
-          `✓ Market sync completed successfully in ${duration}ms - ${result.synced} stocks synced`,
-        );
+        const logMessage = `✓ Market sync completed successfully in ${duration}ms - ${result.syncedToday} stocks synced`;
+        const totalMessage = result.totalStocks > 0 
+          ? ` (${result.totalStocks} total stocks in database, all synced in one batch)`
+          : '';
+        this.logger.log(logMessage + totalMessage);
 
         if (result.warnings.length > 0) {
           this.logger.warn('Sync completed with warnings:', result.warnings);
@@ -127,19 +221,25 @@ export class MarketSyncCronService implements OnModuleInit {
     syncCount: number;
     nextRunIn?: string;
   } {
-    // Calculate next run time (20 minutes from last sync)
+    // Calculate next run time (24 hours from last sync, or next 2 AM UTC)
     let nextRunIn: string | undefined;
     if (this.lastSyncTime) {
-      const nextRun = new Date(
-        this.lastSyncTime.getTime() + 20 * 60 * 1000,
-      );
+      // Calculate next 2 AM UTC
       const now = new Date();
+      const nextRun = new Date(now);
+      nextRun.setUTCHours(2, 0, 0, 0);
+      
+      // If it's already past 2 AM today, schedule for tomorrow
+      if (nextRun <= now) {
+        nextRun.setUTCDate(nextRun.getUTCDate() + 1);
+      }
+      
       const diffMs = nextRun.getTime() - now.getTime();
 
       if (diffMs > 0) {
-        const minutes = Math.floor(diffMs / 60000);
-        const seconds = Math.floor((diffMs % 60000) / 1000);
-        nextRunIn = `${minutes}m ${seconds}s`;
+        const hours = Math.floor(diffMs / (60 * 60 * 1000));
+        const minutes = Math.floor((diffMs % (60 * 60 * 1000)) / 60000);
+        nextRunIn = `${hours}h ${minutes}m`;
       } else {
         nextRunIn = 'Running soon...';
       }

@@ -14,6 +14,7 @@ export class StockSignalsCronjobService {
   private readonly BATCH_SIZE = 3; // Process 3 stocks at a time
   private readonly LLM_LIMIT = 10; // Generate LLM for top 10 signals per strategy
   private isRunning = false; // Prevent concurrent executions
+  private isMarketDataSyncing = false; // Prevent concurrent market data sync
 
   constructor(
     private prisma: PrismaService,
@@ -24,6 +25,54 @@ export class StockSignalsCronjobService {
     @Inject(forwardRef(() => ExchangesService))
     private exchangesService: ExchangesService,
   ) {}
+
+  /**
+   * Scheduled job that runs every 5 minutes
+   * Syncs stock market data from Alpaca API and stores in database
+   * This ensures frontend reads fresh data from DB without live API calls
+   */
+  @Cron('*/5 * * * *') // Every 5 minutes
+  async syncStockMarketData(): Promise<void> {
+    if (this.isMarketDataSyncing) {
+      this.logger.warn('Previous market data sync still running, skipping this execution');
+      return;
+    }
+
+    this.isMarketDataSyncing = true;
+    const startTime = Date.now();
+    this.logger.log('Starting stock market data sync cronjob');
+
+    try {
+      const result = await this.stockTrendingService.syncMarketDataFromAlpaca();
+      const duration = Date.now() - startTime;
+      
+      if (result.success) {
+        this.logger.log(
+          `Stock market data sync completed: ${result.updated} stocks updated in ${duration}ms`,
+        );
+      } else {
+        this.logger.warn(
+          `Stock market data sync completed with issues: ${result.errors.length} errors in ${duration}ms`,
+        );
+      }
+    } catch (error: any) {
+      this.logger.error(`Fatal error in stock market data sync: ${error.message}`, error.stack);
+    } finally {
+      this.isMarketDataSyncing = false;
+    }
+  }
+
+  /**
+   * Manual trigger for market data sync (for testing/debugging)
+   */
+  async triggerMarketDataSync(): Promise<{
+    success: boolean;
+    updated: number;
+    errors: string[];
+  }> {
+    this.logger.log('Manual stock market data sync triggered');
+    return this.stockTrendingService.syncMarketDataFromAlpaca();
+  }
 
   /**
    * Scheduled job that runs every 10 minutes
@@ -58,14 +107,16 @@ export class StockSignalsCronjobService {
 
       this.logger.log(`Found ${stockStrategies.length} stock-specific strategies`);
 
-      // Step 2: Fetch trending stocks from database
-      const trendingStocks = await this.stockTrendingService.getTopTrendingStocks(50);
-      if (trendingStocks.length === 0) {
-        this.logger.warn('No trending stocks found, skipping signal generation');
+      // Step 2: Fetch stocks to process (use rotation strategy to process all stocks over time)
+      // Process 50 stocks per run (every 10 minutes) to avoid overwhelming the system
+      // This ensures all ~500 stocks get processed over ~100 minutes (10 runs)
+      const stocksToProcess = await this.getStocksToProcess(50);
+      if (stocksToProcess.length === 0) {
+        this.logger.warn('No stocks found to process, skipping signal generation');
         return;
       }
 
-      this.logger.log(`Processing ${trendingStocks.length} trending stocks`);
+      this.logger.log(`Processing ${stocksToProcess.length} stocks (rotating through all active stocks)`);
 
       // Step 3: Get Alpaca connection for OHLCV data (or use provided override)
       let connectionInfo = null;
@@ -98,10 +149,10 @@ export class StockSignalsCronjobService {
       let errorCount = 0;
 
       // Process stocks in batches
-      for (let i = 0; i < trendingStocks.length; i += this.BATCH_SIZE) {
-        const batch = trendingStocks.slice(i, i + this.BATCH_SIZE);
+      for (let i = 0; i < stocksToProcess.length; i += this.BATCH_SIZE) {
+        const batch = stocksToProcess.slice(i, i + this.BATCH_SIZE);
         const batchNum = Math.floor(i / this.BATCH_SIZE) + 1;
-        const totalBatches = Math.ceil(trendingStocks.length / this.BATCH_SIZE);
+        const totalBatches = Math.ceil(stocksToProcess.length / this.BATCH_SIZE);
 
         this.logger.log(`Processing batch ${batchNum}/${totalBatches} (${batch.length} stocks)`);
 
@@ -120,7 +171,7 @@ export class StockSignalsCronjobService {
         );
 
         // Small delay between batches to avoid overwhelming APIs
-        if (i + this.BATCH_SIZE < trendingStocks.length) {
+        if (i + this.BATCH_SIZE < stocksToProcess.length) {
           await this.sleep(500);
         }
       }
@@ -203,6 +254,24 @@ export class StockSignalsCronjobService {
     assetId: string,
     connectionInfo: { connectionId: string | null; exchange: string } | null,
   ): Promise<void> {
+    // Check if a signal already exists for this strategy+asset within the last 10 minutes
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    const existingSignal = await this.prisma.strategy_signals.findFirst({
+      where: {
+        strategy_id: strategyId,
+        asset_id: assetId,
+        user_id: null,
+        timestamp: { gte: tenMinutesAgo },
+      },
+    });
+
+    if (existingSignal) {
+      this.logger.debug(
+        `Skipping signal generation for strategy ${strategyId} on asset ${assetId} - recent signal exists`,
+      );
+      return;
+    }
+
     // Get strategy and asset details
     const strategy = await this.prisma.strategies.findUnique({
       where: { strategy_id: strategyId },
@@ -242,6 +311,14 @@ export class StockSignalsCronjobService {
       take_profit_value: strategy.take_profit_value,
     };
 
+    let signalData: {
+      action: string;
+      confidence: number;
+      final_score: number;
+      engine_scores: any;
+      position_sizing?: any;
+    };
+
     try {
       // Call Python API to generate signal
       const assetSymbol = asset.symbol || assetId;
@@ -257,52 +334,133 @@ export class StockSignalsCronjobService {
         portfolio_value: 10000, // Default portfolio value for system signals
       });
 
-      // Store signal in database (without LLM for now - we'll generate LLM in batch later)
-      const signal = await this.prisma.strategy_signals.create({
-        data: {
-          strategy_id: strategyId,
-          user_id: null, // System-generated signal
-          asset_id: assetId,
-          timestamp: new Date(),
-          final_score: pythonSignal.final_score,
-          action: pythonSignal.action,
-          confidence: pythonSignal.confidence,
-          sentiment_score: pythonSignal.engine_scores?.sentiment?.score || 0,
-          trend_score: pythonSignal.engine_scores?.trend?.score || 0,
-          fundamental_score: pythonSignal.engine_scores?.fundamental?.score || 0,
-          liquidity_score: pythonSignal.engine_scores?.liquidity?.score || 0,
-          event_risk_score: pythonSignal.engine_scores?.event_risk?.score || 0,
-          engine_metadata: pythonSignal.engine_scores || {},
-        },
-      });
-
-      // Store signal details if position sizing is available
-      if (pythonSignal.position_sizing) {
-        const stopLossValue = strategy.stop_loss_value ? Number(strategy.stop_loss_value) : null;
-        const takeProfitValue = strategy.take_profit_value ? Number(strategy.take_profit_value) : null;
-
-        await this.prisma.signal_details.create({
-          data: {
-            signal_id: signal.signal_id,
-            entry_price: marketData.price,
-            position_size: pythonSignal.position_sizing.position_size,
-            position_value: pythonSignal.position_sizing.position_size * marketData.price,
-            stop_loss: stopLossValue ? marketData.price * (1 - stopLossValue / 100) : null,
-            take_profit_1: takeProfitValue ? marketData.price * (1 + takeProfitValue / 100) : null,
-            metadata: pythonSignal.metadata || {},
-          },
-        });
-      }
+      signalData = {
+        action: pythonSignal.action,
+        confidence: pythonSignal.confidence,
+        final_score: pythonSignal.final_score,
+        engine_scores: pythonSignal.engine_scores || {},
+        position_sizing: pythonSignal.position_sizing,
+      };
 
       this.logger.debug(
-        `Generated signal for strategy ${strategy.name} on stock ${asset.symbol}: ${pythonSignal.action}`,
+        `Python API signal generated for ${asset.symbol}: ${pythonSignal.action}`,
       );
     } catch (error: any) {
-      this.logger.error(
-        `Error executing strategy ${strategyId} on stock ${assetId}: ${error.message}`,
+      // Fallback: Generate basic signal from price data when Python API fails
+      this.logger.warn(
+        `Python API failed for ${asset.symbol}, using fallback signal generation: ${error.message}`,
       );
-      throw error;
+
+      signalData = this.generateFallbackSignal(marketData);
+      this.logger.debug(
+        `Fallback signal generated for ${asset.symbol}: ${signalData.action}`,
+      );
     }
+
+    // Store signal in database (without LLM for now - we'll generate LLM in batch later)
+    const signal = await this.prisma.strategy_signals.create({
+      data: {
+        strategy_id: strategyId,
+        user_id: null, // System-generated signal
+        asset_id: assetId,
+        timestamp: new Date(),
+        final_score: signalData.final_score,
+        action: signalData.action,
+        confidence: signalData.confidence,
+        sentiment_score: signalData.engine_scores?.sentiment?.score || 0,
+        trend_score: signalData.engine_scores?.trend?.score || 0,
+        fundamental_score: signalData.engine_scores?.fundamental?.score || 0,
+        liquidity_score: signalData.engine_scores?.liquidity?.score || 0,
+        event_risk_score: signalData.engine_scores?.event_risk?.score || 0,
+        engine_metadata: signalData.engine_scores || {},
+      },
+    });
+
+    // Store signal details
+    const stopLossValue = strategy.stop_loss_value ? Number(strategy.stop_loss_value) : 5;
+    const takeProfitValue = strategy.take_profit_value ? Number(strategy.take_profit_value) : 10;
+
+    await this.prisma.signal_details.create({
+      data: {
+        signal_id: signal.signal_id,
+        entry_price: marketData.price,
+        position_size: signalData.position_sizing?.position_size || 1,
+        position_value: signalData.position_sizing?.position_size 
+          ? signalData.position_sizing.position_size * marketData.price 
+          : marketData.price,
+        stop_loss: marketData.price * (1 - stopLossValue / 100),
+        take_profit_1: marketData.price * (1 + takeProfitValue / 100),
+        metadata: {},
+      },
+    });
+
+    this.logger.debug(
+      `Stored signal for strategy ${strategy.name} on stock ${asset.symbol}: ${signalData.action}`,
+    );
+  }
+
+  /**
+   * Generate fallback signal based on price data when Python API fails
+   * Uses simple price change logic to determine action
+   */
+  private generateFallbackSignal(marketData: any): {
+    action: string;
+    confidence: number;
+    final_score: number;
+    engine_scores: any;
+  } {
+    const priceChange = Number(marketData.price_change_24h || 0);
+    const volume = Number(marketData.volume || 0);
+    
+    // Simple logic based on 24h price change
+    let action: string;
+    let confidence: number;
+    let finalScore: number;
+
+    if (priceChange > 3) {
+      // Strong positive momentum
+      action = 'BUY';
+      confidence = Math.min(0.7 + (priceChange / 20), 0.85);
+      finalScore = 0.6 + (priceChange / 30);
+    } else if (priceChange > 1) {
+      // Moderate positive momentum
+      action = 'BUY';
+      confidence = 0.55 + (priceChange / 15);
+      finalScore = 0.4 + (priceChange / 20);
+    } else if (priceChange < -3) {
+      // Strong negative momentum - could be opportunity or warning
+      action = 'HOLD';
+      confidence = 0.5;
+      finalScore = 0.1;
+    } else if (priceChange < -1) {
+      // Moderate negative momentum
+      action = 'HOLD';
+      confidence = 0.45;
+      finalScore = 0.2;
+    } else {
+      // Neutral / low volatility
+      action = 'HOLD';
+      confidence = 0.5;
+      finalScore = 0.3;
+    }
+
+    // Volume boost - higher volume = higher confidence
+    if (volume > 1000000) {
+      confidence = Math.min(confidence + 0.1, 0.9);
+    }
+
+    return {
+      action,
+      confidence: Number(confidence.toFixed(2)),
+      final_score: Number(Math.max(0, Math.min(1, finalScore)).toFixed(2)),
+      engine_scores: {
+        sentiment: { score: 0 },
+        trend: { score: priceChange > 0 ? 0.5 : -0.5 },
+        fundamental: { score: 0 },
+        liquidity: { score: volume > 500000 ? 0.5 : 0.2 },
+        event_risk: { score: 0 },
+      },
+    };
   }
 
   /**
@@ -471,18 +629,164 @@ export class StockSignalsCronjobService {
 
   /**
    * Manual trigger for testing/debugging
+   * Returns immediately and runs signal generation in background to avoid HTTP timeout
    */
   async triggerManualGeneration(options?: { connectionId?: string }): Promise<{
     message: string;
-    processed: number;
-    errors: number;
+    status: string;
   }> {
-    this.logger.log('Manual stock signals generation triggered');
-    await this.generateStockSignals(options);
+    if (this.isRunning) {
+      this.logger.log('Stock signal generation already in progress');
+      return {
+        message: 'Stock signal generation already in progress. Please wait for it to complete.',
+        status: 'in_progress',
+      };
+    }
+
+    this.logger.log('Manual stock signals generation triggered - running in background');
+    
+    // Run in background (don't await) to avoid HTTP timeout
+    // The method sets isRunning=true at start and isRunning=false at end
+    this.generateStockSignals(options).catch(err => {
+      this.logger.error(`Background stock signal generation failed: ${err.message}`);
+    });
+
     return {
-      message: 'Manual stock generation completed',
-      processed: 0, // Would need to track this in the method
-      errors: 0,
+      message: 'Stock signal generation started in background. Signals will appear within 1-2 minutes.',
+      status: 'started',
     };
+  }
+
+  /**
+   * Get stocks to process for signal generation
+   * Uses rotation strategy: prioritizes stocks with oldest or no signals
+   * Processes a limited number per run (50) to avoid overwhelming the system
+   * Over time, all ~500 stocks will be processed
+   */
+  private async getStocksToProcess(limit: number = 50): Promise<Array<{
+    asset_id: string;
+    symbol: string;
+    name: string;
+    display_name: string;
+    logo_url: string | null;
+    asset_type: string;
+    sector: string | null;
+    price_usd: number;
+    price_change_24h: number;
+    price_change_24h_usd: number;
+    market_cap: number | null;
+    volume_24h: number;
+    high_24h: number;
+    low_24h: number;
+    market_volume: number;
+    market_cap_rank: number | null;
+    poll_timestamp: Date;
+  }>> {
+    try {
+      // Get stocks with their latest signal timestamp (if any)
+      // Prioritize stocks that haven't been processed recently or never processed
+      const stocks = await this.prisma.$queryRaw<Array<{
+        asset_id: string;
+        symbol: string;
+        name: string;
+        display_name: string;
+        logo_url: string | null;
+        asset_type: string;
+        sector: string | null;
+        price_usd: number;
+        price_change_24h: number;
+        price_change_24h_usd: number;
+        market_cap: number | null;
+        volume_24h: number;
+        high_24h: number;
+        low_24h: number;
+        market_volume: number;
+        market_cap_rank: number | null;
+        poll_timestamp: Date;
+        last_signal_time: Date | null;
+      }>>`
+        WITH stock_signals AS (
+          SELECT 
+            asset_id,
+            MAX(timestamp) as last_signal_time
+          FROM strategy_signals
+          WHERE user_id IS NULL
+          GROUP BY asset_id
+        )
+        SELECT DISTINCT ON (a.asset_id)
+          a.asset_id,
+          a.symbol,
+          a.name,
+          a.display_name,
+          a.logo_url,
+          a.asset_type,
+          a.sector,
+          COALESCE(mr.price_usd, 0) as price_usd,
+          COALESCE(mr.change_percent_24h, 0) as price_change_24h,
+          COALESCE(mr.change_24h, 0) as price_change_24h_usd,
+          COALESCE(mr.market_cap, NULL) as market_cap,
+          COALESCE(mr.volume_24h, 0) as volume_24h,
+          COALESCE(ta.high_24h, 0) as high_24h,
+          COALESCE(ta.low_24h, 0) as low_24h,
+          COALESCE(ta.market_volume, 0) as market_volume,
+          a.market_cap_rank,
+          COALESCE(ta.poll_timestamp, NOW()) as poll_timestamp,
+          ss.last_signal_time
+        FROM assets a
+        LEFT JOIN market_rankings mr ON mr.asset_id = a.asset_id
+          AND mr.rank_timestamp = (
+            SELECT MAX(rank_timestamp) 
+            FROM market_rankings 
+            WHERE asset_id = a.asset_id
+          )
+        LEFT JOIN trending_assets ta ON ta.asset_id = a.asset_id
+          AND ta.poll_timestamp = (
+            SELECT MAX(poll_timestamp) 
+            FROM trending_assets 
+            WHERE asset_id = a.asset_id
+          )
+        LEFT JOIN stock_signals ss ON ss.asset_id = a.asset_id
+        WHERE a.asset_type = 'stock'
+          AND a.is_active = true
+        ORDER BY 
+          a.asset_id,
+          COALESCE(ss.last_signal_time, '1970-01-01'::timestamp) ASC, -- Oldest signals first (or never processed)
+          a.market_cap_rank ASC NULLS LAST -- Then by market cap
+        LIMIT ${limit}
+      `;
+
+      if (!stocks || stocks.length === 0) {
+        this.logger.warn('No stocks found to process, falling back to trending stocks');
+        // Fallback to trending stocks if query returns nothing
+        return this.stockTrendingService.getTopTrendingStocks(limit);
+      }
+
+      this.logger.log(`Selected ${stocks.length} stocks to process (prioritizing those without recent signals)`);
+
+      // Transform to match expected format
+      return stocks.map((stock) => ({
+        asset_id: stock.asset_id,
+        symbol: stock.symbol,
+        name: stock.name,
+        display_name: stock.display_name || stock.name || stock.symbol,
+        logo_url: stock.logo_url,
+        asset_type: stock.asset_type,
+        sector: stock.sector,
+        price_usd: Number(stock.price_usd || 0),
+        price_change_24h: Number(stock.price_change_24h || 0),
+        price_change_24h_usd: Number(stock.price_change_24h_usd || 0),
+        market_cap: stock.market_cap ? Number(stock.market_cap) : null,
+        volume_24h: Number(stock.volume_24h || 0),
+        high_24h: Number(stock.high_24h || 0),
+        low_24h: Number(stock.low_24h || 0),
+        market_volume: Number(stock.market_volume || 0),
+        market_cap_rank: stock.market_cap_rank,
+        poll_timestamp: stock.poll_timestamp,
+      }));
+    } catch (error: any) {
+      this.logger.error(`Failed to get stocks to process: ${error.message}`);
+      // Fallback to trending stocks if query fails
+      return this.stockTrendingService.getTopTrendingStocks(limit);
+    }
   }
 }

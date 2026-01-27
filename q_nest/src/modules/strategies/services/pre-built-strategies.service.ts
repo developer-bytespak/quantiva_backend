@@ -5,6 +5,7 @@ import { PRE_BUILT_STRATEGIES } from '../data/pre-built-strategies';
 import { PythonApiService } from '../../../kyc/integrations/python-api.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { BinanceService } from '../../binance/binance.service';
+import { MarketStocksDbService } from '../../stocks-market/services/market-stocks-db.service';
 
 @Injectable()
 export class PreBuiltStrategiesService implements OnModuleInit {
@@ -16,6 +17,7 @@ export class PreBuiltStrategiesService implements OnModuleInit {
     @Inject(forwardRef(() => ExchangesService))
     private exchangesService: ExchangesService,
     private binanceService: BinanceService,
+    private marketStocksDbService: MarketStocksDbService,
   ) { }
 
   async onModuleInit() {
@@ -199,6 +201,35 @@ export class PreBuiltStrategiesService implements OnModuleInit {
     return [];
   }
 }
+
+  /**
+   * Get top N stocks from market database (for stocks connection)
+   * Uses the same data source as the market page
+   */
+  async getTopStocks(limit: number = 500) {
+    try {
+      const stocks = await this.marketStocksDbService.getAllWithAssetId(limit);
+      
+      // Transform to match the format expected by preview endpoints
+      return stocks.map(stock => ({
+        asset_id: stock.asset_id,
+        symbol: stock.symbol,
+        name: stock.name,
+        display_name: stock.name,
+        asset_type: 'stock',
+        sector: stock.sector,
+        price_usd: stock.price,
+        market_cap: stock.marketCap,
+        volume_24h: stock.volume24h,
+        price_change_24h: stock.changePercent24h,
+        price_change_24h_usd: stock.change24h,
+        market_cap_rank: stock.rank,
+      }));
+    } catch (error: any) {
+      this.logger.error(`Failed to get top stocks: ${error?.message || error}`);
+      return [];
+    }
+  }
 
   /**
    * Process preview for a single asset (extracted for parallel processing)

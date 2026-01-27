@@ -94,11 +94,23 @@ export class StocksMarketController {
   /**
    * GET /api/stocks-market/sync-status
    * Get sync job status and last update time
+   * Also shows how many stocks are in database vs how many should be synced
    */
   @Get('sync-status')
   async getSyncStatus() {
     try {
-      return await this.stocksMarketService.getSyncStatus();
+      const status = await this.stocksMarketService.getSyncStatus();
+      const activeSymbols =
+        await this.stocksMarketService.getActiveStockSymbolsCount();
+
+      return {
+        ...status,
+        activeSymbolsCount: activeSymbols,
+        recommendation:
+          activeSymbols < 100
+            ? 'Consider calling /api/stocks-market/refresh-sp500-list?sync=true to fetch all S&P 500 stocks and sync market data.'
+            : null,
+      };
     } catch (error: any) {
       this.logger.error('Failed to get sync status', {
         error: error?.message,
@@ -164,11 +176,21 @@ export class StocksMarketController {
     } catch (error: any) {
       this.logger.error(`Failed to get stock detail for ${symbol}`, {
         error: error?.message,
+        stack: error?.stack,
+        symbol,
       });
 
+      // Return more detailed error information for debugging
+      const errorMessage = error?.message || 'Unknown error';
+      const statusCode = error?.status || HttpStatus.INTERNAL_SERVER_ERROR;
+
       throw new HttpException(
-        `Failed to get stock detail for ${symbol}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
+        {
+          message: `Failed to get stock detail for ${symbol}`,
+          error: errorMessage,
+          symbol,
+        },
+        statusCode,
       );
     }
   }
@@ -204,6 +226,41 @@ export class StocksMarketController {
 
       throw new HttpException(
         `Failed to get bars for ${symbol}`,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/stocks-market/refresh-sp500-list
+   * Refresh S&P 500 list from FMP API and store in database
+   * This should be called periodically (e.g., monthly) to keep the list up-to-date
+   * Query params:
+   *  - sync: boolean (default: false) - If true, triggers market data sync after refresh
+   */
+  @Get('refresh-sp500-list')
+  async refreshSP500List(@Query('sync') sync?: string) {
+    try {
+      this.logger.log('Refreshing S&P 500 list from FMP API...');
+      const triggerSync = sync === 'true' || sync === '1';
+      const result = await this.stocksMarketService.refreshSP500ListFromFMP(
+        triggerSync,
+      );
+
+      return {
+        ...result,
+        timestamp: new Date().toISOString(),
+        nextStep: triggerSync
+          ? 'Market data sync completed. Stocks should now be available.'
+          : 'Call /api/stocks-market/force-sync to fetch market data for all stocks.',
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to refresh S&P 500 list', {
+        error: error?.message,
+      });
+
+      throw new HttpException(
+        error.message || 'Failed to refresh S&P 500 list',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }

@@ -22,6 +22,6 @@ import { PrismaModule } from '../../prisma/prisma.module';
     CacheManagerService,
     MarketSyncCronService,
   ],
-  exports: [StocksMarketService],
+  exports: [StocksMarketService, AlpacaMarketService, MarketStocksDbService],
 })
 export class StocksMarketModule {}
