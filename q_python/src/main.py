@@ -99,35 +99,42 @@ def health_check():
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("🚀 FastAPI application starting up...")
-    import os
-    import time
+    """Startup event - registers routers and optionally pre-warms models in background."""
+    import asyncio
     
+    logger.info("🚀 FastAPI application starting up...")
     port = os.environ.get("PORT", "8000")
-    logger.info(f"Server will listen on port {port}")
+    logger.info(f"Server configured for port {port}")
     logger.info(f"Python version: {sys.version}")
     logger.info(f"Environment: {os.environ.get('RENDER', 'local')}")
     
-    # Determine ML init policy and register routers
+    # Register routers immediately - this must complete fast
     skip = os.environ.get("SKIP_ML_INIT", "").lower()
     skip_bool = skip in ("1", "true", "yes")
     try:
         register_routers(skip_ml_init=skip_bool)
+        logger.info("✅ All routers registered successfully")
     except Exception:
         logger.exception("Error while registering routers")
 
+    # Port is bound - server is ready to accept requests
+    logger.info("✅ Server is ready to accept connections")
+    
+    # Background initialization for heavy models
     if skip_bool:
-        logger.info("⚠️ SKIP_ML_INIT is enabled - ML models will NOT be pre-loaded")
-        logger.info("✅ Startup complete (fast mode) - Server is ready!")
+        logger.info("⚠️ SKIP_ML_INIT is enabled - skipping background model pre-loading")
         return
     
-    # Pre-warm FinBERT model for production (skip on Render to avoid timeout)
-    if os.environ.get("RENDER"):
-        logger.info("⚠️ Running on Render - skipping model pre-loading to avoid timeout")
-        logger.info("✅ Startup complete (fast mode) - Server is ready!")
-        return
+    # Launch background task for model pre-warming
+    logger.info("🔄 Launching background task for model initialization...")
+    asyncio.create_task(background_init())
+
+
+async def background_init():
+    """Initialize heavy services in the background after server starts."""
+    import time
     
-    logger.info("🔥 Pre-warming FinBERT model for production use...")
+    logger.info("🔥 Background: Starting model pre-warming...")
     start_time = time.time()
     
     try:
@@ -138,12 +145,11 @@ async def startup_event():
         elapsed = time.time() - start_time
         
         if success:
-            logger.info(f"✅ FinBERT model pre-loaded in {elapsed:.2f}s - API ready for requests")
+            logger.info(f"✅ Background: FinBERT model loaded in {elapsed:.2f}s")
         else:
-            logger.warning(f"⚠️ FinBERT initialization failed after {elapsed:.2f}s - will retry on first request")
+            logger.warning(f"⚠️ Background: FinBERT initialization failed after {elapsed:.2f}s")
     except Exception as e:
         elapsed = time.time() - start_time
-        logger.error(f"❌ Error during FinBERT pre-warming ({elapsed:.2f}s): {str(e)}")
-        logger.info("API will start anyway - FinBERT will load on first request")
+        logger.error(f"❌ Background: Error during model pre-warming ({elapsed:.2f}s): {str(e)}")
     
-    logger.info("✅ Startup complete - Ready to process requests")
+    logger.info("✅ Background initialization complete")
