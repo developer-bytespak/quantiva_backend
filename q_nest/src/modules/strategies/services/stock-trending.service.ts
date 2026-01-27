@@ -93,6 +93,7 @@ export class StockTrendingService {
         asset_id: r.asset_id,
         symbol: r.symbol,
         name: r.display_name || r.name || r.symbol,
+        display_name: r.display_name || r.name || r.symbol,
         logo_url: r.logo_url,
         asset_type: r.asset_type,
         sector: r.sector,
