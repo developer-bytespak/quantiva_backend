@@ -377,8 +377,13 @@ export class AlpacaPaperTradingService {
       if (cachedAgain) return cachedAgain;
 
       this.logger.debug('Fetching orders from Alpaca Paper API');
+      // Default to nested=true to show parent-child relationships for bracket orders
+      const requestParams = {
+        ...(params || { status: 'all', limit: 100 }),
+        nested: params?.nested !== undefined ? params.nested : true,
+      };
       const response = await this.apiClient.get<AlpacaOrder[]>('/v2/orders', {
-        params: params || { status: 'all', limit: 100 },
+        params: requestParams,
       });
       
       this.setCache(cacheKey, response.data, 10000); // Cache for 10 seconds
