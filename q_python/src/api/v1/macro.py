@@ -5,18 +5,28 @@ from fastapi import APIRouter, HTTPException
 from typing import Dict, Any
 import logging
 
-from src.services.macro.fred_service import FredService
-
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/macro", tags=["Macro"])
 
-fred_service = FredService()
+# Lazy-loaded service instance
+_fred_service = None
+
+
+def get_fred_service():
+    """Lazy-load FRED service to avoid slow startup."""
+    global _fred_service
+    if _fred_service is None:
+        from src.services.macro.fred_service import FredService
+        _fred_service = FredService()
+        logger.info("FRED service initialized (lazy)")
+    return _fred_service
 
 
 @router.get("/health")
 async def health_check():
     """Check if FRED service is available."""
+    fred_service = get_fred_service()
     return {
         "available": fred_service.is_available(),
         "api_key_set": fred_service.api_key is not None
@@ -31,6 +41,7 @@ async def fetch_all_indicators() -> Dict[str, Any]:
     Returns:
     Dictionary with all indicator data
     """
+    fred_service = get_fred_service()
     if not fred_service.is_available():
         raise HTTPException(
             status_code=503,
@@ -56,6 +67,7 @@ async def get_indicator(series_id: str) -> Dict[str, Any]:
     Returns:
         Latest indicator value and metadata
     """
+    fred_service = get_fred_service()
     if not fred_service.is_available():
         raise HTTPException(
             status_code=503,
@@ -82,6 +94,7 @@ async def get_yield_curve() -> Dict[str, Any]:
     Returns:
         Yield curve data with spread and rates
     """
+    fred_service = get_fred_service()
     if not fred_service.is_available():
         raise HTTPException(
             status_code=503,

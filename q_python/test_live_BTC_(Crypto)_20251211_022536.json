@@ -1,6 +1,0 @@
-{
-  "strategy_id": "test_live_crypto",
-  "asset_id": "BTC",
-  "error": "name 'timeframe' is not defined",
-  "action": "HOLD"
-}
