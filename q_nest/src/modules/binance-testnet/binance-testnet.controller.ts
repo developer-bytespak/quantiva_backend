@@ -174,36 +174,37 @@ export class BinanceTestnetController {
         return await this.binanceTestnetService.getAllOrders({ symbol, ...filters });
       }
 
-      // No symbol provided -> aggregate across trading symbols with actual balances
-      this.logger.debug('No symbol specified, aggregating orders across symbols with balances');
+      // No symbol provided -> aggregate across trading symbols with actual balances OR recent orders
+      this.logger.debug('No symbol specified, aggregating orders across symbols with balances and recent activity');
 
-      // ONLY query symbols that have non-zero balances to minimize API calls and avoid rate limits
+      // Query symbols that have non-zero balances OR recent orders
       let symbolList: string[] = [];
+      const symbolSet = new Set<string>();
+      
       try {
         const accountInfo = await this.binanceTestnetService.getAccountInfo();
         if (accountInfo?.balances && Array.isArray(accountInfo.balances)) {
-          // Build symbol list ONLY from assets with non-zero balances
-          const accountSymbols = new Set<string>();
+          // Add symbols with non-zero balances
           for (const balance of accountInfo.balances) {
             const asset = balance.asset;
             const total = parseFloat(balance.free || '0') + parseFloat(balance.locked || '0');
-            // Only include assets with actual balance
+            // Include assets with actual balance OR locked balance (open orders)
             if (asset && total > 0 && asset !== 'USDT' && asset !== 'BUSD') {
-              accountSymbols.add(`${asset}USDT`);
+              symbolSet.add(`${asset}USDT`);
             }
           }
-          symbolList = Array.from(accountSymbols);
-          this.logger.debug(`Found ${symbolList.length} symbols with balances: ${symbolList.join(', ')}`);
+          this.logger.debug(`Found ${symbolSet.size} symbols with balances: ${Array.from(symbolSet).join(', ')}`);
         }
         
-        // If no balances found, use a minimal default list
-        if (symbolList.length === 0) {
-          symbolList = ['BTCUSDT', 'ETHUSDT']; // Only top 2 to avoid rate limits
-          this.logger.debug('No balances found, using minimal default symbols');
-        }
+        symbolList = Array.from(symbolSet);
+        
+        // Don't add common pairs - only query symbols with actual balances to minimize API calls
+        this.logger.debug(`Querying ${symbolList.length} symbols with balances`);
+        
       } catch (err: any) {
-        this.logger.warn(`Failed to fetch account info: ${err?.message}, using minimal defaults`);
-        symbolList = ['BTCUSDT', 'ETHUSDT']; // Fallback to minimal list
+        this.logger.warn(`Failed to fetch account info: ${err?.message}, skipping order fetch to avoid ban`);
+        // Return empty to avoid more API calls when we can't even get account info
+        return { orders: [] };
       }
 
       // When aggregating across multiple symbols, request more per symbol to ensure adequate coverage
@@ -300,6 +301,10 @@ export class BinanceTestnetController {
       );
 
       this.logger.debug(`Order placed successfully: orderId=${result.orderId}`);
+      
+      // Save order to database for persistence
+      await this.binanceTestnetService.saveOrderToDatabase(result);
+      
       return result;
     } catch (error: any) {
       this.logger.error(`Failed to place order: ${error?.message}`);

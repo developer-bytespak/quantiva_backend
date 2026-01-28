@@ -17,6 +17,7 @@ import { StocksMarketModule } from './modules/stocks-market/stocks-market.module
 import { StrategiesModule } from './modules/strategies/strategies.module';
 import { AiInsightsModule } from './ai-insights/ai-insights.module';
 import { TaskSchedulerModule } from './task-scheduler/task-scheduler.module';
+import { PortfolioModule } from './modules/portfolio/portfolio.module';
 import { PaperTradingGateway } from './gateways/paper-trading.gateway';
 
 @Module({
@@ -39,6 +40,7 @@ import { PaperTradingGateway } from './gateways/paper-trading.gateway';
     StrategiesModule,
     AiInsightsModule,
     TaskSchedulerModule,
+    PortfolioModule,
   ],
   controllers: [],
   providers: [PaperTradingGateway],

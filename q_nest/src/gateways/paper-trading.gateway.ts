@@ -9,7 +9,6 @@ import {
 } from '@nestjs/websockets';
 import { Logger, UseGuards } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
-import { BinanceUserWsService } from '../modules/exchanges/services/binance-user-ws.service';
 
 @WebSocketGateway({
   namespace: 'paper-trading',
@@ -25,33 +24,7 @@ export class PaperTradingGateway implements OnGatewayConnection, OnGatewayDiscon
   private readonly logger = new Logger(PaperTradingGateway.name);
   private readonly userSockets = new Map<string, Set<string>>(); // userId -> Set of socket IDs
 
-  constructor(private readonly binanceUserWsService: BinanceUserWsService) {
-    // Subscribe to BinanceUserWsService events
-    this.setupBinanceEventListeners();
-  }
-
-  /**
-   * Setup listeners for Binance WebSocket events
-   */
-  private setupBinanceEventListeners(): void {
-    // Forward balance updates to connected clients
-    this.binanceUserWsService.on('balance:update', (data) => {
-      const { userId, ...payload } = data;
-      this.emitToUser(userId, 'balance:update', payload);
-    });
-
-    // Forward order updates to connected clients
-    this.binanceUserWsService.on('order:update', (data) => {
-      const { userId, ...payload } = data;
-      this.emitToUser(userId, 'order:update', payload);
-    });
-
-    // Forward Binance connection status to clients (state-based, not error-based)
-    this.binanceUserWsService.on('binance:status', (data) => {
-      const { userId, ...payload } = data;
-      this.emitToUser(userId, 'binance:status', payload);
-      this.logger.log(`[Binance Status] User ${userId}: ${payload.state}${payload.retryAt ? ` (retry at ${new Date(payload.retryAt).toISOString()})` : ''}`);
-    });
+  constructor() {
   }
 
   /**
@@ -127,7 +100,8 @@ export class PaperTradingGateway implements OnGatewayConnection, OnGatewayDiscon
           setTimeout(async () => {
             const currentSockets = this.userSockets.get(userId);
             if (!currentSockets || currentSockets.size === 0) {
-              await this.binanceUserWsService.disconnect(userId);
+              // await this.binanceUserWsService.disconnect(userId);
+              this.logger.log(`Would disconnect Binance WS for user ${userId}`);
             }
           }, 5000); // 5 second grace period
         }
@@ -151,7 +125,8 @@ export class PaperTradingGateway implements OnGatewayConnection, OnGatewayDiscon
       this.logger.log(`Subscribing to account data for user ${userId}`);
       
       // Connect to Binance user data stream
-      await this.binanceUserWsService.connect(userId);
+      // await this.binanceUserWsService.connect(userId);
+      this.logger.log(`Would connect to Binance WS for user ${userId}`);
       
       client.emit('connection:status', { 
         connected: true, 
@@ -183,7 +158,8 @@ export class PaperTradingGateway implements OnGatewayConnection, OnGatewayDiscon
       // Check if other sockets for this user are still connected
       const socketIds = this.userSockets.get(userId);
       if (!socketIds || socketIds.size <= 1) {
-        await this.binanceUserWsService.disconnect(userId);
+        // await this.binanceUserWsService.disconnect(userId);
+        this.logger.log(`Would disconnect Binance WS for user ${userId}`);
       }
       
       client.emit('connection:status', { 
@@ -208,7 +184,8 @@ export class PaperTradingGateway implements OnGatewayConnection, OnGatewayDiscon
    */
   @SubscribeMessage('get:stats')
   handleGetStats(@ConnectedSocket() client: Socket): void {
-    const stats = this.binanceUserWsService.getStats();
+    // const stats = this.binanceUserWsService.getStats();
+    const stats = { message: 'Stats not available - BinanceUserWsService disabled' };
     client.emit('stats', {
       ...stats,
       gatewayConnections: this.userSockets.size,

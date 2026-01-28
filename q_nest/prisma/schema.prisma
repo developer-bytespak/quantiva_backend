@@ -600,6 +600,7 @@ model orders {
   price               Decimal?      @db.Decimal(20, 8)
   status              OrderStatus   @default(pending)
   auto_trade_approved Boolean       @default(false)
+  metadata            Json?         @db.Json
   created_at          DateTime      @default(now()) @db.Timestamp(6)
   updated_at          DateTime?     @db.Timestamp(6)
 

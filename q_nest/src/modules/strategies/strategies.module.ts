@@ -12,6 +12,7 @@ import { PreBuiltSignalsCronjobService } from './services/pre-built-signals-cron
 import { StockSignalsCronjobService } from './services/stock-signals-cronjob.service';
 import { StockTrendingService } from './services/stock-trending.service';
 import { AlpacaSyncCronjobService } from './services/alpaca-sync-cronjob.service';
+import { PaperTradingService } from './services/paper-trading.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { KycModule } from '../../kyc/kyc.module';
 import { SignalsModule } from '../signals/signals.module';
@@ -35,7 +36,6 @@ import { StocksMarketModule } from '../stocks-market/stocks-market.module';
     PreBuiltSignalsCronjobService,
     StockSignalsCronjobService,
     StockTrendingService,
-    AlpacaSyncCronjobService,
   ],
   exports: [
     StrategiesService,
@@ -48,7 +48,6 @@ import { StocksMarketModule } from '../stocks-market/stocks-market.module';
     PreBuiltSignalsCronjobService,
     StockSignalsCronjobService,
     StockTrendingService,
-    AlpacaSyncCronjobService,
   ],
 })
 export class StrategiesModule {}

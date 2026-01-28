@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { TestnetCacheService } from './testnet-cache.service';
 import { BinanceTestnetService as BinanceTestnetApiService } from '../integrations/binance-testnet.service';
+import { PrismaService } from '../../../prisma/prisma.service';
 import {
   AccountTestnetBalanceDto,
   TestnetOrderDto,
@@ -22,6 +23,7 @@ export class BinanceTestnetService {
   constructor(
     private cacheService: TestnetCacheService,
     private binanceTestnetApi: BinanceTestnetApiService,
+    private prisma: PrismaService,
   ) {
     if (!this.apiKey || !this.apiSecret) {
       this.logger.warn(
@@ -236,9 +238,9 @@ export class BinanceTestnetService {
         filters,
       );
 
-      // Cache result for 30 seconds to reduce API load
-      // This is critical for preventing rate limit bans
-      this.cacheService.set(cacheKey, orders, 30000);
+      // Cache result for 10 minutes to drastically reduce API load
+      // This prevents rate limit bans
+      this.cacheService.set(cacheKey, orders, 600000);
 
       return orders;
     });
@@ -433,6 +435,78 @@ export class BinanceTestnetService {
     } catch (error) {
       this.logger.error(`Failed to get dashboard data: ${error.message}`);
       throw error;
+    }
+  }
+
+  /**
+   * Save Binance testnet order to database for persistence
+   */
+  async saveOrderToDatabase(order: TestnetOrderDto): Promise<void> {
+    try {
+      // Get or create a default portfolio for testnet orders
+      // For now, we'll create orders without portfolio_id requirement
+      // You can enhance this to link to actual user portfolios later
+      
+      const orderData = {
+        order_id: undefined, // Let Prisma generate UUID
+        portfolio_id: '00000000-0000-0000-0000-000000000000', // Placeholder - update to use actual portfolio
+        side: order.side === 'BUY' ? 'BUY' : 'SELL',
+        order_type: order.type === 'MARKET' ? 'market' : 'limit',
+        quantity: order.quantity,
+        price: order.price || (order.cumulativeQuoteAssetTransacted / order.executedQuantity),
+        status: order.status === 'FILLED' ? 'filled' : order.status === 'CANCELED' ? 'cancelled' : 'pending',
+        metadata: {
+          binance_order_id: order.orderId,
+          symbol: order.symbol,
+          executed_quantity: order.executedQuantity,
+          cumulative_quote: order.cumulativeQuoteAssetTransacted,
+          timestamp: order.timestamp,
+          source: 'binance_testnet',
+        },
+      };
+
+      await this.prisma.orders.create({ data: orderData });
+      this.logger.log(`Saved order ${order.orderId} to database`);
+    } catch (error: any) {
+      this.logger.error(`Failed to save order to database: ${error.message}`);
+      // Don't throw - order was placed successfully on Binance, DB save is just for tracking
+    }
+  }
+
+  /**
+   * Get orders from database (no Binance API calls)
+   */
+  async getOrdersFromDatabase(limit: number = 100): Promise<TestnetOrderDto[]> {
+    try {
+      const dbOrders = await this.prisma.orders.findMany({
+        where: {
+          metadata: {
+            path: ['source'],
+            equals: 'binance_testnet',
+          },
+        },
+        orderBy: {
+          created_at: 'desc',
+        },
+        take: limit,
+      });
+
+      // Convert database orders to TestnetOrderDto format
+      return dbOrders.map((order) => ({
+        orderId: order.metadata?.binance_order_id || 0,
+        symbol: order.metadata?.symbol || '',
+        side: order.side === 'BUY' ? 'BUY' : 'SELL',
+        type: order.order_type === 'market' ? 'MARKET' : 'LIMIT',
+        quantity: parseFloat(order.quantity?.toString() || '0'),
+        price: parseFloat(order.price?.toString() || '0'),
+        status: order.status === 'filled' ? 'FILLED' : order.status === 'cancelled' ? 'CANCELED' : 'NEW',
+        timestamp: order.metadata?.timestamp || order.created_at.getTime(),
+        executedQuantity: order.metadata?.executed_quantity || parseFloat(order.quantity?.toString() || '0'),
+        cumulativeQuoteAssetTransacted: order.metadata?.cumulative_quote || 0,
+      }));
+    } catch (error: any) {
+      this.logger.error(`Failed to get orders from database: ${error.message}`);
+      return [];
     }
   }
 }
