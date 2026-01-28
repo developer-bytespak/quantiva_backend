@@ -443,18 +443,61 @@ export class BinanceTestnetService {
    */
   async saveOrderToDatabase(order: TestnetOrderDto): Promise<void> {
     try {
-      // Get or create a default portfolio for testnet orders
-      // For now, we'll create orders without portfolio_id requirement
-      // You can enhance this to link to actual user portfolios later
+      // Get or create a default testnet portfolio
+      // Check if a testnet portfolio exists, create one if not
+      let testnetPortfolio = await this.prisma.portfolios.findFirst({
+        where: {
+          name: 'Binance Testnet Portfolio',
+        },
+      });
+
+      if (!testnetPortfolio) {
+        this.logger.log('Creating default Binance Testnet portfolio...');
+        // Need to get or create a default user first
+        let defaultUser = await this.prisma.users.findFirst({
+          where: {
+            email: 'testnet@quantiva.local',
+          },
+        });
+
+        if (!defaultUser) {
+          defaultUser = await this.prisma.users.create({
+            data: {
+              username: 'testnet_user',
+              email: 'testnet@quantiva.local',
+              password_hash: 'TESTNET_NO_PASSWORD',
+              full_name: 'Testnet User',
+              email_verified: true,
+              kyc_status: 'approved',
+            },
+          });
+        }
+
+        testnetPortfolio = await this.prisma.portfolios.create({
+          data: {
+            user_id: defaultUser.user_id,
+            name: 'Binance Testnet Portfolio',
+            type: 'spot',
+          },
+        });
+        this.logger.log(`Created testnet portfolio: ${testnetPortfolio.portfolio_id}`);
+      }
+      
+      // Calculate price safely
+      let calculatedPrice = order.price || 0;
+      if (!calculatedPrice && order.cumulativeQuoteAssetTransacted && order.executedQuantity) {
+        calculatedPrice = order.cumulativeQuoteAssetTransacted / order.executedQuantity;
+      }
+      // If still no price, we'll fetch it from the order later or leave as 0
       
       const orderData = {
-        order_id: undefined, // Let Prisma generate UUID
-        portfolio_id: '00000000-0000-0000-0000-000000000000', // Placeholder - update to use actual portfolio
+        portfolio_id: testnetPortfolio.portfolio_id,
         side: order.side === 'BUY' ? 'BUY' : 'SELL',
         order_type: order.type === 'MARKET' ? 'market' : 'limit',
         quantity: order.quantity,
-        price: order.price || (order.cumulativeQuoteAssetTransacted / order.executedQuantity),
+        price: calculatedPrice,
         status: order.status === 'FILLED' ? 'filled' : order.status === 'CANCELED' ? 'cancelled' : 'pending',
+        auto_trade_approved: true, // Mark as auto-trade for filtering
         metadata: {
           binance_order_id: order.orderId,
           symbol: order.symbol,
@@ -465,10 +508,14 @@ export class BinanceTestnetService {
         },
       };
 
+      this.logger.debug(`Attempting to save order to database: ${JSON.stringify(orderData, null, 2)}`);
       await this.prisma.orders.create({ data: orderData });
-      this.logger.log(`Saved order ${order.orderId} to database`);
+      this.logger.log(`✅ Saved order ${order.orderId} (${order.symbol}) to database`);
     } catch (error: any) {
-      this.logger.error(`Failed to save order to database: ${error.message}`);
+      this.logger.error(`❌ Failed to save order to database: ${error.message}`);
+      this.logger.error(`Error details: ${JSON.stringify(error, null, 2)}`);
+      this.logger.error(`Error stack: ${error.stack}`);
+      this.logger.error(`Order data that failed: ${JSON.stringify(order, null, 2)}`);
       // Don't throw - order was placed successfully on Binance, DB save is just for tracking
     }
   }
@@ -507,6 +554,74 @@ export class BinanceTestnetService {
     } catch (error: any) {
       this.logger.error(`Failed to get orders from database: ${error.message}`);
       return [];
+    }
+  }
+
+  /**
+   * Get orders from database and sync with Binance API for fresh data
+   * This fetches orders from DB and enriches them with current Binance data
+   */
+  async getSyncedOrdersFromDatabase(limit: number = 100): Promise<TestnetOrderDto[]> {
+    try {
+      // Get orders from database
+      const dbOrders = await this.getOrdersFromDatabase(limit);
+      
+      if (!this.isConfigured() || dbOrders.length === 0) {
+        return dbOrders;
+      }
+
+      this.logger.log(`Syncing ${dbOrders.length} orders from database with Binance API...`);
+      
+      // Group orders by symbol to minimize API calls
+      const ordersBySymbol = new Map<string, TestnetOrderDto[]>();
+      for (const order of dbOrders) {
+        if (!order.symbol) continue;
+        if (!ordersBySymbol.has(order.symbol)) {
+          ordersBySymbol.set(order.symbol, []);
+        }
+        ordersBySymbol.get(order.symbol)!.push(order);
+      }
+
+      // Fetch fresh order data from Binance for each symbol
+      const syncedOrders: TestnetOrderDto[] = [];
+      const symbols = Array.from(ordersBySymbol.keys());
+      
+      for (const symbol of symbols) {
+        try {
+          const dbSymbolOrders = ordersBySymbol.get(symbol)!;
+          
+          // Fetch all orders for this symbol from Binance
+          const binanceOrders = await this.getAllOrders({ 
+            symbol, 
+            limit: 100 
+          });
+          
+          // Match DB orders with Binance orders by orderId
+          for (const dbOrder of dbSymbolOrders) {
+            const binanceOrder = binanceOrders.find(bo => bo.orderId === dbOrder.orderId);
+            
+            if (binanceOrder) {
+              // Use fresh Binance data
+              syncedOrders.push(binanceOrder);
+              this.logger.debug(`Synced order ${dbOrder.orderId} (${symbol}) with Binance API`);
+            } else {
+              // Order not found on Binance, use DB data
+              syncedOrders.push(dbOrder);
+              this.logger.debug(`Order ${dbOrder.orderId} (${symbol}) not found on Binance, using DB data`);
+            }
+          }
+        } catch (error: any) {
+          this.logger.warn(`Failed to sync orders for ${symbol}: ${error.message}, using DB data`);
+          // On error, fall back to DB data for this symbol
+          syncedOrders.push(...ordersBySymbol.get(symbol)!);
+        }
+      }
+
+      this.logger.log(`Successfully synced ${syncedOrders.length} orders`);
+      return syncedOrders;
+    } catch (error: any) {
+      this.logger.error(`Failed to sync orders: ${error.message}`);
+      return this.getOrdersFromDatabase(limit);
     }
   }
 }
