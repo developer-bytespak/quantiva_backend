@@ -86,6 +86,56 @@ async def get_face_engine_status():
         }
 
 
+@router.post("/warmup")
+async def warmup_face_engine():
+    """
+    Pre-load the face recognition engine and models.
+    Call this endpoint on server startup to avoid timeout on first KYC request.
+    
+    This loads:
+        - DeepFace Facenet512 model
+        - Face detection backend
+        - Quality assessment module
+    
+    Returns:
+        - success: Whether warmup completed successfully
+        - engine: Engine name
+        - initialized: Whether engine is now ready
+        - message: Status message
+    """
+    import time
+    start_time = time.time()
+    
+    try:
+        logger.info("Starting face engine warmup...")
+        
+        # Import and initialize the face engine
+        from src.services.kyc.face_engine import get_face_engine
+        engine = get_face_engine()
+        
+        elapsed = time.time() - start_time
+        logger.info(f"Face engine warmup completed in {elapsed:.2f}s")
+        
+        return {
+            "success": True,
+            "engine": "deepface-facenet512",
+            "initialized": engine._initialized,
+            "warmup_time_seconds": round(elapsed, 2),
+            "message": "Face engine loaded and ready for KYC operations"
+        }
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error(f"Face engine warmup failed after {elapsed:.2f}s: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "engine": "unknown",
+            "initialized": False,
+            "warmup_time_seconds": round(elapsed, 2),
+            "error": str(e),
+            "message": "Face engine warmup failed"
+        }
+
+
 # =============================================================================
 # FACE QUALITY ENDPOINT
 # =============================================================================

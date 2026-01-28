@@ -135,8 +135,9 @@ async def background_init():
     import time
     
     logger.info("🔥 Background: Starting model pre-warming...")
-    start_time = time.time()
     
+    # 1. Initialize FinBERT sentiment model
+    start_time = time.time()
     try:
         from src.services.engines.sentiment_engine import SentimentEngine
         sentiment_engine = SentimentEngine()
@@ -150,6 +151,23 @@ async def background_init():
             logger.warning(f"⚠️ Background: FinBERT initialization failed after {elapsed:.2f}s")
     except Exception as e:
         elapsed = time.time() - start_time
-        logger.error(f"❌ Background: Error during model pre-warming ({elapsed:.2f}s): {str(e)}")
+        logger.error(f"❌ Background: Error during FinBERT pre-warming ({elapsed:.2f}s): {str(e)}")
     
-    logger.info("✅ Background initialization complete")
+    # 2. Initialize DeepFace face engine for KYC
+    start_time = time.time()
+    try:
+        logger.info("🔄 Background: Loading DeepFace face engine for KYC...")
+        from src.services.kyc.face_engine import get_face_engine
+        face_engine = get_face_engine()
+        
+        elapsed = time.time() - start_time
+        
+        if face_engine._initialized:
+            logger.info(f"✅ Background: DeepFace face engine loaded in {elapsed:.2f}s")
+        else:
+            logger.warning(f"⚠️ Background: DeepFace initialization incomplete after {elapsed:.2f}s")
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error(f"❌ Background: Error during DeepFace pre-warming ({elapsed:.2f}s): {str(e)}")
+    
+    logger.info("✅ Background initialization complete - all models ready")

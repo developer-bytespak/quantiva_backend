@@ -51,7 +51,7 @@ export class PythonApiService {
       
       if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
         throw new Error(
-          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running.`
         );
       }
       
@@ -89,7 +89,7 @@ export class PythonApiService {
       // Provide more detailed error message
       if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
         throw new Error(
-          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running.`
         );
       }
       
@@ -134,7 +134,7 @@ export class PythonApiService {
       
       if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
         throw new Error(
-          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running.`
         );
       }
       
@@ -174,7 +174,7 @@ export class PythonApiService {
       
       if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
         throw new Error(
-          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running.`
         );
       }
       
