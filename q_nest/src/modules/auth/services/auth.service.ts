@@ -352,7 +352,9 @@ export class AuthService {
     return user;
   }
 
-  // Google Sign-in: verify id token, find or create user, create session + tokens
+  // Google Sign-in: verify id token, check if user exists, return appropriate response
+  // For existing users: return tokens + user data + is_new_user: false
+  // For new users: return google_user info + is_new_user: true (DO NOT auto-create account)
   async loginWithGoogle(idToken: string, ipAddress?: string, deviceId?: string) {
     if (!idToken) throw new BadRequestException('Missing idToken');
 
@@ -377,38 +379,26 @@ export class AuthService {
     const email: string = payload.email;
     const name: string = payload.name || null;
     const picture: string = payload.picture || null;
+    const googleId: string = payload.sub || null; // Google's unique user ID
 
     // Try find existing user by email
-    let user = await this.prisma.users.findUnique({ where: { email } });
+    const user = await this.prisma.users.findUnique({ where: { email } });
 
-    let isNewUser = false;
+    // NEW USER - Return google info without creating account
+    // Frontend should redirect to registration page with this data
     if (!user) {
-      isNewUser = true;
-      // create a username from email local part (ensure uniqueness by appending short id if needed)
-      const local = email.split('@')[0].replace(/[^a-zA-Z0-9_\-\.]/g, '');
-      let username = local;
-      // ensure username unique
-      let suffix = 0;
-      while (await this.prisma.users.findUnique({ where: { username } })) {
-        suffix += 1;
-        username = `${local}${suffix}`;
-      }
-
-      // create user
-      user = await this.prisma.users.create({
-        data: {
+      return {
+        is_new_user: true,
+        google_user: {
           email,
-          username,
-          email_verified: true,
-          // Don't set full_name here - user should complete personal-info during onboarding
-          // full_name: name,
-          profile_pic_url: picture,
-          // leave password_hash null for social logins
+          name,
+          google_id: googleId,
+          picture,
         },
-      });
+      };
     }
 
-    // Generate refresh token and session similar to verify2FA flow
+    // EXISTING USER - Generate tokens and return user data
     const refreshToken = await this.tokenService.generateRefreshToken({
       sub: user.user_id,
       email: user.email,
@@ -432,6 +422,7 @@ export class AuthService {
     const accessToken = await this.tokenService.generateAccessToken(payloadForAccess);
 
     return {
+      is_new_user: false,
       user: {
         user_id: user.user_id,
         email: user.email,
