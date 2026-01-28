@@ -30,36 +30,33 @@ export class MarketSyncCronService implements OnModuleInit {
         const activeSymbolsCount =
           await this.stocksMarketService.getActiveStockSymbolsCount();
 
-        // If we have very few stocks (< 100), automatically fetch from FMP
-        if (activeSymbolsCount < 100) {
+        // If we have fewer stocks than expected (< 400), automatically load from hardcoded list
+        // S&P 500 should have ~500+ stocks, so trigger refresh if significantly below
+        // We use hardcoded list directly to avoid FMP rate limits
+        if (activeSymbolsCount < 400) {
           this.logger.log(
-            `Found only ${activeSymbolsCount} stocks in database. Automatically fetching S&P 500 list from FMP...`,
+            `Found only ${activeSymbolsCount} stocks in database (expected ~500+). Loading S&P 500 from hardcoded list...`,
           );
 
           try {
-            // Fetch S&P 500 list from FMP and trigger sync automatically
+            // Load directly from hardcoded list (bypasses FMP rate limits)
             const refreshResult =
-              await this.stocksMarketService.refreshSP500ListFromFMP(true);
+              await this.stocksMarketService.loadHardcodedSP500List(false);
 
             if (refreshResult.success) {
-              let logMessage = `✓ S&P 500 list fetched: ${refreshResult.stored} new, ${refreshResult.updated} updated, ${refreshResult.total} total`;
+              let logMessage = `✓ S&P 500 list loaded: ${refreshResult.stored} new, ${refreshResult.updated} updated, ${refreshResult.total} total`;
               if (refreshResult.deactivated > 0) {
                 logMessage += `, ${refreshResult.deactivated} removed stocks deactivated`;
               }
               this.logger.log(logMessage);
-              if (refreshResult.syncTriggered) {
-                this.logger.log(
-                  '✓ Market data sync completed for all S&P 500 stocks',
-                );
-              }
             } else {
               this.logger.warn(
-                `⚠ Failed to fetch S&P 500 list: ${refreshResult.message}. Using existing stocks.`,
+                `⚠ Failed to load S&P 500 list: ${refreshResult.message}. Using existing stocks.`,
               );
             }
           } catch (refreshError: any) {
             this.logger.error(
-              'Failed to automatically fetch S&P 500 list on startup',
+              'Failed to automatically load S&P 500 list on startup',
               {
                 error: refreshError?.message,
               },
