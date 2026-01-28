@@ -554,6 +554,36 @@ export class AlpacaPaperTradingService {
   }
 
   /**
+   * Get latest quotes for symbols (for price lookup)
+   */
+  async getLatestQuotes(symbols: string[]): Promise<Record<string, { ap: string; bp: string; as: number; bs: number }>> {
+    try {
+      // Alpaca Market Data API for quotes
+      const dataClient = axios.create({
+        baseURL: 'https://data.alpaca.markets',
+        timeout: 30000,
+        headers: {
+          'APCA-API-KEY-ID': this.configService.get<string>('ALPACA_PAPER_API_KEY') 
+            || this.configService.get<string>('ALPACA_API_KEY') || '',
+          'APCA-API-SECRET-KEY': this.configService.get<string>('ALPACA_PAPER_SECRET_KEY') 
+            || this.configService.get<string>('ALPACA_SECRET_KEY') || '',
+        },
+      });
+
+      const response = await dataClient.get('/v2/stocks/quotes/latest', {
+        params: {
+          symbols: symbols.join(','),
+        },
+      });
+
+      return response.data?.quotes || {};
+    } catch (error: any) {
+      this.logger.error(`Failed to get quotes: ${error?.message}`);
+      return {};
+    }
+  }
+
+  /**
    * Get clock (market hours)
    */
   async getClock(): Promise<{
