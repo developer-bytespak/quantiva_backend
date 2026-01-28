@@ -132,6 +132,44 @@ export class BinanceTestnetController {
   }
 
   /**
+   * Get orders from database (no Binance API calls)
+   * @route GET /binance-testnet/orders/db
+   */
+  @Public()
+  @Get('orders/db')
+  async getOrdersFromDatabase(
+    @Query('limit') limit?: number,
+  ) {
+    try {
+      const parsedLimit = limit ? Math.min(Number(limit), 1000) : 100;
+      const orders = await this.binanceTestnetService.getOrdersFromDatabase(parsedLimit);
+      return { orders };
+    } catch (error: any) {
+      this.logger.error(`Failed to get orders from database: ${error?.message}`);
+      throw new BadRequestException(error?.message ?? 'Failed to fetch orders');
+    }
+  }
+
+  /**
+   * Get orders from database synced with fresh Binance API data
+   * @route GET /binance-testnet/orders/synced
+   */
+  @Public()
+  @Get('orders/synced')
+  async getSyncedOrders(
+    @Query('limit') limit?: number,
+  ) {
+    try {
+      const parsedLimit = limit ? Math.min(Number(limit), 1000) : 100;
+      const orders = await this.binanceTestnetService.getSyncedOrdersFromDatabase(parsedLimit);
+      return { orders };
+    } catch (error: any) {
+      this.logger.error(`Failed to get synced orders: ${error?.message}`);
+      throw new BadRequestException(error?.message ?? 'Failed to fetch synced orders');
+    }
+  }
+
+  /**
    * Get all orders (including filled) with comprehensive filters
    * @route GET /binance-testnet/orders/all
    * Query params:
@@ -302,8 +340,29 @@ export class BinanceTestnetController {
 
       this.logger.debug(`Order placed successfully: orderId=${result.orderId}`);
       
+      // For MARKET orders, fetch the order details to get actual execution price
+      if (result.type === 'MARKET' && result.status === 'FILLED' && !result.cumulativeQuoteAssetTransacted) {
+        this.logger.debug(`Fetching order details for ${result.orderId} to get execution price...`);
+        try {
+          const orderDetails = await this.binanceTestnetService.getAllOrders({ 
+            symbol, 
+            orderId: result.orderId,
+            limit: 1 
+          });
+          if (orderDetails?.length > 0 && orderDetails[0].cumulativeQuoteAssetTransacted) {
+            result.cumulativeQuoteAssetTransacted = orderDetails[0].cumulativeQuoteAssetTransacted;
+            result.price = orderDetails[0].cumulativeQuoteAssetTransacted / orderDetails[0].executedQuantity;
+            this.logger.debug(`Updated order ${result.orderId} with execution price: ${result.price}`);
+          }
+        } catch (err: any) {
+          this.logger.warn(`Failed to fetch order details: ${err.message}`);
+        }
+      }
+      
       // Save order to database for persistence
+      this.logger.log(`🔄 Attempting to save order ${result.orderId} to database...`);
       await this.binanceTestnetService.saveOrderToDatabase(result);
+      this.logger.log(`💾 Database save completed for order ${result.orderId}`);
       
       return result;
     } catch (error: any) {

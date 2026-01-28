@@ -37,7 +37,8 @@ interface BinanceTestnetOrder {
   status: string;
   time: number;
   executedQty: string;
-  cumulativeQuoteAssetTransacted: string;
+  cummulativeQuoteQty: string; // Note: Binance uses 'cummulativeQuoteQty' not 'cumulativeQuoteAssetTransacted'
+  cumulativeQuoteAssetTransacted?: string; // Also try this field name
 }
 
 @Injectable()
@@ -398,11 +399,19 @@ export class BinanceTestnetService {
       return filteredOrders.map((order) => {
         const executedQty = parseFloat(order.executedQty) || 0;
         const price = parseFloat(order.price) || 0;
-        let cumulativeQuote = parseFloat(order.cumulativeQuoteAssetTransacted);
         
-        // If cumulativeQuoteAssetTransacted is null/NaN, calculate it
-        if (!cumulativeQuote || isNaN(cumulativeQuote)) {
-          cumulativeQuote = executedQty * price;
+        // Try both field names - Binance uses 'cummulativeQuoteQty' (with typo)
+        let cumulativeQuote = parseFloat(order.cummulativeQuoteQty) || 
+                              parseFloat(order.cumulativeQuoteAssetTransacted) || 0;
+        
+        // Log raw order data for debugging
+        this.logger.debug(`Order ${order.orderId} raw data: cummulativeQuoteQty=${order.cummulativeQuoteQty}, price=${order.price}, executedQty=${order.executedQty}`);
+        
+        // Calculate effective price for the order
+        let effectivePrice = price;
+        if (executedQty > 0 && cumulativeQuote > 0) {
+          // For market orders, calculate from cumulative quote
+          effectivePrice = cumulativeQuote / executedQty;
         }
         
         return {
@@ -411,7 +420,7 @@ export class BinanceTestnetService {
           side: order.side,
           type: order.type,
           quantity: parseFloat(order.origQty),
-          price: price,
+          price: effectivePrice,
           status: order.status,
           timestamp: order.time,
           executedQuantity: executedQty,
