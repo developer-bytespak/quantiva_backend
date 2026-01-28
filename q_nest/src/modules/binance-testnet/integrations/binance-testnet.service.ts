@@ -299,18 +299,29 @@ export class BinanceTestnetService {
         params,
       );
 
-      return orders.map((order) => ({
-        orderId: order.orderId,
-        symbol: order.symbol,
-        side: order.side,
-        type: order.type,
-        quantity: parseFloat(order.origQty),
-        price: parseFloat(order.price),
-        status: order.status,
-        timestamp: order.time,
-        executedQuantity: parseFloat(order.executedQty),
-        cumulativeQuoteAssetTransacted: parseFloat(order.cumulativeQuoteAssetTransacted),
-      }));
+      return orders.map((order) => {
+        const executedQty = parseFloat(order.executedQty) || 0;
+        const price = parseFloat(order.price) || 0;
+        let cumulativeQuote = parseFloat(order.cumulativeQuoteAssetTransacted);
+        
+        // If cumulativeQuoteAssetTransacted is null/NaN, calculate it
+        if (!cumulativeQuote || isNaN(cumulativeQuote)) {
+          cumulativeQuote = executedQty * price;
+        }
+        
+        return {
+          orderId: order.orderId,
+          symbol: order.symbol,
+          side: order.side,
+          type: order.type,
+          quantity: parseFloat(order.origQty),
+          price: price,
+          status: order.status,
+          timestamp: order.time,
+          executedQuantity: executedQty,
+          cumulativeQuoteAssetTransacted: cumulativeQuote,
+        };
+      });
     } catch (error) {
       this.logger.error(`Failed to get open orders: ${error.message}`);
       throw error;
@@ -384,18 +395,29 @@ export class BinanceTestnetService {
         );
       }
 
-      return filteredOrders.map((order) => ({
-        orderId: order.orderId,
-        symbol: order.symbol,
-        side: order.side,
-        type: order.type,
-        quantity: parseFloat(order.origQty),
-        price: parseFloat(order.price),
-        status: order.status,
-        timestamp: order.time,
-        executedQuantity: parseFloat(order.executedQty),
-        cumulativeQuoteAssetTransacted: parseFloat(order.cumulativeQuoteAssetTransacted),
-      }));
+      return filteredOrders.map((order) => {
+        const executedQty = parseFloat(order.executedQty) || 0;
+        const price = parseFloat(order.price) || 0;
+        let cumulativeQuote = parseFloat(order.cumulativeQuoteAssetTransacted);
+        
+        // If cumulativeQuoteAssetTransacted is null/NaN, calculate it
+        if (!cumulativeQuote || isNaN(cumulativeQuote)) {
+          cumulativeQuote = executedQty * price;
+        }
+        
+        return {
+          orderId: order.orderId,
+          symbol: order.symbol,
+          side: order.side,
+          type: order.type,
+          quantity: parseFloat(order.origQty),
+          price: price,
+          status: order.status,
+          timestamp: order.time,
+          executedQuantity: executedQty,
+          cumulativeQuoteAssetTransacted: cumulativeQuote,
+        };
+      });
     } catch (error) {
       this.logger.error(`Failed to get all orders: ${error.message}`);
       throw error;

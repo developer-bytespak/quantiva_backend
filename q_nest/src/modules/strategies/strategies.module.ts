@@ -20,9 +20,10 @@ import { NewsModule } from '../news/news.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 import { BinanceModule } from '../binance/binance.module';
 import { AiInsightsModule } from '../../ai-insights/ai-insights.module';
+import { StocksMarketModule } from '../stocks-market/stocks-market.module';
 
 @Module({
-  imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule), NewsModule, forwardRef(() => ExchangesModule), BinanceModule, ScheduleModule, AiInsightsModule],
+  imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule), NewsModule, forwardRef(() => ExchangesModule), BinanceModule, ScheduleModule, AiInsightsModule, StocksMarketModule],
   controllers: [StrategiesController],
   providers: [
     StrategiesService,
