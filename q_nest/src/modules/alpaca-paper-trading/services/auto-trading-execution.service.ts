@@ -19,6 +19,19 @@ interface Stock {
   sector: string | null;
 }
 
+// Risk-based exit levels (stop-loss and take-profit percentages)
+interface RiskExitLevels {
+  stopLossPercent: number;
+  takeProfitPercent: number;
+}
+
+const RISK_EXIT_LEVELS: Record<string, RiskExitLevels> = {
+  low: { stopLossPercent: 3, takeProfitPercent: 6 },      // Conservative: 1:2 risk/reward
+  medium: { stopLossPercent: 5, takeProfitPercent: 10 },  // Balanced: 1:2 risk/reward
+  high: { stopLossPercent: 8, takeProfitPercent: 20 },    // Aggressive: 1:2.5 risk/reward
+  default: { stopLossPercent: 5, takeProfitPercent: 10 }, // Fallback
+};
+
 @Injectable()
 export class AutoTradingExecutionService {
   private readonly logger = new Logger(AutoTradingExecutionService.name);
@@ -115,8 +128,19 @@ export class AutoTradingExecutionService {
       throw new Error('No stocks available');
     }
 
-    // Generate a signal (BUY or SELL)
-    const signal = this.generateSignal(strategy);
+    // Get stock momentum to inform signal direction
+    const momentum = await this.getStockMomentum(stock.symbol);
+    
+    // Generate a signal (BUY or SELL) - influenced by momentum
+    const signal = this.generateSignal(strategy, momentum);
+    
+    // Log momentum-based decision for transparency
+    if (Math.abs(momentum) > 1) {
+      this.sessionService.addAiMessage(
+        `${stock.symbol} momentum: ${momentum > 0 ? '+' : ''}${momentum.toFixed(2)}% → ${signal.action}`,
+        'info'
+      );
+    }
     
     // Generate random trade amount ($100 - $500)
     const tradeAmount = this.generateTradeAmount();
@@ -134,17 +158,20 @@ export class AutoTradingExecutionService {
       return null;
     }
 
-    // Check if we need to sell (must have position)
-    if (signal.action === 'SELL') {
-      const position = await this.alpacaService.getPosition(stock.symbol);
-      if (!position) {
-        // Switch to BUY if no position to sell
-        signal.action = 'BUY';
-      }
-    }
+    // Get risk-based exit levels
+    const riskLevels = RISK_EXIT_LEVELS[strategy.risk_level?.toLowerCase()] || RISK_EXIT_LEVELS.default;
+    
+    // Calculate stop-loss and take-profit prices
+    const stopLossPrice = parseFloat((price * (1 - riskLevels.stopLossPercent / 100)).toFixed(2));
+    const takeProfitPrice = parseFloat((price * (1 + riskLevels.takeProfitPercent / 100)).toFixed(2));
 
-    // Generate AI message
-    const aiMessage = this.generateAiExplanation(strategy, stock, signal, price);
+    // Auto-trading now ONLY places BUY orders with bracket (OCO-like) exits
+    // Alpaca automatically handles selling when stop-loss or take-profit is hit
+    // This eliminates the need for manual SELL logic
+    signal.action = 'BUY';
+
+    // Generate AI message with momentum context
+    const aiMessage = this.generateAiExplanation(strategy, stock, signal, price, momentum);
 
     // Create trade record
     const tradeRecord: AutoTradeRecord = {
@@ -163,31 +190,43 @@ export class AutoTradingExecutionService {
     };
 
     try {
-      // Place the order via Alpaca
-      this.sessionService.addAiMessage(`Executing ${signal.action} order for ${stock.symbol}`, 'info');
+      // Place BRACKET order via Alpaca (entry + automatic stop-loss + take-profit)
+      // This is OCO-like: when one exit condition hits, the other is cancelled
+      this.sessionService.addAiMessage(
+        `Placing bracket order: BUY ${stock.symbol} | SL: $${stopLossPrice} (-${riskLevels.stopLossPercent}%) | TP: $${takeProfitPrice} (+${riskLevels.takeProfitPercent}%)`,
+        'info'
+      );
       
       const order = await this.alpacaService.placeOrder({
         symbol: stock.symbol,
-        qty: signal.action === 'SELL' ? undefined : qty,
-        side: signal.action.toLowerCase() as 'buy' | 'sell',
+        qty: qty,
+        side: 'buy',
         type: 'market',
-        time_in_force: 'day',
-        notional: signal.action === 'BUY' ? tradeAmount : undefined,
+        time_in_force: 'gtc', // Good-til-cancelled for bracket orders
+        order_class: 'bracket', // Enable OCO-like behavior
+        take_profit: {
+          limit_price: takeProfitPrice,
+        },
+        stop_loss: {
+          stop_price: stopLossPrice,
+        },
       });
 
       tradeRecord.orderId = order.id;
       tradeRecord.status = order.status === 'filled' ? 'filled' : 'pending';
 
-      // Store the signal in database
-      await this.storeSignal(strategy, stock, signal, tradeAmount, price);
+      // Store the signal in database with exit levels
+      await this.storeSignal(strategy, stock, signal, tradeAmount, price, stopLossPrice, takeProfitPrice);
 
       // Store the order in database with auto-trade metadata
-      await this.storeOrder(stock, signal, tradeAmount, price, order.id);
+      await this.storeOrder(stock, signal, tradeAmount, price, order.id, stopLossPrice, takeProfitPrice);
 
       // Record the trade in session
       this.sessionService.recordTrade(tradeRecord);
 
-      this.logger.log(`Auto trade executed: ${signal.action} ${stock.symbol} @ $${price}, Order: ${order.id}`);
+      this.logger.log(
+        `Bracket order placed: BUY ${stock.symbol} @ $${price}, SL: $${stopLossPrice}, TP: $${takeProfitPrice}, Order: ${order.id}`
+      );
 
       return tradeRecord;
     } catch (error: any) {
@@ -272,24 +311,70 @@ export class AutoTradingExecutionService {
   }
 
   /**
-   * Generate a trading signal (BUY/SELL with confidence)
+   * Get stock momentum (price change percentage) from Alpaca snapshots
+   * Returns positive for upward momentum, negative for downward
    */
-  private generateSignal(strategy: Strategy): { action: 'BUY' | 'SELL'; confidence: number; scores: any } {
-    // Bias slightly towards BUY for paper trading demonstration
-    const buyProbability = 0.65;
+  private async getStockMomentum(symbol: string): Promise<number> {
+    try {
+      const dataClient = (await import('axios')).default.create({
+        baseURL: 'https://data.alpaca.markets',
+        timeout: 10000,
+        headers: {
+          'APCA-API-KEY-ID': process.env.ALPACA_PAPER_API_KEY || process.env.ALPACA_API_KEY || '',
+          'APCA-API-SECRET-KEY': process.env.ALPACA_PAPER_SECRET_KEY || process.env.ALPACA_SECRET_KEY || '',
+        },
+      });
+
+      const response = await dataClient.get(`/v2/stocks/${symbol}/snapshot`);
+      const snapshot = response.data;
+      
+      if (snapshot?.prevDailyBar?.c && snapshot?.latestTrade?.p) {
+        const prevClose = snapshot.prevDailyBar.c;
+        const currentPrice = snapshot.latestTrade.p;
+        return ((currentPrice - prevClose) / prevClose) * 100;
+      }
+      
+      return 0;
+    } catch (error) {
+      this.logger.debug(`Could not get momentum for ${symbol}, using neutral`);
+      return 0;
+    }
+  }
+
+  /**
+   * Generate a trading signal (BUY/SELL with confidence)
+   * Uses momentum-based logic: more likely to BUY when stock is up, SELL when down
+   * Keeps natural randomness to avoid predictable behavior
+   */
+  private generateSignal(strategy: Strategy, momentum: number = 0): { action: 'BUY' | 'SELL'; confidence: number; scores: any } {
+    // Base probability is 50/50, adjusted by momentum
+    // Momentum influence: +5% change = +15% buy probability
+    // This creates a "ride the trend" behavior that feels natural
+    const momentumInfluence = Math.max(-0.25, Math.min(0.25, momentum * 0.03));
+    
+    // Add slight randomness to keep it unpredictable (±10%)
+    const randomNoise = (Math.random() - 0.5) * 0.2;
+    
+    // Final buy probability: 50% base + momentum adjustment + noise
+    // Clamped between 30% and 70% to prevent extreme bias
+    const buyProbability = Math.max(0.3, Math.min(0.7, 0.5 + momentumInfluence + randomNoise));
+    
     const action: 'BUY' | 'SELL' = Math.random() < buyProbability ? 'BUY' : 'SELL';
     
-    // Generate random confidence (0.6 - 0.95)
-    const confidence = 0.6 + Math.random() * 0.35;
+    // Confidence is higher when momentum aligns with action
+    const momentumAlignment = (action === 'BUY' && momentum > 0) || (action === 'SELL' && momentum < 0);
+    const baseConfidence = 0.6 + Math.random() * 0.25;
+    const confidence = momentumAlignment ? baseConfidence + 0.1 : baseConfidence;
 
-    // Generate fake scores for different factors
+    // Generate scores that reflect the momentum analysis
+    const momentumScore = 50 + momentum * 5; // Convert momentum to 0-100 scale
     const scores = {
-      sentiment_score: Math.random() * 100,
-      trend_score: Math.random() * 100,
-      fundamental_score: Math.random() * 100,
-      liquidity_score: 50 + Math.random() * 50, // Higher liquidity for stocks
-      volatility_score: Math.random() * 100,
-      macro_score: Math.random() * 100,
+      sentiment_score: Math.max(0, Math.min(100, momentumScore + (Math.random() - 0.5) * 30)),
+      trend_score: Math.max(0, Math.min(100, momentumScore + (Math.random() - 0.5) * 20)),
+      fundamental_score: 40 + Math.random() * 40, // Less tied to momentum
+      liquidity_score: 50 + Math.random() * 50,
+      volatility_score: Math.abs(momentum) * 10 + Math.random() * 40,
+      macro_score: 40 + Math.random() * 40,
     };
 
     return { action, confidence, scores };
@@ -330,14 +415,23 @@ export class AutoTradingExecutionService {
   /**
    * Generate AI explanation for the trade
    */
-  private generateAiExplanation(strategy: Strategy, stock: Stock, signal: any, price: number): string {
-    const reasons = [
-      `${strategy.name} detected favorable ${signal.action.toLowerCase()} conditions`,
-      `Technical analysis indicates strong ${signal.action === 'BUY' ? 'support' : 'resistance'} levels`,
-      `Sentiment analysis shows ${signal.action === 'BUY' ? 'positive' : 'negative'} market outlook`,
-      `Risk-adjusted returns suggest ${signal.action.toLowerCase()} opportunity`,
-      `Pattern recognition identified ${signal.action === 'BUY' ? 'accumulation' : 'distribution'} phase`,
-      `Momentum indicators confirm ${signal.action.toLowerCase()} signal strength`,
+  private generateAiExplanation(strategy: Strategy, stock: Stock, signal: any, price: number, momentum: number = 0): string {
+    // Momentum-aware explanations feel more natural
+    const momentumStr = momentum > 0 ? 'upward' : momentum < 0 ? 'downward' : 'neutral';
+    const trendAligned = (signal.action === 'BUY' && momentum > 0) || (signal.action === 'SELL' && momentum < 0);
+    
+    const reasons = trendAligned ? [
+      `${strategy.name} riding ${momentumStr} momentum for ${signal.action.toLowerCase()} opportunity`,
+      `Technical analysis confirms ${momentumStr} trend continuation`,
+      `Momentum indicators align with ${signal.action.toLowerCase()} signal`,
+      `Price action suggests continuation of current ${momentumStr} move`,
+      `Trend-following analysis favors ${signal.action.toLowerCase()} position`,
+    ] : [
+      `${strategy.name} identified potential reversal opportunity`,
+      `Mean reversion analysis suggests counter-trend ${signal.action.toLowerCase()}`,
+      `Risk-reward ratio favors contrarian ${signal.action.toLowerCase()} entry`,
+      `Sentiment divergence detected, anticipating ${signal.action.toLowerCase()} setup`,
+      `Pattern recognition suggests ${signal.action === 'BUY' ? 'accumulation' : 'distribution'} phase`,
     ];
 
     const index = Math.floor(Math.random() * reasons.length);
@@ -353,6 +447,8 @@ export class AutoTradingExecutionService {
     signal: { action: 'BUY' | 'SELL'; confidence: number; scores: any },
     amount: number,
     price: number,
+    stopLossPrice?: number,
+    takeProfitPrice?: number,
   ): Promise<void> {
     try {
       await this.prisma.strategy_signals.create({
@@ -371,8 +467,11 @@ export class AutoTradingExecutionService {
           macro_score: signal.scores.macro_score,
           engine_metadata: {
             auto_trade: true,
+            order_class: 'bracket',
             trade_amount: amount,
             trade_price: price,
+            stop_loss_price: stopLossPrice,
+            take_profit_price: takeProfitPrice,
             generated_at: new Date().toISOString(),
           },
         },
@@ -391,6 +490,8 @@ export class AutoTradingExecutionService {
     amount: number,
     price: number,
     alpacaOrderId: string,
+    stopLossPrice?: number,
+    takeProfitPrice?: number,
   ): Promise<void> {
     try {
       // Get or create a default portfolio for auto-trading
@@ -418,10 +519,13 @@ export class AutoTradingExecutionService {
           auto_trade_approved: true,
           metadata: {
             auto_trade: true,
+            order_class: 'bracket',
             alpaca_order_id: alpacaOrderId,
             symbol: stock.symbol,
             asset_id: stock.asset_id,
             confidence: signal.confidence,
+            stop_loss_price: stopLossPrice,
+            take_profit_price: takeProfitPrice,
             generated_at: new Date().toISOString(),
           },
         },

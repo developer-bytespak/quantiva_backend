@@ -126,6 +126,72 @@ export class AutoTradingController {
   }
 
   /**
+   * Get bracket orders (to verify OCO sell logic)
+   * Shows all orders with their attached stop-loss and take-profit legs
+   */
+  @Get('bracket-orders')
+  async getBracketOrders() {
+    try {
+      // Get all open orders with nested=true to see leg relationships
+      const openOrders = await this.alpacaService.getOrders({
+        status: 'open',
+        limit: 100,
+        nested: true,
+      });
+
+      // Get recent closed orders to see filled bracket orders
+      const closedOrders = await this.alpacaService.getOrders({
+        status: 'closed',
+        limit: 50,
+        nested: true,
+        direction: 'desc',
+      });
+
+      // Filter and format bracket orders
+      const bracketOrders = [...openOrders, ...closedOrders]
+        .filter((order: any) => order.order_class === 'bracket' || order.legs?.length > 0)
+        .map((order: any) => ({
+          id: order.id,
+          symbol: order.symbol,
+          side: order.side,
+          qty: order.qty,
+          filled_qty: order.filled_qty,
+          status: order.status,
+          order_class: order.order_class,
+          filled_avg_price: order.filled_avg_price,
+          created_at: order.created_at,
+          filled_at: order.filled_at,
+          // Leg orders (take-profit and stop-loss)
+          legs: order.legs?.map((leg: any) => ({
+            id: leg.id,
+            side: leg.side,
+            type: leg.type,
+            limit_price: leg.limit_price,
+            stop_price: leg.stop_price,
+            status: leg.status,
+            filled_avg_price: leg.filled_avg_price,
+            filled_at: leg.filled_at,
+          })) || [],
+        }));
+
+      return {
+        success: true,
+        message: 'Bracket orders show BUY entry with attached TP (limit sell) and SL (stop sell) legs',
+        data: {
+          total: bracketOrders.length,
+          orders: bracketOrders,
+        },
+      };
+    } catch (error: any) {
+      this.logger.error(`Failed to get bracket orders: ${error?.message}`);
+      throw new HttpException(
+        error?.message || 'Failed to get bracket orders',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
    * Get AI messages
    */
   @Get('messages')
