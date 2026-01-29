@@ -12,11 +12,13 @@ Detection Methods:
 """
 
 import logging
+import time
 from typing import Dict, Optional, Any
 from PIL import Image
 import numpy as np
 
-from src.services.kyc.face_engine import get_face_engine
+# Use optimized face engine
+from src.services.kyc.face_engine_optimized import get_face_engine
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +62,14 @@ def detect_liveness(image: Image.Image, is_video: bool = False) -> Dict[str, Any
         - depth_score: float
         - reflection_score: float
     """
+    start_time = time.time()
+    logger.info("="*50)
+    logger.info("🔍 [LIVENESS] Starting liveness detection...")
+    logger.info(f"   Image size: {image.size}, mode: {image.mode}")
+    
     cv2 = _get_cv2()
     if cv2 is None:
+        logger.error("❌ [LIVENESS] OpenCV not available!")
         return _error_response("OpenCV not available")
     
     try:
@@ -71,9 +79,12 @@ def detect_liveness(image: Image.Image, is_video: bool = False) -> Dict[str, Any
         
         rgb_array = np.array(image, dtype=np.uint8)
         bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+        logger.info(f"   [LIVENESS] Image converted to BGR: {bgr_array.shape}")
         
         # Get face detection with quality from engine
+        logger.info("   [LIVENESS] Getting face engine...")
         engine = get_face_engine()
+        logger.info("   [LIVENESS] Detecting face for quality assessment...")
         face = engine.get_best_face(bgr_array)
         
         face_quality_dict = None
@@ -150,10 +161,11 @@ def detect_liveness(image: Image.Image, is_video: bool = False) -> Dict[str, Any
             liveness_status = "unclear"
             spoof_type = None
         
-        logger.info(
-            f"Liveness: status={liveness_status}, score={liveness_score:.3f}, "
-            f"texture={texture_score:.2f}, depth={depth_score:.2f}, reflection={reflection_score:.2f}"
-        )
+        total_time = time.time() - start_time
+        logger.info(f"✅ [LIVENESS] Detection complete in {total_time:.2f}s")
+        logger.info(f"   Status: {liveness_status.upper()}, Score: {liveness_score:.3f}")
+        logger.info(f"   Texture: {texture_score:.2f}, Depth: {depth_score:.2f}, Reflection: {reflection_score:.2f}")
+        logger.info("="*50)
         
         return {
             "liveness": liveness_status,
@@ -167,7 +179,8 @@ def detect_liveness(image: Image.Image, is_video: bool = False) -> Dict[str, Any
         }
         
     except Exception as e:
-        logger.error(f"Liveness detection failed: {str(e)}", exc_info=True)
+        total_time = time.time() - start_time
+        logger.error(f"❌ [LIVENESS] Detection FAILED after {total_time:.2f}s: {str(e)}", exc_info=True)
         return _error_response(str(e))
 
 

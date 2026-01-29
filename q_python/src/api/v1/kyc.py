@@ -7,7 +7,10 @@ Uses DeepFace for face operations.
 
 import io
 import logging
+import time
+import asyncio
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from PIL import Image
@@ -20,6 +23,10 @@ from src.services.kyc.document_verification import check_authenticity
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/kyc", tags=["KYC"])
+
+# Thread pool for CPU-intensive face matching operations
+# This prevents blocking the async event loop so other requests can be processed
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="kyc_")
 
 
 # =============================================================================
@@ -83,6 +90,59 @@ async def get_face_engine_status():
             "engine": "unknown",
             "initialized": False,
             "error": str(e)
+        }
+
+
+# =============================================================================
+# WARMUP ENDPOINT
+# =============================================================================
+
+@router.post("/warmup")
+async def warmup_face_engine():
+    """
+    Pre-load the face recognition engine and models.
+    Call this endpoint on server startup to avoid timeout on first KYC request.
+    
+    This loads:
+        - DeepFace Facenet512 model (optimized)
+        - OpenCV face detection backend
+    
+    Returns:
+        - success: Whether warmup completed successfully
+        - engine: Engine name
+        - initialized: Whether engine is now ready
+        - message: Status message
+    """
+    import time
+    start_time = time.time()
+    
+    try:
+        logger.info("Starting face engine warmup (optimized)...")
+        
+        # Import and initialize the optimized face engine
+        from src.services.kyc.face_engine_optimized import get_face_engine
+        engine = get_face_engine()
+        
+        elapsed = time.time() - start_time
+        logger.info(f"Face engine warmup completed in {elapsed:.2f}s")
+        
+        return {
+            "success": True,
+            "engine": "deepface-facenet512-optimized",
+            "initialized": engine._initialized,
+            "warmup_time_seconds": round(elapsed, 2),
+            "message": "Optimized face engine loaded and ready for KYC operations"
+        }
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error(f"Face engine warmup failed after {elapsed:.2f}s: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "engine": "unknown",
+            "initialized": False,
+            "warmup_time_seconds": round(elapsed, 2),
+            "error": str(e),
+            "message": "Face engine warmup failed"
         }
 
 
@@ -274,24 +334,57 @@ async def match_faces_endpoint(
         - id_face_quality: Quality metrics for ID photo face
         - selfie_face_quality: Quality metrics for selfie face
     """
+    request_start = time.time()
+    logger.info("\n" + "="*70)
+    logger.info("🚀 [API] POST /kyc/face-match - REQUEST RECEIVED")
+    logger.info("="*70)
+    
     try:
         # Load both images
+        logger.info("📷 [API] Step 1: Loading images...")
+        load_start = time.time()
         id_image = await _load_image(id_photo)
         selfie_image = await _load_image(selfie)
+        load_time = time.time() - load_start
+        logger.info(f"   ID photo: {id_photo.filename} ({id_image.size[0]}x{id_image.size[1]})")
+        logger.info(f"   Selfie: {selfie.filename} ({selfie_image.size[0]}x{selfie_image.size[1]})")
+        logger.info(f"   Images loaded in {load_time:.2f}s")
         
         # Validate both
+        logger.info("✅ [API] Step 2: Validating images...")
         _validate_image(id_image)
         _validate_image(selfie_image)
+        logger.info("   Image validation passed")
         
-        logger.info(f"Face matching: ID={id_photo.filename}, selfie={selfie.filename}")
-        result = match_faces(id_image, selfie_image)
+        logger.info("🧠 [API] Step 3: Starting face matching engine...")
+        match_start = time.time()
+        
+        # Run CPU-intensive face matching in thread pool
+        # This prevents blocking the event loop so other requests can be processed
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(_executor, match_faces, id_image, selfie_image)
+        
+        match_time = time.time() - match_start
+        
+        total_time = time.time() - request_start
+        logger.info("\n" + "="*70)
+        logger.info(f"✅ [API] FACE MATCH COMPLETE")
+        logger.info(f"   Decision: {result.get('decision', 'unknown').upper()}")
+        logger.info(f"   Similarity: {result.get('similarity', 0):.3f}")
+        logger.info(f"   Match time: {match_time:.2f}s")
+        logger.info(f"   Total request time: {total_time:.2f}s")
+        logger.info("="*70 + "\n")
         
         return result
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Face matching failed: {str(e)}", exc_info=True)
+        total_time = time.time() - request_start
+        logger.error(f"\n" + "="*70)
+        logger.error(f"❌ [API] FACE MATCH FAILED after {total_time:.2f}s")
+        logger.error(f"   Error: {str(e)}")
+        logger.error("="*70 + "\n", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Face matching failed: {str(e)}")
 
 
@@ -350,12 +443,20 @@ async def complete_kyc_verification(
         - face_match: Face matching results
         - errors: List of any errors encountered
     """
+    request_start = time.time()
+    logger.info("\n" + "="*70)
+    logger.info("🚀 [API] POST /kyc/verify - FULL KYC VERIFICATION")
+    logger.info("="*70)
+    
     errors = []
     
     try:
         # Load images
+        logger.info("📷 [API] Loading images...")
         id_image = await _load_image(id_document)
         selfie_image = await _load_image(selfie)
+        logger.info(f"   ID document: {id_document.filename} ({id_image.size[0]}x{id_image.size[1]})")
+        logger.info(f"   Selfie: {selfie.filename} ({selfie_image.size[0]}x{selfie_image.size[1]})")
         
         # Reset file positions for re-reading if needed
         await id_document.seek(0)
@@ -363,8 +464,10 @@ async def complete_kyc_verification(
         
         _validate_image(id_image)
         _validate_image(selfie_image)
+        logger.info("✅ Images validated")
         
-        # Return hardcoded OCR result
+        # Step 1: OCR (hardcoded for now)
+        logger.info("📄 [KYC-VERIFY] Step 1/4: OCR extraction...")
         ocr_result = {
             "name": "John Doe",
             "dob": "1990-01-01", 
@@ -375,30 +478,40 @@ async def complete_kyc_verification(
             "confidence": 0.95,
             "raw_text": "UNITED STATES OF AMERICA\nJOHN DOE\n01 JAN 1990\nID123456789",
         }
+        logger.info("   OCR complete (hardcoded response)")
         
-        # 2. Document authenticity
+        # Step 2: Document authenticity
+        logger.info("🔐 [KYC-VERIFY] Step 2/4: Document authenticity check...")
+        step_start = time.time()
         authenticity_result = None
         try:
             authenticity_result = check_authenticity(id_image)
+            logger.info(f"   Authenticity complete in {time.time()-step_start:.2f}s: {authenticity_result.get('is_authentic', 'unknown')}")
         except Exception as e:
             errors.append(f"Authenticity check failed: {str(e)}")
-            logger.error(f"Authenticity in complete verification failed: {e}")
+            logger.error(f"   ❌ Authenticity FAILED: {e}")
         
-        # 3. Liveness
+        # Step 3: Liveness
+        logger.info("👤 [KYC-VERIFY] Step 3/4: Liveness detection...")
+        step_start = time.time()
         liveness_result = None
         try:
             liveness_result = detect_liveness(selfie_image)
+            logger.info(f"   Liveness complete in {time.time()-step_start:.2f}s: {liveness_result.get('liveness', 'unknown')}")
         except Exception as e:
             errors.append(f"Liveness detection failed: {str(e)}")
-            logger.error(f"Liveness in complete verification failed: {e}")
+            logger.error(f"   ❌ Liveness FAILED: {e}")
         
-        # 4. Face matching
+        # Step 4: Face matching (the main operation)
+        logger.info("🧠 [KYC-VERIFY] Step 4/4: Face matching...")
+        step_start = time.time()
         face_match_result = None
         try:
             face_match_result = match_faces(id_image, selfie_image)
+            logger.info(f"   Face match complete in {time.time()-step_start:.2f}s: {face_match_result.get('decision', 'unknown')}")
         except Exception as e:
             errors.append(f"Face matching failed: {str(e)}")
-            logger.error(f"Face matching in complete verification failed: {e}")
+            logger.error(f"   ❌ Face matching FAILED: {e}")
         
         # Determine overall status
         status = _determine_overall_status(
@@ -407,19 +520,33 @@ async def complete_kyc_verification(
             face_match_result
         )
         
+        total_time = time.time() - request_start
+        logger.info("\n" + "="*70)
+        logger.info(f"✅ [KYC-VERIFY] VERIFICATION COMPLETE")
+        logger.info(f"   Final Status: {status.upper()}")
+        logger.info(f"   Total time: {total_time:.2f}s")
+        if errors:
+            logger.info(f"   Errors: {len(errors)}")
+        logger.info("="*70 + "\n")
+        
         return {
             "status": status,
             "ocr": ocr_result,
             "authenticity": authenticity_result,
             "liveness": liveness_result,
             "face_match": face_match_result,
-            "errors": errors if errors else None
+            "errors": errors if errors else None,
+            "processing_time_seconds": round(total_time, 2)
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Complete KYC verification failed: {str(e)}", exc_info=True)
+        total_time = time.time() - request_start
+        logger.error(f"\n" + "="*70)
+        logger.error(f"❌ [KYC-VERIFY] VERIFICATION FAILED after {total_time:.2f}s")
+        logger.error(f"   Error: {str(e)}")
+        logger.error("="*70 + "\n", exc_info=True)
         raise HTTPException(status_code=500, detail=f"KYC verification failed: {str(e)}")
 
 

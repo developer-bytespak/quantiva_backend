@@ -24,8 +24,8 @@ def main():
     # Production settings:
     # - No reload (reload=False)
     # - Bind to 0.0.0.0 to accept external connections
-    # - Use PORT from environment
-    # - Single worker for Render's single-instance setup
+    # - Single worker (TensorFlow loaded once, ~600MB)
+    # - Async endpoints handle concurrency within the single process
     try:
         uvicorn.run(
             "src.main:app",

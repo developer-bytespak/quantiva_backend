@@ -1,15 +1,18 @@
 """
 Face Matching Service for KYC Verification
 ==========================================
-Compares faces between ID photo and selfie using the unified FaceEngine.
+Compares faces between ID photo and selfie using the OPTIMIZED FaceEngine.
+Uses Facenet512 + OpenCV (with RetinaFace backup) for fast, accurate matching.
 """
 
 import logging
+import time
 from typing import Dict, Optional, Tuple, Any
 from PIL import Image
 import numpy as np
 
-from src.services.kyc.face_engine import get_face_engine, FaceEngine
+# Use optimized engine for better performance on resource-constrained servers
+from src.services.kyc.face_engine_optimized import get_face_engine, FaceEngineOptimized
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +76,28 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
     """
     import os
     import uuid
+    
+    logger.info("=" * 60)
+    logger.info("🎯 [KYC] match_faces() called")
+    logger.info(f"   ID Photo: {id_photo.size}, mode={id_photo.mode}")
+    logger.info(f"   Selfie: {selfie.size}, mode={selfie.mode}")
+    logger.info("=" * 60)
+    
+    total_start = time.time()
+    
     try:
         # Convert to BGR
+        logger.info("🔄 [KYC] Converting images to BGR...")
+        t = time.time()
         id_bgr = pil_to_bgr(id_photo)
         selfie_bgr = pil_to_bgr(selfie)
+        logger.info(f"   Conversion done: {time.time()-t:.2f}s")
 
         # Get face engine and perform enhanced verification
+        logger.info("🔄 [KYC] Getting face engine...")
         engine = get_face_engine()
+        
+        logger.info("🔄 [KYC] Calling verify_faces()...")
         result = engine.verify_faces(id_bgr, selfie_bgr)
 
         # Save cropped faces if detected
@@ -179,6 +197,13 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
                        f"euclidean={metrics.get('euclidean', 0):.3f}, "
                        f"manhattan={metrics.get('manhattan', 0):.3f}")
 
+        total_time = time.time() - total_start
+        logger.info("=" * 60)
+        logger.info(f"✅ [KYC] match_faces() completed: {decision.upper()}")
+        logger.info(f"   Similarity: {similarity:.3f}, Threshold: {threshold_used}")
+        logger.info(f"   Total time: {total_time:.2f}s")
+        logger.info("=" * 60)
+        
         return {
             "similarity": float(similarity),
             "is_match": decision == "approved",
@@ -192,16 +217,19 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
             "metrics": match_data.get("metrics", {}),
             "document_crop_path": id_crop_path,
             "selfie_crop_path": selfie_crop_path,
+            "processing_time_seconds": round(total_time, 2)
         }
 
     except Exception as e:
-        logger.error(f"Enhanced face matching failed: {str(e)}", exc_info=True)
+        total_time = time.time() - total_start
+        logger.error(f"❌ [KYC] match_faces() FAILED after {total_time:.2f}s: {str(e)}", exc_info=True)
         return {
             "similarity": 0.0,
             "is_match": False,
             "decision": "rejected",
             "confidence": 0.0,
-            "error": str(e)
+            "error": str(e),
+            "processing_time_seconds": round(total_time, 2)
         }
 
 
@@ -220,9 +248,9 @@ def verify_face_quality(image: Image.Image, is_webcam: bool = False) -> Tuple[bo
         # Convert to BGR
         bgr = pil_to_bgr(image)
         
-        # Use enhanced quality verification
-        from src.services.kyc.face_engine import verify_face_quality
-        return verify_face_quality(bgr, is_webcam)
+        # Use optimized quality verification
+        from src.services.kyc.face_engine_optimized import verify_face_quality as _verify_quality
+        return _verify_quality(bgr, is_webcam)
         
     except Exception as e:
         logger.error(f"Face quality verification failed: {str(e)}")
@@ -273,11 +301,12 @@ def get_engine_status() -> Dict[str, Any]:
     try:
         engine = get_face_engine()
         return {
-            "engine": "deepface-facenet512",
+            "engine": "deepface-facenet512-optimized",
             "initialized": engine._initialized,
             "has_liveness": True,
             "has_preprocessing": True,
-            "adaptive_thresholds": True,
+            "optimized": True,
+            "detectors": ["opencv", "retinaface (lazy)"],
         }
     except Exception as e:
         return {

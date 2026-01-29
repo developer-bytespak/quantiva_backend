@@ -84,39 +84,56 @@ export class KycController {
     @CurrentUser() user: TokenPayload,
     @UploadedFile() file: Express.Multer.File,
   ) {
-    this.logger.debug(`Upload selfie request - User: ${user.sub}, File: ${file?.originalname || 'none'}`);
+    const requestStart = Date.now();
+    this.logger.log('');
+    this.logger.log('████████████████████████████████████████████████████████████████████');
+    this.logger.log('█  🚀 [CONTROLLER] POST /kyc/selfie - REQUEST RECEIVED             █');
+    this.logger.log('████████████████████████████████████████████████████████████████████');
+    this.logger.log(`   Timestamp: ${new Date().toISOString()}`);
+    this.logger.log(`   User: ${user.sub}`);
+    this.logger.log(`   File: ${file?.originalname || 'none'} (${file?.size || 0} bytes)`);
     
     if (!file) {
       this.logger.warn('Upload selfie: No file provided');
       throw new BadRequestException('File is required');
     }
 
-    this.logger.debug(
-      `File received - Name: ${file.originalname}, Size: ${file.size}, Buffer length: ${file.buffer?.length || 0}, MIME: ${file.mimetype}`,
-    );
+    this.logger.log(`   Buffer length: ${file.buffer?.length || 0}, MIME: ${file.mimetype}`);
 
     if (!file.buffer || file.buffer.length === 0) {
-      this.logger.error(
-        `File buffer is empty - Name: ${file.originalname}, Size: ${file.size}, Buffer: ${file.buffer ? 'exists but empty' : 'null'}`,
-      );
+      this.logger.error(`   ❌ File buffer is empty!`);
       throw new BadRequestException('File buffer is empty. Please ensure the file was uploaded correctly.');
     }
 
     try {
+      this.logger.log('   📞 Calling kycService.uploadSelfie()...');
+      const serviceStart = Date.now();
+      
       await this.kycService.uploadSelfie(user.sub, file);
+      
+      const serviceTime = Date.now() - serviceStart;
+      const totalTime = Date.now() - requestStart;
+      
+      this.logger.log('');
+      this.logger.log('████████████████████████████████████████████████████████████████████');
+      this.logger.log('█  ✅ [CONTROLLER] POST /kyc/selfie - SUCCESS                      █');
+      this.logger.log('████████████████████████████████████████████████████████████████████');
+      this.logger.log(`   Service time: ${serviceTime}ms (${(serviceTime/1000).toFixed(2)}s)`);
+      this.logger.log(`   Total request time: ${totalTime}ms (${(totalTime/1000).toFixed(2)}s)`);
+      this.logger.log('');
 
       return {
         success: true,
         message: 'Selfie uploaded and verified successfully',
       };
     } catch (error: any) {
-      this.logger.error('Selfie upload failed', {
-        userId: user.sub,
-        error: error?.message,
-        stack: error?.stack,
-      });
+      const totalTime = Date.now() - requestStart;
+      this.logger.error('');
+      this.logger.error('████████████████████████████████████████████████████████████████████');
+      this.logger.error(`█  ❌ [CONTROLLER] POST /kyc/selfie - FAILED after ${totalTime}ms`);
+      this.logger.error('████████████████████████████████████████████████████████████████████');
+      this.logger.error(`   Error: ${error?.message}`);
       
-      // Return user-friendly error message
       throw new BadRequestException(
         error?.message || 'Failed to process selfie. Please ensure the image is clear and contains a visible face.',
       );
