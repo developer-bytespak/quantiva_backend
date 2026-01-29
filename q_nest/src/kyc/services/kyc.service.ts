@@ -68,16 +68,14 @@ export class KycService {
       // Match faces using Python API
       const matchResult = await this.faceMatchingService.matchFaces(verification.kyc_id, file);
 
-      // Apply decision engine based on face matching result
+      // Apply decision engine - simple approved/rejected only
+      // >= 50% similarity = approved, < 50% = rejected
       let kycStatus = 'rejected';
       let decisionReason = 'Face matching threshold not met';
 
-      if (matchResult.is_match && matchResult.similarity >= 0.50) {
+      if (matchResult.similarity >= 0.50) {
         kycStatus = 'approved';
         decisionReason = `Face match successful (similarity: ${(matchResult.similarity * 100).toFixed(1)}%)`;
-      } else if (matchResult.similarity >= 0.50) {
-        kycStatus = 'review';
-        decisionReason = `Face similarity borderline (${(matchResult.similarity * 100).toFixed(1)}%) - manual review needed`;
       } else {
         kycStatus = 'rejected';
         decisionReason = `Face match failed (similarity: ${(matchResult.similarity * 100).toFixed(1)}% < 50%)`;
