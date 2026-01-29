@@ -48,6 +48,8 @@ export interface AutoTradingSession {
 export class AutoTradingSessionService {
   private readonly logger = new Logger(AutoTradingSessionService.name);
   private historyLoaded = false;
+  private lastHistoryLoad: Date | null = null;
+  private readonly HISTORY_CACHE_TTL = 30000; // 30 seconds cache
   
   constructor(private prisma: PrismaService) {}
   
@@ -104,20 +106,26 @@ export class AutoTradingSessionService {
 
   /**
    * Load historical trades from database (called on startup or when needed)
+   * Uses a 30-second cache to avoid excessive DB queries
    */
   async loadHistoryFromDatabase(): Promise<void> {
-    if (this.historyLoaded) return;
+    // Check cache - reload every 30 seconds max
+    const now = new Date();
+    if (this.historyLoaded && this.lastHistoryLoad) {
+      const timeSinceLastLoad = now.getTime() - this.lastHistoryLoad.getTime();
+      if (timeSinceLastLoad < this.HISTORY_CACHE_TTL) {
+        return; // Use cached data
+      }
+    }
     
     try {
-      this.logger.log('Loading auto-trade history from database...');
-      
-      // Load auto-trade signals from the last 7 days
-      const sevenDaysAgo = new Date();
-      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      // Load auto-trade signals from the last 30 days (extended for better history)
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
       
       const signals = await this.prisma.strategy_signals.findMany({
         where: {
-          timestamp: { gte: sevenDaysAgo },
+          timestamp: { gte: thirtyDaysAgo },
           engine_metadata: {
             path: ['auto_trade'],
             equals: true,
@@ -147,34 +155,41 @@ export class AutoTradingSessionService {
         confidence: sig.confidence,
       }));
 
-      if (trades.length > 0) {
-        this.session.trades = trades;
-        
-        // Recalculate stats from loaded trades
-        this.session.stats.totalTrades = trades.length;
-        this.session.stats.successfulTrades = trades.filter(t => t.status === 'filled').length;
-        this.session.stats.failedTrades = trades.filter(t => t.status === 'failed').length;
-        this.session.stats.totalVolume = trades.reduce((sum, t) => sum + t.amount, 0);
-        this.session.stats.winRate = this.session.stats.totalTrades > 0
-          ? (this.session.stats.successfulTrades / this.session.stats.totalTrades) * 100
-          : 0;
-        this.session.stats.lastTradeTime = trades[0]?.timestamp || null;
-        
-        // Count today's trades
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        this.session.stats.todayTrades = trades.filter(
-          t => new Date(t.timestamp) >= today
-        ).length;
-
-        this.logger.log(`Loaded ${trades.length} auto-trades from database`);
-      }
+      // Always update with fresh data from DB
+      this.session.trades = trades;
+      
+      // Recalculate stats from loaded trades
+      this.session.stats.totalTrades = trades.length;
+      this.session.stats.successfulTrades = trades.filter(t => t.status === 'filled').length;
+      this.session.stats.failedTrades = trades.filter(t => t.status === 'failed').length;
+      this.session.stats.totalVolume = trades.reduce((sum, t) => sum + t.amount, 0);
+      this.session.stats.winRate = this.session.stats.totalTrades > 0
+        ? (this.session.stats.successfulTrades / this.session.stats.totalTrades) * 100
+        : 0;
+      this.session.stats.lastTradeTime = trades[0]?.timestamp || null;
+      
+      // Count today's trades
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      this.session.stats.todayTrades = trades.filter(
+        t => new Date(t.timestamp) >= today
+      ).length;
 
       this.historyLoaded = true;
+      this.lastHistoryLoad = new Date();
+      this.logger.debug(`Loaded ${trades.length} auto-trades from database`);
     } catch (error: any) {
       this.logger.error(`Failed to load history: ${error?.message}`);
-      this.historyLoaded = true; // Don't retry on error
     }
+  }
+
+  /**
+   * Force reload from database (useful when data might be stale)
+   */
+  async forceReloadHistory(): Promise<void> {
+    this.historyLoaded = false;
+    this.lastHistoryLoad = null;
+    await this.loadHistoryFromDatabase();
   }
 
   /**
@@ -412,9 +427,31 @@ export class AutoTradingSessionService {
   }
 
   /**
-   * Reset session (clear all data)
+   * Reset session (keeps historical trades and stats from DB)
+   * Only resets session control state, not the trade history
    */
   resetSession(): void {
+    // Preserve trades and stats - they come from DB
+    const preservedTrades = this.session.trades;
+    const preservedStats = this.session.stats;
+    
+    this.session = {
+      status: 'idle',
+      sessionId: '',
+      startTime: null,
+      lastRunTime: null,
+      nextRunTime: null,
+      trades: preservedTrades, // Keep historical trades
+      stats: preservedStats,   // Keep stats
+      aiMessages: [],          // Only clear AI messages
+    };
+    this.logger.log('Auto trading session reset (trade history preserved)');
+  }
+
+  /**
+   * Full reset including history (use with caution)
+   */
+  fullReset(): void {
     this.session = {
       status: 'idle',
       sessionId: '',
@@ -438,6 +475,8 @@ export class AutoTradingSessionService {
       },
       aiMessages: [],
     };
-    this.logger.log('Auto trading session reset');
+    this.historyLoaded = false;
+    this.lastHistoryLoad = null;
+    this.logger.log('Auto trading session fully reset (all data cleared)');
   }
 }
