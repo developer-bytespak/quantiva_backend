@@ -37,7 +37,8 @@ interface BinanceTestnetOrder {
   status: string;
   time: number;
   executedQty: string;
-  cumulativeQuoteAssetTransacted: string;
+  cummulativeQuoteQty: string; // Note: Binance uses 'cummulativeQuoteQty' not 'cumulativeQuoteAssetTransacted'
+  cumulativeQuoteAssetTransacted?: string; // Also try this field name
 }
 
 @Injectable()
@@ -398,11 +399,19 @@ export class BinanceTestnetService {
       return filteredOrders.map((order) => {
         const executedQty = parseFloat(order.executedQty) || 0;
         const price = parseFloat(order.price) || 0;
-        let cumulativeQuote = parseFloat(order.cumulativeQuoteAssetTransacted);
         
-        // If cumulativeQuoteAssetTransacted is null/NaN, calculate it
-        if (!cumulativeQuote || isNaN(cumulativeQuote)) {
-          cumulativeQuote = executedQty * price;
+        // Try both field names - Binance uses 'cummulativeQuoteQty' (with typo)
+        let cumulativeQuote = parseFloat(order.cummulativeQuoteQty) || 
+                              parseFloat(order.cumulativeQuoteAssetTransacted) || 0;
+        
+        // Log raw order data for debugging
+        this.logger.debug(`Order ${order.orderId} raw data: cummulativeQuoteQty=${order.cummulativeQuoteQty}, price=${order.price}, executedQty=${order.executedQty}`);
+        
+        // Calculate effective price for the order
+        let effectivePrice = price;
+        if (executedQty > 0 && cumulativeQuote > 0) {
+          // For market orders, calculate from cumulative quote
+          effectivePrice = cumulativeQuote / executedQty;
         }
         
         return {
@@ -411,7 +420,7 @@ export class BinanceTestnetService {
           side: order.side,
           type: order.type,
           quantity: parseFloat(order.origQty),
-          price: price,
+          price: effectivePrice,
           status: order.status,
           timestamp: order.time,
           executedQuantity: executedQty,
@@ -495,6 +504,174 @@ export class BinanceTestnetService {
       };
     } catch (error) {
       this.logger.error(`Failed to place order: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Places an OCO (One-Cancels-Other) order for automatic stop-loss and take-profit
+   * When either the stop-loss or take-profit is triggered, the other order is automatically cancelled
+   * 
+   * @param apiKey - Binance Testnet API key
+   * @param apiSecret - Binance Testnet API secret
+   * @param symbol - Trading pair symbol (e.g., BTCUSDT)
+   * @param side - SELL for closing a long position (most common), BUY for closing a short
+   * @param quantity - Amount of the asset to sell/buy
+   * @param takeProfitPrice - Price at which to take profit (limit order)
+   * @param stopLossPrice - Price at which to trigger stop loss (stop price)
+   * @param stopLimitPrice - Price for the stop-loss limit order (usually slightly below stopLossPrice for sells)
+   */
+  async placeOcoOrder(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    quantity: number,
+    takeProfitPrice: number,
+    stopLossPrice: number,
+    stopLimitPrice?: number,
+  ): Promise<{
+    orderListId: number;
+    contingencyType: string;
+    listStatusType: string;
+    listOrderStatus: string;
+    listClientOrderId: string;
+    transactionTime: number;
+    symbol: string;
+    orders: Array<{
+      orderId: number;
+      symbol: string;
+      clientOrderId: string;
+    }>;
+    orderReports: Array<{
+      orderId: number;
+      symbol: string;
+      side: string;
+      type: string;
+      price: string;
+      origQty: string;
+      status: string;
+      stopPrice?: string;
+    }>;
+  }> {
+    try {
+      if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
+        throw new Error(`Invalid symbol provided: "${symbol}"`);
+      }
+
+      // Get symbol info to determine tick size
+      const symbolInfo = await this.getSymbolInfo(symbol);
+      const tickSize = this.getTickSize(symbolInfo);
+      
+      this.logger.debug(`Symbol ${symbol} tick size: ${tickSize}`);
+
+      // If stopLimitPrice not provided, use a small offset from stopLossPrice
+      // For SELL OCO: stopLimitPrice should be slightly below stopLossPrice
+      // For BUY OCO: stopLimitPrice should be slightly above stopLossPrice
+      const effectiveStopLimitPrice = stopLimitPrice || 
+        (side === 'SELL' 
+          ? stopLossPrice * 0.995  // 0.5% below stop price for sells
+          : stopLossPrice * 1.005  // 0.5% above stop price for buys
+        );
+
+      // Round all prices according to tick size
+      const roundedTpPrice = this.roundPrice(takeProfitPrice, tickSize);
+      const roundedSlPrice = this.roundPrice(stopLossPrice, tickSize);
+      const roundedStopLimitPrice = this.roundPrice(effectiveStopLimitPrice, tickSize);
+
+      const params: any = {
+        symbol: symbol.trim().toUpperCase(),
+        side: side.toUpperCase(),
+        quantity: quantity.toString(),
+        price: roundedTpPrice.toString(),
+        stopPrice: roundedSlPrice.toString(),
+        stopLimitPrice: roundedStopLimitPrice.toString(),
+        stopLimitTimeInForce: 'GTC',
+      };
+
+      this.logger.log(
+        `Placing OCO order: ${params.symbol} ${params.side} qty=${params.quantity} ` +
+        `TP=${params.price} SL=${params.stopPrice} stopLimit=${params.stopLimitPrice}`
+      );
+
+      const result = await this.makeSignedRequest(
+        'POST',
+        '/v3/order/oco',
+        apiKey,
+        apiSecret,
+        params,
+      );
+
+      this.logger.log(`OCO order placed successfully: orderListId=${result.orderListId}`);
+
+      return {
+        orderListId: result.orderListId,
+        contingencyType: result.contingencyType,
+        listStatusType: result.listStatusType,
+        listOrderStatus: result.listOrderStatus,
+        listClientOrderId: result.listClientOrderId,
+        transactionTime: result.transactionTime,
+        symbol: result.symbol,
+        orders: result.orders || [],
+        orderReports: result.orderReports || [],
+      };
+    } catch (error) {
+      this.logger.error(`Failed to place OCO order: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Cancels an OCO order list
+   */
+  async cancelOcoOrder(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    orderListId: number,
+  ): Promise<any> {
+    try {
+      const result = await this.makeSignedRequest(
+        'DELETE',
+        '/v3/orderList',
+        apiKey,
+        apiSecret,
+        { symbol, orderListId },
+      );
+
+      this.logger.log(`OCO order cancelled: orderListId=${orderListId}`);
+      return result;
+    } catch (error) {
+      this.logger.error(`Failed to cancel OCO order: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Gets all OCO orders for a symbol
+   */
+  async getOcoOrders(
+    apiKey: string,
+    apiSecret: string,
+    symbol?: string,
+    limit?: number,
+  ): Promise<any[]> {
+    try {
+      const params: any = {};
+      if (symbol) params.symbol = symbol;
+      if (limit) params.limit = limit;
+
+      const result = await this.makeSignedRequest(
+        'GET',
+        '/v3/allOrderList',
+        apiKey,
+        apiSecret,
+        params,
+      );
+
+      return result || [];
+    } catch (error) {
+      this.logger.error(`Failed to get OCO orders: ${error.message}`);
       throw error;
     }
   }
@@ -684,4 +861,45 @@ export class BinanceTestnetService {
       this.logger.error(`Failed to get exchange info: ${error.message}`);
       throw error;
     }
-  }}
+  }
+
+  /**
+   * Get symbol-specific trading rules and filters
+   */
+  async getSymbolInfo(symbol: string): Promise<any> {
+    try {
+      const exchangeInfo = await this.makePublicRequest('/v3/exchangeInfo');
+      const symbolInfo = exchangeInfo.symbols.find((s: any) => s.symbol === symbol.toUpperCase());
+      return symbolInfo || null;
+    } catch (error) {
+      this.logger.error(`Failed to get symbol info for ${symbol}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Round price according to symbol's tick size (PRICE_FILTER)
+   */
+  private roundPrice(price: number, tickSize: string): number {
+    const tick = parseFloat(tickSize);
+    if (tick === 0) return price;
+    
+    // Round to nearest tick
+    const rounded = Math.round(price / tick) * tick;
+    
+    // Get decimal places from tick size
+    const decimals = tickSize.includes('.') ? tickSize.split('.')[1].replace(/0+$/, '').length : 0;
+    
+    return parseFloat(rounded.toFixed(decimals));
+  }
+
+  /**
+   * Get tick size from symbol filters
+   */
+  private getTickSize(symbolInfo: any): string {
+    if (!symbolInfo || !symbolInfo.filters) return '0.00000001';
+    
+    const priceFilter = symbolInfo.filters.find((f: any) => f.filterType === 'PRICE_FILTER');
+    return priceFilter?.tickSize || '0.00000001';
+  }
+}

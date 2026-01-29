@@ -135,8 +135,11 @@ async def background_init():
     import time
     
     logger.info("🔥 Background: Starting model pre-warming...")
-    start_time = time.time()
     
+    # 1. Initialize FinBERT sentiment model
+    
+    # 1. Initialize FinBERT sentiment model
+    start_time = time.time()
     try:
         from src.services.engines.sentiment_engine import SentimentEngine
         sentiment_engine = SentimentEngine()
@@ -150,6 +153,33 @@ async def background_init():
             logger.warning(f"⚠️ Background: FinBERT initialization failed after {elapsed:.2f}s")
     except Exception as e:
         elapsed = time.time() - start_time
-        logger.error(f"❌ Background: Error during model pre-warming ({elapsed:.2f}s): {str(e)}")
+        logger.error(f"❌ Background: Error during FinBERT pre-warming ({elapsed:.2f}s): {str(e)}")
     
-    logger.info("✅ Background initialization complete")
+    # 2. Initialize OPTIMIZED DeepFace face engine for KYC
+    start_time = time.time()
+    try:
+        logger.info("🔄 Background: Loading optimized DeepFace face engine for KYC...")
+        from src.services.kyc.face_engine_optimized import get_face_engine
+        face_engine = get_face_engine()
+        
+        # Force model loading by doing a dummy operation
+        import numpy as np
+        dummy_img = np.zeros((224, 224, 3), dtype=np.uint8)
+        dummy_img[50:150, 50:150] = 128
+        
+        try:
+            face_engine.detect_and_embed(dummy_img)
+        except:
+            pass  # Expected - no real face in dummy image
+        
+        elapsed = time.time() - start_time
+        
+        if face_engine._initialized:
+            logger.info(f"✅ Background: Optimized DeepFace face engine loaded in {elapsed:.2f}s")
+        else:
+            logger.warning(f"⚠️ Background: DeepFace initialization incomplete after {elapsed:.2f}s")
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error(f"❌ Background: Error during DeepFace pre-warming ({elapsed:.2f}s): {str(e)}")
+    
+    logger.info("✅ Background initialization complete - all models ready")

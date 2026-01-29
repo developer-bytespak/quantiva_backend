@@ -265,4 +265,39 @@ export class StocksMarketController {
       );
     }
   }
+
+  /**
+   * GET /api/stocks-market/load-hardcoded-sp500
+   * Load S&P 500 stocks directly from hardcoded list (bypasses FMP API)
+   * Use this when FMP is rate limited
+   * Query params:
+   *  - sync: boolean (default: false) - If true, triggers market data sync after loading
+   */
+  @Get('load-hardcoded-sp500')
+  async loadHardcodedSP500List(@Query('sync') sync?: string) {
+    try {
+      this.logger.log('Loading S&P 500 list from hardcoded symbols (bypassing FMP)...');
+      const triggerSync = sync === 'true' || sync === '1';
+      const result = await this.stocksMarketService.loadHardcodedSP500List(
+        triggerSync,
+      );
+
+      return {
+        ...result,
+        timestamp: new Date().toISOString(),
+        nextStep: triggerSync
+          ? 'Market data sync completed. Stocks should now be available.'
+          : 'Call /api/stocks-market/force-sync to fetch market data for all stocks.',
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to load hardcoded S&P 500 list', {
+        error: error?.message,
+      });
+
+      throw new HttpException(
+        error.message || 'Failed to load hardcoded S&P 500 list',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
 }

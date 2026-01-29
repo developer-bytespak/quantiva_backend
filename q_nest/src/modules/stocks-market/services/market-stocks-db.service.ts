@@ -10,6 +10,11 @@ export class MarketStocksDbService {
 
   /**
    * Upsert multiple stocks into assets and market_rankings tables
+   * 
+   * Important: When marketCap is null (not fetched from FMP due to rotation),
+   * we preserve the existing market_cap value in the database.
+   * This allows FMP rotation to work correctly - stocks not in today's
+   * FMP batch will keep their existing market cap data.
    */
   async upsertBatch(stocks: MarketStock[]): Promise<void> {
     try {
@@ -48,6 +53,18 @@ export class MarketStocksDbService {
               },
             });
 
+            // Get existing market_rankings to preserve market_cap if new value is null
+            const existingRanking = await tx.market_rankings.findFirst({
+              where: { asset_id: asset.asset_id },
+              orderBy: { rank_timestamp: 'desc' },
+              select: { market_cap: true },
+            });
+
+            // Use new market_cap if provided, otherwise preserve existing
+            const marketCapToStore = stock.marketCap !== null 
+              ? stock.marketCap 
+              : existingRanking?.market_cap ?? null;
+
             // Upsert into market_rankings table
             await tx.market_rankings.upsert({
               where: {
@@ -58,7 +75,7 @@ export class MarketStocksDbService {
               },
               update: {
                 rank: stock.rank,
-                market_cap: stock.marketCap,
+                market_cap: marketCapToStore,
                 price_usd: stock.price,
                 volume_24h: stock.volume24h,
                 change_24h: stock.change24h,
@@ -68,7 +85,7 @@ export class MarketStocksDbService {
                 rank_timestamp: now,
                 asset_id: asset.asset_id,
                 rank: stock.rank,
-                market_cap: stock.marketCap,
+                market_cap: marketCapToStore,
                 price_usd: stock.price,
                 volume_24h: stock.volume24h,
                 change_24h: stock.change24h,
@@ -99,7 +116,7 @@ export class MarketStocksDbService {
    */
   async getAll(limit?: number): Promise<MarketStock[]> {
     try {
-      // Use optimized query with window function (faster than DISTINCT ON for large datasets)
+      // Optimized query: fetch assets first, then latest market_rankings separately
       const limitValue = limit || 500;
       
       const stocks = await this.prisma.$queryRaw<Array<{
@@ -115,46 +132,33 @@ export class MarketStocksDbService {
         change_24h: number | null;
         change_percent_24h: number | null;
       }>>`
-        WITH ranked_data AS (
-          SELECT 
-            a.asset_id,
-            a.symbol,
-            a.name,
-            a.sector,
-            a.market_cap_rank,
-            mr.rank,
-            mr.price_usd,
-            mr.market_cap,
-            mr.volume_24h,
-            mr.change_24h,
-            mr.change_percent_24h,
-            ROW_NUMBER() OVER (
-              PARTITION BY a.asset_id 
-              ORDER BY mr.rank_timestamp DESC
-            ) as rn
-          FROM assets a
-          INNER JOIN market_rankings mr ON mr.asset_id = a.asset_id
-          WHERE a.asset_type = 'stock'
-            AND a.is_active = true
-            AND mr.price_usd IS NOT NULL
-        )
         SELECT 
-          asset_id,
-          symbol,
-          name,
-          sector,
-          market_cap_rank,
-          COALESCE(rank, market_cap_rank, 0) as rank,
-          price_usd,
-          market_cap,
-          volume_24h,
-          change_24h,
-          change_percent_24h
-        FROM ranked_data
-        WHERE rn = 1
-        ORDER BY market_cap_rank ASC NULLS LAST
+          a.asset_id,
+          a.symbol,
+          a.name,
+          a.sector,
+          a.market_cap_rank,
+          COALESCE(mr.rank, a.market_cap_rank, 0) as rank,
+          mr.price_usd,
+          mr.market_cap,
+          mr.volume_24h,
+          mr.change_24h,
+          mr.change_percent_24h
+        FROM assets a
+        LEFT JOIN LATERAL (
+          SELECT rank, price_usd, market_cap, volume_24h, change_24h, change_percent_24h
+          FROM market_rankings
+          WHERE asset_id = a.asset_id
+          ORDER BY rank_timestamp DESC
+          LIMIT 1
+        ) mr ON true
+        WHERE a.asset_type = 'stock'
+          AND a.is_active = true
+        ORDER BY a.market_cap_rank ASC NULLS LAST
         LIMIT ${limitValue}
       `;
+
+      this.logger.log(`Retrieved ${stocks.length} stocks from database (requested limit: ${limitValue})`);
 
       return stocks.map((stock) => ({
         rank: stock.rank || stock.market_cap_rank || 0,
@@ -223,43 +227,29 @@ export class MarketStocksDbService {
         change_24h: number | null;
         change_percent_24h: number | null;
       }>>`
-        WITH ranked_data AS (
-          SELECT 
-            a.asset_id,
-            a.symbol,
-            a.name,
-            a.sector,
-            a.market_cap_rank,
-            mr.rank,
-            mr.price_usd,
-            mr.market_cap,
-            mr.volume_24h,
-            mr.change_24h,
-            mr.change_percent_24h,
-            ROW_NUMBER() OVER (
-              PARTITION BY a.asset_id 
-              ORDER BY mr.rank_timestamp DESC NULLS LAST
-            ) as rn
-          FROM assets a
-          LEFT JOIN market_rankings mr ON mr.asset_id = a.asset_id
-          WHERE a.asset_type = 'stock'
-            AND a.is_active = true
-        )
         SELECT 
-          asset_id,
-          symbol,
-          name,
-          sector,
-          market_cap_rank,
-          COALESCE(rank, market_cap_rank, 0) as rank,
-          price_usd,
-          market_cap,
-          volume_24h,
-          change_24h,
-          change_percent_24h
-        FROM ranked_data
-        WHERE rn = 1
-        ORDER BY market_cap_rank ASC NULLS LAST
+          a.asset_id,
+          a.symbol,
+          a.name,
+          a.sector,
+          a.market_cap_rank,
+          COALESCE(mr.rank, a.market_cap_rank, 0) as rank,
+          mr.price_usd,
+          mr.market_cap,
+          mr.volume_24h,
+          mr.change_24h,
+          mr.change_percent_24h
+        FROM assets a
+        LEFT JOIN LATERAL (
+          SELECT rank, price_usd, market_cap, volume_24h, change_24h, change_percent_24h
+          FROM market_rankings
+          WHERE asset_id = a.asset_id
+          ORDER BY rank_timestamp DESC
+          LIMIT 1
+        ) mr ON true
+        WHERE a.asset_type = 'stock'
+          AND a.is_active = true
+        ORDER BY a.market_cap_rank ASC NULLS LAST
         LIMIT ${limitValue}
       `;
       
@@ -561,87 +551,98 @@ export class MarketStocksDbService {
       // Get set of new S&P 500 symbols for quick lookup
       const newSP500Symbols = new Set(symbols.map((s) => s.symbol.toUpperCase()));
 
-      await this.prisma.$transaction(
-        async (tx) => {
-          // First, update/create all stocks in the new S&P 500 list
-          for (const stock of symbols) {
-            const existing = await tx.assets.findUnique({
-              where: {
-                symbol_asset_type: {
-                  symbol: stock.symbol,
-                  asset_type: 'stock',
-                },
-              },
-            });
+      // Get all existing stock symbols first
+      const existingStocks = await this.prisma.assets.findMany({
+        where: {
+          asset_type: 'stock',
+        },
+        select: {
+          asset_id: true,
+          symbol: true,
+          is_active: true,
+        },
+      });
 
-            if (existing) {
-              // Update existing - ensure it's active
-              await tx.assets.update({
-                where: {
-                  asset_id: existing.asset_id,
-                },
-                data: {
-                  name: stock.name,
-                  sector: stock.sector,
-                  is_active: true, // Ensure it's active
-                  last_seen_at: now,
-                  display_name: stock.name,
-                },
-              });
-              updated++;
-            } else {
-              // Create new
-              await tx.assets.create({
-                data: {
-                  symbol: stock.symbol,
-                  name: stock.name,
-                  asset_type: 'stock',
-                  sector: stock.sector,
-                  is_active: true,
-                  first_seen_at: now,
-                  last_seen_at: now,
-                  display_name: stock.name,
-                },
-              });
-              stored++;
-            }
-          }
+      const existingSymbolMap = new Map<string, { asset_id: string; symbol: string | null; is_active: boolean }>(
+        existingStocks.map((s) => [s.symbol?.toUpperCase() || '', s]),
+      );
 
-          // Second, deactivate any stocks that are no longer in S&P 500
-          // (but were previously active stocks)
-          const allActiveStocks = await tx.assets.findMany({
-            where: {
-              asset_type: 'stock',
+      // Process in batches to avoid timeout
+      const BATCH_SIZE = 50;
+      
+      // Separate into stocks to create vs update
+      const toCreate: Array<{ symbol: string; name: string; sector: string }> = [];
+      const toUpdate: Array<{ asset_id: string; name: string; sector: string }> = [];
+
+      for (const stock of symbols) {
+        const existing = existingSymbolMap.get(stock.symbol.toUpperCase());
+        if (existing) {
+          toUpdate.push({
+            asset_id: existing.asset_id,
+            name: stock.name,
+            sector: stock.sector,
+          });
+        } else {
+          toCreate.push(stock);
+        }
+      }
+
+      // Batch create new stocks
+      for (let i = 0; i < toCreate.length; i += BATCH_SIZE) {
+        const batch = toCreate.slice(i, i + BATCH_SIZE);
+        await this.prisma.assets.createMany({
+          data: batch.map((stock) => ({
+            symbol: stock.symbol,
+            name: stock.name,
+            asset_type: 'stock',
+            sector: stock.sector,
+            is_active: true,
+            first_seen_at: now,
+            last_seen_at: now,
+            display_name: stock.name,
+          })),
+          skipDuplicates: true,
+        });
+        stored += batch.length;
+      }
+
+      // Batch update existing stocks - do sequentially to avoid connection issues
+      for (const stock of toUpdate) {
+        try {
+          await this.prisma.assets.update({
+            where: { asset_id: stock.asset_id },
+            data: {
+              name: stock.name,
+              sector: stock.sector,
               is_active: true,
-            },
-            select: {
-              asset_id: true,
-              symbol: true,
+              last_seen_at: now,
+              display_name: stock.name,
             },
           });
+          updated++;
+        } catch (updateError) {
+          // Skip individual failures
+          this.logger.warn(`Failed to update stock ${stock.name}`);
+        }
+      }
 
-          for (const stock of allActiveStocks) {
-            const symbolUpper = stock.symbol?.toUpperCase();
-            if (symbolUpper && !newSP500Symbols.has(symbolUpper)) {
-              // This stock is no longer in S&P 500, deactivate it
-              await tx.assets.update({
-                where: {
-                  asset_id: stock.asset_id,
-                },
-                data: {
-                  is_active: false,
-                  last_seen_at: now,
-                },
-              });
-              deactivated++;
-            }
-          }
-        },
-        {
-          maxWait: 60000,
-          timeout: 60000,
-        },
+      // Deactivate stocks no longer in S&P 500
+      const stocksToDeactivate = existingStocks.filter(
+        (s) => s.is_active && s.symbol && !newSP500Symbols.has(s.symbol.toUpperCase()),
       );
+
+      if (stocksToDeactivate.length > 0) {
+        await this.prisma.assets.updateMany({
+          where: {
+            asset_id: { in: stocksToDeactivate.map((s) => s.asset_id) },
+          },
+          data: {
+            is_active: false,
+            last_seen_at: now,
+          },
+        });
+        deactivated = stocksToDeactivate.length;
+      }
 
       if (deactivated > 0) {
         this.logger.log(

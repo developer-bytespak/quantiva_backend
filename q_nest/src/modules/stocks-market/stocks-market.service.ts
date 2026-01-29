@@ -92,8 +92,13 @@ export class StocksMarketService {
   /**
    * Sync market data from external APIs and store in database
    * This is called by the cron job once per day
-   * Syncs all available stocks in one batch to minimize FMP API calls
-   * Since we only call once per day, we can sync all stocks at once
+   * 
+   * Uses a split-sync strategy to handle FMP rate limits (200-250/day):
+   * - Alpaca: Syncs ALL stocks (no rate limit) - provides real-time prices
+   * - FMP: Syncs 200 stocks per day (rotated by oldest last_seen_at) - provides market cap
+   * 
+   * This allows us to have 500+ stocks with accurate real-time prices,
+   * while market cap data is refreshed every 2-3 days per stock.
    */
   async syncMarketData(): Promise<{
     success: boolean;
@@ -101,45 +106,54 @@ export class StocksMarketService {
     warnings: string[];
     totalStocks: number;
     syncedToday: number;
+    fmpSynced: number;
   }> {
     try {
-      this.logger.log('Starting market data sync...');
+      this.logger.log('Starting market data sync with FMP rotation...');
 
       // Get total count of active stocks
       const totalStocks = await this.dbService.getCount();
       
-      // Since we're syncing once per day, sync all available stocks at once
-      // This minimizes FMP API calls while keeping data fresh
-      let symbolsToSync = await this.dbService.getActiveStockSymbols();
+      // Get ALL active stocks from database for Alpaca sync
+      let allStockSymbols = await this.dbService.getActiveStockSymbols();
 
       // If database is empty, fallback to hardcoded list
-      if (symbolsToSync.length === 0) {
+      if (allStockSymbols.length === 0) {
         this.logger.warn(
-          'No stocks found in database, using hardcoded SP500_TOP50 as fallback',
+          'No stocks found in database, using hardcoded SP500_SYMBOLS as fallback',
         );
-        symbolsToSync = SP500_TOP50;
-      } else {
-        this.logger.log(
-          `Syncing all ${symbolsToSync.length} stocks in one batch (daily sync).`,
-        );
+        allStockSymbols = SP500_SYMBOLS;
       }
+      
+      // Get rotated subset for FMP (200 stocks with oldest last_seen_at)
+      // This ensures all stocks get their market cap refreshed every 2-3 days
+      const FMP_DAILY_LIMIT = 200;
+      const fmpStocksToSync = await this.dbService.getStocksToSyncToday(FMP_DAILY_LIMIT);
+      const fmpSymbols = fmpStocksToSync.map(s => s.symbol);
+      
+      this.logger.log(
+        `Syncing ${allStockSymbols.length} stocks via Alpaca (prices), ${fmpSymbols.length} via FMP (market cap rotation)`,
+      );
 
-      // Fetch aggregated data from APIs
-      const { stocks, warnings } =
-        await this.marketAggregator.getAggregatedMarketData(symbolsToSync);
+      // Fetch aggregated data using rotation method
+      const { stocks, warnings, fmpSynced } =
+        await this.marketAggregator.getAggregatedMarketDataWithRotation(
+          allStockSymbols,
+          fmpSymbols,
+        );
 
       if (stocks.length === 0) {
         throw new Error('No stocks data received from aggregator');
       }
 
-      // Store in database
+      // Store in database (upsertBatch preserves existing market_cap if new value is null)
       await this.dbService.upsertBatch(stocks);
 
       // Invalidate all cache entries for market data
       this.cacheManager.invalidatePattern('^market:');
 
       this.logger.log(
-        `Market data sync completed - ${stocks.length}/${symbolsToSync.length} stocks synced today (${totalStocks} total in database)`,
+        `Market data sync completed - ${stocks.length} stocks synced (${fmpSynced} with fresh market cap) | Total in DB: ${totalStocks}`,
       );
 
       return {
@@ -148,6 +162,7 @@ export class StocksMarketService {
         warnings,
         totalStocks,
         syncedToday: stocks.length,
+        fmpSynced,
       };
     } catch (error: any) {
       this.logger.error('Market data sync failed', {
@@ -160,6 +175,7 @@ export class StocksMarketService {
         warnings: [error?.message || 'Unknown error'],
         totalStocks: 0,
         syncedToday: 0,
+        fmpSynced: 0,
       };
     }
   }
@@ -268,6 +284,97 @@ export class StocksMarketService {
         deactivated: 0,
         total: 0,
         message: `Failed to refresh S&P 500 list: ${error?.message || 'Unknown error'}`,
+      };
+    }
+  }
+
+  /**
+   * Load S&P 500 stocks directly from hardcoded list (bypasses FMP API completely)
+   * Use this when FMP is rate limited
+   */
+  async loadHardcodedSP500List(
+    triggerSync: boolean = false,
+  ): Promise<{
+    success: boolean;
+    stored: number;
+    updated: number;
+    deactivated: number;
+    total: number;
+    message: string;
+    syncTriggered?: boolean;
+  }> {
+    try {
+      this.logger.log('Loading S&P 500 list directly from hardcoded symbols (bypassing FMP)...');
+
+      // Use hardcoded list directly - no FMP API call
+      const constituents = SP500_SYMBOLS.map((stock) => ({
+        symbol: stock.symbol,
+        name: stock.name,
+        sector: stock.sector,
+      }));
+
+      this.logger.log(
+        `Using ${constituents.length} stocks from hardcoded SP500_SYMBOLS list`,
+      );
+
+      // Store in database (automatically handles removed stocks)
+      const { stored, updated, deactivated } =
+        await this.dbService.storeSP500Symbols(constituents);
+
+      let updateMessage = `S&P 500 list loaded from hardcoded list: ${stored} new, ${updated} updated, ${constituents.length} total`;
+      if (deactivated > 0) {
+        updateMessage += `, ${deactivated} removed stocks deactivated`;
+      }
+      this.logger.log(updateMessage);
+
+      // Invalidate cache to ensure fresh data
+      this.cacheManager.invalidatePattern('^market:');
+
+      let syncTriggered = false;
+      // Optionally trigger sync to fetch market data for all stocks
+      if (triggerSync) {
+        this.logger.log('Triggering market data sync after loading hardcoded list...');
+        try {
+          await this.syncMarketData();
+          syncTriggered = true;
+        } catch (syncError: any) {
+          this.logger.warn('Sync after loading failed', {
+            error: syncError?.message,
+          });
+        }
+      }
+
+      let message = `Successfully loaded S&P 500 list from hardcoded symbols: ${stored} new stocks, ${updated} updated`;
+      if (deactivated > 0) {
+        message += `, ${deactivated} removed stocks deactivated`;
+      }
+      message += `. ${
+        triggerSync && syncTriggered
+          ? 'Market data sync triggered.'
+          : 'Call /api/stocks-market/force-sync to fetch market data for all stocks.'
+      }`;
+
+      return {
+        success: true,
+        stored,
+        updated,
+        deactivated,
+        total: constituents.length,
+        message,
+        syncTriggered,
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to load hardcoded S&P 500 list', {
+        error: error?.message,
+      });
+
+      return {
+        success: false,
+        stored: 0,
+        updated: 0,
+        deactivated: 0,
+        total: 0,
+        message: `Failed to load hardcoded S&P 500 list: ${error?.message || 'Unknown error'}`,
       };
     }
   }

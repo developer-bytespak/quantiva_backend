@@ -17,6 +17,7 @@ export class PythonApiService {
 
   constructor(private configService: ConfigService) {
     this.baseUrl = this.configService.get<string>('PYTHON_API_URL', 'http://localhost:8000');
+    this.logger.log(`🔧 PythonApiService initialized with baseUrl: ${this.baseUrl}`);
     this.axiosInstance = axios.create({
       baseURL: this.baseUrl,
       timeout: 300000, // 5 minutes - increased for face matching (embedding + comparison is CPU-intensive)
@@ -51,7 +52,7 @@ export class PythonApiService {
       
       if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
         throw new Error(
-          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running.`
         );
       }
       
@@ -89,7 +90,7 @@ export class PythonApiService {
       // Provide more detailed error message
       if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
         throw new Error(
-          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running.`
         );
       }
       
@@ -107,11 +108,19 @@ export class PythonApiService {
     idPhotoFilename: string,
     selfieFilename: string,
   ): Promise<FaceMatchResponse> {
+    const startTime = Date.now();
+    this.logger.log('--------------------------------------------------------------');
+    this.logger.log(`🐍 [PYTHON-API] Calling POST ${this.baseUrl}/api/v1/kyc/face-match`);
+    this.logger.log(`   ID photo: ${idPhotoBuffer.length} bytes, Selfie: ${selfieBuffer.length} bytes`);
+    
     try {
       const formData = new FormData();
       formData.append('id_photo', idPhotoBuffer, idPhotoFilename);
       formData.append('selfie', selfieBuffer, selfieFilename);
 
+      this.logger.log(`   FormData prepared, sending request...`);
+      const requestStart = Date.now();
+      
       // Extended timeout for face matching (5 minutes) - embedding + comparison is CPU intensive
       const response = await this.axiosInstance.post<FaceMatchResponse>(
         '/api/v1/kyc/face-match',
@@ -122,8 +131,16 @@ export class PythonApiService {
         },
       );
 
+      const responseTime = Date.now() - requestStart;
+      const totalTime = Date.now() - startTime;
+      this.logger.log(`   ✅ Response received in ${responseTime}ms`);
+      this.logger.log(`   Total API call time: ${totalTime}ms (${(totalTime/1000).toFixed(2)}s)`);
+      this.logger.log('--------------------------------------------------------------');
+
       return response.data;
     } catch (error: any) {
+      const totalTime = Date.now() - startTime;
+      this.logger.error(`   ❌ Request FAILED after ${totalTime}ms`);
       this.logger.error('Face matching failed', {
         message: error?.message,
         code: error?.code,
@@ -134,7 +151,7 @@ export class PythonApiService {
       
       if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
         throw new Error(
-          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running.`
         );
       }
       
@@ -174,7 +191,7 @@ export class PythonApiService {
       
       if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
         throw new Error(
-          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running on port 8000.`
+          `Cannot connect to Python API at ${this.baseUrl}. Make sure the Python FastAPI server is running.`
         );
       }
       
