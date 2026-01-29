@@ -92,9 +92,14 @@ export class PreBuiltStrategiesService implements OnModuleInit {
    * - Comprehensive market data from database (price, 24h change, volume, high/low)
    * - Asset display name and logo URL (cached)
    * - Optional realtime OHLCV data from Binance
+   * - Only returns assets tradeable on Binance (when enrichWithRealtime=true)
    */
   async getTopTrendingAssets(limit: number = 20, enrichWithRealtime: boolean = true) {
     try {
+      // Fetch more from DB to account for filtering out non-Binance tradeable assets
+      // Typically ~60-70% of LunarCrush trending coins are on Binance
+      const dbLimit = enrichWithRealtime ? Math.ceil(limit * 2) : limit;
+      
       const rows: any[] = await this.prisma.$queryRaw`
         SELECT DISTINCT ON (ta.asset_id)
           ta.asset_id,
@@ -134,7 +139,7 @@ export class PreBuiltStrategiesService implements OnModuleInit {
         ORDER BY
           ta.asset_id,
           ta.poll_timestamp DESC
-        LIMIT ${limit}
+        LIMIT ${dbLimit}
       `;
 
     if (!rows.length) return [];
@@ -168,30 +173,43 @@ export class PreBuiltStrategiesService implements OnModuleInit {
         baseResults.map(async (asset) => {
           try {
             const realtimeData = await this.binanceService.getEnrichedMarketData(asset.symbol);
+            // Check if Binance returned valid data (null means symbol not found/tradeable)
+            const isTradeable = realtimeData.price !== null && realtimeData.price > 0;
+            
             return {
               ...asset,
-              // Override with fresh realtime data
-              price_usd: realtimeData.price,
-              price_change_24h: realtimeData.priceChangePercent,
-              volume_24h: realtimeData.volume24h,
-              high_24h: realtimeData.high24h,
-              low_24h: realtimeData.low24h,
-              realtime_data: {
+              // Mark as tradeable if Binance has valid price data
+              is_tradeable: isTradeable,
+              // Override with fresh realtime data (keep DB values if Binance returns null)
+              price_usd: realtimeData.price ?? asset.price_usd,
+              price_change_24h: realtimeData.priceChangePercent ?? asset.price_change_24h,
+              volume_24h: realtimeData.volume24h ?? asset.volume_24h,
+              high_24h: realtimeData.high24h ?? asset.high_24h,
+              low_24h: realtimeData.low24h ?? asset.low_24h,
+              realtime_data: isTradeable ? {
                 price: realtimeData.price,
                 priceChangePercent: realtimeData.priceChangePercent,
                 high24h: realtimeData.high24h,
                 low24h: realtimeData.low24h,
                 volume24h: realtimeData.volume24h,
                 quoteVolume24h: realtimeData.quoteVolume24h,
-              },
+              } : null,
             };
           } catch (error: any) {
             this.logger.warn(`Could not fetch realtime data for ${asset.symbol}: ${error.message}`);
-            return asset; // Return DB data as fallback
+            // Asset is not tradeable on Binance
+            return { ...asset, is_tradeable: false, realtime_data: null };
           }
         })
       );
-      return enrichedResults;
+      
+      // Filter out non-tradeable assets (coins not on Binance) and apply original limit
+      const tradeableResults = enrichedResults
+        .filter(a => a.is_tradeable)
+        .slice(0, limit);
+      this.logger.log(`Filtered ${enrichedResults.length} assets to ${tradeableResults.length} tradeable on Binance (limit: ${limit})`);
+      
+      return tradeableResults;
     }
 
     return baseResults;

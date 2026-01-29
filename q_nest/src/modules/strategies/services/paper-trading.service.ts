@@ -249,9 +249,89 @@ export class PaperTradingService implements OnModuleInit {
       this.logger.log(
         `Successfully auto-executed signal ${signal.signal_id} as order ${order.order_id}`,
       );
+
+      // If this was a BUY order and we have SL/TP levels, place OCO order for automatic exit
+      if (signal.action === SignalAction.BUY && orderResult.executedQuantity > 0) {
+        await this.placeOcoForPosition(
+          signal,
+          signalDetails,
+          testnetSymbol,
+          orderResult.executedQuantity,
+          order.order_id,
+        );
+      }
     } catch (error: any) {
       this.logger.error(
         `Error auto-executing signal ${signal.signal_id}: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  /**
+   * Places an OCO (One-Cancels-Other) order to automatically manage stop-loss and take-profit
+   * This is called after a successful BUY order to protect the position
+   */
+  private async placeOcoForPosition(
+    signal: any,
+    signalDetails: any,
+    testnetSymbol: string,
+    executedQuantity: number,
+    parentOrderId: string,
+  ): Promise<void> {
+    try {
+      // Get stop_loss and take_profit from signal details
+      const stopLossPercent = signalDetails.stop_loss || 0.05; // Default 5%
+      const takeProfitPercent = signalDetails.take_profit || 0.10; // Default 10%
+      const entryPrice = signalDetails.entry_price;
+
+      if (!entryPrice || entryPrice <= 0) {
+        this.logger.warn(`Cannot place OCO: No valid entry price for signal ${signal.signal_id}`);
+        return;
+      }
+
+      // Calculate actual SL and TP prices
+      const stopLossPrice = entryPrice * (1 - stopLossPercent);
+      const takeProfitPrice = entryPrice * (1 + takeProfitPercent);
+
+      this.logger.log(
+        `Placing OCO for signal ${signal.signal_id}: ` +
+        `Entry=${entryPrice}, SL=${stopLossPrice.toFixed(4)} (-${(stopLossPercent * 100).toFixed(1)}%), ` +
+        `TP=${takeProfitPrice.toFixed(4)} (+${(takeProfitPercent * 100).toFixed(1)}%)`
+      );
+
+      // Place OCO sell order to protect the long position
+      const ocoResult = await this.binanceTestnetService.placeOcoOrder(
+        testnetSymbol,
+        'SELL',
+        executedQuantity,
+        takeProfitPrice,
+        stopLossPrice,
+      );
+
+      // Update order metadata with OCO information
+      await this.prisma.orders.update({
+        where: { order_id: parentOrderId },
+        data: {
+          metadata: {
+            testnet_order_id: parentOrderId,
+            testnet_symbol: testnetSymbol,
+            execution_timestamp: new Date().toISOString(),
+            oco_order_list_id: ocoResult.orderListId,
+            oco_take_profit_price: takeProfitPrice,
+            oco_stop_loss_price: stopLossPrice,
+            oco_orders: ocoResult.orders,
+          },
+        },
+      });
+
+      this.logger.log(
+        `OCO order placed successfully for signal ${signal.signal_id}: orderListId=${ocoResult.orderListId}`
+      );
+    } catch (error: any) {
+      // Log error but don't fail the main order - OCO is enhancement, not critical
+      this.logger.error(
+        `Failed to place OCO order for signal ${signal.signal_id}: ${error.message}`,
         error.stack,
       );
     }

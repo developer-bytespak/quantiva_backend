@@ -794,6 +794,159 @@ export class BybitService {
   }
 
   /**
+   * Places a bracket order with Take Profit and Stop Loss for Bybit
+   * Bybit spot doesn't have native OCO, but we can achieve similar functionality using
+   * two separate conditional orders: one for take profit, one for stop loss
+   * 
+   * @param apiKey - Bybit API key
+   * @param apiSecret - Bybit API secret  
+   * @param symbol - Trading pair symbol (e.g., BTCUSDT)
+   * @param side - SELL for closing a long position, BUY for closing a short
+   * @param quantity - Amount of the asset to sell/buy
+   * @param takeProfitPrice - Price at which to take profit
+   * @param stopLossPrice - Price at which to trigger stop loss
+   * @returns Object containing both order IDs for tracking
+   */
+  async placeBracketOrder(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    quantity: number,
+    takeProfitPrice: number,
+    stopLossPrice: number,
+  ): Promise<{
+    takeProfitOrderId: string;
+    stopLossOrderId: string;
+    symbol: string;
+    side: string;
+    quantity: number;
+    takeProfitPrice: number;
+    stopLossPrice: number;
+  }> {
+    try {
+      this.logger.log(
+        `Placing bracket order: ${symbol} ${side} qty=${quantity} ` +
+        `TP=${takeProfitPrice} SL=${stopLossPrice}`
+      );
+
+      // Place Take Profit order (LIMIT order at TP price)
+      const tpParams: Record<string, any> = {
+        category: 'spot',
+        symbol,
+        side: side === 'BUY' ? 'Buy' : 'Sell',
+        orderType: 'Limit',
+        qty: quantity.toString(),
+        price: takeProfitPrice.toString(),
+        timeInForce: 'GTC',
+      };
+
+      const tpResult = await this.makeSignedRequest(
+        '/v5/order/create',
+        apiKey,
+        apiSecret,
+        tpParams,
+        'POST',
+      );
+
+      // Place Stop Loss order using conditional trigger
+      // For Bybit spot, we use a trigger order that becomes a market order when stop price is hit
+      const slParams: Record<string, any> = {
+        category: 'spot',
+        symbol,
+        side: side === 'BUY' ? 'Buy' : 'Sell',
+        orderType: 'Market',
+        qty: quantity.toString(),
+        triggerPrice: stopLossPrice.toString(),
+        triggerDirection: side === 'SELL' ? 2 : 1, // 1=rise above, 2=fall below
+        triggerBy: 'LastPrice',
+        orderFilter: 'StopOrder',
+      };
+
+      const slResult = await this.makeSignedRequest(
+        '/v5/order/create',
+        apiKey,
+        apiSecret,
+        slParams,
+        'POST',
+      );
+
+      this.logger.log(
+        `Bracket order placed: TP orderId=${tpResult.orderId}, SL orderId=${slResult.orderId}`
+      );
+
+      return {
+        takeProfitOrderId: tpResult.orderId || '',
+        stopLossOrderId: slResult.orderId || '',
+        symbol,
+        side,
+        quantity,
+        takeProfitPrice,
+        stopLossPrice,
+      };
+    } catch (error: any) {
+      this.logger.error(`Failed to place bracket order: ${error.message}`);
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
+        throw error;
+      }
+      throw new BybitApiException('Failed to place bracket order');
+    }
+  }
+
+  /**
+   * Cancels both orders of a bracket order
+   */
+  async cancelBracketOrder(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    takeProfitOrderId: string,
+    stopLossOrderId: string,
+  ): Promise<{ tpCancelled: boolean; slCancelled: boolean }> {
+    let tpCancelled = false;
+    let slCancelled = false;
+
+    try {
+      // Cancel TP order
+      await this.makeSignedRequest(
+        '/v5/order/cancel',
+        apiKey,
+        apiSecret,
+        {
+          category: 'spot',
+          symbol,
+          orderId: takeProfitOrderId,
+        },
+        'POST',
+      );
+      tpCancelled = true;
+    } catch (error: any) {
+      this.logger.warn(`Failed to cancel TP order ${takeProfitOrderId}: ${error.message}`);
+    }
+
+    try {
+      // Cancel SL order
+      await this.makeSignedRequest(
+        '/v5/order/cancel',
+        apiKey,
+        apiSecret,
+        {
+          category: 'spot',
+          symbol,
+          orderId: stopLossOrderId,
+          orderFilter: 'StopOrder',
+        },
+        'POST',
+      );
+      slCancelled = true;
+    } catch (error: any) {
+      this.logger.warn(`Failed to cancel SL order ${stopLossOrderId}: ${error.message}`);
+    }
+
+    return { tpCancelled, slCancelled };
+  }
+
+  /**
    * Fetches order book (depth) for a symbol
    */
   async getOrderBook(symbol: string, limit: number = 20): Promise<OrderBookDto> {

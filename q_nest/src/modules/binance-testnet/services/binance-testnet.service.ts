@@ -293,6 +293,122 @@ export class BinanceTestnetService {
   }
 
   /**
+   * Places an OCO (One-Cancels-Other) order for automatic stop-loss and take-profit
+   * When either the stop-loss or take-profit is triggered, the other order is automatically cancelled
+   * 
+   * @param symbol - Trading pair symbol (e.g., BTCUSDT)
+   * @param side - SELL for closing a long position (most common), BUY for closing a short
+   * @param quantity - Amount of the asset to sell/buy
+   * @param takeProfitPrice - Price at which to take profit (limit order)
+   * @param stopLossPrice - Price at which to trigger stop loss (stop price)
+   * @param stopLimitPrice - Optional: Price for the stop-loss limit order
+   */
+  async placeOcoOrder(
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    quantity: number,
+    takeProfitPrice: number,
+    stopLossPrice: number,
+    stopLimitPrice?: number,
+  ): Promise<{
+    orderListId: number;
+    contingencyType: string;
+    listStatusType: string;
+    listOrderStatus: string;
+    listClientOrderId: string;
+    transactionTime: number;
+    symbol: string;
+    orders: Array<{
+      orderId: number;
+      symbol: string;
+      clientOrderId: string;
+    }>;
+    orderReports: Array<{
+      orderId: number;
+      symbol: string;
+      side: string;
+      type: string;
+      price: string;
+      origQty: string;
+      status: string;
+      stopPrice?: string;
+    }>;
+  }> {
+    if (!this.isConfigured()) {
+      throw new Error('Testnet not configured');
+    }
+
+    this.logger.log(
+      `Placing OCO order: ${symbol} ${side} qty=${quantity} TP=${takeProfitPrice} SL=${stopLossPrice}`
+    );
+
+    const result = await this.binanceTestnetApi.placeOcoOrder(
+      this.apiKey,
+      this.apiSecret,
+      symbol,
+      side,
+      quantity,
+      takeProfitPrice,
+      stopLossPrice,
+      stopLimitPrice,
+    );
+
+    // Invalidate orders cache
+    this.cacheService.invalidatePattern('testnet:orders');
+
+    return result;
+  }
+
+  /**
+   * Cancels an OCO order list
+   */
+  async cancelOcoOrder(symbol: string, orderListId: number): Promise<any> {
+    if (!this.isConfigured()) {
+      throw new Error('Testnet not configured');
+    }
+
+    const result = await this.binanceTestnetApi.cancelOcoOrder(
+      this.apiKey,
+      this.apiSecret,
+      symbol,
+      orderListId,
+    );
+
+    // Invalidate orders cache
+    this.cacheService.invalidatePattern('testnet:orders');
+
+    return result;
+  }
+
+  /**
+   * Gets all OCO orders
+   */
+  async getOcoOrders(symbol?: string, limit?: number): Promise<any[]> {
+    if (!this.isConfigured()) {
+      throw new Error('Testnet not configured');
+    }
+
+    const cacheKey = `testnet:ocoorders:${symbol || 'all'}:${limit || 'default'}`;
+
+    const cached = this.cacheService.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const orders = await this.binanceTestnetApi.getOcoOrders(
+      this.apiKey,
+      this.apiSecret,
+      symbol,
+      limit,
+    );
+
+    // Cache for 30 seconds
+    this.cacheService.set(cacheKey, orders, 30000);
+
+    return orders;
+  }
+
+  /**
    * Gets ticker price
    */
   async getTickerPrice(symbol: string): Promise<TestnetTickerPriceDto> {

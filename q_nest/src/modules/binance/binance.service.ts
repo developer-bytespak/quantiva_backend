@@ -172,14 +172,15 @@ export class BinanceService {
 
   /**
    * Get enriched market data for strategy preview
+   * Returns null for price fields when API fails to allow fallback to database prices
    */
   async getEnrichedMarketData(symbol: string): Promise<{
-    price: number;
-    priceChangePercent: number;
-    high24h: number;
-    low24h: number;
-    volume24h: number;
-    quoteVolume24h: number;
+    price: number | null;
+    priceChangePercent: number | null;
+    high24h: number | null;
+    low24h: number | null;
+    volume24h: number | null;
+    quoteVolume24h: number | null;
     ohlcv?: Candlestick[];
   }> {
     try {
@@ -194,14 +195,15 @@ export class BinanceService {
         quoteVolume24h: stats.quoteVolume24h,
       };
     } catch (error: any) {
-      this.logger.warn(`Failed to get enriched market data for ${symbol}, returning defaults`);
+      this.logger.warn(`Failed to get enriched market data for ${symbol}, returning nulls for fallback`);
+      // Return nulls instead of 0s so frontend can fall back to database prices
       return {
-        price: 0,
-        priceChangePercent: 0,
-        high24h: 0,
-        low24h: 0,
-        volume24h: 0,
-        quoteVolume24h: 0,
+        price: null,
+        priceChangePercent: null,
+        high24h: null,
+        low24h: null,
+        volume24h: null,
+        quoteVolume24h: null,
       };
     }
   }
