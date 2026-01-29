@@ -83,17 +83,16 @@ export class KycService {
       const matchResult = await this.faceMatchingService.matchFaces(verification.kyc_id, file);
       this.logger.log(`   Face matching completed in ${Date.now() - step2Start}ms (${((Date.now() - step2Start)/1000).toFixed(2)}s)`);
 
+      // Apply decision engine - simple approved/rejected only
+      // >= 50% similarity = approved, < 50% = rejected
       // Step 3: Apply decision logic
       this.logger.log('⚖️  [KYC-SERVICE] Step 3: Applying decision logic...');
       let kycStatus = 'rejected';
       let decisionReason = 'Face matching threshold not met';
 
-      if (matchResult.is_match && matchResult.similarity >= 0.50) {
+      if (matchResult.similarity >= 0.50) {
         kycStatus = 'approved';
         decisionReason = `Face match successful (similarity: ${(matchResult.similarity * 100).toFixed(1)}%)`;
-      } else if (matchResult.similarity >= 0.50) {
-        kycStatus = 'review';
-        decisionReason = `Face similarity borderline (${(matchResult.similarity * 100).toFixed(1)}%) - manual review needed`;
       } else {
         kycStatus = 'rejected';
         decisionReason = `Face match failed (similarity: ${(matchResult.similarity * 100).toFixed(1)}% < 50%)`;

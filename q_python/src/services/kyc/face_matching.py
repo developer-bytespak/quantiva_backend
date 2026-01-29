@@ -165,15 +165,11 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
         liveness_confidence = liveness_data.get("confidence", 0.0)
         is_live = liveness_data.get("is_live", False)
         
-        # Determine final decision
-        if similarity >= 0.5:  # High similarity
-            if is_live or liveness_confidence > 0.2:
-                decision = "approved"
-            else:
-                decision = "review"  # High similarity but liveness concerns
-        elif similarity >= 0.35:  # Moderate similarity
-            decision = "review"
-        else:  # Low similarity
+        # Determine final decision - simple approved/rejected only
+        # >= 50% similarity = approved, < 50% = rejected
+        if similarity >= 0.50:
+            decision = "approved"
+        else:
             decision = "rejected"
         
         # Calculate confidence based on multiple factors
