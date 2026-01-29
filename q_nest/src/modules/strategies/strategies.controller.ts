@@ -322,17 +322,40 @@ export class StrategiesController {
         take: 1000, // Fetch enough to dedupe by asset
       });
 
+      // Get latest trending_assets prices for fallback when Binance API fails
+      const assetIds = [...new Set(signals.map(s => s.asset_id).filter(Boolean))];
+      const trendingPrices = await this.prisma.trending_assets.findMany({
+        where: { asset_id: { in: assetIds } },
+        orderBy: { poll_timestamp: 'desc' },
+        distinct: ['asset_id'],
+        select: {
+          asset_id: true,
+          price_usd: true,
+          volume_24h: true,
+          price_change_24h: true,
+        },
+      });
+      type TrendingPrice = { asset_id: string; price_usd: any; volume_24h: any; price_change_24h: any };
+      const priceMap = new Map<string, TrendingPrice>(trendingPrices.map(p => [p.asset_id, p]));
+
       // Dedupe: keep only the latest signal per asset
       const seen = new Map<string, any>();
       for (const s of signals) {
         const assetId = s.asset?.asset_id || s.asset_id;
         if (!assetId) continue;
         if (!seen.has(assetId)) {
-          // Enrich signal with strategy parameters
+          // Get database price as fallback
+          const dbPrice = priceMap.get(assetId);
+          
+          // Enrich signal with strategy parameters and database price fallback
           seen.set(assetId, {
             ...s,
             stop_loss: strategy.stop_loss_value,
             take_profit: strategy.take_profit_value,
+            // Include database price as fallback for when Binance API returns 0
+            price_usd: dbPrice?.price_usd ? Number(dbPrice.price_usd) : null,
+            db_volume_24h: dbPrice?.volume_24h ? Number(dbPrice.volume_24h) : null,
+            db_price_change_24h: dbPrice?.price_change_24h ? Number(dbPrice.price_change_24h) : null,
           });
         }
       }
@@ -353,24 +376,33 @@ export class StrategiesController {
             if (signal.asset?.symbol) {
               try {
                 const realtimeData = await binanceService.getEnrichedMarketData(signal.asset.symbol);
+                // Check if Binance has valid price data for this symbol
+                const isTradeable = realtimeData.price !== null && realtimeData.price > 0;
+                
                 return {
                   ...signal,
-                  realtime_data: {
+                  is_tradeable: isTradeable,
+                  realtime_data: isTradeable ? {
                     price: realtimeData.price,
                     priceChangePercent: realtimeData.priceChangePercent,
                     high24h: realtimeData.high24h,
                     low24h: realtimeData.low24h,
                     volume24h: realtimeData.volume24h,
                     quoteVolume24h: realtimeData.quoteVolume24h,
-                  },
+                  } : null,
                 };
               } catch (error: any) {
-                return { ...signal, realtime_data: null };
+                // Symbol not found on Binance - mark as not tradeable
+                return { ...signal, is_tradeable: false, realtime_data: null };
               }
             }
-            return signal;
+            return { ...signal, is_tradeable: false };
           })
         );
+        
+        // Filter out non-tradeable assets (not available on Binance)
+        results = results.filter(r => r.is_tradeable);
+        this.logger.log(`Filtered signals to ${results.length} tradeable assets`);
       }
 
       return results;

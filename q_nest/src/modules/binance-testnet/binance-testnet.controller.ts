@@ -18,6 +18,7 @@ import { JwtAuthGuard } from '../../modules/auth/guards/jwt-auth.guard';
 import { Public } from '../../common/decorators/public.decorator';
 import { PlaceTestnetOrderDto } from './dto/place-testnet-order.dto';
 import { TestnetOrderDto } from './dto/testnet-data.dto';
+import { PrismaService } from '../../prisma/prisma.service';
 
 /**
  * Binance Testnet Paper Trading Controller
@@ -44,7 +45,10 @@ export class BinanceTestnetController {
     'DOTUSDT',
   ];
 
-  constructor(private readonly binanceTestnetService: BinanceTestnetService) {}
+  constructor(
+    private readonly binanceTestnetService: BinanceTestnetService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   /**
    * Get testnet status and configuration
@@ -363,6 +367,87 @@ export class BinanceTestnetController {
       this.logger.log(`🔄 Attempting to save order ${result.orderId} to database...`);
       await this.binanceTestnetService.saveOrderToDatabase(result);
       this.logger.log(`💾 Database save completed for order ${result.orderId}`);
+      
+      // If this was a successful BUY order, automatically place OCO for risk management
+      this.logger.log(`🔍 OCO Check - side: ${dto.side}, status: ${result.status}, executedQty: ${result.executedQuantity}`);
+      if (dto.side === 'BUY' && result.status === 'FILLED' && result.executedQuantity > 0) {
+        try {
+          this.logger.log(`📊 Placing OCO order for BUY position: ${symbol}`);
+          
+          // Calculate SL/TP prices (default: -5% SL, +10% TP)
+          const entryPrice = result.price || (result.cumulativeQuoteAssetTransacted / result.executedQuantity);
+          this.logger.log(`💰 Entry price: ${entryPrice}, price: ${result.price}, cumulativeQuote: ${result.cumulativeQuoteAssetTransacted}`);
+          const stopLossPercent = dto.stopLoss || 0.05; // 5% default
+          const takeProfitPercent = dto.takeProfit || 0.10; // 10% default
+          
+          const stopLossPrice = entryPrice * (1 - stopLossPercent);
+          const takeProfitPrice = entryPrice * (1 + takeProfitPercent);
+          
+          this.logger.log(
+            `OCO Prices - Entry: ${entryPrice.toFixed(4)}, ` +
+            `SL: ${stopLossPrice.toFixed(4)} (-${(stopLossPercent * 100).toFixed(1)}%), ` +
+            `TP: ${takeProfitPrice.toFixed(4)} (+${(takeProfitPercent * 100).toFixed(1)}%)`
+          );
+          
+          // Place OCO order
+          this.logger.log(`🚀 Calling placeOcoOrder with: symbol=${symbol}, side=SELL, qty=${result.executedQuantity}, TP=${takeProfitPrice.toFixed(4)}, SL=${stopLossPrice.toFixed(4)}`);
+          const ocoResult = await this.binanceTestnetService.placeOcoOrder(
+            symbol,
+            'SELL',
+            result.executedQuantity,
+            takeProfitPrice,
+            stopLossPrice,
+          );
+          
+          this.logger.log(`✅ OCO order placed successfully! orderListId=${ocoResult.orderListId}, orders=${JSON.stringify(ocoResult.orders)}`);
+          
+          // Find the saved order and update it with OCO metadata
+          const savedOrders = await this.prisma.orders.findMany({
+            where: {
+              metadata: {
+                path: ['binance_order_id'],
+                equals: result.orderId,
+              },
+            },
+            orderBy: {
+              created_at: 'desc',
+            },
+            take: 1,
+          });
+          
+          if (savedOrders.length > 0) {
+            const savedOrder = savedOrders[0];
+            await this.prisma.orders.update({
+              where: { order_id: savedOrder.order_id },
+              data: {
+                metadata: {
+                  ...(savedOrder.metadata as object),
+                  oco_order_list_id: ocoResult.orderListId,
+                  oco_take_profit_price: takeProfitPrice,
+                  oco_stop_loss_price: stopLossPrice,
+                  oco_orders: ocoResult.orders,
+                },
+              },
+            });
+            this.logger.log(`📝 Updated order metadata with OCO info`);
+          }
+          
+          // Return result with OCO info
+          return {
+            ...result,
+            ocoOrderListId: ocoResult.orderListId,
+            ocoTakeProfitPrice: takeProfitPrice,
+            ocoStopLossPrice: stopLossPrice,
+          };
+        } catch (ocoError: any) {
+          // Log error but don't fail the main order - OCO is enhancement, not critical
+          this.logger.error(`❌ Failed to place OCO order - Error: ${ocoError.message}`);
+          this.logger.error(`Stack trace: ${ocoError.stack}`);
+          if (ocoError.response) {
+            this.logger.error(`API Response: ${JSON.stringify(ocoError.response)}`);
+          }
+        }
+      }
       
       return result;
     } catch (error: any) {

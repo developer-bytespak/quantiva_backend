@@ -584,6 +584,53 @@ export class BinanceService {
   }
 
   /**
+   * Makes a signed DELETE request to Binance API
+   */
+  private async makeSignedDeleteRequest(
+    endpoint: string,
+    apiKey: string,
+    apiSecret: string,
+    params: Record<string, any> = {},
+  ): Promise<any> {
+    const serverTime = await this.getBinanceServerTime();
+    const recvWindow = 60000;
+
+    const queryString = new URLSearchParams({
+      ...params,
+      timestamp: serverTime.toString(),
+      recvWindow: recvWindow.toString(),
+    }).toString();
+
+    const signature = this.createSignature(queryString, apiSecret);
+    const url = `${endpoint}?${queryString}&signature=${signature}`;
+
+    try {
+      const response = await this.apiClient.delete(url, {
+        headers: {
+          'X-MBX-APIKEY': apiKey,
+        },
+      });
+      return response.data;
+    } catch (error: any) {
+      if (error.response?.data?.code) {
+        const binanceCode = error.response.data.code;
+        const binanceMsg = error.response.data.msg || 'Binance API error';
+
+        if (binanceCode === -2015 || binanceCode === -1022) {
+          throw new InvalidApiKeyException(binanceMsg);
+        }
+
+        if (binanceCode === -1003) {
+          throw new BinanceRateLimitException(binanceMsg);
+        }
+
+        throw new BinanceApiException(binanceMsg, `BINANCE_${binanceCode}`);
+      }
+      throw new BinanceApiException(error.message || 'Failed to delete order');
+    }
+  }
+
+  /**
    * Places an order on Binance
    */
   async placeOrder(
@@ -629,6 +676,152 @@ export class BinanceService {
         throw error;
       }
       throw new BinanceApiException('Failed to place order');
+    }
+  }
+
+  /**
+   * Places an OCO (One-Cancels-Other) order for automatic stop-loss and take-profit
+   * When either the stop-loss or take-profit is triggered, the other order is automatically cancelled
+   * 
+   * @param apiKey - Binance API key
+   * @param apiSecret - Binance API secret
+   * @param symbol - Trading pair symbol (e.g., BTCUSDT)
+   * @param side - SELL for closing a long position, BUY for closing a short
+   * @param quantity - Amount of the asset to sell/buy
+   * @param takeProfitPrice - Price at which to take profit (limit order)
+   * @param stopLossPrice - Price at which to trigger stop loss (stop price)
+   * @param stopLimitPrice - Price for the stop-loss limit order (optional, defaults to slightly offset from stopLossPrice)
+   */
+  async placeOcoOrder(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    quantity: number,
+    takeProfitPrice: number,
+    stopLossPrice: number,
+    stopLimitPrice?: number,
+  ): Promise<{
+    orderListId: number;
+    contingencyType: string;
+    listStatusType: string;
+    listOrderStatus: string;
+    listClientOrderId: string;
+    transactionTime: number;
+    symbol: string;
+    orders: Array<{
+      orderId: number;
+      symbol: string;
+      clientOrderId: string;
+    }>;
+    orderReports: Array<{
+      orderId: number;
+      symbol: string;
+      side: string;
+      type: string;
+      price: string;
+      origQty: string;
+      status: string;
+      stopPrice?: string;
+    }>;
+  }> {
+    try {
+      // If stopLimitPrice not provided, use a small offset from stopLossPrice
+      const effectiveStopLimitPrice = stopLimitPrice || 
+        (side === 'SELL' 
+          ? stopLossPrice * 0.995  // 0.5% below stop price for sells
+          : stopLossPrice * 1.005  // 0.5% above stop price for buys
+        );
+
+      const params: Record<string, any> = {
+        symbol,
+        side: side.toUpperCase(),
+        quantity: quantity.toString(),
+        price: takeProfitPrice.toFixed(8),        // Take profit limit price
+        stopPrice: stopLossPrice.toFixed(8),      // Stop trigger price
+        stopLimitPrice: effectiveStopLimitPrice.toFixed(8), // Stop limit price
+        stopLimitTimeInForce: 'GTC',
+      };
+
+      this.logger.log(
+        `Placing OCO order: ${symbol} ${side} qty=${quantity} ` +
+        `TP=${takeProfitPrice} SL=${stopLossPrice}`
+      );
+
+      const result = await this.makeSignedPostRequest('/api/v3/order/oco', apiKey, apiSecret, params);
+
+      this.logger.log(`OCO order placed successfully: orderListId=${result.orderListId}`);
+
+      return {
+        orderListId: result.orderListId,
+        contingencyType: result.contingencyType,
+        listStatusType: result.listStatusType,
+        listOrderStatus: result.listOrderStatus,
+        listClientOrderId: result.listClientOrderId,
+        transactionTime: result.transactionTime,
+        symbol: result.symbol,
+        orders: result.orders || [],
+        orderReports: result.orderReports || [],
+      };
+    } catch (error: any) {
+      this.logger.error(`Failed to place OCO order: ${error.message}`);
+      if (error instanceof BinanceApiException || error instanceof InvalidApiKeyException) {
+        throw error;
+      }
+      throw new BinanceApiException('Failed to place OCO order');
+    }
+  }
+
+  /**
+   * Cancels an OCO order list
+   */
+  async cancelOcoOrder(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    orderListId: number,
+  ): Promise<any> {
+    try {
+      const result = await this.makeSignedDeleteRequest(
+        '/api/v3/orderList',
+        apiKey,
+        apiSecret,
+        { symbol, orderListId },
+      );
+
+      this.logger.log(`OCO order cancelled: orderListId=${orderListId}`);
+      return result;
+    } catch (error: any) {
+      this.logger.error(`Failed to cancel OCO order: ${error.message}`);
+      if (error instanceof BinanceApiException || error instanceof InvalidApiKeyException) {
+        throw error;
+      }
+      throw new BinanceApiException('Failed to cancel OCO order');
+    }
+  }
+
+  /**
+   * Gets all OCO orders for a symbol
+   */
+  async getOcoOrders(
+    apiKey: string,
+    apiSecret: string,
+    symbol?: string,
+    limit?: number,
+  ): Promise<any[]> {
+    try {
+      const params: Record<string, any> = {};
+      if (symbol) params.symbol = symbol;
+      if (limit) params.limit = limit;
+
+      const result = await this.makeSignedRequest('/api/v3/allOrderList', apiKey, apiSecret, params);
+      return result || [];
+    } catch (error: any) {
+      this.logger.error(`Failed to get OCO orders: ${error.message}`);
+      if (error instanceof BinanceApiException || error instanceof InvalidApiKeyException) {
+        throw error;
+      }
+      throw new BinanceApiException('Failed to get OCO orders');
     }
   }
 
