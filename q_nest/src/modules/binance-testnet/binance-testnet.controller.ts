@@ -478,6 +478,35 @@ export class BinanceTestnetController {
   }
 
   /**
+   * Cancel all open orders for a symbol (PUBLIC for scripts)
+   * @route DELETE /binance-testnet/orders/cancel-all/:symbol
+   */
+  @Public()
+  @Delete('orders/cancel-all/:symbol')
+  @HttpCode(HttpStatus.OK)
+  async cancelAllOrdersForSymbol(@Param('symbol') symbol: string) {
+    const openOrders = await this.binanceTestnetService.getOpenOrders();
+    const symbolOrders = openOrders.filter((o: any) => o.symbol === symbol);
+    
+    const results = [];
+    for (const order of symbolOrders) {
+      try {
+        const result = await this.binanceTestnetService.cancelOrder(symbol, order.orderId);
+        results.push({ orderId: order.orderId, status: 'cancelled', result });
+      } catch (error) {
+        results.push({ orderId: order.orderId, status: 'failed', error: error?.message });
+      }
+    }
+    
+    return {
+      symbol,
+      cancelled: results.filter(r => r.status === 'cancelled').length,
+      failed: results.filter(r => r.status === 'failed').length,
+      details: results,
+    };
+  }
+
+  /**
    * Get ticker price
    * @route GET /binance-testnet/ticker/:symbol
    */
@@ -541,5 +570,26 @@ export class BinanceTestnetController {
   async getDashboardData(@Query('symbols') symbols: string = 'BTCUSDT,ETHUSDT') {
     const symbolList = symbols.split(',').map((s) => s.trim());
     return this.binanceTestnetService.getDashboardData(symbolList);
+  }
+
+  /**
+   * Sync orders from Binance API into database
+   * This imports existing Binance orders that weren't stored in DB
+   * @route POST /binance-testnet/orders/sync
+   */
+  @Public()
+  @Post('orders/sync')
+  async syncOrdersFromBinance() {
+    try {
+      const result = await this.binanceTestnetService.syncOrdersFromBinanceToDatabase();
+      return {
+        success: true,
+        message: `Synced ${result.synced} orders from Binance to database`,
+        ...result,
+      };
+    } catch (error: any) {
+      this.logger.error(`Failed to sync orders: ${error?.message}`);
+      throw new BadRequestException(error?.message ?? 'Failed to sync orders');
+    }
   }
 }
