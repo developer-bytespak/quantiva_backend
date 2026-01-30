@@ -1,5 +1,5 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
-import { CreateStrategyDto, ValidateStrategyDto } from '../dto/create-strategy.dto';
+import { CreateStrategyDto, ValidateStrategyDto, EntryRuleDto, ExitRuleDto } from '../dto/create-strategy.dto';
 
 @Injectable()
 export class StrategyValidationService {
@@ -18,6 +18,16 @@ export class StrategyValidationService {
     'VOLUME',
     // allow using the aggregated final score as a rule indicator
     'final_score',
+  ];
+
+  // Valid field paths for score-based rules (like pre-built strategies)
+  private readonly validFields = [
+    'final_score',
+    'metadata.engine_details.sentiment.score',
+    'metadata.engine_details.trend.score',
+    'metadata.engine_details.fundamental.score',
+    'metadata.engine_details.event_risk.score',
+    'metadata.engine_details.liquidity.score',
   ];
 
   private readonly validOperators = [
@@ -123,24 +133,47 @@ export class StrategyValidationService {
 
   /**
    * Validate entry or exit rules
+   * Supports both indicator-based rules (legacy) and field-based rules (new score-based)
    */
   private validateRules(
-    rules: Array<{ indicator: string; operator: string; value: number; timeframe?: string }>,
+    rules: Array<EntryRuleDto | ExitRuleDto>,
     ruleType: 'entry' | 'exit',
   ): string[] {
     const errors: string[] = [];
 
     if (!Array.isArray(rules) || rules.length === 0) {
-      errors.push(`${ruleType} rules must be a non-empty array`);
+      // Allow empty rules for field-based strategies (they use engine_weights instead)
       return errors;
     }
 
     rules.forEach((rule, index) => {
-      // Validate indicator
-      if (!rule.indicator || !this.validIndicators.includes(rule.indicator)) {
+      // Check if rule uses field-based or indicator-based format
+      const hasField = 'field' in rule && rule.field;
+      const hasIndicator = 'indicator' in rule && rule.indicator;
+
+      if (!hasField && !hasIndicator) {
         errors.push(
-          `${ruleType} rule ${index + 1}: Invalid indicator '${rule.indicator}'. Valid indicators: ${this.validIndicators.join(', ')}`,
+          `${ruleType} rule ${index + 1}: Must have either 'indicator' or 'field' property`,
         );
+        return;
+      }
+
+      // Validate field-based rule
+      if (hasField) {
+        if (!this.validFields.includes(rule.field!)) {
+          errors.push(
+            `${ruleType} rule ${index + 1}: Invalid field '${rule.field}'. Valid fields: ${this.validFields.join(', ')}`,
+          );
+        }
+      }
+
+      // Validate indicator-based rule
+      if (hasIndicator) {
+        if (!this.validIndicators.includes(rule.indicator!)) {
+          errors.push(
+            `${ruleType} rule ${index + 1}: Invalid indicator '${rule.indicator}'. Valid indicators: ${this.validIndicators.join(', ')}`,
+          );
+        }
       }
 
       // Validate operator

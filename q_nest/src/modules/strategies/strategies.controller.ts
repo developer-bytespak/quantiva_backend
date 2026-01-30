@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode, HttpStatus, UseGuards, NotFoundException, ForbiddenException, BadRequestException, Logger } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode, HttpStatus, UseGuards, NotFoundException, ForbiddenException, BadRequestException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { StrategiesService } from './strategies.service';
 import { CreateStrategyDto, ValidateStrategyDto } from './dto/create-strategy.dto';
 import { PreBuiltStrategiesService } from './services/pre-built-strategies.service';
@@ -571,7 +571,430 @@ export class StrategiesController {
     }));
   }
 
-  // Generic :id route should come AFTER specific routes
+  /**
+   * Get available stock symbols for strategy creation
+   * Must be placed BEFORE generic :id route to avoid route conflict
+   * Endpoint: GET /strategies/available-stocks
+   */
+  @Get('available-stocks')
+  async getAvailableStocks(@Query('search') search?: string, @Query('limit') limit?: string) {
+    const limitNum = limit ? parseInt(limit, 10) : 50;
+    
+    try {
+      const whereClause: any = {
+        asset_type: 'stock',
+      };
+
+      if (search) {
+        whereClause.OR = [
+          { symbol: { contains: search.toUpperCase() } },
+          { name: { contains: search } },
+        ];
+      }
+
+      const stocks = await this.prisma.assets.findMany({
+        where: whereClause,
+        select: {
+          asset_id: true,
+          symbol: true,
+          name: true,
+          display_name: true,
+        },
+        take: limitNum,
+        orderBy: { symbol: 'asc' },
+      });
+
+      return stocks.map(s => ({
+        symbol: s.symbol,
+        name: s.name || s.display_name || s.symbol,
+      }));
+    } catch (error) {
+      this.logger.error('Error fetching available stocks:', error);
+      throw new BadRequestException('Failed to fetch available stocks');
+    }
+  }
+
+  /**
+   * ============================================
+   * USER CUSTOM STRATEGY ENDPOINTS (STOCKS)
+   * Must be declared BEFORE @Get(':id') so /my-strategies is not matched as :id
+   * ============================================
+   */
+
+  /**
+   * Get all strategies owned by the current logged-in user
+   * Endpoint: GET /strategies/my-strategies
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get('my-strategies')
+  async getMyStrategies(@CurrentUser() user: TokenPayload) {
+    if (!user?.sub) {
+      throw new BadRequestException('User ID not found in token');
+    }
+    this.logger.log(`Fetching strategies for user: ${user.sub}`);
+
+    try {
+      const strategies = await this.prisma.strategies.findMany({
+        where: {
+          user_id: user.sub,
+          type: 'user', // Only user-created strategies, not admin/pre-built
+        },
+        include: {
+          signals: {
+            orderBy: { timestamp: 'desc' },
+            take: 5, // Last 5 signals per strategy
+          },
+          _count: {
+            select: { signals: true },
+          },
+        },
+        orderBy: { created_at: 'desc' },
+      });
+
+      // Calculate performance metrics for each strategy
+      const strategiesWithMetrics = await Promise.all(
+        strategies.map(async (strategy) => {
+          // Get signal stats
+          const signalStats = await this.prisma.strategy_signals.groupBy({
+            by: ['action'],
+            where: { strategy_id: strategy.strategy_id },
+            _count: true,
+          });
+
+          const buySignals = signalStats.find(s => s.action === 'BUY')?._count || 0;
+          const sellSignals = signalStats.find(s => s.action === 'SELL')?._count || 0;
+          const holdSignals = signalStats.find(s => s.action === 'HOLD')?._count || 0;
+
+          // Get average confidence
+          const avgConfidence = await this.prisma.strategy_signals.aggregate({
+            where: { strategy_id: strategy.strategy_id },
+            _avg: { confidence: true, final_score: true },
+          });
+
+          return {
+            ...strategy,
+            metrics: {
+              total_signals: strategy._count.signals,
+              buy_signals: buySignals,
+              sell_signals: sellSignals,
+              hold_signals: holdSignals,
+              avg_confidence: avgConfidence._avg.confidence ? Number(avgConfidence._avg.confidence) : 0,
+              avg_score: avgConfidence._avg.final_score ? Number(avgConfidence._avg.final_score) : 0,
+            },
+          };
+        })
+      );
+
+      // Serialize to plain JSON-safe objects (Prisma Decimal/Date can break Nest response)
+      return JSON.parse(
+        JSON.stringify(strategiesWithMetrics, (_, v) => {
+          if (v instanceof Date) return v.toISOString();
+          if (v != null && typeof v === 'object' && typeof (v as any).toNumber === 'function') return (v as any).toNumber();
+          return v;
+        }),
+      );
+    } catch (err: any) {
+      this.logger.error(`getMyStrategies failed: ${err?.message}`, err?.stack);
+      throw new InternalServerErrorException(
+        err?.message?.includes('Invalid') || err?.code === 'P2002' ? err.message : 'Failed to load strategies'
+      );
+    }
+  }
+
+  /**
+   * Create a new custom stock strategy for the current user
+   * Endpoint: POST /strategies/custom/stocks
+   */
+  @UseGuards(JwtAuthGuard)
+  @Post('custom/stocks')
+  @HttpCode(HttpStatus.CREATED)
+  async createStockStrategy(
+    @Body() dto: CreateStrategyDto,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    this.logger.log(`Creating custom stock strategy for user: ${user.sub}`);
+
+    // Ensure user ownership
+    dto.user_id = user.sub;
+    dto.type = 'user' as any; // Force type to 'user'
+
+    // Validate stock symbols exist (basic validation)
+    if (!dto.target_assets || dto.target_assets.length === 0) {
+      throw new BadRequestException('At least one target stock symbol is required');
+    }
+
+    // Create the strategy
+    const strategy = await this.strategiesService.createCustomStrategy(dto);
+
+    this.logger.log(`Created strategy ${strategy.strategy_id} for user ${user.sub}`);
+
+    return {
+      success: true,
+      message: 'Stock strategy created successfully',
+      strategy,
+    };
+  }
+
+  /**
+   * Get a specific user strategy (with ownership verification)
+   * Endpoint: GET /strategies/my-strategies/:id
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get('my-strategies/:id')
+  async getMyStrategy(
+    @Param('id') strategyId: string,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    const strategy = await this.prisma.strategies.findUnique({
+      where: { strategy_id: strategyId },
+      include: {
+        signals: {
+          orderBy: { timestamp: 'desc' },
+          take: 20,
+          include: {
+            asset: true,
+            explanations: {
+              orderBy: { created_at: 'desc' },
+              take: 1,
+            },
+          },
+        },
+        parameters: true,
+      },
+    });
+
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${strategyId} not found`);
+    }
+
+    if (strategy.user_id !== user.sub) {
+      throw new ForbiddenException('You do not own this strategy');
+    }
+
+    return strategy;
+  }
+
+  /**
+   * Update a user's custom strategy
+   * Endpoint: PUT /strategies/my-strategies/:id
+   */
+  @UseGuards(JwtAuthGuard)
+  @Put('my-strategies/:id')
+  async updateMyStrategy(
+    @Param('id') strategyId: string,
+    @Body() updateDto: Partial<CreateStrategyDto>,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    // Verify ownership
+    const strategy = await this.prisma.strategies.findUnique({
+      where: { strategy_id: strategyId },
+    });
+
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${strategyId} not found`);
+    }
+
+    if (strategy.user_id !== user.sub) {
+      throw new ForbiddenException('You do not own this strategy');
+    }
+
+    // Update strategy
+    const updated = await this.prisma.strategies.update({
+      where: { strategy_id: strategyId },
+      data: {
+        name: updateDto.name,
+        description: updateDto.description,
+        risk_level: updateDto.risk_level,
+        timeframe: updateDto.timeframe,
+        entry_rules: updateDto.entry_rules as any,
+        exit_rules: updateDto.exit_rules as any,
+        indicators: updateDto.indicators as any,
+        stop_loss_value: updateDto.stop_loss_value,
+        take_profit_value: updateDto.take_profit_value,
+        target_assets: updateDto.target_assets as any,
+        is_active: updateDto.is_active,
+        updated_at: new Date(),
+      },
+      include: {
+        parameters: true,
+      },
+    });
+
+    this.logger.log(`Updated strategy ${strategyId} for user ${user.sub}`);
+
+    return {
+      success: true,
+      message: 'Strategy updated successfully',
+      strategy: updated,
+    };
+  }
+
+  /**
+   * Delete a user's custom strategy
+   * Endpoint: DELETE /strategies/my-strategies/:id
+   */
+  @UseGuards(JwtAuthGuard)
+  @Delete('my-strategies/:id')
+  async deleteMyStrategy(
+    @Param('id') strategyId: string,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    // Verify ownership
+    const strategy = await this.prisma.strategies.findUnique({
+      where: { strategy_id: strategyId },
+    });
+
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${strategyId} not found`);
+    }
+
+    if (strategy.user_id !== user.sub) {
+      throw new ForbiddenException('You do not own this strategy');
+    }
+
+    // Delete related signals first
+    await this.prisma.strategy_signals.deleteMany({
+      where: { strategy_id: strategyId },
+    });
+
+    // Delete strategy
+    await this.prisma.strategies.delete({
+      where: { strategy_id: strategyId },
+    });
+
+    this.logger.log(`Deleted strategy ${strategyId} for user ${user.sub}`);
+
+    return {
+      success: true,
+      message: 'Strategy deleted successfully',
+    };
+  }
+
+  /**
+   * Generate signals for a user's custom stock strategy
+   * Endpoint: POST /strategies/my-strategies/:id/generate-signals
+   */
+  @UseGuards(JwtAuthGuard)
+  @Post('my-strategies/:id/generate-signals')
+  @HttpCode(HttpStatus.OK)
+  async generateMyStrategySignals(
+    @Param('id') strategyId: string,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    this.logger.log(`Generating signals for strategy ${strategyId} by user ${user.sub}`);
+
+    // Verify ownership
+    const strategy = await this.prisma.strategies.findUnique({
+      where: { strategy_id: strategyId },
+    });
+
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${strategyId} not found`);
+    }
+
+    if (strategy.user_id !== user.sub) {
+      throw new ForbiddenException('You do not own this strategy');
+    }
+
+    // Get target stocks
+    const targetAssets = (strategy.target_assets as string[]) || [];
+    if (targetAssets.length === 0) {
+      throw new BadRequestException('Strategy has no target assets');
+    }
+
+    // Fetch stock asset IDs from database
+    const assets = await this.prisma.assets.findMany({
+      where: {
+        symbol: { in: targetAssets },
+        asset_type: 'stock',
+      },
+    });
+
+    if (assets.length === 0) {
+      // Try to create assets for the symbols
+      this.logger.warn(`No assets found for symbols: ${targetAssets.join(', ')}. Creating them...`);
+      
+      for (const symbol of targetAssets) {
+        await this.prisma.assets.upsert({
+          where: { symbol },
+          create: {
+            symbol,
+            name: symbol,
+            display_name: symbol,
+            asset_type: 'stock',
+          },
+          update: {},
+        });
+      }
+
+      // Re-fetch
+      const newAssets = await this.prisma.assets.findMany({
+        where: {
+          symbol: { in: targetAssets },
+          asset_type: 'stock',
+        },
+      });
+
+      if (newAssets.length === 0) {
+        throw new BadRequestException('Could not find or create assets for the specified symbols');
+      }
+    }
+
+    // Generate signals for each asset
+    const assetIds = assets.map(a => a.asset_id);
+    const results = await this.strategyExecutionService.executeStrategyOnAssets(
+      strategyId,
+      assetIds,
+    );
+
+    return {
+      success: true,
+      message: `Generated signals for ${results.length} stocks`,
+      signals: results,
+    };
+  }
+
+  /**
+   * Toggle strategy active status
+   * Endpoint: POST /strategies/my-strategies/:id/toggle-active
+   */
+  @UseGuards(JwtAuthGuard)
+  @Post('my-strategies/:id/toggle-active')
+  @HttpCode(HttpStatus.OK)
+  async toggleStrategyActive(
+    @Param('id') strategyId: string,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    // Verify ownership
+    const strategy = await this.prisma.strategies.findUnique({
+      where: { strategy_id: strategyId },
+    });
+
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${strategyId} not found`);
+    }
+
+    if (strategy.user_id !== user.sub) {
+      throw new ForbiddenException('You do not own this strategy');
+    }
+
+    // Toggle active status
+    const updated = await this.prisma.strategies.update({
+      where: { strategy_id: strategyId },
+      data: {
+        is_active: !strategy.is_active,
+        updated_at: new Date(),
+      },
+    });
+
+    return {
+      success: true,
+      message: `Strategy ${updated.is_active ? 'activated' : 'deactivated'}`,
+      is_active: updated.is_active,
+    };
+  }
+
+  // Generic :id route must come AFTER specific routes (e.g. my-strategies)
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.strategiesService.findOne(id);

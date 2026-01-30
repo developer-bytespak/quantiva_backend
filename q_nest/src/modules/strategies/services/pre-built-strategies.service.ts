@@ -282,8 +282,6 @@ export class PreBuiltStrategiesService implements OnModuleInit {
     }
 
     // Call Python API to generate signal (preview only, not stored)
-    // Pass asset symbol for OHLCV fetching (Python services need symbol, not UUID)
-    // Use longer timeout for preview (60s) to handle slow external APIs
     const assetSymbol = asset.symbol || asset.asset_id;
     const signal = await this.pythonApi.post(
       '/api/v1/signals/generate',
@@ -291,16 +289,16 @@ export class PreBuiltStrategiesService implements OnModuleInit {
         strategy_id: strategyId,
         asset_id: asset.asset_id,
         asset_type: marketData.asset_type || 'crypto',
-        connection_id: connectionId, // Automatically fetched from database if userId available
+        connection_id: connectionId,
         exchange: exchange,
         asset_symbol: assetSymbol,
         strategy_data: {
           ...strategyData,
-          user_id: strategy.user_id, // Pass user_id for logging/debugging
+          user_id: strategy.user_id,
         },
         market_data: marketData,
       },
-      { timeout: 60000 }, // 60 seconds for preview operations
+      { timeout: 20000 }, // 20s – typical 2–8s; fail fast on slow assets
     ).then((response) => response.data);
 
     // Enrich preview with market data fallbacks similar to strategy-preview
@@ -410,10 +408,9 @@ export class PreBuiltStrategiesService implements OnModuleInit {
       take_profit_value: strategy.take_profit_value,
     };
 
-    // Process assets in parallel batches to avoid timeout
-    // Batch size: 3 assets at a time to reduce per-batch time and avoid rate limits
-    const BATCH_SIZE = 3;
-    const TIMEOUT_MS = 60000; // 60 seconds per asset (matches Python API timeout for preview)
+    // Process assets in parallel batches to reduce total response time
+    const BATCH_SIZE = 12;
+    const TIMEOUT_MS = 20000; // 20 seconds per asset (fail fast; Python typically 2–8s)
 
     for (let i = 0; i < assets.length; i += BATCH_SIZE) {
       const batchStartTime = Date.now();
@@ -464,9 +461,9 @@ export class PreBuiltStrategiesService implements OnModuleInit {
       const batchDuration = Date.now() - batchStartTime;
       this.logger.log(`Batch ${batchNum} completed in ${batchDuration}ms`);
 
-      // Small delay between batches to avoid overwhelming APIs
+      // Brief pause between batches to avoid overwhelming Python/exchange APIs
       if (i + BATCH_SIZE < assets.length) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
 

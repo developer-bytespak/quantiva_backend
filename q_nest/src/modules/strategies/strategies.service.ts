@@ -118,16 +118,20 @@ export class StrategiesService {
   }
 
   async createCustomStrategy(dto: CreateStrategyDto) {
-    // Validate strategy
-    const validation = await this.validationService.validateStrategy(dto);
-    if (!validation.valid) {
-      throw new BadRequestException({ message: 'Strategy validation failed', errors: validation.errors });
+    // Validate strategy (skip validation if using field-based rules)
+    const hasFieldBasedRules = dto.entry_rules?.some(r => r.field) || dto.exit_rules?.some(r => r.field);
+    
+    if (!hasFieldBasedRules) {
+      const validation = await this.validationService.validateStrategy(dto);
+      if (!validation.valid) {
+        throw new BadRequestException({ message: 'Strategy validation failed', errors: validation.errors });
+      }
     }
 
     // Parse rules
     const parsedRules = this.validationService.parseStrategyRules(dto);
 
-    // Create strategy with all fields
+    // Create strategy with all fields including engine_weights
     const strategy = await this.prisma.strategies.create({
       data: {
         user_id: dto.user_id,
@@ -139,6 +143,7 @@ export class StrategiesService {
         entry_rules: parsedRules.entry_rules as any,
         exit_rules: parsedRules.exit_rules as any,
         indicators: parsedRules.indicators as any,
+        engine_weights: dto.engine_weights as any, // Add engine weights for score-based strategies
         stop_loss_type: dto.stop_loss_type,
         stop_loss_value: dto.stop_loss_value,
         take_profit_type: dto.take_profit_type,
