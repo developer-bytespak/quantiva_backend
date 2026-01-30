@@ -594,6 +594,146 @@ export class StrategiesController {
     return this.strategiesService.validateStrategy(validateStrategyDto);
   }
 
+  /**
+   * Close unprotected positions (positions without bracket orders/OCO sell orders)
+   * This is a safety endpoint to close positions that don't have proper exit logic
+   * 
+   * Endpoint: POST /strategies/close-unprotected-positions
+   */
+  @Post('close-unprotected-positions')
+  @HttpCode(HttpStatus.OK)
+  async closeUnprotectedPositions() {
+    this.logger.log('Manual trigger: Close unprotected positions');
+    
+    try {
+      // Import AlpacaPaperTradingService dynamically to avoid circular dependency
+      const { AlpacaPaperTradingService } = await import('../alpaca-paper-trading/alpaca-paper-trading.service');
+      const alpacaService = new AlpacaPaperTradingService(this.configService);
+      
+      // Get all positions
+      const positions = await alpacaService.getPositions();
+      
+      if (!positions || positions.length === 0) {
+        return {
+          success: true,
+          message: 'No open positions found',
+          closed: [],
+        };
+      }
+      
+      // Get all orders with nested bracket legs
+      const allOrders = await alpacaService.getOrders({ 
+        status: 'all',
+        nested: true
+      });
+      
+      // Build set of symbols with active sell orders
+      const symbolsWithSellOrders = new Set<string>();
+      
+      for (const order of allOrders) {
+        // Check bracket legs
+        if (order.order_class === 'bracket' && order.legs && order.legs.length > 0) {
+          const hasActiveSellLegs = order.legs.some((leg: any) => 
+            leg.side === 'sell' && ['new', 'held', 'accepted', 'pending_new'].includes(leg.status)
+          );
+          if (hasActiveSellLegs) {
+            symbolsWithSellOrders.add(order.symbol);
+          }
+        }
+        
+        // Check standalone sell orders
+        if (order.side === 'sell' && ['new', 'held', 'accepted', 'pending_new'].includes(order.status)) {
+          symbolsWithSellOrders.add(order.symbol);
+        }
+      }
+      
+      // Find unprotected positions
+      const unprotectedPositions = positions.filter((pos: any) => 
+        !symbolsWithSellOrders.has(pos.symbol)
+      );
+      
+      if (unprotectedPositions.length === 0) {
+        return {
+          success: true,
+          message: 'All positions are protected with sell orders',
+          total_positions: positions.length,
+          protected: positions.length,
+          unprotected: 0,
+          closed: [],
+        };
+      }
+      
+      // Close unprotected positions
+      const closedPositions = [];
+      const failedPositions = [];
+      
+      for (const position of unprotectedPositions) {
+        try {
+          const closeOrder = await alpacaService.placeOrder({
+            symbol: position.symbol,
+            qty: parseFloat(position.qty),
+            side: 'sell',
+            type: 'market',
+            time_in_force: 'day',
+          });
+          
+          closedPositions.push({
+            symbol: position.symbol,
+            qty: position.qty,
+            entry_price: position.avg_entry_price,
+            close_price: position.current_price,
+            pl: position.unrealized_pl,
+            pl_percent: position.unrealized_plpc,
+            order_id: closeOrder.id,
+          });
+          
+          // Log to database
+          await this.prisma.auto_trade_logs.create({
+            data: {
+              session_id: 'MANUAL_CLOSE_UNPROTECTED',
+              event_type: 'POSITION_CLOSED',
+              message: `Closed unprotected position: ${position.symbol}`,
+              metadata: {
+                symbol: position.symbol,
+                qty: position.qty,
+                entry_price: position.avg_entry_price,
+                close_price: position.current_price,
+                pl: position.unrealized_pl,
+                pl_percent: position.unrealized_plpc,
+                order_id: closeOrder.id,
+                reason: 'No bracket orders or sell orders found',
+              } as any,
+            },
+          });
+          
+          // Rate limit: 500ms between orders
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+        } catch (error: any) {
+          this.logger.error(`Failed to close ${position.symbol}: ${error.message}`);
+          failedPositions.push({
+            symbol: position.symbol,
+            error: error.message,
+          });
+        }
+      }
+      
+      return {
+        success: true,
+        message: `Closed ${closedPositions.length} unprotected position(s)`,
+        total_positions: positions.length,
+        protected: positions.length - unprotectedPositions.length,
+        unprotected: unprotectedPositions.length,
+        closed: closedPositions,
+        failed: failedPositions,
+      };
+      
+    } catch (error: any) {
+      this.logger.error(`Failed to close unprotected positions: ${error.message}`);
+      throw new BadRequestException(`Failed to close unprotected positions: ${error.message}`);
+    }
+  }
+
   @Get(':id/rules')
   getRules(@Param('id') id: string) {
     return this.strategiesService.findOne(id).then((strategy) => {
