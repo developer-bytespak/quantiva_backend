@@ -22,6 +22,7 @@ import { LoginDto } from '../dto/login.dto';
 import { Verify2FADto } from '../dto/verify-2fa.dto';
 import { ChangePasswordDto } from '../dto/change-password.dto';
 import { DeleteAccountDto } from '../dto/delete-account.dto';
+import { VerifyPasswordDto } from '../dto/verify-password.dto';
 import { ConfigService } from '@nestjs/config';
 import { TokenPayload } from '../services/token.service';
 
@@ -269,6 +270,16 @@ export class AuthController {
     @Body() changePasswordDto: ChangePasswordDto,
   ) {
     return this.authService.changePassword(user.sub, changePasswordDto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('verify-password')
+  @HttpCode(HttpStatus.OK)
+  async verifyPassword(
+    @CurrentUser() user: TokenPayload,
+    @Body() verifyPasswordDto: VerifyPasswordDto,
+  ) {
+    return this.authService.verifyPassword(user.sub, verifyPasswordDto.password);
   }
 
   @UseGuards(JwtAuthGuard)

@@ -446,6 +446,31 @@ export class AuthService {
   }
 
   /**
+   * Verify user's password
+   * Used before sensitive operations like account deletion
+   */
+  async verifyPassword(userId: string, password: string) {
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+
+    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
+
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Invalid password');
+    }
+
+    return {
+      success: true,
+      message: 'Password verified successfully',
+    };
+  }
+
+  /**
    * Request 2FA code for account deletion
    * Generates and sends verification code to user's email
    */
