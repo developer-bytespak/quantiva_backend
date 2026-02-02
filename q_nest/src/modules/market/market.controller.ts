@@ -1,9 +1,13 @@
-import { Controller, Get, Query, Param, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Query, Param, HttpException, HttpStatus, Post } from '@nestjs/common';
 import { MarketService } from './market.service';
+import { CoinDetailsCacheService } from './services/coin-details-cache.service';
 
 @Controller('api/market')
 export class MarketController {
-  constructor(private readonly marketService: MarketService) {}
+  constructor(
+    private readonly marketService: MarketService,
+    private readonly coinDetailsCacheService: CoinDetailsCacheService,
+  ) {}
 
   /**
    * GET /api/market/coins/top
@@ -124,6 +128,83 @@ export class MarketController {
       }
       throw new HttpException(
         error.message || 'Failed to fetch coin details',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * POST /api/market/coins/sync
+   * Manually trigger sync of top N coins (admin only)
+   * Body: { limit?: number }
+   */
+  @Post('coins/sync')
+  async syncTopCoins(@Query('limit') limit?: string) {
+    try {
+      const limitNum = limit ? parseInt(limit, 10) : 200;
+      if (isNaN(limitNum) || limitNum < 1 || limitNum > 500) {
+        throw new HttpException(
+          'Limit must be a number between 1 and 500',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      
+      const result = await this.coinDetailsCacheService.syncTopCoins(limitNum);
+      
+      return {
+        message: 'Coin sync completed',
+        ...result,
+      };
+    } catch (error: any) {
+      throw new HttpException(
+        error.message || 'Failed to sync coins',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * POST /api/market/coins/refresh-stale
+   * Manually trigger refresh of stale coins
+   * Query params: maxCoins (default: 50)
+   */
+  @Post('coins/refresh-stale')
+  async refreshStaleCoins(@Query('maxCoins') maxCoins?: string) {
+    try {
+      const max = maxCoins ? parseInt(maxCoins, 10) : 50;
+      if (isNaN(max) || max < 1 || max > 200) {
+        throw new HttpException(
+          'maxCoins must be a number between 1 and 200',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      
+      const result = await this.coinDetailsCacheService.refreshStaleCoins(max);
+      
+      return {
+        message: 'Stale coins refresh completed',
+        ...result,
+      };
+    } catch (error: any) {
+      throw new HttpException(
+        error.message || 'Failed to refresh stale coins',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/market/coins/cache/stats
+   * Get cache statistics
+   */
+  @Get('coins/cache/stats')
+  async getCacheStats() {
+    try {
+      const stats = await this.coinDetailsCacheService.getCacheStats();
+      return stats;
+    } catch (error: any) {
+      throw new HttpException(
+        error.message || 'Failed to get cache stats',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }

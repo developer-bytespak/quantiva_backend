@@ -106,7 +106,7 @@ export class KycService {
       await this.prisma.kyc_verifications.update({
         where: { kyc_id: verification.kyc_id },
         data: {
-          status: kycStatus,
+          status: kycStatus as any,
           decision_reason: decisionReason,
           doc_authenticity_score: matchResult.similarity,
         },
