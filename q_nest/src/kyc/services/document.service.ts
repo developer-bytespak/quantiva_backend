@@ -1,8 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { StorageService } from '../../storage/storage.service';
+import { CloudinaryService } from '../../storage/cloudinary.service';
 import { PythonApiService } from '../integrations/python-api.service';
-import * as fs from 'fs/promises';
 
 @Injectable()
 export class DocumentService {
@@ -10,7 +9,7 @@ export class DocumentService {
 
   constructor(
     private prisma: PrismaService,
-    private storage: StorageService,
+    private cloudinary: CloudinaryService,
     private pythonApi: PythonApiService,
   ) {}
 
@@ -19,28 +18,24 @@ export class DocumentService {
     file: Express.Multer.File,
     documentType?: string,
   ): Promise<string> {
-    // Save file to storage
-    const filePath = await this.storage.saveFile(file, 'kyc/documents');
+    this.logger.log(`Uploading document for KYC: ${kycId}`);
+    
+    // Upload file to Cloudinary instead of local storage
+    const uploadResult = await this.cloudinary.uploadFile(file, 'quantiva/kyc/documents');
+    
+    this.logger.log(`Document uploaded to Cloudinary: ${uploadResult.secureUrl}`);
 
-    // Create document record
+    // Create document record with Cloudinary URL
     const document = await this.prisma.kyc_documents.create({
       data: {
         kyc_id: kycId,
-        storage_url: filePath,
+        storage_url: uploadResult.secureUrl, // Store the full Cloudinary URL
         document_type: documentType || null,
       },
     });
 
-    // Perform OCR asynchronously (could be done in background job)
-    // PAUSED: OCR temporarily disabled
-    // this.performOCR(document.document_id, filePath, file.buffer, file.originalname).catch(
-    //   (error) => {
-    //     this.logger.error('OCR processing failed', error);
-    //   },
-    // );
-
-    // Check document authenticity
-    this.checkAuthenticity(document.document_id, filePath, file.buffer, file.originalname).catch(
+    // Check document authenticity (async, non-blocking)
+    this.checkAuthenticity(document.document_id, uploadResult.secureUrl, file.buffer, file.originalname).catch(
       (error) => {
         this.logger.error('Authenticity check failed', error);
       },

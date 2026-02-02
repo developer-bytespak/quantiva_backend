@@ -1,10 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
-import { StorageService } from '../../storage/storage.service';
+import { CloudinaryService } from '../../storage/cloudinary.service';
 import { PythonApiService } from '../integrations/python-api.service';
-import * as fs from 'fs/promises';
-import * as path from 'path';
 
 @Injectable()
 export class FaceMatchingService {
@@ -12,7 +10,7 @@ export class FaceMatchingService {
 
   constructor(
     private prisma: PrismaService,
-    private storage: StorageService,
+    private cloudinary: CloudinaryService,
     private pythonApi: PythonApiService,
     private configService: ConfigService,
   ) {}
@@ -47,15 +45,15 @@ export class FaceMatchingService {
 
     this.logger.log(`   Document found: ${document.document_id}, storage: ${document.storage_url}`);
 
-    // Step 2: Read ID photo from storage
-    this.logger.log('📷 [NEST-KYC] Step 2: Reading ID photo from storage...');
+    // Step 2: Fetch ID photo from Cloudinary URL
+    this.logger.log('📷 [NEST-KYC] Step 2: Fetching ID photo from Cloudinary...');
     const step2Start = Date.now();
     const idPhotoBuffer = await this.getDocumentImageBuffer(document.storage_url);
-    this.logger.log(`   Storage read completed in ${Date.now() - step2Start}ms`);
+    this.logger.log(`   Cloudinary fetch completed in ${Date.now() - step2Start}ms`);
 
     if (!idPhotoBuffer || idPhotoBuffer.length === 0) {
       this.logger.error(`ID photo buffer is empty for document: ${document.storage_url}`);
-      throw new Error('Failed to read ID photo from storage');
+      throw new Error('Failed to fetch ID photo from Cloudinary');
     }
 
     this.logger.log(
@@ -92,11 +90,11 @@ export class FaceMatchingService {
       );
     }
 
-    // Step 4: Save selfie to storage
-    this.logger.log('💾 [NEST-KYC] Step 4: Saving selfie to storage...');
+    // Step 4: Upload selfie to Cloudinary
+    this.logger.log('💾 [NEST-KYC] Step 4: Uploading selfie to Cloudinary...');
     const step4Start = Date.now();
-    const selfiePath = await this.storage.saveFile(selfieFile, 'kyc/selfies');
-    this.logger.log(`   Selfie saved in ${Date.now() - step4Start}ms`);
+    const selfieUpload = await this.cloudinary.uploadFile(selfieFile, 'quantiva/kyc/selfies');
+    this.logger.log(`   Selfie uploaded in ${Date.now() - step4Start}ms: ${selfieUpload.secureUrl}`);
 
     // Step 5: Update database records
     this.logger.log('🗄️  [NEST-KYC] Step 5: Updating database records...');
@@ -112,7 +110,7 @@ export class FaceMatchingService {
       await this.prisma.kyc_face_matches.update({
         where: { match_id: existingMatch.match_id },
         data: {
-          photo_url: selfiePath,
+          photo_url: selfieUpload.secureUrl,
           similarity: matchResult.similarity,
           is_match: matchResult.is_match,
         },
@@ -122,7 +120,7 @@ export class FaceMatchingService {
       await this.prisma.kyc_face_matches.create({
         data: {
           kyc_id: kycId,
-          photo_url: selfiePath,
+          photo_url: selfieUpload.secureUrl,
           similarity: matchResult.similarity,
           is_match: matchResult.is_match,
         },
@@ -152,38 +150,19 @@ export class FaceMatchingService {
     };
   }
 
-  private async getDocumentImageBuffer(storagePath: string): Promise<Buffer> {
-    // Get storage root from config (same as StorageService uses)
-    const storageRoot = this.configService.get<string>('STORAGE_ROOT', './storage');
-    
-    // Normalize path separators (handle both / and \ for cross-platform compatibility)
-    const normalizedPath = storagePath.replace(/\\/g, '/');
-    const fullPath = path.join(storageRoot, normalizedPath);
-    
-    this.logger.debug(`Reading document from: ${fullPath}`);
-    
-    try {
-      // Check if file exists
-      await fs.access(fullPath);
-      
-      // Read file
-      const buffer = await fs.readFile(fullPath);
-      
-      if (!buffer || buffer.length === 0) {
-        this.logger.error(`File exists but is empty: ${fullPath}`);
-        throw new Error(`Document file is empty: ${storagePath}`);
-      }
-      
-      this.logger.debug(`Successfully read document, size: ${buffer.length} bytes`);
-      return buffer;
-    } catch (error: any) {
-      if (error.code === 'ENOENT') {
-        this.logger.error(`Document file not found: ${fullPath}`);
-        throw new Error(`Document file not found: ${storagePath}`);
-      }
-      this.logger.error(`Failed to read document file: ${fullPath}`, error);
-      throw new Error(`Failed to read document: ${error.message}`);
+  /**
+   * Fetch document image from Cloudinary URL or local storage (for backward compatibility)
+   */
+  private async getDocumentImageBuffer(storageUrl: string): Promise<Buffer> {
+    // Check if it's a Cloudinary URL (starts with http/https)
+    if (storageUrl.startsWith('http://') || storageUrl.startsWith('https://')) {
+      this.logger.debug(`Fetching document from Cloudinary: ${storageUrl}`);
+      return this.cloudinary.fetchImageBuffer(storageUrl);
     }
+    
+    // Fallback for old local storage paths (shouldn't happen after migration)
+    this.logger.warn(`Document has old local storage path: ${storageUrl}. This will fail on Render.`);
+    throw new Error(`Document stored locally, not on Cloudinary. Please re-upload the document. Path: ${storageUrl}`);
   }
 }
 

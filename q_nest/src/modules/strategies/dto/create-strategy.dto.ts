@@ -11,7 +11,19 @@ import {
   Max,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { StrategyType, RiskLevel } from '@prisma/client';
+
+// Define local enums to avoid Prisma client initialization issues with class-validator
+// These must match the Prisma schema enums exactly
+export enum StrategyType {
+  admin = 'admin',
+  user = 'user',
+}
+
+export enum RiskLevel {
+  low = 'low',
+  medium = 'medium',
+  high = 'high',
+}
 
 // Engine weights for score-based signal generation (like pre-built strategies)
 export class EngineWeightsDto {
