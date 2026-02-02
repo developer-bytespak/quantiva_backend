@@ -100,43 +100,51 @@ def match_faces(id_photo: Image.Image, selfie: Image.Image) -> Dict[str, Any]:
         logger.info("🔄 [KYC] Calling verify_faces()...")
         result = engine.verify_faces(id_bgr, selfie_bgr)
 
-        # Save cropped faces if detected
-        output_dir = os.environ.get("KYC_FACE_CROP_DIR", "./kyc_face_crops")
-        os.makedirs(output_dir, exist_ok=True)
+        # Debug crop saving - ONLY in development (disabled in production/Render)
+        # Set SAVE_FACE_CROPS=true in .env to enable local debugging
+        save_crops_enabled = os.environ.get("SAVE_FACE_CROPS", "false").lower() == "true"
+        id_crop_path = None
+        selfie_crop_path = None
 
-        # Clean old crops before saving new ones
-        try:
-            for old_file in os.listdir(output_dir):
-                if old_file.endswith('.jpg') or old_file.endswith('.jpeg'):
-                    old_path = os.path.join(output_dir, old_file)
-                    os.remove(old_path)
-            logger.info(f"Cleaned old face crops from {output_dir}")
-        except Exception as e:
-            logger.warning(f"Failed to clean old crops: {e}")
+        if save_crops_enabled:
+            output_dir = os.environ.get("KYC_FACE_CROP_DIR", "./kyc_face_crops")
+            os.makedirs(output_dir, exist_ok=True)
 
-        def save_crop(bgr_img, face_result, prefix):
-            if not face_result or not face_result.get("bbox"):
-                logger.info(f"No face detected for {prefix}, skipping crop save.")
-                return None
-            bbox = face_result["bbox"]
-            x1, y1, x2, y2 = [int(c) for c in bbox]
-            crop = bgr_img[y1:y2, x1:x2]
-            
-            # Convert to grayscale for consistency with face matching
-            import cv2
-            crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            
-            crop_path = os.path.join(output_dir, f"{prefix}_crop.jpg")
+            # Clean old crops before saving new ones
             try:
-                cv2.imwrite(crop_path, crop_gray)
-                logger.info(f"Saved grayscale cropped face for {prefix} at: {crop_path}")
-                return crop_path
+                for old_file in os.listdir(output_dir):
+                    if old_file.endswith('.jpg') or old_file.endswith('.jpeg'):
+                        old_path = os.path.join(output_dir, old_file)
+                        os.remove(old_path)
+                logger.info(f"Cleaned old face crops from {output_dir}")
             except Exception as e:
-                logger.warning(f"Failed to save crop for {prefix}: {e}")
-                return None
+                logger.warning(f"Failed to clean old crops: {e}")
 
-        id_crop_path = save_crop(id_bgr, result.get("face1"), "document")
-        selfie_crop_path = save_crop(selfie_bgr, result.get("face2"), "selfie")
+            def save_crop(bgr_img, face_result, prefix):
+                if not face_result or not face_result.get("bbox"):
+                    logger.info(f"No face detected for {prefix}, skipping crop save.")
+                    return None
+                bbox = face_result["bbox"]
+                x1, y1, x2, y2 = [int(c) for c in bbox]
+                crop = bgr_img[y1:y2, x1:x2]
+                
+                # Convert to grayscale for consistency with face matching
+                import cv2
+                crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                
+                crop_path = os.path.join(output_dir, f"{prefix}_crop.jpg")
+                try:
+                    cv2.imwrite(crop_path, crop_gray)
+                    logger.info(f"Saved grayscale cropped face for {prefix} at: {crop_path}")
+                    return crop_path
+                except Exception as e:
+                    logger.warning(f"Failed to save crop for {prefix}: {e}")
+                    return None
+
+            id_crop_path = save_crop(id_bgr, result.get("face1"), "document")
+            selfie_crop_path = save_crop(selfie_bgr, result.get("face2"), "selfie")
+        else:
+            logger.debug("Face crop saving disabled (set SAVE_FACE_CROPS=true to enable)")
 
         if not result["success"]:
             logger.warning(f"Enhanced face verification failed: {result.get('error')}")

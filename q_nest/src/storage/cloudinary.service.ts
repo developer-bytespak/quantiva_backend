@@ -164,6 +164,57 @@ export class CloudinaryService {
   }
 
   /**
+   * Extract public ID from Cloudinary URL
+   * @param url Full Cloudinary URL
+   * @returns Public ID or null if not a valid Cloudinary URL
+   */
+  extractPublicIdFromUrl(url: string): string | null {
+    if (!url || !url.includes('cloudinary.com')) {
+      return null;
+    }
+
+    try {
+      // Cloudinary URL format: https://res.cloudinary.com/{cloud_name}/image/upload/v{version}/{public_id}.{format}
+      // Example: https://res.cloudinary.com/djqmhkla6/image/upload/v1770067306/quantiva/kyc/documents/1770067295432_file.jpg
+      const match = url.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
+      if (match && match[1]) {
+        // Decode URL-encoded characters and return public ID
+        return decodeURIComponent(match[1]);
+      }
+      return null;
+    } catch (error) {
+      this.logger.error(`Failed to extract public ID from URL: ${url}`);
+      return null;
+    }
+  }
+
+  /**
+   * Delete an image from Cloudinary by URL
+   * @param url Full Cloudinary URL
+   */
+  async deleteByUrl(url: string): Promise<boolean> {
+    if (!this.isConfigured) {
+      this.logger.warn('Cloudinary not configured, skipping delete');
+      return false;
+    }
+
+    const publicId = this.extractPublicIdFromUrl(url);
+    if (!publicId) {
+      this.logger.warn(`Not a Cloudinary URL, cannot delete: ${url}`);
+      return false;
+    }
+
+    try {
+      await cloudinary.uploader.destroy(publicId);
+      this.logger.debug(`Deleted image from Cloudinary: ${publicId}`);
+      return true;
+    } catch (error: any) {
+      this.logger.error(`Failed to delete Cloudinary image ${publicId}: ${error.message}`);
+      return false;
+    }
+  }
+
+  /**
    * Delete an image from Cloudinary by public ID
    * @param publicId Cloudinary public ID
    */

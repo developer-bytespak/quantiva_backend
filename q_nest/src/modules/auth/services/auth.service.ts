@@ -18,6 +18,7 @@ import { Verify2FADto } from '../dto/verify-2fa.dto';
 import { ChangePasswordDto } from '../dto/change-password.dto';
 import { DeleteAccountDto } from '../dto/delete-account.dto';
 import { StorageService } from '../../../storage/storage.service';
+import { CloudinaryService } from '../../../storage/cloudinary.service';
 
 @Injectable()
 export class AuthService {
@@ -29,6 +30,7 @@ export class AuthService {
     private rateLimitService: RateLimitService,
     private configService: ConfigService,
     private storageService: StorageService,
+    private cloudinaryService: CloudinaryService,
   ) {}
 
   private getGoogleClient() {
@@ -878,8 +880,19 @@ export class AuthService {
 
     for (const fileUrl of filesToDelete) {
       try {
-        await this.storageService.deleteFile(fileUrl);
-        cloudFilesDeleted++;
+        // Check if it's a Cloudinary URL
+        if (fileUrl.includes('cloudinary.com')) {
+          const deleted = await this.cloudinaryService.deleteByUrl(fileUrl);
+          if (deleted) {
+            cloudFilesDeleted++;
+          } else {
+            cloudFilesFailed++;
+          }
+        } else {
+          // Fallback to local storage deletion for old files
+          await this.storageService.deleteFile(fileUrl);
+          cloudFilesDeleted++;
+        }
       } catch (error) {
         cloudFilesFailed++;
         console.error(
