@@ -270,6 +270,32 @@ export class BinanceTestnetService {
       price,
     );
 
+    // Store order in database for persistence
+    try {
+      await this.prisma.orders.create({
+        data: {
+          order_id: `binance_testnet_${order.orderId}`,
+          side: side,
+          order_type: type.toLowerCase(),
+          quantity: quantity,
+          price: price || (order.cumulativeQuoteAssetTransacted / order.executedQuantity) || 0,
+          status: order.status === 'FILLED' ? 'filled' : order.status === 'NEW' ? 'pending' : 'cancelled',
+          metadata: {
+            source: 'binance_testnet',
+            binance_order_id: order.orderId,
+            symbol: symbol,
+            timestamp: order.timestamp,
+            executed_quantity: order.executedQuantity,
+            cumulative_quote: order.cumulativeQuoteAssetTransacted,
+          },
+        },
+      });
+      this.logger.debug(`Order ${order.orderId} stored in database`);
+    } catch (dbError: any) {
+      // Don't fail if DB insert fails - order was placed successfully on Binance
+      this.logger.warn(`Failed to store order in database: ${dbError?.message}`);
+    }
+
     // Invalidate orders cache
     this.cacheService.invalidatePattern('testnet:orders');
 
@@ -738,6 +764,104 @@ export class BinanceTestnetService {
     } catch (error: any) {
       this.logger.error(`Failed to sync orders: ${error.message}`);
       return this.getOrdersFromDatabase(limit);
+    }
+  }
+
+  /**
+   * Sync orders from Binance API into database
+   * This imports existing Binance orders that weren't stored in DB
+   */
+  async syncOrdersFromBinanceToDatabase(): Promise<{ synced: number; skipped: number; errors: number }> {
+    if (!this.isConfigured()) {
+      throw new Error('Testnet not configured');
+    }
+
+    let synced = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    try {
+      // Get account info to find symbols with balances
+      const accountInfo = await this.getAccountInfo();
+      const symbolsWithBalance = accountInfo.balances
+        .filter((b: any) => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0)
+        .map((b: any) => b.asset + 'USDT')
+        .filter((s: string) => s !== 'USDTUSDT');
+
+      // Add common trading pairs
+      const tradingSymbols = [...new Set([...symbolsWithBalance, 'BTCUSDT', 'ETHUSDT', 'BNBUSDT'])];
+
+      this.logger.log(`Syncing orders for symbols: ${tradingSymbols.join(', ')}`);
+
+      // Get existing order IDs from database
+      const existingOrders = await this.prisma.orders.findMany({
+        where: {
+          metadata: {
+            path: ['source'],
+            equals: 'binance_testnet',
+          },
+        },
+        select: {
+          metadata: true,
+        },
+      });
+      const existingOrderIds = new Set(
+        existingOrders.map((o: any) => o.metadata?.binance_order_id).filter(Boolean)
+      );
+
+      // Fetch orders from Binance for each symbol
+      for (const symbol of tradingSymbols) {
+        try {
+          const binanceOrders = await this.getAllOrders({ symbol, limit: 100 });
+          
+          for (const order of binanceOrders) {
+            if (existingOrderIds.has(order.orderId)) {
+              skipped++;
+              continue;
+            }
+
+            try {
+              // Calculate price for market orders
+              let price = order.price || 0;
+              if (!price && order.cumulativeQuoteAssetTransacted && order.executedQuantity) {
+                price = order.cumulativeQuoteAssetTransacted / order.executedQuantity;
+              }
+
+              await this.prisma.orders.create({
+                data: {
+                  order_id: `binance_testnet_${order.orderId}`,
+                  side: order.side,
+                  order_type: order.type === 'MARKET' ? 'market' : 'limit',
+                  quantity: order.quantity,
+                  price: price,
+                  status: order.status === 'FILLED' ? 'filled' : order.status === 'NEW' ? 'pending' : 'cancelled',
+                  metadata: {
+                    source: 'binance_testnet',
+                    binance_order_id: order.orderId,
+                    symbol: order.symbol,
+                    timestamp: order.timestamp,
+                    executed_quantity: order.executedQuantity,
+                    cumulative_quote: order.cumulativeQuoteAssetTransacted,
+                  },
+                },
+              });
+              synced++;
+              this.logger.debug(`Synced order ${order.orderId} (${symbol})`);
+            } catch (dbError: any) {
+              errors++;
+              this.logger.warn(`Failed to save order ${order.orderId}: ${dbError?.message}`);
+            }
+          }
+        } catch (symbolError: any) {
+          this.logger.warn(`Failed to fetch orders for ${symbol}: ${symbolError?.message}`);
+        }
+      }
+
+      this.logger.log(`Sync complete: ${synced} synced, ${skipped} skipped, ${errors} errors`);
+      return { synced, skipped, errors };
+    } catch (error: any) {
+      this.logger.error(`Sync failed: ${error.message}`);
+      throw error;
     }
   }
 }
