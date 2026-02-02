@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import axios, { AxiosInstance } from 'axios';
+import { CoinDetailsCacheService } from './services/coin-details-cache.service';
 
 export interface CoinGeckoCoin {
   id: string;
@@ -37,10 +38,15 @@ export class MarketService {
   private readonly apiClient: AxiosInstance;
   private readonly apiKey: string | null;
   private readonly baseUrl: string;
+  
+  // In-memory cache for coin details to reduce API calls
+  private coinDetailsCache: Map<string, { data: any; timestamp: number }> = new Map();
+  private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes cache
 
   constructor(
     private configService: ConfigService,
     private prisma: PrismaService,
+    private coinDetailsCacheService: CoinDetailsCacheService,
   ) {
     this.apiKey = this.configService.get<string>('COINGECKO_API_KEY') || null;
     
@@ -202,9 +208,33 @@ export class MarketService {
   /**
    * Fetch detailed information about a specific coin
    * Accepts either coin ID (e.g., "bitcoin") or symbol (e.g., "BTC")
+   * Implements database cache + 5-minute in-memory cache to reduce API calls
    */
   async getCoinDetails(coinIdOrSymbol: string): Promise<any> {
     try {
+      const cacheKey = coinIdOrSymbol.toLowerCase();
+      
+      // 1. Check in-memory cache first (fastest)
+      const memCached = this.coinDetailsCache.get(cacheKey);
+      const now = Date.now();
+      
+      if (memCached && (now - memCached.timestamp) < this.CACHE_TTL) {
+        this.logger.log(`Returning in-memory cached coin details for ${coinIdOrSymbol}`);
+        return memCached.data;
+      }
+
+      // 2. Check database cache (fast, reduces API calls)
+      const dbCached = await this.coinDetailsCacheService.getCoinDetailsFromDB(coinIdOrSymbol);
+      if (dbCached) {
+        // Store in memory cache
+        this.coinDetailsCache.set(cacheKey, {
+          data: dbCached,
+          timestamp: now,
+        });
+        return dbCached;
+      }
+
+      // 3. Fetch from CoinGecko API as last resort
       let coinId = coinIdOrSymbol.toLowerCase();
 
       // Always try to search by symbol first if it looks like a symbol
@@ -221,18 +251,18 @@ export class MarketService {
         }
       }
 
-      const response = await this.apiClient.get(`/coins/${coinId}`, {
-        params: {
-          localization: false,
-          tickers: false,
-          market_data: true,
-          community_data: true,
-          developer_data: true,
-          sparkline: false,
-        },
+      this.logger.log(`Fetching fresh coin details from CoinGecko API for ${coinIdOrSymbol}`);
+      
+      // Sync to database (fetches from API and saves)
+      const freshData = await this.coinDetailsCacheService.syncCoinDetails(coinId);
+
+      // Store in memory cache
+      this.coinDetailsCache.set(cacheKey, {
+        data: freshData,
+        timestamp: now,
       });
 
-      return response.data;
+      return freshData;
     } catch (error: any) {
       this.logger.error('Failed to fetch coin details from CoinGecko', {
         coinIdOrSymbol,
