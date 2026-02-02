@@ -26,5 +26,8 @@ __pycache__/
 *.so
 .Python
 
+# KYC face crops (local debug images)
+q_python/kyc_face_crops/
+
 # KYC standalone test folder (local testing only)
 kyc_standalone_test/
