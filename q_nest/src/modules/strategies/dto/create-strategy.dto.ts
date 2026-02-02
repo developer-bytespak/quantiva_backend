@@ -13,9 +13,48 @@ import {
 import { Type } from 'class-transformer';
 import { StrategyType, RiskLevel } from '@prisma/client';
 
+// Engine weights for score-based signal generation (like pre-built strategies)
+export class EngineWeightsDto {
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  sentiment?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  trend?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  fundamental?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  event_risk?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  liquidity?: number;
+}
+
 export class EntryRuleDto {
+  // Support both "indicator" (legacy) and "field" (new score-based) for rules
+  @IsOptional()
   @IsString()
-  indicator: string;
+  indicator?: string;
+
+  @IsOptional()
+  @IsString()
+  field?: string; // e.g., 'final_score', 'metadata.engine_details.sentiment.score'
 
   @IsString()
   operator: string; // '>', '<', '>=', '<=', '==', 'cross_above', 'cross_below'
@@ -33,8 +72,14 @@ export class EntryRuleDto {
 }
 
 export class ExitRuleDto {
+  // Support both "indicator" (legacy) and "field" (new score-based) for rules
+  @IsOptional()
   @IsString()
-  indicator: string;
+  indicator?: string;
+
+  @IsOptional()
+  @IsString()
+  field?: string; // e.g., 'final_score', 'metadata.engine_details.sentiment.score'
 
   @IsString()
   operator: string;
@@ -72,34 +117,37 @@ export class CreateStrategyDto {
   @IsString()
   name: string;
 
-  // @IsEnum(StrategyType)
+  @IsEnum(StrategyType)
   type: StrategyType;
 
   @IsOptional()
   @IsString()
   description?: string;
 
-  // @IsEnum(RiskLevel)
+  @IsEnum(RiskLevel)
   risk_level: RiskLevel;
 
   @IsOptional()
   @IsString()
   timeframe?: string; // '1h', '4h', '1d', etc.
 
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => EntryRuleDto)
-  entry_rules: EntryRuleDto[];
+  entry_rules?: EntryRuleDto[];
 
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ExitRuleDto)
-  exit_rules: ExitRuleDto[];
+  exit_rules?: ExitRuleDto[];
 
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => IndicatorConfigDto)
-  indicators: IndicatorConfigDto[];
+  indicators?: IndicatorConfigDto[];
 
   @IsOptional()
   @IsString()
@@ -137,23 +185,31 @@ export class CreateStrategyDto {
   @IsOptional()
   @IsBoolean()
   is_active?: boolean;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => EngineWeightsDto)
+  engine_weights?: EngineWeightsDto;
 }
 
 export class ValidateStrategyDto {
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => EntryRuleDto)
-  entry_rules: EntryRuleDto[];
+  entry_rules?: EntryRuleDto[];
 
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ExitRuleDto)
-  exit_rules: ExitRuleDto[];
+  exit_rules?: ExitRuleDto[];
 
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => IndicatorConfigDto)
-  indicators: IndicatorConfigDto[];
+  indicators?: IndicatorConfigDto[];
 
   @IsOptional()
   @IsString()
