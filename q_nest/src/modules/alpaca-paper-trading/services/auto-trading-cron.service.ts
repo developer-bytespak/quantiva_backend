@@ -22,33 +22,62 @@ export class AutoTradingCronService implements OnModuleInit {
     // Load trade history from database first
     await this.sessionService.loadHistoryFromDatabase();
     
-    // Auto-start trading session on module init
-    await this.autoStartSession();
+    // Auto-start trading session on module init with retry
+    await this.autoStartSessionWithRetry();
+  }
+
+  /**
+   * Auto-start with retry logic
+   */
+  private async autoStartSessionWithRetry(): Promise<void> {
+    let attempts = 0;
+    const maxAttempts = 3;
+    const retryDelay = 5000; // 5 seconds
+
+    while (attempts < maxAttempts) {
+      attempts++;
+      try {
+        await this.autoStartSession();
+        return; // Success, exit
+      } catch (error: any) {
+        this.logger.error(`Auto-start attempt ${attempts}/${maxAttempts} failed: ${error?.message}`);
+        if (attempts < maxAttempts) {
+          this.logger.log(`Retrying in ${retryDelay/1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+        }
+      }
+    }
+    this.logger.error('Failed to auto-start trading after all attempts');
   }
 
   /**
    * Auto-start the trading session if Alpaca is configured
    */
   private async autoStartSession(): Promise<void> {
-    try {
-      if (!this.alpacaService.isConfigured()) {
-        this.logger.warn('Alpaca not configured, auto trading will not start');
-        return;
-      }
-
-      const balance = await this.alpacaService.getAccountBalance();
-      const startingBalance = balance.equity;
-
-      if (startingBalance < 10000) {
-        this.logger.warn(`Balance $${startingBalance.toFixed(2)} below $10,000 threshold, auto trading will not start`);
-        return;
-      }
-
-      this.sessionService.startSession(startingBalance);
-      this.logger.log(`Auto trading auto-started with balance: $${startingBalance.toFixed(2)}`);
-    } catch (error: any) {
-      this.logger.error(`Failed to auto-start trading: ${error?.message}`);
+    if (!this.alpacaService.isConfigured()) {
+      this.logger.warn('⚠️  Alpaca not configured - auto trading disabled');
+      this.logger.warn('   Set ALPACA_API_KEY and ALPACA_SECRET_KEY in .env');
+      return;
     }
+
+    this.logger.log('✓ Alpaca credentials configured');
+    
+    const balance = await this.alpacaService.getAccountBalance();
+    const startingBalance = balance.equity;
+    
+    this.logger.log(`Current Alpaca balance: $${startingBalance.toFixed(2)}`);
+
+    // Lower threshold to $1000 to allow more flexibility
+    const minBalance = 1000;
+    if (startingBalance < minBalance) {
+      this.logger.warn(`⚠️  Balance $${startingBalance.toFixed(2)} below $${minBalance} threshold`);
+      this.logger.warn('   Auto trading will not start until balance is increased');
+      return;
+    }
+
+    this.sessionService.startSession(startingBalance);
+    this.logger.log(`✓ Auto trading STARTED with balance: $${startingBalance.toFixed(2)}`);
+    this.logger.log('✓ Next run scheduled in 6 hours');
   }
 
   /**
@@ -57,18 +86,28 @@ export class AutoTradingCronService implements OnModuleInit {
    */
   @Cron('0 */6 * * *') // Every 6 hours at minute 0
   async handleAutomatedTrading() {
+    const now = new Date().toISOString();
+    this.logger.log(`========================================`);
+    this.logger.log(`🤖 AUTO-TRADING CRON TRIGGERED: ${now}`);
+    this.logger.log(`========================================`);
+
     if (this.isExecuting) {
-      this.logger.warn('Previous execution still in progress, skipping');
+      this.logger.warn('⚠️  Previous execution still in progress, skipping');
       return;
     }
 
+    const sessionStatus = this.sessionService.getStatus();
+    this.logger.log(`Session status: ${sessionStatus}`);
+    
     if (!this.sessionService.isTradeAllowed()) {
-      this.logger.debug('Auto trading not active, skipping cron execution');
+      this.logger.warn('⚠️  Auto trading not active (session not running)');
+      this.logger.warn('   The session may have stopped or failed to start');
+      this.logger.warn('   Check logs above for auto-start errors or restart the service');
       return;
     }
 
     this.isExecuting = true;
-    this.logger.log('Starting scheduled auto-trading execution');
+    this.logger.log('✓ Starting scheduled auto-trading execution');
 
     try {
       // Add AI messages for visual effect
@@ -78,23 +117,25 @@ export class AutoTradingCronService implements OnModuleInit {
       const result = await this.executionService.executeAutomatedTrades();
 
       if (result.success) {
-        this.logger.log(`Auto trading completed: ${result.tradesExecuted} trades executed`);
+        this.logger.log(`✓ Auto trading completed: ${result.tradesExecuted} trades executed`);
         this.sessionService.addAiMessage(
           `Trading cycle complete: ${result.tradesExecuted} trades`,
           'success'
         );
       } else {
-        this.logger.warn(`Auto trading completed with errors: ${result.errors.join(', ')}`);
+        this.logger.warn(`⚠️  Auto trading completed with errors: ${result.errors.join(', ')}`);
         this.sessionService.addAiMessage(
           `Trading cycle completed with ${result.errors.length} errors`,
           'warning'
         );
       }
     } catch (error: any) {
-      this.logger.error(`Auto trading cron failed: ${error?.message}`);
+      this.logger.error(`❌ Auto trading cron failed: ${error?.message}`);
+      this.logger.error(error.stack);
       this.sessionService.addAiMessage(`Execution error: ${error?.message}`, 'warning');
     } finally {
       this.isExecuting = false;
+      this.logger.log(`========================================`);
     }
   }
 

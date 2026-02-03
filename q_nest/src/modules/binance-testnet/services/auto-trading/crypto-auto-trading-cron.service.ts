@@ -22,34 +22,63 @@ export class CryptoAutoTradingCronService implements OnModuleInit {
     // Load trade history from database first
     await this.sessionService.loadHistoryFromDatabase();
     
-    // Auto-start trading session on module init
-    await this.autoStartSession();
+    // Auto-start trading session on module init with retry
+    await this.autoStartSessionWithRetry();
+  }
+
+  /**
+   * Auto-start with retry logic
+   */
+  private async autoStartSessionWithRetry(): Promise<void> {
+    let attempts = 0;
+    const maxAttempts = 3;
+    const retryDelay = 5000; // 5 seconds
+
+    while (attempts < maxAttempts) {
+      attempts++;
+      try {
+        await this.autoStartSession();
+        return; // Success, exit
+      } catch (error: any) {
+        this.logger.error(`Crypto auto-start attempt ${attempts}/${maxAttempts} failed: ${error?.message}`);
+        if (attempts < maxAttempts) {
+          this.logger.log(`Retrying in ${retryDelay/1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+        }
+      }
+    }
+    this.logger.error('Failed to auto-start crypto trading after all attempts');
   }
 
   /**
    * Auto-start the trading session if Binance testnet is configured
    */
   private async autoStartSession(): Promise<void> {
-    try {
-      if (!this.binanceTestnetService.isConfigured()) {
-        this.logger.warn('Binance testnet not configured, crypto auto trading will not start');
-        return;
-      }
-
-      const accountBalance = await this.binanceTestnetService.getAccountBalance();
-      const usdtBalance = accountBalance.balances.find((b: any) => b.asset === 'USDT')?.free || 0;
-      const startingBalance = typeof usdtBalance === 'string' ? parseFloat(usdtBalance) : usdtBalance;
-
-      if (startingBalance < 100) {
-        this.logger.warn(`USDT balance $${startingBalance.toFixed(2)} below $100 threshold, crypto auto trading will not start`);
-        return;
-      }
-
-      this.sessionService.startSession(startingBalance);
-      this.logger.log(`Crypto auto trading auto-started with USDT balance: $${startingBalance.toFixed(2)}`);
-    } catch (error: any) {
-      this.logger.error(`Failed to auto-start crypto trading: ${error?.message}`);
+    if (!this.binanceTestnetService.isConfigured()) {
+      this.logger.warn('⚠️  Binance testnet not configured - crypto auto trading disabled');
+      this.logger.warn('   Set TESTNET_API_KEY and TESTNET_API_SECRET in .env');
+      return;
     }
+
+    this.logger.log('✓ Binance testnet credentials configured');
+    
+    const accountBalance = await this.binanceTestnetService.getAccountBalance();
+    const usdtBalance = accountBalance.balances.find((b: any) => b.asset === 'USDT')?.free || 0;
+    const startingBalance = typeof usdtBalance === 'string' ? parseFloat(usdtBalance) : usdtBalance;
+    
+    this.logger.log(`Current USDT balance: $${startingBalance.toFixed(2)}`);
+
+    // Lower threshold to $10 to allow more flexibility on testnet
+    const minBalance = 10;
+    if (startingBalance < minBalance) {
+      this.logger.warn(`⚠️  USDT balance $${startingBalance.toFixed(2)} below $${minBalance} threshold`);
+      this.logger.warn('   Crypto auto trading will not start until balance is increased');
+      return;
+    }
+
+    this.sessionService.startSession(startingBalance);
+    this.logger.log(`✓ Crypto auto trading STARTED with USDT balance: $${startingBalance.toFixed(2)}`);
+    this.logger.log('✓ Next run scheduled in 6 hours');
   }
 
   /**
@@ -59,18 +88,28 @@ export class CryptoAutoTradingCronService implements OnModuleInit {
    */
   @Cron('30 */6 * * *') // Every 6 hours at minute 30
   async handleAutomatedTrading() {
+    const now = new Date().toISOString();
+    this.logger.log(`========================================`);
+    this.logger.log(`🪙 CRYPTO AUTO-TRADING CRON TRIGGERED: ${now}`);
+    this.logger.log(`========================================`);
+
     if (this.isExecuting) {
-      this.logger.warn('Previous crypto execution still in progress, skipping');
+      this.logger.warn('⚠️  Previous crypto execution still in progress, skipping');
       return;
     }
 
+    const sessionStatus = this.sessionService.getStatus();
+    this.logger.log(`Session status: ${sessionStatus}`);
+    
     if (!this.sessionService.isTradeAllowed()) {
-      this.logger.debug('Crypto auto trading not active, skipping cron execution');
+      this.logger.warn('⚠️  Crypto auto trading not active (session not running)');
+      this.logger.warn('   The session may have stopped or failed to start');
+      this.logger.warn('   Check logs above for auto-start errors or restart the service');
       return;
     }
 
     this.isExecuting = true;
-    this.logger.log('Starting scheduled crypto auto-trading execution');
+    this.logger.log('✓ Starting scheduled crypto auto-trading execution');
 
     try {
       // Add AI messages for visual effect
@@ -80,23 +119,25 @@ export class CryptoAutoTradingCronService implements OnModuleInit {
       const result = await this.executionService.executeAutomatedTrades();
 
       if (result.success) {
-        this.logger.log(`Crypto auto trading completed: ${result.tradesExecuted} trades executed`);
+        this.logger.log(`✓ Crypto auto trading completed: ${result.tradesExecuted} trades executed`);
         this.sessionService.addAiMessage(
           `Crypto trading cycle complete: ${result.tradesExecuted} trades`,
           'success'
         );
       } else {
-        this.logger.warn(`Crypto auto trading completed with errors: ${result.errors.join(', ')}`);
+        this.logger.warn(`⚠️  Crypto auto trading completed with errors: ${result.errors.join(', ')}`);
         this.sessionService.addAiMessage(
           `Crypto trading cycle completed with ${result.errors.length} errors`,
           'warning'
         );
       }
     } catch (error: any) {
-      this.logger.error(`Crypto auto trading cron failed: ${error?.message}`);
+      this.logger.error(`❌ Crypto auto trading cron failed: ${error?.message}`);
+      this.logger.error(error.stack);
       this.sessionService.addAiMessage(`Execution error: ${error?.message}`, 'warning');
     } finally {
       this.isExecuting = false;
+      this.logger.log(`========================================`);
     }
   }
 
