@@ -290,8 +290,8 @@ export class CoinDetailsCacheService {
           await this.syncCoinDetails(coin.id);
           success++;
           
-          // Add delay between requests (500ms)
-          await new Promise(resolve => setTimeout(resolve, 500));
+          // Reduced delay between requests (200ms instead of 500ms)
+          await new Promise(resolve => setTimeout(resolve, 200));
         } catch (error) {
           failed++;
           this.logger.warn(`Failed to sync coin: ${coin.id}`);
