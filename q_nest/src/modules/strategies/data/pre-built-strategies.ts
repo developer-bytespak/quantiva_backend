@@ -1,9 +1,12 @@
 import { RiskLevel } from '@prisma/client';
 
+export type AssetType = 'crypto' | 'stock';
+
 export interface PreBuiltStrategyTemplate {
   name: string;
   description: string;
   risk_level: RiskLevel;
+  asset_type: AssetType; // 'crypto' | 'stock'
   engine_weights: {
     sentiment: number;
     trend: number;
@@ -23,6 +26,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
     description:
       'Focuses on sentiment analysis and trend following. Ideal for capturing momentum driven by market sentiment and technical trends.',
     risk_level: 'medium',
+    asset_type: 'crypto',
     engine_weights: {
       sentiment: 0.5,
       trend: 0.4,
@@ -57,6 +61,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
     description:
       'Balanced approach combining all engines with emphasis on sentiment and trend. Designed for consistent alpha generation across market conditions.',
     risk_level: 'medium',
+    asset_type: 'crypto',
     engine_weights: {
       sentiment: 0.35,
       trend: 0.25,
@@ -86,6 +91,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
     description:
       'Prioritizes liquidity and market depth. Best for large positions and minimizing slippage in volatile markets.',
     risk_level: 'low',
+    asset_type: 'crypto',
     engine_weights: {
       sentiment: 0.3,
       trend: 0.2,
@@ -120,6 +126,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
     description:
       'Heavy focus on event risk management. Protects against adverse events while maintaining exposure to opportunities.',
     risk_level: 'high',
+    asset_type: 'crypto',
     engine_weights: {
       sentiment: 0.25,
       trend: 0.2,
@@ -159,6 +166,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
     description:
       'Stock-focused strategy emphasizing fundamental analysis and earnings quality. Targets stable companies with strong financials, positive earnings momentum, and low event risk. Ideal for long-term investors seeking steady growth.',
     risk_level: 'low',
+    asset_type: 'stock',
     engine_weights: {
       sentiment: 0.25,
       trend: 0.15,
@@ -208,6 +216,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
     description:
       'High-conviction strategy for growth stocks with strong technical momentum and positive sentiment. Ideal for tech sector and momentum plays. Requires strong social buzz and upward price action.',
     risk_level: 'high',
+    asset_type: 'stock',
     engine_weights: {
       sentiment: 0.4,
       trend: 0.35,
@@ -257,6 +266,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
     description:
       'Fundamental-driven strategy focusing on undervalued stocks with strong fundamentals. Emphasizes P/E ratios, earnings quality, and revenue growth. Looks for temporary dips in quality companies.',
     risk_level: 'medium',
+    asset_type: 'stock',
     engine_weights: {
       sentiment: 0.15,
       trend: 0.1,
@@ -301,6 +311,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
     description:
       'Conservative strategy for dividend-paying stocks with stable fundamentals. Focuses on consistent earnings, low event risk, and strong financial health. Prioritizes capital preservation and steady income.',
     risk_level: 'low',
+    asset_type: 'stock',
     engine_weights: {
       sentiment: 0.2,
       trend: 0.15,

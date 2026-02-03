@@ -41,15 +41,23 @@ export class PreBuiltStrategiesService implements OnModuleInit {
       });
 
       if (existing) {
-        this.logger.debug(`Strategy ${template.name} already exists, skipping`);
+        // Update existing strategy with asset_type if it's missing
+        if (!existing.asset_type) {
+          await this.prisma.strategies.update({
+            where: { strategy_id: existing.strategy_id },
+            data: { asset_type: template.asset_type },
+          });
+          this.logger.debug(`Updated ${template.name} with asset_type: ${template.asset_type}`);
+        }
         continue;
       }
 
-      // Create strategy
+      // Create strategy with asset_type
       await this.prisma.strategies.create({
         data: {
           name: template.name,
           type: 'admin',
+          asset_type: template.asset_type, // Add asset_type
           description: template.description,
           risk_level: template.risk_level as RiskLevel,
           engine_weights: template.engine_weights as any,
@@ -61,7 +69,7 @@ export class PreBuiltStrategiesService implements OnModuleInit {
         },
       });
 
-      this.logger.log(`Created pre-built strategy: ${template.name}`);
+      this.logger.log(`Created pre-built strategy: ${template.name} (${template.asset_type})`);
     }
 
     this.logger.log('Pre-built strategies seeding completed');
@@ -69,13 +77,21 @@ export class PreBuiltStrategiesService implements OnModuleInit {
 
   /**
    * Get all pre-built strategies (admin type)
+   * @param assetType Optional filter by asset type ('crypto' | 'stock')
    */
-  async getPreBuiltStrategies() {
+  async getPreBuiltStrategies(assetType?: 'crypto' | 'stock') {
+    const whereClause: any = {
+      type: 'admin',
+      is_active: true,
+    };
+
+    // Filter by asset_type if provided
+    if (assetType) {
+      whereClause.asset_type = assetType;
+    }
+
     return this.prisma.strategies.findMany({
-      where: {
-        type: 'admin',
-        is_active: true,
-      },
+      where: whereClause,
       orderBy: {
         created_at: 'asc',
       },

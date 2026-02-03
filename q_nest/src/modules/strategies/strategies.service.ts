@@ -137,6 +137,7 @@ export class StrategiesService {
         user_id: dto.user_id,
         name: dto.name,
         type: dto.type,
+        asset_type: dto.asset_type || 'crypto', // Default to crypto if not specified
         description: dto.description,
         risk_level: dto.risk_level,
         timeframe: dto.timeframe,
@@ -279,6 +280,7 @@ export class StrategiesService {
         user_id: userId,
         name: config?.name || `${template.name} (Custom)`,
         type: 'user',
+        asset_type: template.asset_type || 'crypto', // Inherit asset_type from template
         description: template.description,
         risk_level: template.risk_level,
         timeframe: template.timeframe,
@@ -307,13 +309,20 @@ export class StrategiesService {
 
   /**
    * Get all pre-built strategies
+   * @param assetType Optional filter by asset type ('crypto' | 'stock')
    */
-  async getPreBuiltStrategies() {
+  async getPreBuiltStrategies(assetType?: 'crypto' | 'stock') {
+    const whereClause: any = {
+      type: 'admin',
+      is_active: true,
+    };
+
+    if (assetType) {
+      whereClause.asset_type = assetType;
+    }
+
     return this.prisma.strategies.findMany({
-      where: {
-        type: 'admin',
-        is_active: true,
-      },
+      where: whereClause,
       orderBy: {
         created_at: 'asc',
       },

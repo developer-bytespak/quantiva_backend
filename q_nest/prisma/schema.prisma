@@ -344,6 +344,7 @@ model strategies {
   user_id              String?                   @db.Uuid
   name                 String?                   @db.VarChar(100)
   type                 StrategyType
+  asset_type           String?
   description          String?
   risk_level           RiskLevel
   auto_trade_threshold Decimal?                  @db.Decimal(5, 4)

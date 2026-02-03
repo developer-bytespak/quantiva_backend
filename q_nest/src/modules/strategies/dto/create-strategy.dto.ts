@@ -25,6 +25,11 @@ export enum RiskLevel {
   high = 'high',
 }
 
+export enum AssetType {
+  crypto = 'crypto',
+  stock = 'stock',
+}
+
 // Engine weights for score-based signal generation (like pre-built strategies)
 export class EngineWeightsDto {
   @IsOptional()
@@ -138,6 +143,10 @@ export class CreateStrategyDto {
 
   @IsEnum(RiskLevel)
   risk_level: RiskLevel;
+
+  @IsOptional()
+  @IsEnum(AssetType)
+  asset_type?: AssetType; // 'crypto' | 'stock' - defaults to 'crypto'
 
   @IsOptional()
   @IsString()
