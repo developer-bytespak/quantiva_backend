@@ -51,9 +51,14 @@ export class StrategiesController {
   }
 
   // Move specific routes BEFORE the generic :id route
+  /**
+   * Get all pre-built strategies (admin type)
+   * @param asset_type Optional filter: 'crypto' | 'stock'
+   * Endpoint: GET /strategies/pre-built?asset_type=crypto
+   */
   @Get('pre-built')
-  getPreBuiltStrategies() {
-    return this.preBuiltStrategiesService.getPreBuiltStrategies();
+  getPreBuiltStrategies(@Query('asset_type') assetType?: 'crypto' | 'stock') {
+    return this.preBuiltStrategiesService.getPreBuiltStrategies(assetType);
   }
 
   @Get('trending-assets')
@@ -616,29 +621,40 @@ export class StrategiesController {
 
   /**
    * ============================================
-   * USER CUSTOM STRATEGY ENDPOINTS (STOCKS)
+   * USER CUSTOM STRATEGY ENDPOINTS (STOCKS & CRYPTO)
    * Must be declared BEFORE @Get(':id') so /my-strategies is not matched as :id
    * ============================================
    */
 
   /**
    * Get all strategies owned by the current logged-in user
-   * Endpoint: GET /strategies/my-strategies
+   * @param asset_type Optional filter: 'crypto' | 'stock'
+   * Endpoint: GET /strategies/my-strategies?asset_type=crypto
    */
   @UseGuards(JwtAuthGuard)
   @Get('my-strategies')
-  async getMyStrategies(@CurrentUser() user: TokenPayload) {
+  async getMyStrategies(
+    @CurrentUser() user: TokenPayload,
+    @Query('asset_type') assetType?: 'crypto' | 'stock',
+  ) {
     if (!user?.sub) {
       throw new BadRequestException('User ID not found in token');
     }
-    this.logger.log(`Fetching strategies for user: ${user.sub}`);
+    this.logger.log(`Fetching strategies for user: ${user.sub}, asset_type: ${assetType || 'all'}`);
 
     try {
+      const whereClause: any = {
+        user_id: user.sub,
+        type: 'user', // Only user-created strategies, not admin/pre-built
+      };
+
+      // Filter by asset_type if provided
+      if (assetType) {
+        whereClause.asset_type = assetType;
+      }
+
       const strategies = await this.prisma.strategies.findMany({
-        where: {
-          user_id: user.sub,
-          type: 'user', // Only user-created strategies, not admin/pre-built
-        },
+        where: whereClause,
         include: {
           signals: {
             orderBy: { timestamp: 'desc' },
@@ -703,6 +719,7 @@ export class StrategiesController {
 
   /**
    * Create a new custom stock strategy for the current user
+   * Requires a stock (Alpaca) exchange connection
    * Endpoint: POST /strategies/custom/stocks
    */
   @UseGuards(JwtAuthGuard)
@@ -717,6 +734,7 @@ export class StrategiesController {
     // Ensure user ownership
     dto.user_id = user.sub;
     dto.type = 'user' as any; // Force type to 'user'
+    dto.asset_type = 'stock' as any; // Force asset_type to 'stock'
 
     // Validate stock symbols exist (basic validation)
     if (!dto.target_assets || dto.target_assets.length === 0) {
@@ -726,11 +744,47 @@ export class StrategiesController {
     // Create the strategy
     const strategy = await this.strategiesService.createCustomStrategy(dto);
 
-    this.logger.log(`Created strategy ${strategy.strategy_id} for user ${user.sub}`);
+    this.logger.log(`Created stock strategy ${strategy.strategy_id} for user ${user.sub}`);
 
     return {
       success: true,
       message: 'Stock strategy created successfully',
+      strategy,
+    };
+  }
+
+  /**
+   * Create a new custom crypto strategy for the current user
+   * Requires a crypto (Binance) exchange connection
+   * Endpoint: POST /strategies/custom/crypto
+   */
+  @UseGuards(JwtAuthGuard)
+  @Post('custom/crypto')
+  @HttpCode(HttpStatus.CREATED)
+  async createCryptoStrategy(
+    @Body() dto: CreateStrategyDto,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    this.logger.log(`Creating custom crypto strategy for user: ${user.sub}`);
+
+    // Ensure user ownership
+    dto.user_id = user.sub;
+    dto.type = 'user' as any; // Force type to 'user'
+    dto.asset_type = 'crypto' as any; // Force asset_type to 'crypto'
+
+    // Validate crypto symbols exist (basic validation)
+    if (!dto.target_assets || dto.target_assets.length === 0) {
+      throw new BadRequestException('At least one target crypto symbol is required');
+    }
+
+    // Create the strategy
+    const strategy = await this.strategiesService.createCustomStrategy(dto);
+
+    this.logger.log(`Created crypto strategy ${strategy.strategy_id} for user ${user.sub}`);
+
+    return {
+      success: true,
+      message: 'Crypto strategy created successfully',
       strategy,
     };
   }
