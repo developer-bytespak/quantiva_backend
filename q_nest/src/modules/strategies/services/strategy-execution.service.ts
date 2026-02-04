@@ -231,7 +231,7 @@ export class StrategyExecutionService {
   }
 
   /**
-   * Execute strategy on multiple assets
+   * Execute strategy on multiple assets with parallel processing
    * Only generates LLM explanations for top 5 signals (by final_score or confidence)
    * to avoid hitting Gemini free tier rate limits
    */
@@ -239,27 +239,38 @@ export class StrategyExecutionService {
     strategyId: string,
     assetIds: string[],
   ): Promise<any[]> {
-    const results: any[] = [];
     const LLM_LIMIT = 5; // Only generate LLM for top 5 signals
+    const CONCURRENCY_LIMIT = 3; // Process 3 assets in parallel to speed up
 
     this.logger.log(
-      `Executing strategy ${strategyId} on ${assetIds.length} assets`,
+      `Executing strategy ${strategyId} on ${assetIds.length} assets (concurrency: ${CONCURRENCY_LIMIT})`,
     );
 
-    // Step 1: Generate all signals without LLM
-    for (const assetId of assetIds) {
-      try {
-        const result = await this.executeStrategy(strategyId, assetId, false);
-        results.push(result);
-      } catch (error: any) {
-        this.logger.warn(
-          `Error executing strategy ${strategyId} on asset ${assetId}: ${error.message}`,
-        );
-        results.push({
-          asset_id: assetId,
-          error: error.message,
-        });
-      }
+    // Step 1: Generate all signals without LLM - in parallel with concurrency limit
+    const results: any[] = [];
+    
+    // Process in batches for controlled parallelism
+    for (let i = 0; i < assetIds.length; i += CONCURRENCY_LIMIT) {
+      const batch = assetIds.slice(i, i + CONCURRENCY_LIMIT);
+      this.logger.log(`Processing batch ${Math.floor(i / CONCURRENCY_LIMIT) + 1}/${Math.ceil(assetIds.length / CONCURRENCY_LIMIT)}: ${batch.length} assets`);
+      
+      const batchPromises = batch.map(async (assetId) => {
+        try {
+          const result = await this.executeStrategy(strategyId, assetId, false);
+          return result;
+        } catch (error: any) {
+          this.logger.warn(
+            `Error executing strategy ${strategyId} on asset ${assetId}: ${error.message}`,
+          );
+          return {
+            asset_id: assetId,
+            error: error.message,
+          };
+        }
+      });
+      
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
     }
 
     this.logger.log(
@@ -433,9 +444,31 @@ export class StrategyExecutionService {
 
   /**
    * Get market data for asset
+   * Supports both crypto (trending_assets) and stocks (market_rankings)
    */
   private async getMarketData(assetId: string, assetType: string | null): Promise<any> {
-    // Get latest trending asset data
+    // For stocks, check market_rankings first
+    if (assetType === 'stock') {
+      const marketRanking = await this.prisma.market_rankings.findFirst({
+        where: {
+          asset_id: assetId,
+        },
+        orderBy: {
+          rank_timestamp: 'desc',
+        },
+      });
+
+      if (marketRanking) {
+        return {
+          price: Number(marketRanking.price || 0),
+          volume_24h: Number(marketRanking.volume_24h || 0),
+          market_cap: Number(marketRanking.market_cap || 0),
+          asset_type: 'stock',
+        };
+      }
+    }
+
+    // For crypto or fallback, check trending_assets
     const trendingAsset = await this.prisma.trending_assets.findFirst({
       where: {
         asset_id: assetId,

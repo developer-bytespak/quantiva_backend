@@ -7,6 +7,7 @@ import { StrategyPreviewService } from './services/strategy-preview.service';
 import { StrategyExecutionService } from './services/strategy-execution.service';
 import { PreBuiltSignalsCronjobService } from './services/pre-built-signals-cronjob.service';
 import { StockSignalsCronjobService } from './services/stock-signals-cronjob.service';
+import { CustomStrategyCronjobService } from './services/custom-strategy-cronjob.service';
 import { NewsCronjobService } from '../news/news-cronjob.service';
 import { NewsService } from '../news/news.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -30,6 +31,7 @@ export class StrategiesController {
     private readonly strategyExecutionService: StrategyExecutionService,
     private readonly preBuiltSignalsCronjobService: PreBuiltSignalsCronjobService,
     private readonly stockSignalsCronjobService: StockSignalsCronjobService,
+    private readonly customStrategyCronjobService: CustomStrategyCronjobService,
     private readonly newsCronjobService: NewsCronjobService,
     private readonly newsService: NewsService,
     private readonly prisma: PrismaService,
@@ -925,7 +927,8 @@ export class StrategiesController {
   }
 
   /**
-   * Generate signals for a user's custom stock strategy
+   * Generate signals for a user's custom strategy (supports both stock and crypto)
+   * Uses cached market data from the database for fast processing (no real-time API calls)
    * Endpoint: POST /strategies/my-strategies/:id/generate-signals
    */
   @UseGuards(JwtAuthGuard)
@@ -950,19 +953,32 @@ export class StrategiesController {
       throw new ForbiddenException('You do not own this strategy');
     }
 
-    // Get target stocks
+    // Get target assets
     const targetAssets = (strategy.target_assets as string[]) || [];
     if (targetAssets.length === 0) {
-      throw new BadRequestException('Strategy has no target assets');
+      throw new BadRequestException('Strategy has no target assets. Please add at least one asset to your strategy.');
     }
 
-    // Fetch stock asset IDs from database
-    const assets = await this.prisma.assets.findMany({
+    // Determine asset type from strategy (default to 'crypto' for user strategies)
+    const assetType = strategy.asset_type || 'crypto';
+    this.logger.log(`Strategy asset type: ${assetType}, target assets: ${targetAssets.join(', ')}`);
+
+    // Ensure assets exist in database - first try with type filter
+    let assets = await this.prisma.assets.findMany({
       where: {
         symbol: { in: targetAssets },
-        asset_type: 'stock',
+        asset_type: assetType,
       },
     });
+
+    // If no assets found, try without type filter (assets might exist with different type)
+    if (assets.length === 0) {
+      assets = await this.prisma.assets.findMany({
+        where: {
+          symbol: { in: targetAssets },
+        },
+      });
+    }
 
     if (assets.length === 0) {
       // Try to create assets for the symbols
@@ -975,36 +991,399 @@ export class StrategiesController {
             symbol,
             name: symbol,
             display_name: symbol,
-            asset_type: 'stock',
+            asset_type: assetType,
           },
           update: {},
         });
       }
 
-      // Re-fetch
-      const newAssets = await this.prisma.assets.findMany({
+      // Re-fetch the newly created assets
+      assets = await this.prisma.assets.findMany({
         where: {
           symbol: { in: targetAssets },
-          asset_type: 'stock',
+          asset_type: assetType,
         },
       });
 
-      if (newAssets.length === 0) {
+      if (assets.length === 0) {
         throw new BadRequestException('Could not find or create assets for the specified symbols');
       }
     }
 
-    // Generate signals for each asset
-    const assetIds = assets.map(a => a.asset_id);
-    const results = await this.strategyExecutionService.executeStrategyOnAssets(
-      strategyId,
-      assetIds,
-    );
+    this.logger.log(`Starting signal generation for ${assets.length} assets using cached data`);
+    
+    // Option 1: If strategy is already active, signals will be generated in next cronjob
+    // Option 2: Make strategy active and return immediately
+    
+    // Ensure strategy is active so it will be processed by the cronjob
+    if (!strategy.is_active) {
+      await this.prisma.strategies.update({
+        where: { strategy_id: strategyId },
+        data: { is_active: true },
+      });
+    }
 
+    // Get the most recent signals for this strategy (if any exist)
+    const existingSignals = await this.prisma.strategy_signals.findMany({
+      where: {
+        strategy_id: strategyId,
+      },
+      include: {
+        asset: true,
+        details: true,
+      },
+      orderBy: {
+        timestamp: 'desc',
+      },
+      take: 20,
+    });
+
+    // Calculate time until next cronjob run (every 10 minutes at :00, :10, :20, etc.)
+    const now = new Date();
+    const currentMinute = now.getMinutes();
+    const nextRunMinute = Math.ceil(currentMinute / 10) * 10;
+    const minutesUntilNextRun = nextRunMinute === currentMinute ? 10 : (nextRunMinute - currentMinute);
+    
+    this.logger.log(`Strategy ${strategyId} is active. Signals will be generated in ~${minutesUntilNextRun} minutes`);
+    
     return {
       success: true,
-      message: `Generated signals for ${results.length} stocks`,
-      signals: results,
+      message: `Strategy is active. Signals will be generated automatically every 10 minutes (next run in ~${minutesUntilNextRun} minutes). ${existingSignals.length > 0 ? `Showing ${existingSignals.length} existing signals.` : 'No signals yet - check back after the next scheduled run.'}`,
+      scheduled: true,
+      nextRunInMinutes: minutesUntilNextRun,
+      signalsGenerated: existingSignals.length,
+      signals: existingSignals.map(s => ({
+        signal_id: s.signal_id,
+        asset_id: s.asset_id,
+        symbol: s.asset?.symbol,
+        action: s.action,
+        confidence: s.confidence,
+        final_score: s.final_score,
+        sentiment_score: s.sentiment_score,
+        trend_score: s.trend_score,
+        fundamental_score: s.fundamental_score,
+        liquidity_score: s.liquidity_score,
+        event_risk_score: s.event_risk_score,
+        timestamp: s.timestamp,
+        details: s.details[0] ? {
+          entry_price: s.details[0].entry_price,
+          stop_loss: s.details[0].stop_loss,
+          take_profit_1: s.details[0].take_profit_1,
+        } : null,
+      })),
+      errors: [],
+    };
+  }
+
+  /**
+   * Get signals for a user's custom strategy
+   * Endpoint: GET /strategies/my-strategies/:id/signals
+   * 
+   * Matches the pre-built signals format for frontend compatibility
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get('my-strategies/:id/signals')
+  async getMyStrategySignals(
+    @Param('id') strategyId: string,
+    @CurrentUser() user: TokenPayload,
+    @Query('limit') limit?: string,
+    @Query('latest_only') latestOnly?: string,
+    @Query('realtime') realtime?: string,
+  ) {
+    // Verify ownership
+    const strategy = await this.prisma.strategies.findUnique({
+      where: { strategy_id: strategyId },
+    });
+
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${strategyId} not found`);
+    }
+
+    if (strategy.user_id !== user.sub) {
+      throw new ForbiddenException('You do not own this strategy');
+    }
+
+    const limitNum = limit ? parseInt(limit, 10) : 50;
+    const enrichWithRealtime = realtime === 'true' || realtime === '1';
+
+    // If latest_only=true, return only one signal per asset (latest per asset) - same as pre-built
+    if (latestOnly === 'true' || latestOnly === '1') {
+      const signals = await this.prisma.strategy_signals.findMany({
+        where: {
+          strategy_id: strategyId,
+        },
+        include: {
+          asset: true,
+          explanations: {
+            orderBy: { created_at: 'desc' },
+            take: 1,
+          },
+          details: {
+            orderBy: { created_at: 'desc' },
+            take: 1,
+          },
+        },
+        orderBy: {
+          timestamp: 'desc',
+        },
+        take: 1000, // Fetch enough to dedupe by asset
+      });
+
+      // Get latest trending_assets prices for fallback
+      const assetIds = [...new Set(signals.map(s => s.asset_id).filter(Boolean))];
+      const trendingPrices = await this.prisma.trending_assets.findMany({
+        where: { asset_id: { in: assetIds } },
+        orderBy: { poll_timestamp: 'desc' },
+        distinct: ['asset_id'],
+        select: {
+          asset_id: true,
+          price_usd: true,
+          volume_24h: true,
+          price_change_24h: true,
+        },
+      });
+      type TrendingPrice = { asset_id: string; price_usd: any; volume_24h: any; price_change_24h: any };
+      const priceMap = new Map<string, TrendingPrice>(trendingPrices.map(p => [p.asset_id, p]));
+
+      // Dedupe: keep only the latest signal per asset
+      const seen = new Map<string, any>();
+      for (const s of signals) {
+        const assetId = s.asset?.asset_id || s.asset_id;
+        if (!assetId) continue;
+        if (!seen.has(assetId)) {
+          const dbPrice = priceMap.get(assetId);
+          seen.set(assetId, {
+            ...s,
+            stop_loss: strategy.stop_loss_value,
+            take_profit: strategy.take_profit_value,
+            price_usd: dbPrice?.price_usd ? Number(dbPrice.price_usd) : null,
+            db_volume_24h: dbPrice?.volume_24h ? Number(dbPrice.volume_24h) : null,
+            db_price_change_24h: dbPrice?.price_change_24h ? Number(dbPrice.price_change_24h) : null,
+          });
+        }
+      }
+
+      let results = Array.from(seen.values()).sort((a, b) => {
+        const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return tb - ta;
+      });
+
+      // Enrich with realtime data if requested (same as pre-built)
+      if (enrichWithRealtime) {
+        const { BinanceService } = await import('../binance/binance.service');
+        const binanceService = new BinanceService();
+        
+        results = await Promise.all(
+          results.map(async (signal) => {
+            if (signal.asset?.symbol) {
+              try {
+                const realtimeData = await binanceService.getEnrichedMarketData(signal.asset.symbol);
+                const isTradeable = realtimeData.price !== null && realtimeData.price > 0;
+                
+                return {
+                  ...signal,
+                  is_tradeable: isTradeable,
+                  realtime_data: isTradeable ? {
+                    price: realtimeData.price,
+                    priceChangePercent: realtimeData.priceChangePercent,
+                    high24h: realtimeData.high24h,
+                    low24h: realtimeData.low24h,
+                    volume24h: realtimeData.volume24h,
+                    quoteVolume24h: realtimeData.quoteVolume24h,
+                  } : null,
+                };
+              } catch (error: any) {
+                return { ...signal, is_tradeable: false, realtime_data: null };
+              }
+            }
+            return { ...signal, is_tradeable: false };
+          })
+        );
+        
+        // Filter out non-tradeable assets
+        results = results.filter(r => r.is_tradeable);
+        this.logger.log(`Filtered custom signals to ${results.length} tradeable assets`);
+      }
+
+      return results;
+    }
+
+    // Get all signals with explanations (without deduping) - same format as pre-built
+    const signals = await this.prisma.strategy_signals.findMany({
+      where: {
+        strategy_id: strategyId,
+      },
+      include: {
+        asset: true,
+        explanations: {
+          orderBy: { created_at: 'desc' },
+          take: 1,
+        },
+        details: {
+          orderBy: { created_at: 'desc' },
+          take: 1,
+        },
+      },
+      orderBy: {
+        timestamp: 'desc',
+      },
+      take: limitNum,
+    });
+
+    // Enrich all signals with strategy parameters (same as pre-built)
+    return signals.map((s) => ({
+      ...s,
+      stop_loss: strategy.stop_loss_value,
+      take_profit: strategy.take_profit_value,
+    }));
+  }
+
+  /**
+   * Get trending assets with insights for a custom strategy
+   * Works the same as pre-built endpoint but uses strategy's target_assets
+   * If target_assets is null/empty, returns all top 50 trending assets
+   * 
+   * Endpoint: GET /strategies/my-strategies/:id/trending-with-insights
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get('my-strategies/:id/trending-with-insights')
+  async getCustomStrategyTrendingWithInsights(
+    @Param('id') strategyId: string,
+    @CurrentUser() user: TokenPayload,
+    @Query('limit') limit?: string,
+  ) {
+    // Verify ownership
+    const strategy = await this.prisma.strategies.findUnique({
+      where: { strategy_id: strategyId },
+    });
+
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${strategyId} not found`);
+    }
+
+    if (strategy.user_id !== user.sub) {
+      throw new ForbiddenException('You do not own this strategy');
+    }
+
+    const limitNum = limit ? parseInt(limit, 10) : 50;
+    const targetAssets = (strategy.target_assets as string[]) || [];
+    const assetType = strategy.asset_type || 'crypto';
+    const isStockStrategy = assetType === 'stock';
+
+    this.logger.log(`getCustomStrategyTrendingWithInsights: strategy=${strategy.name}, targetAssets=${targetAssets.length}, type=${assetType}`);
+
+    // Get trending assets based on strategy type
+    let allAssets: any[];
+    if (isStockStrategy) {
+      allAssets = await this.preBuiltStrategiesService.getTopStocks(limitNum);
+    } else {
+      allAssets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, true);
+    }
+
+    // Filter to target assets if specified, otherwise use all
+    let assets = targetAssets.length > 0
+      ? allAssets.filter(a => targetAssets.includes(a.symbol))
+      : allAssets;
+
+    // If target assets don't match any trending, try to find them in the assets table
+    if (assets.length === 0 && targetAssets.length > 0) {
+      const dbAssets = await this.prisma.assets.findMany({
+        where: { symbol: { in: targetAssets } },
+      });
+      
+      // Enrich with trending data if available
+      const trendingMap = new Map(allAssets.map(a => [a.symbol, a]));
+      assets = dbAssets.map(a => ({
+        ...a,
+        ...(trendingMap.get(a.symbol) || {}),
+      }));
+    }
+
+    if (assets.length === 0) {
+      this.logger.warn(`No assets found for custom strategy ${strategyId}`);
+      return { 
+        strategy: {
+          id: strategy.strategy_id,
+          name: strategy.name,
+          description: strategy.description,
+        },
+        assets: [], 
+      };
+    }
+
+    // Get signals for these assets with this strategy
+    const assetIds = assets.map(a => a.asset_id).filter(Boolean);
+    const signals = await this.prisma.strategy_signals.findMany({
+      where: {
+        strategy_id: strategyId,
+        asset_id: { in: assetIds },
+      },
+      include: {
+        details: {
+          orderBy: { created_at: 'desc' },
+          take: 1,
+        },
+      },
+      orderBy: {
+        timestamp: 'desc',
+      },
+    });
+
+    // Create signal map (one signal per asset)
+    const signalMap = new Map();
+    for (const signal of signals) {
+      if (!signalMap.has(signal.asset_id)) {
+        signalMap.set(signal.asset_id, {
+          signal_id: signal.signal_id,
+          action: signal.action,
+          confidence: signal.confidence,
+          final_score: signal.final_score,
+          entry_price: signal.details[0]?.entry_price,
+          stop_loss: signal.details[0]?.stop_loss,
+          take_profit_1: signal.details[0]?.take_profit_1,
+          stop_loss_pct: strategy.stop_loss_value,
+          take_profit_pct: strategy.take_profit_value,
+          sentiment_score: signal.sentiment_score,
+          trend_score: signal.trend_score,
+        });
+      }
+    }
+
+    // Generate AI insights for top 2 assets (same as pre-built)
+    const top2Assets = assets.slice(0, 2);
+    const assetsWithInsights = await this.aiInsightsService.generateTrendingAssetsInsights(
+      top2Assets,
+      strategyId,
+      strategy.name || 'Custom Strategy',
+      signalMap,
+      2,
+    );
+
+    // Return top 2 with insights + remaining without
+    const remaining = assets.slice(2).map(asset => ({
+      ...asset,
+      hasAiInsight: false,
+      signal: signalMap.get(asset.asset_id) || null,
+    }));
+
+    const finalAssets = [
+      ...assetsWithInsights.map(a => ({
+        ...a,
+        signal: signalMap.get(a.asset_id) || null,
+      })),
+      ...remaining,
+    ];
+    
+    this.logger.log(`Returning ${finalAssets.length} assets for custom strategy (${assetsWithInsights.length} with insights)`);
+    
+    return {
+      strategy: {
+        id: strategy.strategy_id,
+        name: strategy.name,
+        description: strategy.description,
+      },
+      assets: finalAssets,
     };
   }
 
