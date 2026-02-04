@@ -272,9 +272,11 @@ export class BinanceTestnetService {
 
     // Store order in database for persistence
     try {
+      this.logger.log(`🔵 Attempting to save order ${order.orderId} to database...`);
       await this.prisma.orders.create({
         data: {
           order_id: `binance_testnet_${order.orderId}`,
+          portfolio_id: '415ad43b-4b8a-4841-ba61-f03ac4132ef9', // Use the actual portfolio ID from existing orders
           side: side,
           order_type: type.toLowerCase(),
           quantity: quantity,
@@ -290,10 +292,11 @@ export class BinanceTestnetService {
           },
         },
       });
-      this.logger.debug(`Order ${order.orderId} stored in database`);
+      this.logger.log(`✅ Order ${order.orderId} successfully stored in database`);
     } catch (dbError: any) {
       // Don't fail if DB insert fails - order was placed successfully on Binance
-      this.logger.warn(`Failed to store order in database: ${dbError?.message}`);
+      this.logger.error(`❌ Failed to store order in database: ${dbError?.message}`);
+      this.logger.error(`❌ DB Error details: ${JSON.stringify(dbError)}`);
     }
 
     // Invalidate orders cache
@@ -378,6 +381,49 @@ export class BinanceTestnetService {
       stopLossPrice,
       stopLimitPrice,
     );
+
+    // Save OCO orders to database for trade history tracking
+    try {
+      // OCO creates 2 orders: LIMIT_MAKER (take profit) and STOP_LOSS_LIMIT (stop loss)
+      if (result.orderReports && result.orderReports.length > 0) {
+        for (const orderReport of result.orderReports) {
+          const isStopLoss = orderReport.type === 'STOP_LOSS_LIMIT';
+          const price = isStopLoss 
+            ? parseFloat(orderReport.stopPrice || '0')
+            : parseFloat(orderReport.price || '0');
+
+          await this.prisma.orders.create({
+            data: {
+              order_id: `binance_testnet_${orderReport.orderId}`,
+              portfolio_id: '415ad43b-4b8a-4841-ba61-f03ac4132ef9', // Use the actual portfolio ID from existing orders
+              side: orderReport.side,
+              order_type: orderReport.type.toLowerCase(),
+              quantity: parseFloat(orderReport.origQty || '0'),
+              price: price,
+              status: orderReport.status === 'FILLED' ? 'filled' : 'pending',
+              metadata: {
+                source: 'binance_testnet',
+                binance_order_id: orderReport.orderId,
+                symbol: orderReport.symbol,
+                timestamp: result.transactionTime,
+                oco_order_list_id: result.orderListId,
+                oco_type: isStopLoss ? 'stop_loss' : 'take_profit',
+                stop_price: orderReport.stopPrice,
+              },
+            },
+          });
+          this.logger.debug(
+            `OCO order ${orderReport.orderId} (${isStopLoss ? 'SL' : 'TP'}) stored in database`
+          );
+        }
+        this.logger.log(
+          `✓ Saved ${result.orderReports.length} OCO orders to database (List ID: ${result.orderListId})`
+        );
+      }
+    } catch (dbError: any) {
+      // Don't fail if DB insert fails - orders were placed successfully on Binance
+      this.logger.warn(`Failed to store OCO orders in database: ${dbError?.message}`);
+    }
 
     // Invalidate orders cache
     this.cacheService.invalidatePattern('testnet:orders');
@@ -768,6 +814,25 @@ export class BinanceTestnetService {
   }
 
   /**
+   * Sync orders in background (non-blocking)
+   * Updates order statuses without blocking the response
+   */
+  private syncOrdersInBackground(): void {
+    this.logger.log('🔄 Starting background sync...');
+    
+    // Run sync without awaiting (fire and forget)
+    this.syncOrdersFromBinanceToDatabase()
+      .then(result => {
+        this.logger.log(
+          `✓ Background sync complete: ${result.synced} synced, ${result.skipped} skipped, ${result.errors} errors`
+        );
+      })
+      .catch(error => {
+        this.logger.warn(`Background sync failed: ${error?.message}`);
+      });
+  }
+
+  /**
    * Sync orders from Binance API into database
    * This imports existing Binance orders that weren't stored in DB
    */
@@ -793,7 +858,7 @@ export class BinanceTestnetService {
 
       this.logger.log(`Syncing orders for symbols: ${tradingSymbols.join(', ')}`);
 
-      // Get existing order IDs from database
+      // Get existing orders from database
       const existingOrders = await this.prisma.orders.findMany({
         where: {
           metadata: {
@@ -802,21 +867,43 @@ export class BinanceTestnetService {
           },
         },
         select: {
+          order_id: true,
           metadata: true,
+          status: true,
         },
       });
-      const existingOrderIds = new Set(
-        existingOrders.map((o: any) => o.metadata?.binance_order_id).filter(Boolean)
+      const existingOrdersMap = new Map<number, { order_id: string; status: string; metadata: any }>(
+        existingOrders.map((o: any) => [o.metadata?.binance_order_id, o])
       );
 
-      // Fetch orders from Binance for each symbol
+      // Fetch orders from Binance for each symbol (limit to recent 50 for speed)
       for (const symbol of tradingSymbols) {
         try {
-          const binanceOrders = await this.getAllOrders({ symbol, limit: 100 });
+          const binanceOrders = await this.getAllOrders({ symbol, limit: 50 });
           
           for (const order of binanceOrders) {
-            if (existingOrderIds.has(order.orderId)) {
-              skipped++;
+            const existingOrder = existingOrdersMap.get(order.orderId);
+            
+            if (existingOrder) {
+              // Update status if changed (e.g., NEW → FILLED)
+              const newStatus = order.status === 'FILLED' ? 'filled' : 
+                                order.status === 'NEW' ? 'pending' : 'cancelled';
+              
+              if (existingOrder.status !== newStatus) {
+                try {
+                  await this.prisma.orders.update({
+                    where: { order_id: existingOrder.order_id },
+                    data: { status: newStatus },
+                  });
+                  this.logger.debug(`Updated order ${order.orderId} status: ${existingOrder.status} → ${newStatus}`);
+                  synced++;
+                } catch (updateError: any) {
+                  this.logger.warn(`Failed to update order ${order.orderId}: ${updateError?.message}`);
+                  errors++;
+                }
+              } else {
+                skipped++;
+              }
               continue;
             }
 
@@ -830,6 +917,7 @@ export class BinanceTestnetService {
               await this.prisma.orders.create({
                 data: {
                   order_id: `binance_testnet_${order.orderId}`,
+                  portfolio_id: '415ad43b-4b8a-4841-ba61-f03ac4132ef9', // Use the actual portfolio ID from existing orders
                   side: order.side,
                   order_type: order.type === 'MARKET' ? 'market' : 'limit',
                   quantity: order.quantity,
@@ -878,6 +966,10 @@ export class BinanceTestnetService {
       if (!this.isConfigured()) {
         throw new Error('Binance testnet not configured');
       }
+
+      // Start sync in background (don't wait for it)
+      // This updates order statuses but doesn't block the response
+      this.syncOrdersInBackground();
 
       // Get filled orders from database (much faster than API calls)
       const dbOrders = await this.prisma.orders.findMany({
