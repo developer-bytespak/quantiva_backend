@@ -864,4 +864,172 @@ export class BinanceTestnetService {
       throw error;
     }
   }
+
+  /**
+   * Get trade history with realized P&L for crypto trades
+   * Processes filled trades to match BUY/SELL pairs and calculate profit/loss
+   */
+  async getTradeHistory(params?: {
+    limit?: number;
+    startTime?: number;
+    endTime?: number;
+  }): Promise<any[]> {
+    try {
+      if (!this.isConfigured()) {
+        throw new Error('Binance testnet not configured');
+      }
+
+      // Get filled orders from database (much faster than API calls)
+      const dbOrders = await this.prisma.orders.findMany({
+        where: {
+          metadata: {
+            path: ['source'],
+            equals: 'binance_testnet',
+          },
+          status: 'filled',
+        },
+        orderBy: {
+          created_at: 'asc', // Oldest first for FIFO
+        },
+        take: params?.limit || 500,
+      });
+
+      if (dbOrders.length === 0) {
+        this.logger.log('No filled orders found in database');
+        return [];
+      }
+
+      this.logger.log(`Processing ${dbOrders.length} filled orders from database`);
+
+      // Log all orders for debugging
+      dbOrders.forEach(order => {
+        this.logger.debug(
+          `Order: ${order.metadata?.symbol} ${order.side} ${order.quantity} @ $${order.price} | ` +
+          `Status: ${order.status} | Time: ${order.created_at.toISOString()}`
+        );
+      });
+
+      // Group by symbol
+      const tradesBySymbol: { [symbol: string]: any[] } = {};
+      
+      dbOrders.forEach((order) => {
+        const symbol = order.metadata?.symbol;
+        if (!symbol) return;
+        
+        const price = parseFloat(order.price?.toString() || '0');
+        const qty = parseFloat(order.quantity?.toString() || '0');
+        
+        // Skip orders with invalid price (0 or negative)
+        if (price <= 0) {
+          this.logger.warn(`Skipping order with invalid price: ${symbol} ${order.side} ${qty} @ $${price}`);
+          return;
+        }
+        
+        if (!tradesBySymbol[symbol]) {
+          tradesBySymbol[symbol] = [];
+        }
+        
+        tradesBySymbol[symbol].push({
+          side: order.side,
+          qty: qty,
+          price: price,
+          time: order.created_at.getTime(),
+          commission: order.metadata?.fee || 0,
+        });
+      });
+
+      // Process each symbol to find closed trades (BUY → SELL pairs)
+      const closedTrades: any[] = [];
+      
+      for (const [symbol, trades] of Object.entries(tradesBySymbol)) {
+        // Already sorted by time (oldest first)
+        const buyQueue: any[] = [];
+        
+        for (const trade of trades) {
+          const side = trade.side?.toUpperCase();
+          const qty = trade.qty;
+          const price = trade.price;
+          
+          if (side === 'BUY') {
+            // Add to buy queue
+            buyQueue.push({
+              ...trade,
+              remainingQty: qty,
+              originalQty: qty,
+            });
+          } else if (side === 'SELL' && buyQueue.length > 0) {
+            // Match with oldest buys (FIFO)
+            let remainingSellQty = qty;
+            
+            while (remainingSellQty > 0 && buyQueue.length > 0) {
+              const oldestBuy = buyQueue[0];
+              const matchedQty = Math.min(remainingSellQty, oldestBuy.remainingQty);
+              
+              // Calculate P&L for this matched pair
+              const buyPrice = oldestBuy.price;
+              const sellPrice = price;
+              const profitLoss = (sellPrice - buyPrice) * matchedQty;
+              const profitLossPercent = ((sellPrice - buyPrice) / buyPrice) * 100;
+              
+              // Calculate fees
+              const buyFee = oldestBuy.commission || 0;
+              const sellFee = trade.commission || 0;
+              const totalFees = buyFee + sellFee;
+              const netProfitLoss = profitLoss - totalFees;
+              
+              // Calculate duration
+              const entryTime = new Date(oldestBuy.time);
+              const exitTime = new Date(trade.time);
+              const durationMs = exitTime.getTime() - entryTime.getTime();
+              const durationHours = Math.floor(durationMs / (1000 * 60 * 60));
+              const durationMinutes = Math.floor((durationMs % (1000 * 60 * 60)) / (1000 * 60));
+              const duration = durationHours > 0 
+                ? `${durationHours}h ${durationMinutes}m`
+                : `${durationMinutes}m`;
+              
+              // Log the matched trade for verification
+              this.logger.log(
+                `✓ Matched trade: ${symbol} | ` +
+                `BUY ${matchedQty} @ $${buyPrice.toFixed(4)} → ` +
+                `SELL ${matchedQty} @ $${sellPrice.toFixed(4)} | ` +
+                `P&L: $${netProfitLoss.toFixed(2)} (${profitLossPercent.toFixed(2)}%) | ` +
+                `Fees: $${totalFees.toFixed(4)} | Duration: ${duration}`
+              );
+              
+              closedTrades.push({
+                id: `${symbol}_${oldestBuy.time}_${trade.time}`,
+                symbol: symbol,
+                entryPrice: buyPrice,
+                exitPrice: sellPrice,
+                quantity: matchedQty,
+                profitLoss: netProfitLoss,
+                profitLossPercent: profitLossPercent,
+                entryTime: entryTime.toISOString(),
+                exitTime: exitTime.toISOString(),
+                duration: duration,
+                fees: totalFees,
+              });
+              
+              // Update remaining quantities
+              remainingSellQty -= matchedQty;
+              oldestBuy.remainingQty -= matchedQty;
+              
+              // Remove from queue if fully matched
+              if (oldestBuy.remainingQty <= 0) {
+                buyQueue.shift();
+              }
+            }
+          }
+        }
+      }
+      
+      // Sort by exit time (most recent first)
+      closedTrades.sort((a, b) => new Date(b.exitTime).getTime() - new Date(a.exitTime).getTime());
+      
+      return closedTrades;
+    } catch (error) {
+      this.logger.error(`Failed to get trade history: ${error.message}`);
+      throw error;
+    }
+  }
 }

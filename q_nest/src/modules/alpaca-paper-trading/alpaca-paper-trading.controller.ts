@@ -420,6 +420,50 @@ export class AlpacaPaperTradingController {
   }
 
   /**
+   * Get trade history with realized P&L
+   */
+  @Get('trade-history')
+  async getTradeHistory(
+    @Query('limit') limit?: string,
+    @Query('after') after?: string,
+    @Query('until') until?: string,
+  ) {
+    try {
+      const history = await this.alpacaService.getTradeHistory({
+        limit: limit ? parseInt(limit, 10) : 200,
+        after,
+        until,
+      });
+      
+      // Calculate summary statistics
+      const totalProfitLoss = history.reduce((sum, trade) => sum + trade.profitLoss, 0);
+      const profitableTrades = history.filter(t => t.profitLoss > 0).length;
+      const losingTrades = history.filter(t => t.profitLoss < 0).length;
+      const winRate = history.length > 0 ? (profitableTrades / history.length) * 100 : 0;
+      const avgProfit = history.length > 0 ? totalProfitLoss / history.length : 0;
+      
+      return {
+        success: true,
+        data: history,
+        summary: {
+          totalTrades: history.length,
+          profitableTrades,
+          losingTrades,
+          totalProfitLoss,
+          winRate,
+          avgProfit,
+        },
+      };
+    } catch (error: any) {
+      this.logger.error(`Failed to get trade history: ${error?.message}`);
+      throw new HttpException(
+        error?.response?.data?.message || error?.message || 'Failed to get trade history',
+        error?.response?.status || HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
    * Get market clock
    */
   @Get('clock')

@@ -540,6 +540,112 @@ export class AlpacaPaperTradingService {
   }
 
   /**
+   * Get trade history with realized P&L
+   * Processes FILL activities to match BUY/SELL pairs and calculate profit/loss
+   */
+  async getTradeHistory(params?: {
+    limit?: number;
+    after?: string;
+    until?: string;
+  }): Promise<any[]> {
+    // Get FILL activities (completed trades)
+    const activities = await this.getAccountActivities(['FILL'], {
+      direction: 'desc',
+      page_size: params?.limit || 500,
+      after: params?.after,
+      until: params?.until,
+    });
+
+    // Group trades by symbol to match BUY/SELL pairs
+    const tradesBySymbol: { [symbol: string]: any[] } = {};
+    
+    activities.forEach((activity: any) => {
+      if (!tradesBySymbol[activity.symbol]) {
+        tradesBySymbol[activity.symbol] = [];
+      }
+      tradesBySymbol[activity.symbol].push(activity);
+    });
+
+    // Process each symbol to find closed trades (BUY → SELL pairs)
+    const closedTrades: any[] = [];
+    
+    for (const [symbol, trades] of Object.entries(tradesBySymbol)) {
+      // Sort by date (oldest first for FIFO matching)
+      trades.sort((a, b) => new Date(a.transaction_time).getTime() - new Date(b.transaction_time).getTime());
+      
+      const buyQueue: any[] = [];
+      
+      for (const trade of trades) {
+        const side = trade.side.toUpperCase();
+        const qty = Math.abs(parseFloat(trade.qty));
+        const price = parseFloat(trade.price);
+        
+        if (side === 'BUY') {
+          // Add to buy queue
+          buyQueue.push({
+            ...trade,
+            remainingQty: qty,
+            originalQty: qty,
+          });
+        } else if (side === 'SELL' && buyQueue.length > 0) {
+          // Match with oldest buys (FIFO)
+          let remainingSellQty = qty;
+          
+          while (remainingSellQty > 0 && buyQueue.length > 0) {
+            const oldestBuy = buyQueue[0];
+            const matchedQty = Math.min(remainingSellQty, oldestBuy.remainingQty);
+            
+            // Calculate P&L for this matched pair
+            const buyPrice = parseFloat(oldestBuy.price);
+            const sellPrice = price;
+            const profitLoss = (sellPrice - buyPrice) * matchedQty;
+            const profitLossPercent = ((sellPrice - buyPrice) / buyPrice) * 100;
+            
+            // Calculate duration
+            const entryTime = new Date(oldestBuy.transaction_time);
+            const exitTime = new Date(trade.transaction_time);
+            const durationMs = exitTime.getTime() - entryTime.getTime();
+            const durationHours = Math.floor(durationMs / (1000 * 60 * 60));
+            const durationMinutes = Math.floor((durationMs % (1000 * 60 * 60)) / (1000 * 60));
+            const duration = durationHours > 0 
+              ? `${durationHours}h ${durationMinutes}m`
+              : `${durationMinutes}m`;
+            
+            closedTrades.push({
+              id: `${oldestBuy.id}_${trade.id}`,
+              symbol: symbol,
+              entryPrice: buyPrice,
+              exitPrice: sellPrice,
+              quantity: matchedQty,
+              profitLoss: profitLoss,
+              profitLossPercent: profitLossPercent,
+              entryTime: oldestBuy.transaction_time,
+              exitTime: trade.transaction_time,
+              duration: duration,
+              entryOrderId: oldestBuy.order_id,
+              exitOrderId: trade.order_id,
+            });
+            
+            // Update remaining quantities
+            remainingSellQty -= matchedQty;
+            oldestBuy.remainingQty -= matchedQty;
+            
+            // Remove from queue if fully matched
+            if (oldestBuy.remainingQty <= 0) {
+              buyQueue.shift();
+            }
+          }
+        }
+      }
+    }
+    
+    // Sort by exit time (most recent first)
+    closedTrades.sort((a, b) => new Date(b.exitTime).getTime() - new Date(a.exitTime).getTime());
+    
+    return closedTrades;
+  }
+
+  /**
    * Get trading calendar
    */
   async getCalendar(start?: string, end?: string): Promise<{

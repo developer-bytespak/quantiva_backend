@@ -592,4 +592,47 @@ export class BinanceTestnetController {
       throw new BadRequestException(error?.message ?? 'Failed to sync orders');
     }
   }
+
+  /**
+   * Get trade history with realized P&L
+   * @route GET /binance-testnet/trade-history
+   */
+  @Get('trade-history')
+  async getTradeHistory(
+    @Query('limit') limit?: number,
+    @Query('startTime') startTime?: number,
+    @Query('endTime') endTime?: number,
+  ) {
+    try {
+      const trades = await this.binanceTestnetService.getTradeHistory({
+        limit: limit ? parseInt(limit.toString()) : 200,
+        startTime: startTime ? parseInt(startTime.toString()) : undefined,
+        endTime: endTime ? parseInt(endTime.toString()) : undefined,
+      });
+
+      // Calculate summary statistics
+      const totalTrades = trades.length;
+      const profitableTrades = trades.filter(t => t.profitLoss > 0).length;
+      const losingTrades = trades.filter(t => t.profitLoss < 0).length;
+      const totalProfitLoss = trades.reduce((sum, t) => sum + t.profitLoss, 0);
+      const winRate = totalTrades > 0 ? (profitableTrades / totalTrades) * 100 : 0;
+      const avgProfit = totalTrades > 0 ? totalProfitLoss / totalTrades : 0;
+
+      return {
+        success: true,
+        data: trades,
+        summary: {
+          totalTrades,
+          profitableTrades,
+          losingTrades,
+          totalProfitLoss,
+          winRate,
+          avgProfit,
+        },
+      };
+    } catch (error: any) {
+      this.logger.error(`Failed to get trade history: ${error?.message}`);
+      throw new BadRequestException(error?.message ?? 'Failed to get trade history');
+    }
+  }
 }
