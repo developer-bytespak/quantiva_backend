@@ -5,7 +5,7 @@ import { PythonApiService } from '../../../kyc/integrations/python-api.service';
 import { PreBuiltStrategiesService } from './pre-built-strategies.service';
 import { StrategyExecutionService } from './strategy-execution.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
-import { ConnectionStatus } from '@prisma/client';
+import { ConnectionStatus, StrategyType } from '@prisma/client';
 
 @Injectable()
 export class PreBuiltSignalsCronjobService {
@@ -117,6 +117,9 @@ export class PreBuiltSignalsCronjobService {
 
       // Step 5: Generate LLM explanations for top N signals per strategy
       await this.generateLLMExplanationsForTopSignals(strategies);
+
+      // Step 6: Process active custom (user) strategies
+      await this.processActiveCustomStrategies(trendingAssets, connectionInfo);
 
       const duration = Date.now() - startTime;
       this.logger.log(
@@ -474,6 +477,256 @@ export class PreBuiltSignalsCronjobService {
       volume_24h: trendingAsset ? Number(trendingAsset.market_volume || 0) : 0,
       asset_type: assetType || 'crypto',
     };
+  }
+
+  /**
+   * Process all active custom (user) strategies
+   * This runs after pre-built strategies to reuse the same cached market data
+   */
+  private async processActiveCustomStrategies(
+    trendingAssets: any[],
+    connectionInfo: { connectionId: string | null; exchange: string } | null,
+  ): Promise<void> {
+    try {
+      // Get all active user strategies
+      const customStrategies = await this.prisma.strategies.findMany({
+        where: {
+          type: StrategyType.user,
+          is_active: true,
+          user_id: { not: null },
+          // Note: target_assets can be null - we'll use all trending assets in that case
+        },
+        include: {
+          user: {
+            select: {
+              user_id: true,
+              email: true,
+            },
+          },
+        },
+      });
+
+      this.logger.log(`[CustomStrategies] Query completed. Found ${customStrategies.length} strategies`);
+      
+      if (customStrategies.length === 0) {
+        this.logger.log('[CustomStrategies] No active custom strategies found, skipping');
+        return;
+      }
+
+      // Log each strategy for debugging
+      for (const s of customStrategies) {
+        this.logger.log(`[CustomStrategies] Found: "${s.name}" (${s.strategy_id}), assets: ${JSON.stringify(s.target_assets)}`);
+      }
+
+      this.logger.log(`Processing ${customStrategies.length} active custom strategies`);
+
+      // Build a map of symbol -> asset from trending assets for quick lookup
+      const trendingAssetsMap = new Map<string, any>();
+      for (const asset of trendingAssets) {
+        trendingAssetsMap.set(asset.symbol, asset);
+      }
+
+      let customSignalsGenerated = 0;
+      let customErrors = 0;
+
+      for (const strategy of customStrategies) {
+        try {
+          const targetAssets = (strategy.target_assets as string[]) || [];
+          
+          // If no target assets specified, use ALL trending assets (same as pre-built)
+          const assetsToProcess = targetAssets.length > 0
+            ? targetAssets
+            : trendingAssets.map(a => a.symbol);
+          
+          this.logger.log(`Processing custom strategy "${strategy.name}" with ${assetsToProcess.length} assets${targetAssets.length === 0 ? ' (using all trending)' : ''}`);
+
+          // Get user-specific connection if available
+          const userConnectionInfo = await this.getUserConnection(strategy.user_id, strategy.asset_type || 'crypto');
+
+          // Process each target asset (or all trending if none specified)
+          for (const symbol of assetsToProcess) {
+            try {
+              // First check if asset exists in our trending assets (already has fresh sentiment data)
+              let asset = trendingAssetsMap.get(symbol);
+              
+              if (!asset) {
+                // Look up the asset in the database
+                asset = await this.prisma.assets.findFirst({
+                  where: { symbol },
+                });
+
+                if (!asset) {
+                  // Create the asset if it doesn't exist
+                  asset = await this.prisma.assets.create({
+                    data: {
+                      symbol,
+                      name: symbol,
+                      display_name: symbol,
+                      asset_type: strategy.asset_type || 'crypto',
+                    },
+                  });
+                }
+
+                // Run sentiment analysis for this asset since it wasn't in trending
+                await this.runSentimentAnalysis(asset);
+              }
+
+              // Execute the strategy for this asset
+              await this.executeCustomStrategyForAsset(
+                strategy,
+                asset,
+                userConnectionInfo || connectionInfo,
+              );
+              customSignalsGenerated++;
+            } catch (error: any) {
+              customErrors++;
+              this.logger.warn(
+                `Error processing ${symbol} for custom strategy ${strategy.name}: ${error.message}`,
+              );
+            }
+          }
+        } catch (error: any) {
+          this.logger.error(
+            `Error processing custom strategy ${strategy.name}: ${error.message}`,
+          );
+        }
+      }
+
+      this.logger.log(
+        `Custom strategies processed: ${customSignalsGenerated} signals generated, ${customErrors} errors`,
+      );
+    } catch (error: any) {
+      this.logger.error(`Error processing custom strategies: ${error.message}`);
+      // Don't throw - continue with the rest of the cronjob
+    }
+  }
+
+  /**
+   * Execute a custom strategy for a single asset
+   */
+  private async executeCustomStrategyForAsset(
+    strategy: any,
+    asset: any,
+    connectionInfo: { connectionId: string | null; exchange: string } | null,
+  ): Promise<void> {
+    // Get market data
+    const marketData = await this.getMarketData(asset.asset_id, asset.asset_type);
+
+    // Use provided connection info or default
+    const connectionId = connectionInfo?.connectionId || null;
+    const exchange = connectionInfo?.exchange || 'binance';
+
+    // Prepare strategy data
+    const strategyData = {
+      user_id: strategy.user_id,
+      entry_rules: strategy.entry_rules || [],
+      exit_rules: strategy.exit_rules || [],
+      indicators: strategy.indicators || [],
+      timeframe: strategy.timeframe,
+      engine_weights:
+        strategy.engine_weights || {
+          sentiment: 0.35,
+          trend: 0.25,
+          fundamental: 0.15,
+          event_risk: 0.15,
+          liquidity: 0.1,
+        },
+      stop_loss_value: strategy.stop_loss_value,
+      take_profit_value: strategy.take_profit_value,
+    };
+
+    try {
+      // Call Python API to generate signal
+      const assetSymbol = asset.symbol || asset.asset_id;
+      const pythonSignal = await this.pythonApi.generateSignal(strategy.strategy_id, asset.asset_id, {
+        strategy_data: strategyData,
+        market_data: marketData,
+        connection_id: connectionId,
+        exchange: exchange,
+        asset_symbol: assetSymbol,
+      });
+
+      // Store signal in database with user_id
+      const signal = await this.prisma.strategy_signals.create({
+        data: {
+          strategy_id: strategy.strategy_id,
+          user_id: strategy.user_id, // Associate with user
+          asset_id: asset.asset_id,
+          timestamp: new Date(),
+          final_score: pythonSignal.final_score,
+          action: pythonSignal.action,
+          confidence: pythonSignal.confidence,
+          sentiment_score: pythonSignal.engine_scores?.sentiment?.score || 0,
+          trend_score: pythonSignal.engine_scores?.trend?.score || 0,
+          fundamental_score: pythonSignal.engine_scores?.fundamental?.score || 0,
+          liquidity_score: pythonSignal.engine_scores?.liquidity?.score || 0,
+          event_risk_score: pythonSignal.engine_scores?.event_risk?.score || 0,
+          engine_metadata: pythonSignal.engine_scores || {},
+        },
+      });
+
+      // Store signal details if position sizing is available
+      if (pythonSignal.position_sizing) {
+        const stopLossValue = strategy.stop_loss_value ? Number(strategy.stop_loss_value) : null;
+        const takeProfitValue = strategy.take_profit_value ? Number(strategy.take_profit_value) : null;
+
+        await this.prisma.signal_details.create({
+          data: {
+            signal_id: signal.signal_id,
+            entry_price: marketData.price,
+            position_size: pythonSignal.position_sizing.position_size,
+            position_value: pythonSignal.position_sizing.position_size * marketData.price,
+            stop_loss: stopLossValue ? marketData.price * (1 - stopLossValue / 100) : null,
+            take_profit_1: takeProfitValue ? marketData.price * (1 + takeProfitValue / 100) : null,
+            metadata: pythonSignal.metadata || {},
+          },
+        });
+      }
+
+      this.logger.debug(
+        `Generated signal for custom strategy ${strategy.name} on asset ${asset.symbol}: ${pythonSignal.action}`,
+      );
+    } catch (error: any) {
+      this.logger.error(
+        `Error executing custom strategy ${strategy.strategy_id} on asset ${asset.asset_id}: ${error.message}`,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Get user-specific exchange connection
+   */
+  private async getUserConnection(
+    userId: string,
+    assetType: string,
+  ): Promise<{ connectionId: string | null; exchange: string } | null> {
+    try {
+      const exchangeName = assetType === 'stock' ? 'alpaca' : 'binance';
+      
+      const connection = await this.prisma.user_exchange_connections.findFirst({
+        where: {
+          user_id: userId,
+          status: ConnectionStatus.active,
+          exchange: {
+            name: { contains: exchangeName, mode: 'insensitive' },
+          },
+        },
+        include: { exchange: true },
+      });
+
+      if (connection) {
+        return {
+          connectionId: connection.connection_id,
+          exchange: connection.exchange?.name?.toLowerCase() || exchangeName,
+        };
+      }
+
+      return null;
+    } catch (error: any) {
+      this.logger.warn(`Error getting user connection for ${userId}: ${error.message}`);
+      return null;
+    }
   }
 
   /**

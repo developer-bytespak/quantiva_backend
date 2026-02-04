@@ -10,6 +10,7 @@ import { StrategyCacheService } from './services/strategy-cache.service';
 import { LLMExplanationProcessorService } from './services/llm-explanation-processor.service';
 import { PreBuiltSignalsCronjobService } from './services/pre-built-signals-cronjob.service';
 import { StockSignalsCronjobService } from './services/stock-signals-cronjob.service';
+import { CustomStrategyCronjobService } from './services/custom-strategy-cronjob.service';
 import { StockTrendingService } from './services/stock-trending.service';
 import { AlpacaSyncCronjobService } from './services/alpaca-sync-cronjob.service';
 import { PaperTradingService } from './services/paper-trading.service';
@@ -35,6 +36,7 @@ import { StocksMarketModule } from '../stocks-market/stocks-market.module';
     LLMExplanationProcessorService,
     PreBuiltSignalsCronjobService,
     StockSignalsCronjobService,
+    CustomStrategyCronjobService,
     StockTrendingService,
   ],
   exports: [
@@ -47,6 +49,7 @@ import { StocksMarketModule } from '../stocks-market/stocks-market.module';
     LLMExplanationProcessorService,
     PreBuiltSignalsCronjobService,
     StockSignalsCronjobService,
+    CustomStrategyCronjobService,
     StockTrendingService,
   ],
 })
