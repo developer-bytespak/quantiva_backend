@@ -839,6 +839,55 @@ export class BinanceTestnetService {
       throw error;
     }
   }
+
+  /**
+   * Get account trade list (filled orders)
+   * Binance API: GET /api/v3/myTrades
+   */
+  async getMyTrades(
+    apiKey: string,
+    apiSecret: string,
+    filters: {
+      symbol?: string;
+      limit?: number;
+      startTime?: number;
+      endTime?: number;
+      fromId?: number;
+    },
+  ): Promise<any[]> {
+    try {
+      const params: any = {
+        limit: filters.limit || 500,
+      };
+
+      if (filters.symbol) {
+        params.symbol = filters.symbol;
+      }
+      if (filters.startTime) {
+        params.startTime = filters.startTime;
+      }
+      if (filters.endTime) {
+        params.endTime = filters.endTime;
+      }
+      if (filters.fromId) {
+        params.fromId = filters.fromId;
+      }
+
+      const trades = await this.makeSignedRequest(
+        'GET',
+        '/v3/myTrades',
+        apiKey,
+        apiSecret,
+        params,
+      );
+
+      return trades;
+    } catch (error) {
+      this.logger.error(`Failed to get my trades: ${error.message}`);
+      throw error;
+    }
+  }
+
   /**
    * Gets exchange information including all available trading pairs
    */

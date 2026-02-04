@@ -16,14 +16,23 @@ export class CryptoAutoTradingCronService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    this.logger.log('Crypto Auto Trading Cron Service initialized');
-    this.logger.log('Scheduled to run every 6 hours: 30 */6 * * * (offset from stocks)');
-    
-    // Load trade history from database first
-    await this.sessionService.loadHistoryFromDatabase();
-    
-    // Auto-start trading session on module init with retry
-    await this.autoStartSessionWithRetry();
+    try {
+      this.logger.log('🚀 Crypto Auto Trading Cron Service initialized');
+      this.logger.log('📅 Scheduled to run every 6 hours: 30 */6 * * * (offset from stocks)');
+      
+      // Load trade history from database first
+      this.logger.log('📖 Loading trade history from database...');
+      await this.sessionService.loadHistoryFromDatabase();
+      this.logger.log('✓ Trade history loaded');
+      
+      // Auto-start trading session on module init with retry
+      this.logger.log('🔄 Attempting to auto-start trading session...');
+      await this.autoStartSessionWithRetry();
+    } catch (error: any) {
+      this.logger.error('❌ CRITICAL ERROR in onModuleInit:', error?.message || error);
+      this.logger.error('Stack:', error?.stack);
+      // Don't throw - let the app continue even if auto-start fails
+    }
   }
 
   /**
