@@ -9,6 +9,13 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from src.config import LUNARCRUSH_API_KEY
 
+try:
+    from src.services.llm.gemini_adapter import GeminiAdapter
+    GEMINI_AVAILABLE = True
+except Exception as e:
+    GEMINI_AVAILABLE = False
+    logging.getLogger(__name__).warning(f"Gemini not available for news description generation: {str(e)}")
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,6 +31,15 @@ class LunarCrushService:
         """Initialize LunarCrushService."""
         self.logger = logging.getLogger(__name__)
         self.api_key = LUNARCRUSH_API_KEY
+        
+        # Initialize Gemini for news description generation
+        self.gemini_adapter = None
+        if GEMINI_AVAILABLE:
+            try:
+                self.gemini_adapter = GeminiAdapter()
+                self.logger.info("Gemini adapter initialized for news description generation")
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize Gemini adapter: {str(e)}")
         
         # Simple in-memory cache (5 minutes TTL for social metrics, 1 minute for news)
         self._social_metrics_cache: Dict[str, tuple] = {}  # {symbol: (data, timestamp)}
@@ -62,6 +78,57 @@ class LunarCrushService:
         for key in expired_keys:
             del self._social_metrics_cache[key]
         
+        # Clean news cache
+        expired_keys = [
+            key for key, (_, timestamp) in self._news_cache.items()
+            if current_time - timestamp > self.NEWS_TTL * 2
+        ]
+        for key in expired_keys:
+            del self._news_cache[key]
+    
+    def _generate_description_with_gemini(self, title: str, symbol: str) -> str:
+        """
+        Generate a brief news description using Gemini API.
+        
+        Args:
+            title: News title
+            symbol: Cryptocurrency symbol (e.g., BTC, ETH)
+        
+        Returns:
+            Generated description or empty string if generation fails
+        """
+        if not self.gemini_adapter:
+            return ""
+        
+        try:
+            prompt = f"""Generate a brief, factual news description (1-2 sentences, max 120 characters) for this cryptocurrency news headline.
+
+Cryptocurrency: {symbol}
+Title: {title}
+
+Guidelines:
+- Be concise and professional
+- Avoid speculation
+- Focus on the main news point
+- Return ONLY the description, no other text"""
+            
+            response = self.gemini_adapter.model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.5,
+                    "max_output_tokens": 200,
+                }
+            )
+            
+            if response and response.text:
+                description = response.text.strip()
+                # Truncate to 200 chars to be safe
+                return description[:200] if len(description) > 200 else description
+            return ""
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to generate description for '{title}': {str(e)}")
+            return ""
         # Clean news cache
         expired_keys = [
             key for key, (_, timestamp) in self._news_cache.items()
@@ -151,34 +218,20 @@ class LunarCrushService:
             for article in articles[:limit]:
                 try:
                     # Parse API v4 article fields - actual field names from the API
-                    # API returns: post_title, post_link, post_created (Unix timestamp), creator_display_name
                     title = article.get('post_title', article.get('title', ''))
                     url = article.get('post_link', article.get('url', article.get('link', '')))
-                    
-                    # Source is creator_display_name or creator_name
                     source = article.get('creator_display_name', article.get('creator_name', article.get('source', 'unknown')))
-                    
-                    # Description/text - API doesn't provide this, use title as fallback
-                    text = article.get('description', title)
-                    
                     # Use date as returned by LunarCrush API
-                    # API returns Unix timestamp (post_created) or ISO string
                     date_raw = article.get('date', article.get('published_at', article.get('post_created', article.get('created_at', None))))
-                    
-                    # Convert Unix timestamp to datetime if needed
                     published_at = None
                     if date_raw:
                         if isinstance(date_raw, (int, float)):
-                            # Unix timestamp
                             published_at = datetime.fromtimestamp(date_raw, tz=timezone.utc)
                         elif isinstance(date_raw, str):
-                            # Try to parse as ISO string or Unix timestamp string
                             try:
-                                # Try as Unix timestamp string first
                                 if date_raw.isdigit():
                                     published_at = datetime.fromtimestamp(int(date_raw), tz=timezone.utc)
                                 else:
-                                    # Try ISO format
                                     from dateutil import parser
                                     published_at = parser.parse(date_raw)
                             except (ValueError, TypeError):
@@ -186,17 +239,33 @@ class LunarCrushService:
                                 published_at = None
                         elif isinstance(date_raw, datetime):
                             published_at = date_raw
-                    
-                    if title:
-                        news_items.append({
-                            'title': title,
-                            'text': text or title,  # Use title if text is empty
-                            'source': source,
-                            'published_at': published_at,
-                            'url': url
-                        })
-                    else:
+
+                    if not title:
                         self.logger.debug(f"Skipping article with no title: {article.keys()}")
+                        continue
+
+                    # Retry Gemini up to 3 times
+                    description = ""
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        description = self._generate_description_with_gemini(title, symbol)
+                        if description:
+                            break
+                        else:
+                            self.logger.warning(f"Gemini failed to generate description for '{title}' (attempt {attempt+1}/{max_retries})")
+                            time.sleep(2 ** attempt)  # Exponential backoff
+
+                    if not description:
+                        self.logger.warning(f"Skipping article for {symbol} because Gemini could not generate a description after {max_retries} attempts: {title}")
+                        continue
+
+                    news_items.append({
+                        'title': title,
+                        'text': description,
+                        'source': source,
+                        'published_at': published_at,
+                        'url': url
+                    })
                 except Exception as e:
                     self.logger.warning(f"Error parsing article: {str(e)}")
                     continue

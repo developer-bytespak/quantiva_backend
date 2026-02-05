@@ -478,6 +478,20 @@ export class NewsService {
         pollTimestamp.getTime() + storedCount * 1000,
       );
 
+      // Skip articles with no title (avoid storing corrupted records)
+      if (!newsItem.title || newsItem.title.trim() === '') {
+        this.logger.debug(`Skipping article with empty title for ${symbol}`);
+        skippedCount++;
+        continue;
+      }
+
+      // Skip articles with no URL (avoid storing incomplete records)
+      if (!newsItem.url || newsItem.url.trim() === '') {
+        this.logger.debug(`Skipping article with empty URL for ${symbol}: ${newsItem.title}`);
+        skippedCount++;
+        continue;
+      }
+
       // Store news article
       try {
         await this.prisma.trending_news.create({
