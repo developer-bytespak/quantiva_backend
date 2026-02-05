@@ -681,5 +681,37 @@ export class NewsCronjobService {
       throw error;
     }
   }
+
+  /**
+   * Delete Old News - Runs once daily at 2:00 AM
+   * Deletes all trending_news records older than 7 days
+   * Helps maintain database size and performance
+   */
+  @Cron('0 2 * * *') // Every day at 2:00 AM
+  async deleteOldNews(): Promise<void> {
+    this.logger.log('🧹 Starting cleanup: deleting news older than 7 days');
+    const startTime = Date.now();
+
+    try {
+      // Calculate date 7 days ago
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+      // Delete old news records
+      const deleteResult = await this.prisma.trending_news.deleteMany({
+        where: {
+          poll_timestamp: { lt: sevenDaysAgo },
+        },
+      });
+
+      const duration = Math.round((Date.now() - startTime) / 1000);
+      this.logger.log(
+        `✅ Cleanup completed: Deleted ${deleteResult.count} old news records (older than ${sevenDaysAgo.toISOString()}) in ${duration}s`,
+      );
+    } catch (error: any) {
+      this.logger.error(`❌ Error deleting old news: ${error.message}`);
+      // Don't throw - let the cron continue to next run
+    }
+  }
 }
 

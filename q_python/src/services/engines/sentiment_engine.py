@@ -377,11 +377,13 @@ class SentimentEngine(BaseEngine):
                             source = item.get('source', 'stock_news_api')
                             news_type = self._detect_news_type_from_source(source)
                             text_data.append({
-                                'text': combined_text,
+                                'text': combined_text,  # For sentiment analysis
                                 'source': source,
                                 'news_type': news_type,
                                 'published_at': item.get('published_at'),
-                                'url': item.get('url')
+                                'url': item.get('url'),
+                                'title': title,  # Separate title for DB
+                                'description': text  # Separate description for DB
                             })
             
             elif asset_type == 'crypto':
@@ -401,11 +403,13 @@ class SentimentEngine(BaseEngine):
                             source = item.get('source', 'lunarcrush')
                             news_type = self._detect_news_type_from_source(source)
                             text_data.append({
-                                'text': combined_text,
+                                'text': combined_text,  # For sentiment analysis
                                 'source': source,
                                 'news_type': news_type,
                                 'published_at': item.get('published_at'),
-                                'url': item.get('url')
+                                'url': item.get('url'),
+                                'title': title,  # Separate title for DB
+                                'description': text  # Separate description for DB
                             })
             
             self.logger.info(f"Fetched {len(text_data)} news items for {asset_id}")
