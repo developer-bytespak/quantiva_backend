@@ -1,14 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { BinanceTestnetService } from '../binance-testnet/services/binance-testnet.service';
+import { AlpacaService } from '../exchanges/integrations/alpaca.service';
 import { SignalAction } from '@prisma/client';
 
 /**
  * Position Synchronization Service
  *
- * Synchronizes testnet order fills with portfolio positions.
+ * Synchronizes paper trading order fills with portfolio positions.
  * This ensures that:
- * 1. Portfolio positions reflect testnet fills
+ * 1. Portfolio positions reflect paper trading fills
  * 2. PnL is calculated correctly
  * 3. Position history is maintained
  */
@@ -18,23 +18,23 @@ export class PositionSyncService {
 
   constructor(
     private prisma: PrismaService,
-    private binanceTestnetService: BinanceTestnetService,
+    private alpacaService: AlpacaService,
   ) {}
 
   /**
-   * Sync all testnet orders with portfolio positions
+   * Sync all paper trading orders with portfolio positions
    * Called periodically to update positions based on actual fills
    */
   async syncAllPositions() {
     try {
       this.logger.log('Starting position synchronization');
 
-      // Get all auto-executed orders that were placed on testnet
+      // Get all auto-executed orders that were placed on paper trading
       const autoTradedOrders = await this.prisma.orders.findMany({
         where: {
           auto_trade_approved: true,
           metadata: {
-            path: ['testnet_order_id'],
+            path: ['alpaca_order_id'],
             not: null,
           },
         },
@@ -54,15 +54,17 @@ export class PositionSyncService {
         return;
       }
 
-      // Get current testnet account balance and holdings
-      const accountBalance = await this.binanceTestnetService.getAccountBalance();
-      const balanceMap = new Map<string, number>();
+      // Get current paper trading positions
+      if (!this.alpacaService.isConfigured()) {
+        this.logger.warn('Alpaca not configured. Skipping position sync.');
+        return;
+      }
 
-      for (const balance of accountBalance.balances) {
-        const total = (balance.free || 0) + (balance.locked || 0);
-        if (total > 0) {
-          balanceMap.set(balance.asset, total);
-        }
+      const positions = await this.alpacaService.getPositions();
+      const positionMap = new Map<string, any>();
+
+      for (const position of positions) {
+        positionMap.set(position.symbol, position);
       }
 
       // Update each position based on current holdings
@@ -70,7 +72,12 @@ export class PositionSyncService {
         if (!order.signal?.asset) continue;
 
         const asset = order.signal.asset;
-        const currentHolding = balanceMap.get(asset.symbol) || 0;
+        const alpacaSymbol = order.metadata?.alpaca_symbol;
+        
+        if (!alpacaSymbol) continue;
+
+        const position = positionMap.get(alpacaSymbol);
+        const currentHolding = position ? parseFloat(position.qty) : 0;
 
         await this.updatePositionFromHolding(
           order.portfolio_id,

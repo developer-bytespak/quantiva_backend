@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AlpacaPaperTradingService } from '../alpaca-paper-trading.service';
 import { AutoTradingSessionService, AutoTradeRecord } from './auto-trading-session.service';
+import { ALPACA_SUPPORTED_CRYPTO } from '../../exchanges/integrations/alpaca.service';
 import { v4 as uuidv4 } from 'uuid';
 
 interface Strategy {
@@ -12,11 +13,12 @@ interface Strategy {
   is_active: boolean;
 }
 
-interface Stock {
+interface Asset {
   asset_id: string;
   symbol: string;
   name: string | null;
   sector: string | null;
+  asset_type: string;
 }
 
 // Risk-based exit levels (stop-loss and take-profit percentages)
@@ -36,8 +38,8 @@ const RISK_EXIT_LEVELS: Record<string, RiskExitLevels> = {
 export class AutoTradingExecutionService {
   private readonly logger = new Logger(AutoTradingExecutionService.name);
 
-  // Cache for stocks and strategies
-  private stocksCache: Stock[] = [];
+  // Cache for assets (stocks + crypto) and strategies
+  private assetsCache: Asset[] = [];
   private strategiesCache: Strategy[] = [];
   private lastCacheRefresh: Date | null = null;
   private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes
@@ -122,14 +124,17 @@ export class AutoTradingExecutionService {
   private async executeSingleStrategyTrade(strategy: Strategy): Promise<AutoTradeRecord | null> {
     this.sessionService.addAiMessage(`Processing strategy: ${strategy.name}`, 'info');
 
-    // Pick a random stock
-    const stock = this.pickRandomStock();
-    if (!stock) {
-      throw new Error('No stocks available');
+    // Pick a random asset (stock or crypto)
+    const asset = this.pickRandomAsset();
+    if (!asset) {
+      throw new Error('No assets available');
     }
+    
+    // Convert symbol to Alpaca format if crypto (BTCUSDT -> BTC/USD)
+    const alpacaSymbol = this.convertToAlpacaSymbol(asset.symbol, asset.asset_type);
 
-    // Get stock momentum to inform signal direction
-    const momentum = await this.getStockMomentum(stock.symbol);
+    // Get asset momentum to inform signal direction
+    const momentum = await this.getStockMomentum(alpacaSymbol);
     
     // Generate a signal (BUY or SELL) - influenced by momentum
     const signal = this.generateSignal(strategy, momentum);
@@ -137,7 +142,7 @@ export class AutoTradingExecutionService {
     // Log momentum-based decision for transparency
     if (Math.abs(momentum) > 1) {
       this.sessionService.addAiMessage(
-        `${stock.symbol} momentum: ${momentum > 0 ? '+' : ''}${momentum.toFixed(2)}% → ${signal.action}`,
+        `${alpacaSymbol} momentum: ${momentum > 0 ? '+' : ''}${momentum.toFixed(2)}% → ${signal.action}`,
         'info'
       );
     }
@@ -145,16 +150,19 @@ export class AutoTradingExecutionService {
     // Generate random trade amount ($100 - $500)
     const tradeAmount = this.generateTradeAmount();
 
-    // Get current stock price
-    const price = await this.getStockPrice(stock.symbol);
+    // Get current asset price
+    const price = await this.getStockPrice(alpacaSymbol);
     if (!price || price <= 0) {
-      throw new Error(`Could not get price for ${stock.symbol}`);
+      throw new Error(`Could not get price for ${alpacaSymbol}`);
     }
 
-    // Calculate quantity
-    const qty = Math.floor(tradeAmount / price);
-    if (qty < 1) {
-      this.logger.warn(`Trade amount $${tradeAmount} too small for ${stock.symbol} at $${price}`);
+    // Calculate quantity (handle fractional for crypto, whole for stocks)
+    const qty = asset.asset_type === 'crypto' 
+      ? parseFloat((tradeAmount / price).toFixed(8)) // Crypto allows fractional
+      : Math.floor(tradeAmount / price); // Stocks require whole numbers
+    
+    if (qty <= 0 || (asset.asset_type === 'stock' && qty < 1)) {
+      this.logger.warn(`Trade amount $${tradeAmount} too small for ${alpacaSymbol} at $${price}`);
       return null;
     }
 
@@ -171,7 +179,7 @@ export class AutoTradingExecutionService {
     signal.action = 'BUY';
 
     // Generate AI message with momentum context
-    const aiMessage = this.generateAiExplanation(strategy, stock, signal, price, momentum);
+    const aiMessage = this.generateAiExplanation(strategy, asset, signal, price, momentum);
 
     // Create trade record
     const tradeRecord: AutoTradeRecord = {
@@ -179,7 +187,7 @@ export class AutoTradingExecutionService {
       timestamp: new Date(),
       strategyId: strategy.strategy_id,
       strategyName: strategy.name || 'Unknown Strategy',
-      symbol: stock.symbol,
+      symbol: alpacaSymbol,
       action: signal.action,
       amount: tradeAmount,
       price,
@@ -193,12 +201,12 @@ export class AutoTradingExecutionService {
       // Place BRACKET order via Alpaca (entry + automatic stop-loss + take-profit)
       // This is OCO-like: when one exit condition hits, the other is cancelled
       this.sessionService.addAiMessage(
-        `Placing bracket order: BUY ${stock.symbol} | SL: $${stopLossPrice} (-${riskLevels.stopLossPercent}%) | TP: $${takeProfitPrice} (+${riskLevels.takeProfitPercent}%)`,
+        `Placing bracket order: BUY ${alpacaSymbol} (${asset.asset_type}) | SL: $${stopLossPrice} (-${riskLevels.stopLossPercent}%) | TP: $${takeProfitPrice} (+${riskLevels.takeProfitPercent}%)`,
         'info'
       );
       
       const order = await this.alpacaService.placeOrder({
-        symbol: stock.symbol,
+        symbol: alpacaSymbol,
         qty: qty,
         side: 'buy',
         type: 'market',
@@ -216,16 +224,16 @@ export class AutoTradingExecutionService {
       tradeRecord.status = order.status === 'filled' ? 'filled' : 'pending';
 
       // Store the signal in database with exit levels
-      await this.storeSignal(strategy, stock, signal, tradeAmount, price, stopLossPrice, takeProfitPrice);
+      await this.storeSignal(strategy, asset, signal, tradeAmount, price, stopLossPrice, takeProfitPrice);
 
       // Store the order in database with auto-trade metadata
-      await this.storeOrder(stock, signal, tradeAmount, price, order.id, stopLossPrice, takeProfitPrice);
+      await this.storeOrder(asset, signal, tradeAmount, price, order.id, stopLossPrice, takeProfitPrice);
 
       // Record the trade in session
       this.sessionService.recordTrade(tradeRecord);
 
       this.logger.log(
-        `Bracket order placed: BUY ${stock.symbol} @ $${price}, SL: $${stopLossPrice}, TP: $${takeProfitPrice}, Order: ${order.id}`
+        `Bracket order placed: BUY ${alpacaSymbol} (${asset.asset_type}) @ $${price}, SL: $${stopLossPrice}, TP: $${takeProfitPrice}, Order: ${order.id}`
       );
 
       return tradeRecord;
@@ -277,37 +285,61 @@ export class AutoTradingExecutionService {
       return;
     }
 
-    // Refresh stocks cache
-    const stocks = await this.prisma.assets.findMany({
+    // Refresh assets cache - both stocks and crypto
+    const assets = await this.prisma.assets.findMany({
       where: {
-        asset_type: 'stock',
-        is_active: true,
+        OR: [
+          { asset_type: 'stock', is_active: true },
+          { asset_type: 'crypto', is_active: true },
+        ],
       },
       select: {
         asset_id: true,
         symbol: true,
         name: true,
         sector: true,
+        asset_type: true,
       },
     });
-    this.stocksCache = stocks;
+    
+    // Filter crypto to only Alpaca-supported coins
+    this.assetsCache = assets.filter(asset => {
+      if (asset.asset_type === 'crypto') {
+        const baseSymbol = asset.symbol.replace(/USDT?$/, '');
+        return ALPACA_SUPPORTED_CRYPTO.includes(baseSymbol);
+      }
+      return true; // Include all stocks
+    });
 
     // Refresh strategies cache
     this.strategiesCache = await this.getActiveAdminStrategies();
 
+    const cryptoCount = this.assetsCache.filter(a => a.asset_type === 'crypto').length;
+    const stockCount = this.assetsCache.filter(a => a.asset_type === 'stock').length;
     this.lastCacheRefresh = now;
-    this.logger.debug(`Caches refreshed: ${stocks.length} stocks, ${this.strategiesCache.length} strategies`);
+    this.logger.debug(`Caches refreshed: ${stockCount} stocks, ${cryptoCount} crypto, ${this.strategiesCache.length} strategies`);
   }
 
   /**
-   * Pick a random stock from cache
+   * Pick a random asset (stock or crypto) from cache
    */
-  private pickRandomStock(): Stock | null {
-    if (this.stocksCache.length === 0) {
+  private pickRandomAsset(): Asset | null {
+    if (this.assetsCache.length === 0) {
       return null;
     }
-    const index = Math.floor(Math.random() * this.stocksCache.length);
-    return this.stocksCache[index];
+    const index = Math.floor(Math.random() * this.assetsCache.length);
+    return this.assetsCache[index];
+  }
+
+  /**
+   * Convert crypto symbol to Alpaca format: BTCUSDT -> BTC/USD
+   */
+  private convertToAlpacaSymbol(symbol: string, assetType: string): string {
+    if (assetType === 'crypto') {
+      const baseSymbol = symbol.replace(/USDT?$/, '');
+      return `${baseSymbol}/USD`;
+    }
+    return symbol; // Stock symbols remain unchanged
   }
 
   /**
@@ -421,14 +453,15 @@ export class AutoTradingExecutionService {
   /**
    * Generate AI explanation for the trade
    */
-  private generateAiExplanation(strategy: Strategy, stock: Stock, signal: any, price: number, momentum: number = 0): string {
+  private generateAiExplanation(strategy: Strategy, asset: Asset, signal: any, price: number, momentum: number = 0): string {
     // Momentum-aware explanations feel more natural
     const momentumStr = momentum > 0 ? 'upward' : momentum < 0 ? 'downward' : 'neutral';
     const trendAligned = (signal.action === 'BUY' && momentum > 0) || (signal.action === 'SELL' && momentum < 0);
+    const assetType = asset.asset_type === 'crypto' ? 'crypto' : 'stock';
     
     const reasons = trendAligned ? [
-      `${strategy.name} riding ${momentumStr} momentum for ${signal.action.toLowerCase()} opportunity`,
-      `Technical analysis confirms ${momentumStr} trend continuation`,
+      `${strategy.name} riding ${momentumStr} momentum for ${signal.action.toLowerCase()} opportunity in ${assetType}`,
+      `Technical analysis confirms ${momentumStr} trend continuation for ${asset.symbol}`,
       `Momentum indicators align with ${signal.action.toLowerCase()} signal`,
       `Price action suggests continuation of current ${momentumStr} move`,
       `Trend-following analysis favors ${signal.action.toLowerCase()} position`,
@@ -441,7 +474,7 @@ export class AutoTradingExecutionService {
     ];
 
     const index = Math.floor(Math.random() * reasons.length);
-    return `${reasons[index]} for ${stock.symbol} at $${price.toFixed(2)} (${(signal.confidence * 100).toFixed(1)}% confidence)`;
+    return `${reasons[index]} for ${asset.symbol} at $${price.toFixed(2)} (${(signal.confidence * 100).toFixed(1)}% confidence)`;
   }
 
   /**
@@ -449,7 +482,7 @@ export class AutoTradingExecutionService {
    */
   private async storeSignal(
     strategy: Strategy,
-    stock: Stock,
+    asset: Asset,
     signal: { action: 'BUY' | 'SELL'; confidence: number; scores: any },
     amount: number,
     price: number,
@@ -460,7 +493,7 @@ export class AutoTradingExecutionService {
       await this.prisma.strategy_signals.create({
         data: {
           strategy_id: strategy.strategy_id,
-          asset_id: stock.asset_id,
+          asset_id: asset.asset_id,
           timestamp: new Date(),
           action: signal.action,
           confidence: signal.confidence,
@@ -491,7 +524,7 @@ export class AutoTradingExecutionService {
    * Store order in database with auto-trade metadata
    */
   private async storeOrder(
-    stock: Stock,
+    asset: Asset,
     signal: { action: 'BUY' | 'SELL'; confidence: number },
     amount: number,
     price: number,
@@ -527,8 +560,9 @@ export class AutoTradingExecutionService {
             auto_trade: true,
             order_class: 'bracket',
             alpaca_order_id: alpacaOrderId,
-            symbol: stock.symbol,
-            asset_id: stock.asset_id,
+            symbol: asset.symbol,
+            asset_id: asset.asset_id,
+            asset_type: asset.asset_type,
             confidence: signal.confidence,
             stop_loss_price: stopLossPrice,
             take_profit_price: takeProfitPrice,

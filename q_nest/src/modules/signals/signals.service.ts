@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { SignalAction, OrderType } from '@prisma/client';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
 import { BinanceService } from '../binance/binance.service';
+import { ALPACA_SUPPORTED_CRYPTO } from '../exchanges/integrations/alpaca.service';
 
 @Injectable()
 export class SignalsService {
@@ -89,6 +90,15 @@ export class SignalsService {
     for (const s of signals) {
       const assetId = s.asset?.asset_id || s.asset_id;
       if (!assetId) continue; // skip malformed rows
+      
+      // Filter for Alpaca-supported cryptocurrencies only
+      const assetSymbol = s.asset?.symbol || '';
+      const baseSymbol = assetSymbol.replace(/USDT?$/, ''); // Remove USDT or USDC suffix
+      if (!ALPACA_SUPPORTED_CRYPTO.includes(baseSymbol)) {
+        this.logger.debug(`Filtering out ${assetSymbol} - not supported by Alpaca`);
+        continue; // Skip unsupported assets
+      }
+      
       if (!seen.has(assetId)) {
         // Normalize shape: ensure `explanations` array exists; fallback to legacy `explanation`
         const explanations = (s.explanations && s.explanations.length > 0)

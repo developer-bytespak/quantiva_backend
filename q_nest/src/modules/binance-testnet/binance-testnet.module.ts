@@ -24,7 +24,7 @@ import {
   ],
   controllers: [
     BinanceTestnetController,
-    CryptoAutoTradingController,
+    // CryptoAutoTradingController, // Disabled - using Alpaca for crypto paper trading
   ],
   providers: [
     BinanceTestnetService,
@@ -33,7 +33,7 @@ import {
     // Crypto Auto Trading
     CryptoAutoTradingSessionService,
     CryptoAutoTradingExecutionService,
-    CryptoAutoTradingCronService,
+    // CryptoAutoTradingCronService, // Disabled - using Alpaca for paper trading
     CryptoAutoTradingStatsService,
   ],
   exports: [

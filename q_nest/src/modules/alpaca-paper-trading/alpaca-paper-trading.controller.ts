@@ -420,7 +420,7 @@ export class AlpacaPaperTradingController {
   }
 
   /**
-   * Get trade history with realized P&L
+   * Get trade history with realized P&L (crypto only)
    */
   @Get('trade-history')
   async getTradeHistory(
@@ -429,11 +429,14 @@ export class AlpacaPaperTradingController {
     @Query('until') until?: string,
   ) {
     try {
-      const history = await this.alpacaService.getTradeHistory({
+      const allHistory = await this.alpacaService.getTradeHistory({
         limit: limit ? parseInt(limit, 10) : 200,
         after,
         until,
       });
+      
+      // Filter for crypto only (symbols with /)
+      const history = allHistory.filter(trade => trade.symbol.includes('/'));
       
       // Calculate summary statistics
       const totalProfitLoss = history.reduce((sum, trade) => sum + trade.profitLoss, 0);

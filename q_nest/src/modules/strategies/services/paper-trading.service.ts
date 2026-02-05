@@ -1,17 +1,18 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { BinanceTestnetService } from '../../binance-testnet/services/binance-testnet.service';
+import { AlpacaService } from '../../exchanges/integrations/alpaca.service';
 import { SignalsService } from '../../signals/signals.service';
 import { PortfolioService } from '../../portfolio/portfolio.service';
 import { SignalAction } from '@prisma/client';
+import { ConfigService } from '@nestjs/config';
 
 /**
  * Paper Trading Automation Service
  *
- * Monitors signals and automatically executes trades on Binance testnet when:
+ * Monitors signals and automatically executes trades on Alpaca paper trading when:
  * 1. Signal confidence exceeds strategy's auto_trade_threshold
  * 2. Position sizing is available from signal details
- * 3. Account has sufficient balance on testnet
+ * 3. Account has sufficient balance on paper account
  *
  * Features:
  * - Automatic order placement when thresholds are met
@@ -27,9 +28,10 @@ export class PaperTradingService implements OnModuleInit {
 
   constructor(
     private prisma: PrismaService,
-    private binanceTestnetService: BinanceTestnetService,
+    private alpacaService: AlpacaService,
     private signalsService: SignalsService,
     private portfolioService: PortfolioService,
+    private configService: ConfigService,
   ) {}
 
   /**
@@ -37,12 +39,16 @@ export class PaperTradingService implements OnModuleInit {
    * Starts monitoring signals for auto-execution
    */
   onModuleInit() {
-    // Only start if testnet is configured
-    if (this.binanceTestnetService.isConfigured()) {
-      this.logger.log('Starting Paper Trading Automation Service');
+    // Configure Alpaca with credentials from environment
+    const alpacaKey = this.configService.get('ALPACA_API_KEY');
+    const alpacaSecret = this.configService.get('ALPACA_API_SECRET');
+
+    if (alpacaKey && alpacaSecret) {
+      this.alpacaService.configure(alpacaKey, alpacaSecret, true); // true = paper trading
+      this.logger.log('Starting Paper Trading Automation Service with Alpaca');
       this.startMonitoring();
     } else {
-      this.logger.warn('Binance testnet not configured. Paper trading automation disabled.');
+      this.logger.warn('Alpaca API credentials not configured. Paper trading automation disabled.');
     }
   }
 
@@ -185,27 +191,27 @@ export class PaperTradingService implements OnModuleInit {
         return;
       }
 
-      // Determine testnet symbol (e.g., BTC -> BTCUSDT, AAPL -> AAPL, etc.)
-      const testnetSymbol = this.getTestnetSymbol(asset.symbol, asset.asset_type);
+      // Determine paper trading symbol (e.g., BTC -> BTC/USD, ETH -> ETH/USD)
+      const paperSymbol = this.getPaperTradingSymbol(asset.symbol, asset.asset_type);
 
-      // Check testnet balance before placing order
-      const accountBalance = await this.binanceTestnetService.getAccountBalance();
-      const usdtBalance = accountBalance.balances.find((b: any) => b.asset === 'USDT')?.free || 0;
+      // Check paper account balance before placing order
+      const accountBalance = await this.alpacaService.getAccountBalance();
+      const usdBalance = accountBalance.balances.find((b: any) => b.asset === 'USD')?.free || 0;
 
-      if (usdtBalance <= 0) {
+      if (usdBalance <= 0) {
         this.logger.warn(
-          `Insufficient testnet USDT balance (${usdtBalance}) for signal ${signal.signal_id}. Skipping.`,
+          `Insufficient paper USD balance (${usdBalance}) for signal ${signal.signal_id}. Skipping.`,
         );
         return;
       }
 
-      // Place testnet order
+      // Place paper trading order
       this.logger.log(
-        `Auto-executing signal ${signal.signal_id}: ${signal.action} ${testnetSymbol} qty=${signalDetails.position_size} at price=${signalDetails.entry_price}`,
+        `Auto-executing signal ${signal.signal_id}: ${signal.action} ${paperSymbol} qty=${signalDetails.position_size} at price=${signalDetails.entry_price}`,
       );
 
-      const orderResult = await this.binanceTestnetService.placeOrder(
-        testnetSymbol,
+      const orderResult = await this.alpacaService.placeOrder(
+        paperSymbol,
         signal.action === SignalAction.BUY ? 'BUY' : 'SELL',
         'MARKET', // Use market orders for immediate execution
         signalDetails.position_size,
@@ -223,24 +229,24 @@ export class PaperTradingService implements OnModuleInit {
           price: signalDetails.entry_price,
           status: 'FILLED', // Market orders execute immediately
           auto_trade_approved: true,
-          // Store testnet order ID for tracking
+          // Store Alpaca order ID for tracking
           metadata: {
-            testnet_order_id: orderResult.orderId,
-            testnet_symbol: testnetSymbol,
+            alpaca_order_id: orderResult.orderId,
+            alpaca_symbol: paperSymbol,
             execution_timestamp: new Date().toISOString(),
           },
         },
       });
 
-      // Create execution record with testnet fill information
+      // Create execution record with Alpaca fill information
       if (orderResult.executedQuantity > 0) {
         await this.prisma.order_executions.create({
           data: {
             order_id: order.order_id,
-            trade_id: `testnet_${orderResult.orderId}`,
+            trade_id: `alpaca_${orderResult.orderId}`,
             price: orderResult.price > 0 ? orderResult.price : orderResult.cumulativeQuoteAssetTransacted / orderResult.executedQuantity,
             quantity: orderResult.executedQuantity,
-            fee: 0, // Testnet doesn't charge fees
+            fee: 0, // Paper trading doesn't charge fees
             timestamp: new Date(),
           },
         });
@@ -250,12 +256,12 @@ export class PaperTradingService implements OnModuleInit {
         `Successfully auto-executed signal ${signal.signal_id} as order ${order.order_id}`,
       );
 
-      // If this was a BUY order and we have SL/TP levels, place OCO order for automatic exit
+      // If this was a BUY order and we have SL/TP levels, place bracket order for automatic exit
       if (signal.action === SignalAction.BUY && orderResult.executedQuantity > 0) {
-        await this.placeOcoForPosition(
+        await this.placeBracketForPosition(
           signal,
           signalDetails,
-          testnetSymbol,
+          paperSymbol,
           orderResult.executedQuantity,
           order.order_id,
         );
@@ -269,13 +275,13 @@ export class PaperTradingService implements OnModuleInit {
   }
 
   /**
-   * Places an OCO (One-Cancels-Other) order to automatically manage stop-loss and take-profit
+   * Places a bracket order to automatically manage stop-loss and take-profit
    * This is called after a successful BUY order to protect the position
    */
-  private async placeOcoForPosition(
+  private async placeBracketForPosition(
     signal: any,
     signalDetails: any,
-    testnetSymbol: string,
+    paperSymbol: string,
     executedQuantity: number,
     parentOrderId: string,
   ): Promise<void> {
@@ -286,7 +292,7 @@ export class PaperTradingService implements OnModuleInit {
       const entryPrice = signalDetails.entry_price;
 
       if (!entryPrice || entryPrice <= 0) {
-        this.logger.warn(`Cannot place OCO: No valid entry price for signal ${signal.signal_id}`);
+        this.logger.warn(`Cannot place bracket order: No valid entry price for signal ${signal.signal_id}`);
         return;
       }
 
@@ -295,77 +301,83 @@ export class PaperTradingService implements OnModuleInit {
       const takeProfitPrice = entryPrice * (1 + takeProfitPercent);
 
       this.logger.log(
-        `Placing OCO for signal ${signal.signal_id}: ` +
+        `Placing bracket order for signal ${signal.signal_id}: ` +
         `Entry=${entryPrice}, SL=${stopLossPrice.toFixed(4)} (-${(stopLossPercent * 100).toFixed(1)}%), ` +
         `TP=${takeProfitPrice.toFixed(4)} (+${(takeProfitPercent * 100).toFixed(1)}%)`
       );
 
-      // Place OCO sell order to protect the long position
-      const ocoResult = await this.binanceTestnetService.placeOcoOrder(
-        testnetSymbol,
+      // Place bracket sell order to protect the long position
+      const bracketResult = await this.alpacaService.placeBracketOrder(
+        paperSymbol,
         'SELL',
         executedQuantity,
         takeProfitPrice,
         stopLossPrice,
       );
 
-      // Update order metadata with OCO information
+      // Update order metadata with bracket information
       await this.prisma.orders.update({
         where: { order_id: parentOrderId },
         data: {
           metadata: {
-            testnet_order_id: parentOrderId,
-            testnet_symbol: testnetSymbol,
+            alpaca_order_id: parentOrderId,
+            alpaca_symbol: paperSymbol,
             execution_timestamp: new Date().toISOString(),
-            oco_order_list_id: ocoResult.orderListId,
-            oco_take_profit_price: takeProfitPrice,
-            oco_stop_loss_price: stopLossPrice,
-            oco_orders: ocoResult.orders,
+            bracket_order_list_id: bracketResult.orderListId,
+            bracket_take_profit_price: takeProfitPrice,
+            bracket_stop_loss_price: stopLossPrice,
+            bracket_orders: bracketResult.orders,
           },
         },
       });
 
       this.logger.log(
-        `OCO order placed successfully for signal ${signal.signal_id}: orderListId=${ocoResult.orderListId}`
+        `Bracket order placed successfully for signal ${signal.signal_id}: orderListId=${bracketResult.orderListId}`
       );
     } catch (error: any) {
-      // Log error but don't fail the main order - OCO is enhancement, not critical
+      // Log error but don't fail the main order - bracket is enhancement, not critical
       this.logger.error(
-        `Failed to place OCO order for signal ${signal.signal_id}: ${error.message}`,
+        `Failed to place bracket order for signal ${signal.signal_id}: ${error.message}`,
         error.stack,
       );
     }
   }
 
   /**
-   * Convert asset symbol to testnet trading symbol
-   * e.g., BTC -> BTCUSDT, AAPL -> AAPL (if stock)
+   * Convert asset symbol to paper trading symbol
+   * e.g., BTC -> BTC/USD, ETH -> ETH/USD
    */
-  private getTestnetSymbol(symbol: string, assetType: string): string {
+  private getPaperTradingSymbol(symbol: string, assetType: string): string {
     const upperSymbol = symbol.toUpperCase();
 
-    // Crypto: append USDT if not already a trading pair
+    // Crypto: convert to Alpaca format (BTC -> BTC/USD)
     if (assetType === 'crypto' || assetType === 'CRYPTO') {
-      if (!upperSymbol.includes('USDT') && !upperSymbol.includes('USDC') && !upperSymbol.includes('BUSD')) {
-        return `${upperSymbol}USDT`;
+      // If already in correct format, return as-is
+      if (upperSymbol.includes('/')) {
+        return upperSymbol;
       }
-      return upperSymbol;
+      // Remove common suffixes and add /USD
+      const cleanSymbol = upperSymbol
+        .replace('USDT', '')
+        .replace('USDC', '')
+        .replace('BUSD', '');
+      return `${cleanSymbol}/USD`;
     }
 
-    // Stocks: return as-is (testnet might not support stocks)
+    // Stocks: return as-is
     return upperSymbol;
   }
 
   /**
-   * Sync testnet order fills back to portfolio positions
+   * Sync paper trading order fills back to portfolio positions
    * This should be called periodically to update position tracking
    */
-  async syncTestnetPositions() {
+  async syncPaperPositions() {
     try {
-      this.logger.log('Syncing testnet positions to portfolio');
+      this.logger.log('Syncing paper trading positions to portfolio');
 
-      // Get all open orders from testnet
-      const openOrdersResult = await this.binanceTestnetService.getAllOrders({
+      // Get all open orders from Alpaca
+      const openOrdersResult = await this.alpacaService.getAllOrders({
         limit: 100,
       });
 
@@ -373,12 +385,12 @@ export class PaperTradingService implements OnModuleInit {
         return;
       }
 
-      // Get all testnet-linked orders from database
+      // Get all Alpaca-linked orders from database
       const dbOrders = await this.prisma.orders.findMany({
         where: {
           auto_trade_approved: true,
           metadata: {
-            path: ['testnet_order_id'],
+            path: ['alpaca_order_id'],
             not: null,
           },
         },
@@ -390,23 +402,23 @@ export class PaperTradingService implements OnModuleInit {
 
       // Update positions for filled orders
       for (const dbOrder of dbOrders) {
-        const testnetOrderId = dbOrder.metadata?.testnet_order_id;
-        if (!testnetOrderId) continue;
+        const alpacaOrderId = dbOrder.metadata?.alpaca_order_id;
+        if (!alpacaOrderId) continue;
 
-        // Find corresponding testnet order
-        const testnetOrder = openOrdersResult.find(
-          (o: any) => o.orderId === testnetOrderId,
+        // Find corresponding Alpaca order
+        const alpacaOrder = openOrdersResult.find(
+          (o: any) => o.id === alpacaOrderId,
         );
 
-        if (testnetOrder && testnetOrder.status === 'FILLED') {
+        if (alpacaOrder && alpacaOrder.status === 'filled') {
           // Update portfolio position
           await this.updatePortfolioPosition(dbOrder);
         }
       }
 
-      this.logger.log('Testnet position sync completed');
+      this.logger.log('Paper trading position sync completed');
     } catch (error: any) {
-      this.logger.error(`Error syncing testnet positions: ${error.message}`);
+      this.logger.error(`Error syncing paper positions: ${error.message}`);
     }
   }
 
