@@ -101,20 +101,16 @@ export class NewsService {
    */
   async getAllNewsFromDB(limit: number = 100) {
     try {
-      // Query all news with actual content (must have URL - real articles)
+      // Query all news with URL and heading present
       const newsRecords = await this.prisma.trending_news.findMany({
         where: {
-          AND: [
-            { article_url: { not: null } },
-            { article_url: { not: '' } },
-            { heading: { not: null } },
-            { heading: { not: '' } },
-          ],
+          article_url: { not: '' },
+          heading: { not: '' },
         },
         orderBy: {
           poll_timestamp: 'desc',
         },
-        take: limit * 3, // Fetch more to account for filtering
+        take: limit,
         include: {
           asset: {
             select: {
@@ -127,52 +123,29 @@ export class NewsService {
 
       this.logger.log(`Found ${newsRecords.length} news records with URLs in database`);
 
-      // Transform to response format and filter out source-only records
-      const news_items = newsRecords
-        .map((record) => {
-          const metadata = record.metadata as any;
-          const newsDetail = record.news_detail as any;
-          
-          let description = '';
-          if (metadata?.description) {
-            description = metadata.description;
-          } else if (newsDetail?.description) {
-            description = newsDetail.description;
-          } else if (typeof record.news_detail === 'string') {
-            description = record.news_detail;
-          }
-          
-          return {
-            symbol: record.asset?.symbol || 'Unknown',
-            title: record.heading || 'Crypto News',
-            description: description,
-            url: record.article_url || '',
-            source: record.source || 'Unknown',
-            published_at: record.published_at?.toISOString() || record.poll_timestamp.toISOString(),
-            sentiment: {
-              label: record.sentiment_label || 'neutral',
-              score: Number(record.news_sentiment || 0),
-              confidence: metadata?.confidence || 0.5,
-            },
-          };
-        })
-        .filter((item) => {
-          // Filter out items where title is just a source name (common patterns)
-          const sourceLikeNames = [
-            'CryptoSlate', 'AMBCrypto', 'ZyCrypto', 'CCN', 'CBS News', 
-            'Cryptonews.com', 'CryptoPanic', 'Crypto Daily', 'TWJ News',
-            'Bitcoin.com News', 'The Boston Globe', 'The Verge', 'The Daily Beast',
-            'CoinDesk', 'Crypto Briefing', 'Decrypt', 'CNBC International',
-            'The Washington Post', 'Yahoo Finance', 'The Associated Press',
-            'Trader Edge', 'CoinGape'
-          ];
-          
-          // Keep items that have a URL AND title is NOT just a source name
-          return item.url && !sourceLikeNames.includes(item.title);
-        })
-        .slice(0, limit); // Apply limit after filtering
+      // Transform to response format
+      const news_items = newsRecords.map((record) => {
+        const metadata = record.metadata as any;
+        const newsDetail = record.news_detail as any;
+        
+        let description = newsDetail?.description || '';
+        
+        return {
+          symbol: record.asset?.symbol || 'Unknown',
+          title: record.heading,
+          description: description,
+          url: record.article_url,
+          source: record.source || 'Unknown',
+          published_at: record.published_at?.toISOString() || record.poll_timestamp.toISOString(),
+          sentiment: {
+            label: record.sentiment_label || 'neutral',
+            score: Number(record.news_sentiment || 0),
+            confidence: metadata?.confidence || 0.5,
+          },
+        };
+      });
 
-      this.logger.log(`Returning ${news_items.length} complete news items after filtering`);
+      this.logger.log(`Returning ${news_items.length} complete news items`);
 
       return {
         total_count: news_items.length,
@@ -197,7 +170,6 @@ export class NewsService {
       let asset = await this.assetsService.findBySymbol(symbolUpper);
       if (!asset) {
         this.logger.warn(`Asset ${symbolUpper} not found in database`);
-        // Return empty response with metadata
         return {
           symbol: symbolUpper,
           news_items: [],
@@ -222,103 +194,34 @@ export class NewsService {
 
       const assetId = asset.asset_id;
       const now = new Date();
-      const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-      this.logger.debug(`Querying news for asset_id: ${assetId}, symbol: ${symbolUpper}`);
-
-      // Query trending_news for recent articles with actual content
-      // Filter out records with "No text data available" in metadata
+      // Single query: Fetch latest news with URL and heading present
       const newsRecords = await this.prisma.trending_news.findMany({
         where: {
           asset_id: assetId,
-          poll_timestamp: {
-            gte: twentyFourHoursAgo,
-          },
-          OR: [
-            { AND: [{ heading: { not: null } }, { heading: { not: '' } }] },
-            { AND: [{ article_url: { not: null } }, { article_url: { not: '' } }] },
-          ],
+          poll_timestamp: { gte: sevenDaysAgo },
+          article_url: { not: '' },
+          heading: { not: '' },
         },
-        orderBy: {
-          poll_timestamp: 'desc',
-        },
-        take: limit * 3, // Query 3x the limit to account for filtering
+        orderBy: { poll_timestamp: 'desc' },
+        take: limit,
       });
 
-      this.logger.debug(`Found ${newsRecords.length} news records in last 24h for ${symbolUpper}`);
-
-      // If no news in last 24h, try 48h
-      let finalNewsRecords = newsRecords;
-      if (newsRecords.length === 0) {
-        this.logger.debug(`No news in 24h, trying 48h for ${symbolUpper}`);
-        const fortyEightHoursAgo = new Date(now.getTime() - 48 * 60 * 60 * 1000);
-        finalNewsRecords = await this.prisma.trending_news.findMany({
-          where: {
-            asset_id: assetId,
-            poll_timestamp: {
-              gte: fortyEightHoursAgo,
-            },
-            OR: [
-              { AND: [{ heading: { not: null } }, { heading: { not: '' } }] },
-              { AND: [{ article_url: { not: null } }, { article_url: { not: '' } }] },
-            ],
-          },
-          orderBy: {
-            poll_timestamp: 'desc',
-          },
-          take: limit * 3,
-        });
-        this.logger.debug(`Found ${finalNewsRecords.length} news records in last 48h for ${symbolUpper}`);
-      }
-
-      // If still no news, try 7 days (for testing with older data)
-      if (finalNewsRecords.length === 0) {
-        this.logger.debug(`No news in 48h, trying 7 days for ${symbolUpper}`);
-        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-        finalNewsRecords = await this.prisma.trending_news.findMany({
-          where: {
-            asset_id: assetId,
-            poll_timestamp: {
-              gte: sevenDaysAgo,
-            },
-            OR: [
-              { AND: [{ heading: { not: null } }, { heading: { not: '' } }] },
-              { AND: [{ article_url: { not: null } }, { article_url: { not: '' } }] },
-            ],
-          },
-          orderBy: {
-            poll_timestamp: 'desc',
-          },
-          take: limit * 3,
-        });
-        this.logger.debug(`Found ${finalNewsRecords.length} news records in last 7 days for ${symbolUpper}`);
-      }
-
-      // Filter out records with "No text data available" note
-      finalNewsRecords = finalNewsRecords.filter((record) => {
-        const metadata = record.metadata as any;
-        return metadata?.note !== 'No text data available';
-      }).slice(0, limit); // Apply the original limit after filtering
+      this.logger.debug(`Found ${newsRecords.length} news records for ${symbolUpper}`);
 
       // Transform to response format
-      const news_items: CryptoNewsItem[] = finalNewsRecords.map((record) => {
-        const metadata = record.metadata as any;
+      const news_items: CryptoNewsItem[] = newsRecords.map((record) => {
         const newsDetail = record.news_detail as any;
+        const metadata = record.metadata as any;
         
-        // Extract description from metadata or news_detail
-        let description = '';
-        if (metadata?.description) {
-          description = metadata.description;
-        } else if (newsDetail?.description) {
-          description = newsDetail.description;
-        } else if (typeof record.news_detail === 'string') {
-          description = record.news_detail;
-        }
+        // Extract description
+        let description = newsDetail?.description || '';
         
         return {
-          title: record.heading || 'Crypto News',
+          title: record.heading,
           description: description,
-          url: record.article_url || '',
+          url: record.article_url,
           source: record.source || 'Unknown',
           published_at: record.published_at?.toISOString() || record.poll_timestamp.toISOString(),
           sentiment: {
@@ -349,7 +252,7 @@ export class NewsService {
       };
 
       // Calculate freshness
-      const latestNewsTime = finalNewsRecords[0]?.poll_timestamp;
+      const latestNewsTime = newsRecords[0]?.poll_timestamp;
       const ageMinutes = latestNewsTime
         ? (now.getTime() - new Date(latestNewsTime).getTime()) / 1000 / 60
         : 999999;
@@ -367,7 +270,7 @@ export class NewsService {
           last_updated_at: latestNewsTime?.toISOString() || null,
           is_fresh,
           freshness: ageMinutes < 30 ? 'fresh' : ageMinutes < 120 ? 'recent' : 'cached',
-          total_count: finalNewsRecords.length,
+          total_count: newsRecords.length,
         },
       };
     } catch (error: any) {
@@ -574,6 +477,20 @@ export class NewsService {
       const uniqueTimestamp = new Date(
         pollTimestamp.getTime() + storedCount * 1000,
       );
+
+      // Skip articles with no title (avoid storing corrupted records)
+      if (!newsItem.title || newsItem.title.trim() === '') {
+        this.logger.debug(`Skipping article with empty title for ${symbol}`);
+        skippedCount++;
+        continue;
+      }
+
+      // Skip articles with no URL (avoid storing incomplete records)
+      if (!newsItem.url || newsItem.url.trim() === '') {
+        this.logger.debug(`Skipping article with empty URL for ${symbol}: ${newsItem.title}`);
+        skippedCount++;
+        continue;
+      }
 
       // Store news article
       try {
