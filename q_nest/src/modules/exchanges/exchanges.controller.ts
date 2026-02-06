@@ -11,6 +11,7 @@ import {
   HttpCode,
   HttpStatus,
   HttpException,
+  Logger,
 } from '@nestjs/common';
 import { ExchangesService } from './exchanges.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -46,6 +47,8 @@ import { ForbiddenException } from '@nestjs/common';
 @Controller('exchanges')
 @UseGuards(JwtAuthGuard)
 export class ExchangesController {
+  private readonly logger = new Logger(ExchangesController.name);
+
   constructor(
     private readonly exchangesService: ExchangesService,
     private readonly binanceService: BinanceService,
@@ -725,55 +728,76 @@ export class ExchangesController {
   @Get('connections/:connectionId/dashboard')
   @UseGuards(ConnectionOwnerGuard)
   async getDashboard(@Param('connectionId') connectionId: string) {
-    // Get connection to determine exchange
-    const connection = await this.exchangesService.getConnectionById(connectionId);
-    if (!connection || !connection.exchange) {
-      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    try {
+      // Get connection to determine exchange
+      const connection = await this.exchangesService.getConnectionById(connectionId);
+      if (!connection || !connection.exchange) {
+        throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+      }
+
+      const exchangeName = connection.exchange.name.toLowerCase();
+      this.logger.log(`Dashboard request for ${exchangeName} connection: ${connectionId}, status: ${connection.status}`);
+      
+      // Check if connection is active
+      if (connection.status !== 'active') {
+        this.logger.warn(`Connection ${connectionId} is not active, status: ${connection.status}`);
+        throw new HttpException(
+          `Connection status is ${connection.status}. Please reconnect your exchange account.`,
+          HttpStatus.BAD_REQUEST
+        );
+      }
+      
+      // OPTIMIZATION: Check if all data is cached before syncing
+      // This prevents unnecessary API calls to external exchanges
+      const isCached = this.exchangesService.isDashboardDataCached(connectionId, exchangeName);
+      
+      // Only sync if cache is missing (saves external API calls)
+      if (!isCached) {
+        this.logger.log(`Cache miss, syncing data for ${connectionId}`);
+        await this.exchangesService.syncConnectionData(connectionId);
+      }
+
+      const [balance, positions, orders, portfolio] = await Promise.all([
+        this.exchangesService.getConnectionData(connectionId, 'balance'),
+        this.exchangesService.getConnectionData(connectionId, 'positions'),
+        this.exchangesService.getConnectionData(connectionId, 'orders'),
+        this.exchangesService.getConnectionData(connectionId, 'portfolio'),
+      ]);
+
+      // OPTIMIZATION: Reuse prices from positions (already fetched during sync)
+      // Only fetch additional prices if needed for symbols not in positions
+      const topPositions = (positions as any[]).slice(0, 10);
+      
+      // For crypto exchanges, append USDT to symbols. For stocks (Alpaca), use symbol as-is
+      const isCryptoExchange = exchangeName === 'binance' || exchangeName === 'bybit';
+      const positionSymbols = new Set(topPositions.map((p) => 
+        isCryptoExchange ? `${p.symbol}USDT` : p.symbol
+      ));
+      
+      // Prices are already in positions data, extract them
+      const prices = topPositions.map((p) => ({
+        symbol: isCryptoExchange ? `${p.symbol}USDT` : p.symbol,
+        price: p.currentPrice,
+        change24h: 0, // Not available in positions, would need separate call
+        changePercent24h: p.pnlPercent || 0,
+      }));
+
+      return {
+        success: true,
+        data: {
+          balance,
+          positions,
+          orders: (orders as any[]).slice(0, 50), // Limit orders for dashboard
+          portfolio,
+          prices,
+        },
+        last_updated: new Date().toISOString(),
+        cached: isCached, // Indicate if data came from cache
+      };
+    } catch (error) {
+      this.logger.error(`Dashboard error for ${connectionId}:`, error?.stack || error);
+      throw error;
     }
-
-    const exchangeName = connection.exchange.name.toLowerCase();
-    
-    // OPTIMIZATION: Check if all data is cached before syncing
-    // This prevents unnecessary API calls to external exchanges
-    const isCached = this.exchangesService.isDashboardDataCached(connectionId, exchangeName);
-    
-    // Only sync if cache is missing (saves external API calls)
-    if (!isCached) {
-      await this.exchangesService.syncConnectionData(connectionId);
-    }
-
-    const [balance, positions, orders, portfolio] = await Promise.all([
-      this.exchangesService.getConnectionData(connectionId, 'balance'),
-      this.exchangesService.getConnectionData(connectionId, 'positions'),
-      this.exchangesService.getConnectionData(connectionId, 'orders'),
-      this.exchangesService.getConnectionData(connectionId, 'portfolio'),
-    ]);
-
-    // OPTIMIZATION: Reuse prices from positions (already fetched during sync)
-    // Only fetch additional prices if needed for symbols not in positions
-    const topPositions = (positions as any[]).slice(0, 10);
-    const positionSymbols = new Set(topPositions.map((p) => `${p.symbol}USDT`));
-    
-    // Prices are already in positions data, extract them
-    const prices = topPositions.map((p) => ({
-      symbol: `${p.symbol}USDT`,
-      price: p.currentPrice,
-      change24h: 0, // Not available in positions, would need separate call
-      changePercent24h: p.pnlPercent || 0,
-    }));
-
-    return {
-      success: true,
-      data: {
-        balance,
-        positions,
-        orders: (orders as any[]).slice(0, 50), // Limit orders for dashboard
-        portfolio,
-        prices,
-      },
-      last_updated: new Date().toISOString(),
-      cached: isCached, // Indicate if data came from cache
-    };
   }
 
   @Get('connections/:connectionId/orderbook/:symbol')
