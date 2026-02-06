@@ -264,6 +264,65 @@ export class ExchangesService {
     const apiKeyEncrypted = this.encryptionService.encryptApiKey(data.api_key);
     const apiSecretEncrypted = this.encryptionService.encryptApiKey(data.api_secret);
 
+    // Check if there's an existing connection for this user and exchange
+    const existingConnection = await this.prisma.user_exchange_connections.findFirst({
+      where: {
+        user_id: data.user_id,
+        exchange_id: data.exchange_id,
+      },
+      orderBy: {
+        created_at: 'desc',
+      },
+    });
+
+    // If there's an existing connection (regardless of status), update it with new credentials
+    if (existingConnection) {
+      this.logger.log(`Updating existing connection ${existingConnection.connection_id} (status: ${existingConnection.status}) with new credentials (key starts with: ${data.api_key.substring(0, 2)}...)`);
+      
+      // First, mark all other connections for this exchange as invalid to avoid conflicts
+      await this.prisma.user_exchange_connections.updateMany({
+        where: {
+          user_id: data.user_id,
+          exchange_id: data.exchange_id,
+          connection_id: {
+            not: existingConnection.connection_id,
+          },
+        },
+        data: {
+          status: ConnectionStatus.invalid,
+        },
+      });
+      
+      return this.prisma.user_exchange_connections.update({
+        where: { connection_id: existingConnection.connection_id },
+        data: {
+          api_key_encrypted: apiKeyEncrypted,
+          api_secret_encrypted: apiSecretEncrypted,
+          status: ConnectionStatus.active, // Set to active since keys are pre-verified
+          connection_metadata: {
+            enable_trading: data.enable_trading,
+            verified_at: new Date().toISOString(),
+          },
+          updated_at: new Date(),
+        },
+        include: { exchange: true },
+      });
+    }
+
+    // Create new connection if none exists (and mark any orphaned ones as invalid)
+    this.logger.log(`Creating new connection for user ${data.user_id} and exchange ${data.exchange_id}`);
+    
+    // Mark any old connections for this exchange as invalid
+    await this.prisma.user_exchange_connections.updateMany({
+      where: {
+        user_id: data.user_id,
+        exchange_id: data.exchange_id,
+      },
+      data: {
+        status: ConnectionStatus.invalid,
+      },
+    });
+    
     return this.prisma.user_exchange_connections.create({
       data: {
         user_id: data.user_id,
@@ -271,9 +330,10 @@ export class ExchangesService {
         auth_type: data.auth_type,
         api_key_encrypted: apiKeyEncrypted,
         api_secret_encrypted: apiSecretEncrypted,
-        status: ConnectionStatus.pending,
+        status: ConnectionStatus.active, // Set to active since keys are pre-verified
         connection_metadata: {
           enable_trading: data.enable_trading,
+          verified_at: new Date().toISOString(),
         },
       },
       include: { exchange: true },
@@ -363,8 +423,14 @@ export class ExchangesService {
       include: { exchange: true },
     });
 
-    if (!connection || connection.status !== ConnectionStatus.active) {
-      throw new ConnectionNotFoundException('Connection not found or not active');
+    if (!connection) {
+      this.logger.error(`Connection ${connectionId} not found in database`);
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    if (connection.status !== ConnectionStatus.active) {
+      this.logger.error(`Connection ${connectionId} has status: ${connection.status}, expected: active`);
+      throw new ConnectionNotFoundException(`Connection status is ${connection.status}. Please reconnect your exchange account.`);
     }
 
     if (!connection.api_key_encrypted || !connection.api_secret_encrypted) {
@@ -419,6 +485,7 @@ export class ExchangesService {
         portfolio = this.bybitService.calculatePortfolioFromPositions(positions);
       } else if (isAlpaca) {
         // Alpaca: fetch account info, positions and orders
+        console.log(`[SYNC] Syncing Alpaca connection ${connectionId}, API Key starts with: ${apiKey.substring(0, 2)}...`);
         const accountInfo = await this.alpacaService.getAccountInfo(apiKey, apiSecret);
         const positionsRaw = await this.alpacaService.getPositions(apiKey, apiSecret);
         const ordersRaw = await this.alpacaService.getOrders(apiKey, apiSecret);
@@ -505,7 +572,21 @@ export class ExchangesService {
         },
       });
     } catch (error) {
+      console.error(`[SYNC] Failed to sync connection data for ${connectionId}:`, error?.message);
       this.logger.error(`Failed to sync connection data for ${connectionId}`, error);
+      
+      // Check if it's an authentication error - log but don't mark as invalid for now
+      if (error?.response?.status === 401 || error?.status === 401) {
+        console.error(`[SYNC] 401 Unauthorized error - API credentials may be invalid`);
+        // Temporarily disabled: Don't mark as invalid to allow retry
+        // await this.prisma.user_exchange_connections.update({
+        //   where: { connection_id: connectionId },
+        //   data: { status: ConnectionStatus.invalid },
+        // }).catch(err => this.logger.error('Failed to update connection status', err));
+        
+        throw new Error('API credentials are invalid or expired. Please check your Alpaca API keys.');
+      }
+      
       throw error;
     }
   }

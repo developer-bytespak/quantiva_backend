@@ -548,13 +548,40 @@ export class AlpacaPaperTradingService {
     after?: string;
     until?: string;
   }): Promise<any[]> {
-    // Get FILL activities (completed trades)
-    const activities = await this.getAccountActivities(['FILL'], {
-      direction: 'desc',
-      page_size: params?.limit || 500,
-      after: params?.after,
-      until: params?.until,
-    });
+    // Get ALL FILL activities by paginating through results
+    // Alpaca uses cursor-based pagination with page_token
+    const allActivities: any[] = [];
+    let pageToken: string | undefined;
+    const pageSize = 100; // Alpaca max per page
+    const maxPages = 50; // Safety limit to prevent infinite loops (5000 activities max)
+    let pageCount = 0;
+
+    do {
+      const response = await this.apiClient.get('/v2/account/activities/FILL', {
+        params: {
+          direction: 'desc',
+          page_size: pageSize,
+          page_token: pageToken,
+          after: params?.after,
+          until: params?.until,
+        },
+      });
+
+      const activities = response.data || [];
+      allActivities.push(...activities);
+
+      // Alpaca returns next page token in the last activity's id
+      // If we got fewer results than page size, we've reached the end
+      if (activities.length < pageSize) {
+        break;
+      }
+
+      // Use the last activity's id as the page token for next request
+      pageToken = activities[activities.length - 1]?.id;
+      pageCount++;
+    } while (pageToken && pageCount < maxPages);
+
+    const activities = allActivities;
 
     // Group trades by symbol to match BUY/SELL pairs
     const tradesBySymbol: { [symbol: string]: any[] } = {};
@@ -639,10 +666,68 @@ export class AlpacaPaperTradingService {
       }
     }
     
-    // Sort by exit time (most recent first)
-    closedTrades.sort((a, b) => new Date(b.exitTime).getTime() - new Date(a.exitTime).getTime());
+    // Consolidate trades that share the same exit (same symbol + exitPrice + exitTime rounded to minute)
+    // This groups multiple BUY orders sold in a single SELL into one trade entry
+    // Alpaca may split fills into multiple activities with different IDs, so we group by price+time
+    const consolidatedTrades: any[] = [];
+    const tradesByExitOrder: { [key: string]: any[] } = {};
     
-    return closedTrades;
+    closedTrades.forEach(trade => {
+      // Round exit time to the minute to group fills from the same order
+      const exitDate = new Date(trade.exitTime);
+      const roundedExitTime = new Date(
+        exitDate.getFullYear(),
+        exitDate.getMonth(),
+        exitDate.getDate(),
+        exitDate.getHours(),
+        exitDate.getMinutes()
+      ).toISOString();
+      
+      // Group by symbol + exit price + rounded exit time
+      const key = `${trade.symbol}_${trade.exitPrice}_${roundedExitTime}`;
+      if (!tradesByExitOrder[key]) {
+        tradesByExitOrder[key] = [];
+      }
+      tradesByExitOrder[key].push(trade);
+    });
+    
+    for (const trades of Object.values(tradesByExitOrder)) {
+      if (trades.length === 1) {
+        consolidatedTrades.push(trades[0]);
+      } else {
+        // Consolidate multiple trades into one
+        const totalQty = trades.reduce((sum, t) => sum + t.quantity, 0);
+        const totalPL = trades.reduce((sum, t) => sum + t.profitLoss, 0);
+        const totalCost = trades.reduce((sum, t) => sum + (t.entryPrice * t.quantity), 0);
+        const avgEntryPrice = totalCost / totalQty;
+        const avgPLPercent = ((trades[0].exitPrice - avgEntryPrice) / avgEntryPrice) * 100;
+        
+        // Use earliest entry time for duration calculation
+        const earliestEntry = trades.reduce((earliest, t) => 
+          new Date(t.entryTime) < new Date(earliest.entryTime) ? t : earliest
+        );
+        
+        consolidatedTrades.push({
+          id: trades.map(t => t.id).join('_'),
+          symbol: trades[0].symbol,
+          entryPrice: Math.round(avgEntryPrice * 100) / 100, // Round to 2 decimals
+          exitPrice: trades[0].exitPrice,
+          quantity: totalQty,
+          profitLoss: Math.round(totalPL * 100) / 100,
+          profitLossPercent: Math.round(avgPLPercent * 100) / 100,
+          entryTime: earliestEntry.entryTime,
+          exitTime: trades[0].exitTime,
+          duration: earliestEntry.duration,
+          entryOrderId: trades.map(t => t.entryOrderId).join(','),
+          exitOrderId: trades[0].exitOrderId,
+        });
+      }
+    }
+    
+    // Sort by exit time (most recent first)
+    consolidatedTrades.sort((a, b) => new Date(b.exitTime).getTime() - new Date(a.exitTime).getTime());
+    
+    return consolidatedTrades;
   }
 
   /**

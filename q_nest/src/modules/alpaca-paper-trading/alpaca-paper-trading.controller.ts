@@ -420,13 +420,15 @@ export class AlpacaPaperTradingController {
   }
 
   /**
-   * Get trade history with realized P&L (crypto only)
+   * Get trade history with realized P&L
+   * @param type - 'stock' for stocks only, 'crypto' for crypto only, 'all' for both (default: 'all')
    */
   @Get('trade-history')
   async getTradeHistory(
     @Query('limit') limit?: string,
     @Query('after') after?: string,
     @Query('until') until?: string,
+    @Query('type') type?: 'stock' | 'crypto' | 'all',
   ) {
     try {
       const allHistory = await this.alpacaService.getTradeHistory({
@@ -435,8 +437,16 @@ export class AlpacaPaperTradingController {
         until,
       });
       
-      // Filter for crypto only (symbols with /)
-      const history = allHistory.filter(trade => trade.symbol.includes('/'));
+      // Filter based on type parameter
+      let history = allHistory;
+      if (type === 'crypto') {
+        // Crypto symbols contain '/'
+        history = allHistory.filter(trade => trade.symbol.includes('/'));
+      } else if (type === 'stock') {
+        // Stock symbols don't contain '/'
+        history = allHistory.filter(trade => !trade.symbol.includes('/'));
+      }
+      // 'all' or undefined returns everything
       
       // Calculate summary statistics
       const totalProfitLoss = history.reduce((sum, trade) => sum + trade.profitLoss, 0);
@@ -452,9 +462,9 @@ export class AlpacaPaperTradingController {
           totalTrades: history.length,
           profitableTrades,
           losingTrades,
-          totalProfitLoss,
-          winRate,
-          avgProfit,
+          totalProfitLoss: Math.round(totalProfitLoss * 100) / 100, // Round to 2 decimals
+          winRate: Math.round(winRate * 10) / 10, // Round to 1 decimal
+          avgProfit: Math.round(avgProfit * 100) / 100, // Round to 2 decimals
         },
       };
     } catch (error: any) {

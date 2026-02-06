@@ -77,7 +77,14 @@ export class AlpacaService {
     accountType: string;
   }> {
     try {
-      const res = await this.getClient().get('/v2/account', {
+      // Detect if it's a paper or live key based on the key prefix
+      // Paper keys start with 'PK', live keys start with 'AK'
+      const isPaperKey = apiKey.startsWith('PK');
+      const client = isPaperKey ? this.paperApiClient : this.apiClient;
+      
+      this.logger.log(`Verifying Alpaca ${isPaperKey ? 'paper' : 'live'} trading key`);
+      
+      const res = await client.get('/v2/account', {
         headers: this.getAuthHeaders(apiKey, apiSecret),
       });
 
@@ -98,10 +105,24 @@ export class AlpacaService {
    * Get account information including balance
    */
   async getAccountInfo(apiKey?: string, apiSecret?: string): Promise<any> {
-    const res = await this.getClient().get('/v2/account', {
-      headers: this.getAuthHeaders(apiKey, apiSecret),
-    });
-    return res.data;
+    // Detect if it's a paper or live key based on the key prefix
+    const keyToUse = apiKey || this.apiKey;
+    const isPaperKey = keyToUse?.startsWith('PK');
+    const client = isPaperKey ? this.paperApiClient : this.apiClient;
+    
+    console.log(`[ALPACA] Fetching account info using ${isPaperKey ? 'paper' : 'live'} endpoint (key: ${keyToUse?.substring(0, 2)}...)`);
+    
+    try {
+      const res = await client.get('/v2/account', {
+        headers: this.getAuthHeaders(apiKey, apiSecret),
+      });
+      console.log(`[ALPACA] Account info fetched successfully`);
+      return res.data;
+    } catch (error: any) {
+      console.error(`[ALPACA] getAccountInfo FAILED: Status ${error?.response?.status}, Data:`, error?.response?.data);
+      this.logger.error(`Alpaca getAccountInfo failed: ${error?.response?.status} - ${JSON.stringify(error?.response?.data)}`, error?.stack);
+      throw error;
+    }
   }
 
   /**
@@ -122,10 +143,20 @@ export class AlpacaService {
   }
 
   /**
+   * Get the appropriate API client based on API key prefix
+   */
+  private getClientForKey(apiKey?: string): AxiosInstance {
+    const keyToUse = apiKey || this.apiKey;
+    const isPaperKey = keyToUse?.startsWith('PK');
+    return isPaperKey ? this.paperApiClient : this.apiClient;
+  }
+
+  /**
    * Get all positions
    */
   async getPositions(apiKey?: string, apiSecret?: string): Promise<any[]> {
-    const res = await this.getClient().get('/v2/positions', {
+    const client = this.getClientForKey(apiKey);
+    const res = await client.get('/v2/positions', {
       headers: this.getAuthHeaders(apiKey, apiSecret),
     });
     return res.data || [];
@@ -135,7 +166,8 @@ export class AlpacaService {
    * Get orders with optional filters
    */
   async getOrders(apiKey?: string, apiSecret?: string, status = 'open'): Promise<any[]> {
-    const res = await this.getClient().get('/v2/orders', {
+    const client = this.getClientForKey(apiKey);
+    const res = await client.get('/v2/orders', {
       headers: this.getAuthHeaders(apiKey, apiSecret),
       params: {
         status,
@@ -149,7 +181,8 @@ export class AlpacaService {
    * Get all orders (closed and open)
    */
   async getAllOrders(options?: { limit?: number }): Promise<any[]> {
-    const res = await this.getClient().get('/v2/orders', {
+    const client = this.getClientForKey();
+    const res = await client.get('/v2/orders', {
       headers: this.getAuthHeaders(),
       params: {
         status: 'all',
