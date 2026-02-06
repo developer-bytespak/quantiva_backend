@@ -10,11 +10,11 @@ from datetime import datetime, timezone
 from src.config import LUNARCRUSH_API_KEY
 
 try:
-    from src.services.llm.gemini_adapter import GeminiAdapter
-    GEMINI_AVAILABLE = True
+    from src.services.llm.openai_news_adapter import OpenAINewsAdapter
+    OPENAI_AVAILABLE = True
 except Exception as e:
-    GEMINI_AVAILABLE = False
-    logging.getLogger(__name__).warning(f"Gemini not available for news description generation: {str(e)}")
+    OPENAI_AVAILABLE = False
+    logging.getLogger(__name__).warning(f"OpenAI not available for news description generation: {str(e)}")
 
 logger = logging.getLogger(__name__)
 
@@ -32,20 +32,20 @@ class LunarCrushService:
         self.logger = logging.getLogger(__name__)
         self.api_key = LUNARCRUSH_API_KEY
         
-        # Initialize Gemini for news description generation
-        self.gemini_adapter = None
-        if GEMINI_AVAILABLE:
+        # Initialize OpenAI for news description generation
+        self.openai_adapter = None
+        if OPENAI_AVAILABLE:
             try:
-                self.gemini_adapter = GeminiAdapter()
-                self.logger.info("Gemini adapter initialized for news description generation")
+                self.openai_adapter = OpenAINewsAdapter()
+                self.logger.info("OpenAI adapter initialized for news description generation")
             except Exception as e:
-                self.logger.warning(f"Failed to initialize Gemini adapter: {str(e)}")
+                self.logger.warning(f"Failed to initialize OpenAI adapter: {str(e)}")
         
-        # Simple in-memory cache (5 minutes TTL for social metrics, 1 minute for news)
+        # Simple in-memory cache (increased TTL to reduce API calls on free tier)
         self._social_metrics_cache: Dict[str, tuple] = {}  # {symbol: (data, timestamp)}
         self._news_cache: Dict[str, tuple] = {}  # {symbol: (data, timestamp)}
-        self.SOCIAL_METRICS_TTL = 5 * 60  # 5 minutes
-        self.NEWS_TTL = 1 * 60  # 1 minute
+        self.SOCIAL_METRICS_TTL = 30 * 60  # 30 minutes (increased from 5 to reduce API calls)
+        self.NEWS_TTL = 15 * 60  # 15 minutes (increased from 1 to reduce API calls)
         
         # Rate limiting: track last request time and wait if needed
         self._last_request_time = 0
@@ -86,48 +86,24 @@ class LunarCrushService:
         for key in expired_keys:
             del self._news_cache[key]
     
-    def _generate_description_with_gemini(self, title: str, symbol: str) -> str:
+    def _generate_description_with_openai(self, title: str, symbol: str) -> str:
         """
-        Generate a brief news description using Gemini API.
-        
+        Generate a brief news description using OpenAI API.
         Args:
             title: News title
             symbol: Cryptocurrency symbol (e.g., BTC, ETH)
-        
         Returns:
             Generated description or empty string if generation fails
         """
-        if not self.gemini_adapter:
+        if not self.openai_adapter:
             return ""
-        
         try:
-            prompt = f"""Generate a brief, factual news description (1-2 sentences, max 120 characters) for this cryptocurrency news headline.
-
-Cryptocurrency: {symbol}
-Title: {title}
-
-Guidelines:
-- Be concise and professional
-- Avoid speculation
-- Focus on the main news point
-- Return ONLY the description, no other text"""
-            
-            response = self.gemini_adapter.model.generate_content(
-                prompt,
-                generation_config={
-                    "temperature": 0.5,
-                    "max_output_tokens": 200,
-                }
-            )
-            
-            if response and response.text:
-                description = response.text.strip()
-                # Truncate to 200 chars to be safe
-                return description[:200] if len(description) > 200 else description
+            description = self.openai_adapter.generate_description(title, symbol)
+            if description:
+                return description
             return ""
-            
         except Exception as e:
-            self.logger.warning(f"Failed to generate description for '{title}': {str(e)}")
+            self.logger.warning(f"Failed to generate description for '{title}' using OpenAI: {str(e)}")
             return ""
         # Clean news cache
         expired_keys = [
@@ -244,19 +220,19 @@ Guidelines:
                         self.logger.debug(f"Skipping article with no title: {article.keys()}")
                         continue
 
-                    # Retry Gemini up to 3 times
+                    # Retry OpenAI up to 3 times
                     description = ""
                     max_retries = 3
                     for attempt in range(max_retries):
-                        description = self._generate_description_with_gemini(title, symbol)
+                        description = self._generate_description_with_openai(title, symbol)
                         if description:
                             break
                         else:
-                            self.logger.warning(f"Gemini failed to generate description for '{title}' (attempt {attempt+1}/{max_retries})")
+                            self.logger.warning(f"OpenAI failed to generate description for '{title}' (attempt {attempt+1}/{max_retries})")
                             time.sleep(2 ** attempt)  # Exponential backoff
 
                     if not description:
-                        self.logger.warning(f"Skipping article for {symbol} because Gemini could not generate a description after {max_retries} attempts: {title}")
+                        self.logger.warning(f"Skipping article for {symbol} because OpenAI could not generate a description after {max_retries} attempts: {title}")
                         continue
 
                     news_items.append({
