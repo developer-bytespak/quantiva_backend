@@ -4,12 +4,13 @@ import axios, { AxiosInstance } from 'axios';
 /**
  * Alpaca supported cryptocurrencies (base symbols without /USD)
  * These are the crypto assets available for trading on Alpaca
+ * Note: TRX removed as it's not active for trading
  */
 export const ALPACA_SUPPORTED_CRYPTO = [
   'BTC', 'ETH', 'LTC', 'BCH', 'USDT', 'USDC', 'XRP', 'DOGE', 
   'SHIB', 'MATIC', 'UNI', 'AAVE', 'LINK', 'MKR', 'ALGO', 
-  'AVAX', 'DOT', 'SOL', 'ADA', 'TRX', 'XLM', 'ETC', 'FIL',
-  'GRT', 'SUSHI', 'YFI', 'BAT', 'CRV'
+  'AVAX', 'DOT', 'SOL', 'ADA', 'XLM', 'ETC', 'FIL',
+  'GRT', 'SUSHI', 'YFI', 'BAT', 'CRV', 'ATOM'
 ];
 
 @Injectable()

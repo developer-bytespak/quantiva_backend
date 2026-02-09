@@ -403,10 +403,14 @@ export class AlpacaPaperTradingService {
    * Place a new order
    */
   async placeOrder(params: PlaceOrderParams): Promise<AlpacaOrder> {
-    this.logger.log(`Placing order: ${params.side} ${params.qty || params.notional} ${params.symbol} @ ${params.type}`);
+    // Convert symbol to Alpaca format if needed (BTCUSDT -> BTC/USD)
+    const alpacaSymbol = this.convertToAlpacaSymbol(params.symbol);
+    
+    this.logger.log(`📝 Order symbol conversion: ${params.symbol} -> ${alpacaSymbol}`);
+    this.logger.log(`Placing order: ${params.side} ${params.qty || params.notional} ${alpacaSymbol} @ ${params.type}`);
 
     const orderData: any = {
-      symbol: params.symbol,
+      symbol: alpacaSymbol,
       side: params.side,
       type: params.type,
       time_in_force: params.time_in_force,
@@ -731,6 +735,40 @@ export class AlpacaPaperTradingService {
   }
 
   /**
+   * Convert symbol to Alpaca format
+   * BTCUSDT -> BTC/USD
+   * ETHUSDT -> ETH/USD
+   * BTC/USD -> BTC/USD (already correct)
+   * AAPL -> AAPL (stocks remain unchanged)
+   */
+  private convertToAlpacaSymbol(symbol: string): string {
+    // If already in Alpaca format (contains /), return as-is
+    if (symbol.includes('/')) {
+      return symbol;
+    }
+
+    const upperSymbol = symbol.toUpperCase();
+
+    // Handle crypto pairs ending with USDT, USDC, or USD
+    if (upperSymbol.endsWith('USDT')) {
+      return upperSymbol.replace('USDT', '/USD');
+    }
+    if (upperSymbol.endsWith('USDC')) {
+      return upperSymbol.replace('USDC', '/USD');
+    }
+    if (upperSymbol.endsWith('USD') && upperSymbol.length > 3) {
+      // Only if it's not just "USD" itself
+      const base = upperSymbol.slice(0, -3);
+      if (base.length >= 2) { // Reasonable crypto symbol length
+        return `${base}/USD`;
+      }
+    }
+
+    // Stock symbols remain unchanged
+    return symbol;
+  }
+
+  /**
    * Get trading calendar
    */
   async getCalendar(start?: string, end?: string): Promise<{
@@ -745,11 +783,11 @@ export class AlpacaPaperTradingService {
   }
 
   /**
-   * Get latest quotes for symbols (for price lookup)
+   * Get latest quotes for symbols (for price lookup - stocks only)
    */
   async getLatestQuotes(symbols: string[]): Promise<Record<string, { ap: string; bp: string; as: number; bs: number }>> {
     try {
-      // Alpaca Market Data API for quotes
+      // Alpaca Market Data API for stock quotes
       const dataClient = axios.create({
         baseURL: 'https://data.alpaca.markets',
         timeout: 30000,
@@ -771,6 +809,49 @@ export class AlpacaPaperTradingService {
     } catch (error: any) {
       this.logger.error(`Failed to get quotes: ${error?.message}`);
       return {};
+    }
+  }
+
+  /**
+   * Get latest crypto quote for a single symbol
+   */
+  async getCryptoQuote(symbol: string): Promise<{ ap: string; bp: string; t: string } | null> {
+    try {
+      // Alpaca Market Data API for crypto - use latest trades endpoint
+      const dataClient = axios.create({
+        baseURL: 'https://data.alpaca.markets',
+        timeout: 30000,
+        headers: {
+          'APCA-API-KEY-ID': this.configService.get<string>('ALPACA_PAPER_API_KEY') 
+            || this.configService.get<string>('ALPACA_API_KEY') || '',
+          'APCA-API-SECRET-KEY': this.configService.get<string>('ALPACA_PAPER_SECRET_KEY') 
+            || this.configService.get<string>('ALPACA_SECRET_KEY') || '',
+        },
+      });
+
+      // Use latest trades endpoint for crypto (more reliable than quotes)
+      const response = await dataClient.get(`/v1beta3/crypto/us/latest/trades`, {
+        params: {
+          symbols: symbol,
+        },
+      });
+
+      const trades = response.data?.trades || {};
+      const trade = trades[symbol];
+      
+      if (trade && trade.p) {
+        // Return trade price as both ask and bid (crypto doesn't have spread like stocks)
+        return {
+          ap: trade.p.toString(), // ask price
+          bp: trade.p.toString(), // bid price
+          t: trade.t || new Date().toISOString(),
+        };
+      }
+      
+      return null;
+    } catch (error: any) {
+      this.logger.error(`Failed to get crypto quote for ${symbol}: ${error?.message}`);
+      return null;
     }
   }
 

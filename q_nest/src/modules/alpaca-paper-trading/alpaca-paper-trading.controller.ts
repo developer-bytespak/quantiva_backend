@@ -143,6 +143,41 @@ export class AlpacaPaperTradingController {
   }
 
   /**
+   * Get latest quote for a symbol
+   */
+  @Get('quote/:symbol')
+  async getQuote(@Param('symbol') symbol: string) {
+    try {
+      // Convert symbol to Alpaca format if needed (BTCUSDT -> BTC/USD)
+      let alpacaSymbol = symbol.toUpperCase();
+      if (!alpacaSymbol.includes('/')) {
+        // Remove USDT/USDC suffixes and add /USD
+        alpacaSymbol = alpacaSymbol.replace(/USDT?$/g, '').replace(/USDC$/g, '') + '/USD';
+      }
+      
+      this.logger.log(`📊 Getting quote for ${symbol} -> ${alpacaSymbol}`);
+      
+      const quotes = await this.alpacaService.getLatestQuotes([alpacaSymbol]);
+      const quote = quotes[alpacaSymbol];
+      
+      if (!quote) {
+        throw new HttpException(`Quote not found for ${alpacaSymbol}`, HttpStatus.NOT_FOUND);
+      }
+      
+      return {
+        success: true,
+        data: quote,
+      };
+    } catch (error: any) {
+      this.logger.error(`Failed to get quote for ${symbol}: ${error?.message}`);
+      throw new HttpException(
+        error?.response?.data?.message || error?.message || 'Failed to get quote',
+        error?.response?.status || HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
    * Close a position
    */
   @Delete('positions/:symbol')
@@ -437,14 +472,21 @@ export class AlpacaPaperTradingController {
         until,
       });
       
+      this.logger.log(`📊 Trade History - Total trades: ${allHistory.length}`);
+      if (allHistory.length > 0) {
+        this.logger.log(`📊 Sample symbols: ${allHistory.slice(0, 5).map(t => t.symbol).join(', ')}`);
+      }
+      
       // Filter based on type parameter
       let history = allHistory;
       if (type === 'crypto') {
         // Crypto symbols contain '/'
         history = allHistory.filter(trade => trade.symbol.includes('/'));
+        this.logger.log(`📊 Crypto trades filtered: ${history.length} out of ${allHistory.length}`);
       } else if (type === 'stock') {
         // Stock symbols don't contain '/'
         history = allHistory.filter(trade => !trade.symbol.includes('/'));
+        this.logger.log(`📊 Stock trades filtered: ${history.length} out of ${allHistory.length}`);
       }
       // 'all' or undefined returns everything
       
