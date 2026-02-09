@@ -38,6 +38,9 @@ const RISK_EXIT_LEVELS: Record<string, RiskExitLevels> = {
 export class AutoTradingExecutionService {
   private readonly logger = new Logger(AutoTradingExecutionService.name);
 
+  // Maximum trades per cycle (4 trades for 4 different crypto coins)
+  private readonly MAX_TRADES_PER_CYCLE = 4;
+
   // Cache for assets (stocks + crypto) and strategies
   private assetsCache: Asset[] = [];
   private strategiesCache: Strategy[] = [];
@@ -86,11 +89,21 @@ export class AutoTradingExecutionService {
 
       this.sessionService.addAiMessage(`Found ${strategies.length} active strategies to process`, 'info');
 
-      // Execute one trade per strategy
-      for (const strategy of strategies) {
+      // Execute exactly 4 trades for crypto (one per strategy, up to MAX_TRADES_PER_CYCLE)
+      const tradesToExecute = Math.min(strategies.length, this.MAX_TRADES_PER_CYCLE);
+      this.logger.log(`Executing ${tradesToExecute} crypto trades`);
+      
+      // Track used crypto symbols to ensure no duplicates
+      const usedCryptoSymbols = new Set<string>();
+
+      for (let i = 0; i < tradesToExecute; i++) {
+        const strategy = strategies[i];
         try {
-          await this.executeSingleStrategyTrade(strategy);
-          tradesExecuted++;
+          const trade = await this.executeSingleCryptoTrade(strategy, usedCryptoSymbols);
+          if (trade) {
+            tradesExecuted++;
+            usedCryptoSymbols.add(trade.symbol.split('/')[0]); // Add base symbol (e.g., 'BTC' from 'BTC/USD')
+          }
           
           // Small delay between trades
           await this.delay(1000);
@@ -119,15 +132,17 @@ export class AutoTradingExecutionService {
   }
 
   /**
-   * Execute a single trade for a specific strategy
+   * Execute a single crypto trade for a specific strategy
+   * Ensures the selected crypto hasn't been used in this cycle
    */
-  private async executeSingleStrategyTrade(strategy: Strategy): Promise<AutoTradeRecord | null> {
+  private async executeSingleCryptoTrade(strategy: Strategy, usedSymbols: Set<string>): Promise<AutoTradeRecord | null> {
     this.sessionService.addAiMessage(`Processing strategy: ${strategy.name}`, 'info');
 
-    // Pick a random asset (stock or crypto)
-    const asset = this.pickRandomAsset();
+    // Pick a random CRYPTO asset that hasn't been used yet
+    const asset = this.pickRandomCryptoAsset(usedSymbols);
     if (!asset) {
-      throw new Error('No assets available');
+      this.logger.warn('No available crypto assets or all have been used in this cycle');
+      return null;
     }
     
     // Convert symbol to Alpaca format if crypto (BTCUSDT -> BTC/USD)
@@ -321,7 +336,33 @@ export class AutoTradingExecutionService {
   }
 
   /**
-   * Pick a random asset (stock or crypto) from cache
+   * Pick a random crypto asset that hasn't been used yet in this cycle
+   */
+  private pickRandomCryptoAsset(usedSymbols: Set<string>): Asset | null {
+    // Filter to only crypto assets
+    const cryptoAssets = this.assetsCache.filter(asset => asset.asset_type === 'crypto');
+    
+    if (cryptoAssets.length === 0) {
+      return null;
+    }
+    
+    // Filter out already used symbols in this cycle
+    const availableAssets = cryptoAssets.filter(asset => {
+      const baseSymbol = asset.symbol.replace(/USDT?$/, '');
+      return !usedSymbols.has(baseSymbol);
+    });
+    
+    if (availableAssets.length === 0) {
+      this.logger.warn('All crypto assets have been used in this cycle');
+      return null;
+    }
+    
+    const index = Math.floor(Math.random() * availableAssets.length);
+    return availableAssets[index];
+  }
+
+  /**
+   * Pick a random asset (stock or crypto) from cache - kept for backward compatibility
    */
   private pickRandomAsset(): Asset | null {
     if (this.assetsCache.length === 0) {
@@ -584,6 +625,7 @@ export class AutoTradingExecutionService {
 
   /**
    * Execute a manual trade trigger (for testing)
+   * Uses crypto-only trading to match the automated behavior
    */
   async executeManualTrade(): Promise<{ success: boolean; trade?: AutoTradeRecord; error?: string }> {
     if (!this.sessionService.isTradeAllowed()) {
@@ -601,7 +643,8 @@ export class AutoTradingExecutionService {
     const strategy = strategies[Math.floor(Math.random() * strategies.length)];
 
     try {
-      const trade = await this.executeSingleStrategyTrade(strategy);
+      // Use crypto-specific trade with empty used symbols set
+      const trade = await this.executeSingleCryptoTrade(strategy, new Set<string>());
       return { success: true, trade: trade || undefined };
     } catch (error: any) {
       return { success: false, error: error?.message };

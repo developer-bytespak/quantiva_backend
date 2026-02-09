@@ -403,10 +403,14 @@ export class AlpacaPaperTradingService {
    * Place a new order
    */
   async placeOrder(params: PlaceOrderParams): Promise<AlpacaOrder> {
-    this.logger.log(`Placing order: ${params.side} ${params.qty || params.notional} ${params.symbol} @ ${params.type}`);
+    // Convert symbol to Alpaca format if needed (BTCUSDT -> BTC/USD)
+    const alpacaSymbol = this.convertToAlpacaSymbol(params.symbol);
+    
+    this.logger.log(`📝 Order symbol conversion: ${params.symbol} -> ${alpacaSymbol}`);
+    this.logger.log(`Placing order: ${params.side} ${params.qty || params.notional} ${alpacaSymbol} @ ${params.type}`);
 
     const orderData: any = {
-      symbol: params.symbol,
+      symbol: alpacaSymbol,
       side: params.side,
       type: params.type,
       time_in_force: params.time_in_force,
@@ -728,6 +732,40 @@ export class AlpacaPaperTradingService {
     consolidatedTrades.sort((a, b) => new Date(b.exitTime).getTime() - new Date(a.exitTime).getTime());
     
     return consolidatedTrades;
+  }
+
+  /**
+   * Convert symbol to Alpaca format
+   * BTCUSDT -> BTC/USD
+   * ETHUSDT -> ETH/USD
+   * BTC/USD -> BTC/USD (already correct)
+   * AAPL -> AAPL (stocks remain unchanged)
+   */
+  private convertToAlpacaSymbol(symbol: string): string {
+    // If already in Alpaca format (contains /), return as-is
+    if (symbol.includes('/')) {
+      return symbol;
+    }
+
+    const upperSymbol = symbol.toUpperCase();
+
+    // Handle crypto pairs ending with USDT, USDC, or USD
+    if (upperSymbol.endsWith('USDT')) {
+      return upperSymbol.replace('USDT', '/USD');
+    }
+    if (upperSymbol.endsWith('USDC')) {
+      return upperSymbol.replace('USDC', '/USD');
+    }
+    if (upperSymbol.endsWith('USD') && upperSymbol.length > 3) {
+      // Only if it's not just "USD" itself
+      const base = upperSymbol.slice(0, -3);
+      if (base.length >= 2) { // Reasonable crypto symbol length
+        return `${base}/USD`;
+      }
+    }
+
+    // Stock symbols remain unchanged
+    return symbol;
   }
 
   /**
