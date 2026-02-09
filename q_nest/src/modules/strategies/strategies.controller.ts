@@ -1048,7 +1048,7 @@ export class StrategiesController {
     
     return {
       success: true,
-      message: `Strategy is active. Signals will be generated automatically every 10 minutes (next run in ~${minutesUntilNextRun} minutes). ${existingSignals.length > 0 ? `Showing ${existingSignals.length} existing signals.` : 'No signals yet - check back after the next scheduled run.'}`,
+      message: `Strategy is active. Signals will be generated automatically every 10 minutes by ${assetType === 'stock' ? 'stock' : 'crypto'} signal processor (next run in ~${minutesUntilNextRun} minutes). ${existingSignals.length > 0 ? `Showing ${existingSignals.length} existing signals.` : 'No signals yet - check back after the next scheduled run.'}`,
       scheduled: true,
       nextRunInMinutes: minutesUntilNextRun,
       signalsGenerated: existingSignals.length,
