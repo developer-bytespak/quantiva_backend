@@ -783,11 +783,11 @@ export class AlpacaPaperTradingService {
   }
 
   /**
-   * Get latest quotes for symbols (for price lookup)
+   * Get latest quotes for symbols (for price lookup - stocks only)
    */
   async getLatestQuotes(symbols: string[]): Promise<Record<string, { ap: string; bp: string; as: number; bs: number }>> {
     try {
-      // Alpaca Market Data API for quotes
+      // Alpaca Market Data API for stock quotes
       const dataClient = axios.create({
         baseURL: 'https://data.alpaca.markets',
         timeout: 30000,
@@ -809,6 +809,49 @@ export class AlpacaPaperTradingService {
     } catch (error: any) {
       this.logger.error(`Failed to get quotes: ${error?.message}`);
       return {};
+    }
+  }
+
+  /**
+   * Get latest crypto quote for a single symbol
+   */
+  async getCryptoQuote(symbol: string): Promise<{ ap: string; bp: string; t: string } | null> {
+    try {
+      // Alpaca Market Data API for crypto - use latest trades endpoint
+      const dataClient = axios.create({
+        baseURL: 'https://data.alpaca.markets',
+        timeout: 30000,
+        headers: {
+          'APCA-API-KEY-ID': this.configService.get<string>('ALPACA_PAPER_API_KEY') 
+            || this.configService.get<string>('ALPACA_API_KEY') || '',
+          'APCA-API-SECRET-KEY': this.configService.get<string>('ALPACA_PAPER_SECRET_KEY') 
+            || this.configService.get<string>('ALPACA_SECRET_KEY') || '',
+        },
+      });
+
+      // Use latest trades endpoint for crypto (more reliable than quotes)
+      const response = await dataClient.get(`/v1beta3/crypto/us/latest/trades`, {
+        params: {
+          symbols: symbol,
+        },
+      });
+
+      const trades = response.data?.trades || {};
+      const trade = trades[symbol];
+      
+      if (trade && trade.p) {
+        // Return trade price as both ask and bid (crypto doesn't have spread like stocks)
+        return {
+          ap: trade.p.toString(), // ask price
+          bp: trade.p.toString(), // bid price
+          t: trade.t || new Date().toISOString(),
+        };
+      }
+      
+      return null;
+    } catch (error: any) {
+      this.logger.error(`Failed to get crypto quote for ${symbol}: ${error?.message}`);
+      return null;
     }
   }
 

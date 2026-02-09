@@ -99,17 +99,21 @@ export class AutoTradingExecutionService {
       for (let i = 0; i < tradesToExecute; i++) {
         const strategy = strategies[i];
         try {
+          this.logger.log(`Attempting trade ${i + 1}/${tradesToExecute} for strategy: ${strategy.name}`);
           const trade = await this.executeSingleCryptoTrade(strategy, usedCryptoSymbols);
           if (trade) {
             tradesExecuted++;
             usedCryptoSymbols.add(trade.symbol.split('/')[0]); // Add base symbol (e.g., 'BTC' from 'BTC/USD')
+            this.logger.log(`✅ Trade ${i + 1} executed successfully: ${trade.symbol}`);
+          } else {
+            this.logger.warn(`⚠️ Trade ${i + 1} returned null (no asset available)`);
           }
           
           // Small delay between trades
           await this.delay(1000);
         } catch (error: any) {
           const errorMsg = `Failed to execute trade for strategy ${strategy.name}: ${error?.message}`;
-          this.logger.error(errorMsg);
+          this.logger.error(`❌ Trade ${i + 1} failed: ${errorMsg}`);
           errors.push(errorMsg);
         }
       }
@@ -145,8 +149,11 @@ export class AutoTradingExecutionService {
       return null;
     }
     
+    this.logger.log(`Selected crypto asset: ${asset.symbol} (${asset.name || 'N/A'})`);
+    
     // Convert symbol to Alpaca format if crypto (BTCUSDT -> BTC/USD)
     const alpacaSymbol = this.convertToAlpacaSymbol(asset.symbol, asset.asset_type);
+    this.logger.log(`Alpaca symbol format: ${alpacaSymbol}`);
 
     // Get asset momentum to inform signal direction
     const momentum = await this.getStockMomentum(alpacaSymbol);
@@ -213,27 +220,39 @@ export class AutoTradingExecutionService {
     };
 
     try {
-      // Place BRACKET order via Alpaca (entry + automatic stop-loss + take-profit)
-      // This is OCO-like: when one exit condition hits, the other is cancelled
-      this.sessionService.addAiMessage(
-        `Placing bracket order: BUY ${alpacaSymbol} (${asset.asset_type}) | SL: $${stopLossPrice} (-${riskLevels.stopLossPercent}%) | TP: $${takeProfitPrice} (+${riskLevels.takeProfitPercent}%)`,
-        'info'
-      );
+      // Note: Bracket orders are NOT supported for crypto on Alpaca (stocks only)
+      // For crypto, we place simple market orders without automatic exits
+      const isCrypto = asset.asset_type === 'crypto';
       
-      const order = await this.alpacaService.placeOrder({
+      if (isCrypto) {
+        this.sessionService.addAiMessage(
+          `Placing BUY order: ${alpacaSymbol} (crypto) | Target SL: $${stopLossPrice} (-${riskLevels.stopLossPercent}%) | TP: $${takeProfitPrice} (+${riskLevels.takeProfitPercent}%)`,
+          'info'
+        );
+      } else {
+        this.sessionService.addAiMessage(
+          `Placing bracket order: BUY ${alpacaSymbol} (stock) | SL: $${stopLossPrice} (-${riskLevels.stopLossPercent}%) | TP: $${takeProfitPrice} (+${riskLevels.takeProfitPercent}%)`,
+          'info'
+        );
+      }
+      
+      // Build order params - bracket only for stocks
+      const orderParams: any = {
         symbol: alpacaSymbol,
         qty: qty,
         side: 'buy',
         type: 'market',
-        time_in_force: 'gtc', // Good-til-cancelled for bracket orders
-        order_class: 'bracket', // Enable OCO-like behavior
-        take_profit: {
-          limit_price: takeProfitPrice,
-        },
-        stop_loss: {
-          stop_price: stopLossPrice,
-        },
-      });
+        time_in_force: isCrypto ? 'gtc' : 'day',
+      };
+      
+      // Add bracket for stocks only (not supported for crypto)
+      if (!isCrypto) {
+        orderParams.order_class = 'bracket';
+        orderParams.take_profit = { limit_price: takeProfitPrice };
+        orderParams.stop_loss = { stop_price: stopLossPrice };
+      }
+      
+      const order = await this.alpacaService.placeOrder(orderParams);
 
       tradeRecord.orderId = order.id;
       tradeRecord.status = order.status === 'filled' ? 'filled' : 'pending';
@@ -247,9 +266,15 @@ export class AutoTradingExecutionService {
       // Record the trade in session
       this.sessionService.recordTrade(tradeRecord);
 
-      this.logger.log(
-        `Bracket order placed: BUY ${alpacaSymbol} (${asset.asset_type}) @ $${price}, SL: $${stopLossPrice}, TP: $${takeProfitPrice}, Order: ${order.id}`
-      );
+      if (isCrypto) {
+        this.logger.log(
+          `✅ Crypto market order placed: BUY ${alpacaSymbol} @ $${price} | Order: ${order.id} | Note: SL: $${stopLossPrice}, TP: $${takeProfitPrice} are TARGET prices only (not automatic - Alpaca doesn't support bracket orders for crypto)`
+        );
+      } else {
+        this.logger.log(
+          `✅ Bracket order placed: BUY ${alpacaSymbol} (stock) @ $${price}, SL: $${stopLossPrice}, TP: $${takeProfitPrice}, Order: ${order.id}`
+        );
+      }
 
       return tradeRecord;
     } catch (error: any) {
@@ -317,11 +342,19 @@ export class AutoTradingExecutionService {
       },
     });
     
+    this.logger.debug(`Found ${assets.length} total assets from database (before filtering)`);
+    const cryptoFromDb = assets.filter(a => a.asset_type === 'crypto');
+    this.logger.debug(`Found ${cryptoFromDb.length} crypto assets in database: ${cryptoFromDb.map(a => a.symbol).join(', ')}`);
+    
     // Filter crypto to only Alpaca-supported coins
     this.assetsCache = assets.filter(asset => {
       if (asset.asset_type === 'crypto') {
         const baseSymbol = asset.symbol.replace(/USDT?$/, '');
-        return ALPACA_SUPPORTED_CRYPTO.includes(baseSymbol);
+        const isSupported = ALPACA_SUPPORTED_CRYPTO.includes(baseSymbol);
+        if (!isSupported) {
+          this.logger.debug(`Filtering out ${asset.symbol} (base: ${baseSymbol}) - not in ALPACA_SUPPORTED_CRYPTO`);
+        }
+        return isSupported;
       }
       return true; // Include all stocks
     });
@@ -332,7 +365,14 @@ export class AutoTradingExecutionService {
     const cryptoCount = this.assetsCache.filter(a => a.asset_type === 'crypto').length;
     const stockCount = this.assetsCache.filter(a => a.asset_type === 'stock').length;
     this.lastCacheRefresh = now;
-    this.logger.debug(`Caches refreshed: ${stockCount} stocks, ${cryptoCount} crypto, ${this.strategiesCache.length} strategies`);
+    this.logger.log(`✅ Caches refreshed: ${stockCount} stocks, ${cryptoCount} crypto, ${this.strategiesCache.length} strategies`);
+    
+    if (cryptoCount > 0) {
+      const cryptoSymbols = this.assetsCache.filter(a => a.asset_type === 'crypto').map(a => a.symbol).join(', ');
+      this.logger.log(`Available crypto assets: ${cryptoSymbols}`);
+    } else {
+      this.logger.warn('⚠️  NO CRYPTO ASSETS FOUND IN CACHE - this will cause zero trades!');
+    }
   }
 
   /**
@@ -467,27 +507,54 @@ export class AutoTradingExecutionService {
   }
 
   /**
-   * Get current stock price from Alpaca
+   * Get current price from Alpaca (stocks or crypto)
    */
   private async getStockPrice(symbol: string): Promise<number> {
     try {
-      // Try to get from Alpaca quotes
-      const quotes = await this.alpacaService.getLatestQuotes([symbol]);
-      if (quotes && quotes[symbol]) {
-        return parseFloat(quotes[symbol].ap) || parseFloat(quotes[symbol].bp) || 0;
+      // Determine if this is a crypto symbol (contains '/')
+      const isCrypto = symbol.includes('/');
+      
+      this.logger.debug(`Getting price for ${symbol} (${isCrypto ? 'crypto' : 'stock'})`);
+      
+      if (isCrypto) {
+        // For crypto, get price directly from Alpaca crypto quotes endpoint
+        const quote = await this.alpacaService.getCryptoQuote(symbol);
+        if (quote && quote.ap) {
+          const price = parseFloat(quote.ap);
+          this.logger.debug(`Crypto price for ${symbol}: $${price}`);
+          return price;
+        }
+        this.logger.warn(`No crypto quote data for ${symbol}`);
+      } else {
+        // For stocks, use the existing method
+        const quotes = await this.alpacaService.getLatestQuotes([symbol]);
+        if (quotes && quotes[symbol]) {
+          const price = parseFloat(quotes[symbol].ap) || parseFloat(quotes[symbol].bp) || 0;
+          if (price > 0) {
+            this.logger.debug(`Stock price for ${symbol}: $${price}`);
+            return price;
+          }
+        }
+        this.logger.warn(`No stock quote data for ${symbol}`);
       }
       
       // Fallback: try getting from position if exists
-      const position = await this.alpacaService.getPosition(symbol);
-      if (position) {
-        return parseFloat(position.current_price);
+      try {
+        const position = await this.alpacaService.getPosition(symbol);
+        if (position && position.current_price) {
+          const price = parseFloat(position.current_price);
+          this.logger.debug(`Price from position for ${symbol}: $${price}`);
+          return price;
+        }
+      } catch (posError) {
+        this.logger.debug(`No position found for ${symbol}`);
       }
 
-      // Last resort: return a reasonable default price for testing
-      return 100;
-    } catch (error) {
-      this.logger.warn(`Could not get price for ${symbol}, using default`);
-      return 100;
+      // Last resort: throw error with meaningful message
+      throw new Error(`Unable to fetch price for ${symbol} - no quote data available`);
+    } catch (error: any) {
+      this.logger.error(`Failed to get price for ${symbol}: ${error?.message}`);
+      throw error;
     }
   }
 
