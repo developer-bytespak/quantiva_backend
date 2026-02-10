@@ -14,6 +14,7 @@ model users {
   password_hash        String?                     @db.VarChar(255)
   email_verified       Boolean                     @default(false)
   kyc_status           KycStatus                   @default(pending)
+  current_tier         PlanTier                    @default(FREE)
   created_at           DateTime                    @default(now()) @db.Timestamp(6)
   updated_at           DateTime?                   @updatedAt @db.Timestamp(6)
   two_factor_enabled   Boolean                     @default(true)
@@ -35,7 +36,10 @@ model users {
   sessions             user_sessions[]
   settings             user_settings?
   subscriptions        user_subscriptions[]
+  subscription_usage   subscription_usage[]
+  payment_history      payment_history[]
 
+  @@index([current_tier])
   @@map("users")
 }
 
@@ -655,28 +659,53 @@ model drawdown_history {
 
 model subscription_plans {
   plan_id            String               @id @default(uuid()) @db.Uuid
-  name               String               @unique @db.VarChar(50)
-  price_monthly      Decimal?             @db.Decimal(10, 2)
-  description        String?
-  features_json      Json?                @db.Json
+  tier               PlanTier
+  billing_period     BillingPeriod
+  price              Decimal              @db.Decimal(10, 2)
+  base_price         Decimal?             @db.Decimal(10, 2)
+  discount_percent   Decimal?             @default(0) @db.Decimal(5, 2)
+  name               String               @db.VarChar(100)
+  description        String?              @db.Text
+  is_active          Boolean              @default(true)
+  display_order      Int?
+  created_at         DateTime             @default(now()) @db.Timestamp(6)
+  updated_at         DateTime?            @updatedAt @db.Timestamp(6)
   user_subscriptions user_subscriptions[]
+  plan_features      plan_features[]
 
+  @@unique([tier, billing_period])
+  @@index([tier])
   @@map("subscription_plans")
 }
 
 model user_subscriptions {
-  subscription_id  String             @id @default(uuid()) @db.Uuid
-  user_id          String             @db.Uuid
-  plan_id          String             @db.Uuid
-  status           SubscriptionStatus @default(active)
-  started_at       DateTime?          @db.Timestamp(6)
-  expires_at       DateTime?          @db.Timestamp(6)
-  billing_provider String?            @db.VarChar(50)
-  plan             subscription_plans @relation(fields: [plan_id], references: [plan_id])
-  user             users              @relation(fields: [user_id], references: [user_id])
+  subscription_id      String               @id @default(uuid()) @db.Uuid
+  user_id              String               @db.Uuid
+  plan_id              String               @db.Uuid
+  tier                 PlanTier
+  billing_period       BillingPeriod
+  status               SubscriptionStatus   @default(active)
+  current_period_start DateTime?            @db.Timestamp(6)
+  current_period_end   DateTime?            @db.Timestamp(6)
+  last_payment_date    DateTime?            @db.Timestamp(6)
+  next_billing_date    DateTime?            @db.Timestamp(6)
+  auto_renew           Boolean              @default(true)
+  cancelled_at         DateTime?            @db.Timestamp(6)
+  external_id          String?              @db.VarChar(255)
+  started_at           DateTime?            @db.Timestamp(6)
+  expires_at           DateTime?            @db.Timestamp(6)
+  billing_provider     String?              @db.VarChar(50)
+  created_at           DateTime             @default(now()) @db.Timestamp(6)
+  updated_at           DateTime?            @updatedAt @db.Timestamp(6)
+  plan                 subscription_plans   @relation(fields: [plan_id], references: [plan_id])
+  user                 users                @relation(fields: [user_id], references: [user_id])
+  payment_history      payment_history[]
+  subscription_usage   subscription_usage[]
 
   @@index([user_id])
   @@index([plan_id])
+  @@index([status])
+  @@index([current_period_end])
   @@map("user_subscriptions")
 }
 
@@ -706,6 +735,66 @@ model sentiment_ema_state {
   updated_at     DateTime @default(now()) @updatedAt @db.Timestamp(6)
 
   @@map("sentiment_ema_state")
+}
+
+model plan_features {
+  feature_id   String             @id @default(uuid()) @db.Uuid
+  plan_id      String             @db.Uuid
+  feature_type FeatureType
+  enabled      Boolean            @default(true)
+  limit_value  Int?
+  created_at   DateTime           @default(now()) @db.Timestamp(6)
+  updated_at   DateTime?          @updatedAt @db.Timestamp(6)
+  plan         subscription_plans @relation(fields: [plan_id], references: [plan_id], onDelete: Cascade)
+
+  @@unique([plan_id, feature_type])
+  @@index([plan_id])
+  @@map("plan_features")
+}
+
+model subscription_usage {
+  usage_id        String             @id @default(uuid()) @db.Uuid
+  subscription_id String             @db.Uuid
+  user_id         String             @db.Uuid
+  feature_type    FeatureType
+  usage_count     Int                @default(0)
+  period_start    DateTime           @db.Timestamp(6)
+  period_end      DateTime           @db.Timestamp(6)
+  details         Json?              @db.Json
+  created_at      DateTime           @default(now()) @db.Timestamp(6)
+  updated_at      DateTime?          @updatedAt @db.Timestamp(6)
+  subscription    user_subscriptions @relation(fields: [subscription_id], references: [subscription_id], onDelete: Cascade)
+  user            users              @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@unique([subscription_id, feature_type])
+  @@index([subscription_id])
+  @@index([user_id])
+  @@map("subscription_usage")
+}
+
+model payment_history {
+  payment_id          String             @id @default(uuid()) @db.Uuid
+  subscription_id     String             @db.Uuid
+  user_id             String             @db.Uuid
+  amount              Decimal            @db.Decimal(10, 2)
+  currency            String             @default("USD") @db.VarChar(3)
+  status              PaymentStatus      @default(pending)
+  payment_provider    String?            @db.VarChar(50)
+  external_payment_id String?            @db.VarChar(255)
+  payment_method      String?            @db.VarChar(50)
+  invoice_url         String?            @db.Text
+  receipt_url         String?            @db.Text
+  failure_reason      String?            @db.Text
+  paid_at             DateTime?          @db.Timestamp(6)
+  created_at          DateTime           @default(now()) @db.Timestamp(6)
+  updated_at          DateTime?          @updatedAt @db.Timestamp(6)
+  subscription        user_subscriptions @relation(fields: [subscription_id], references: [subscription_id], onDelete: Cascade)
+  user                users              @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([subscription_id])
+  @@index([status])
+  @@map("payment_history")
 }
 
 enum KycStatus {
@@ -799,4 +888,30 @@ enum SentimentLabel {
   positive
   negative
   neutral
+}
+
+enum PlanTier {
+  FREE
+  PRO
+  ELITE
+}
+
+enum BillingPeriod {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
+enum FeatureType {
+  CUSTOM_STRATEGIES
+  VC_POOL_ACCESS
+  EARLY_ACCESS
+}
+
+enum PaymentStatus {
+  pending
+  succeeded
+  failed
+  refunded
+  cancelled
 }
