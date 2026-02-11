@@ -213,8 +213,93 @@ export class StrategiesService {
   }
 
   async delete(id: string) {
-    return this.prisma.strategies.delete({
+    // Get strategy details first
+    const strategy = await this.prisma.strategies.findUnique({
       where: { strategy_id: id },
+    });
+
+    if (!strategy) {
+      throw new Error('Strategy not found');
+    }
+
+    // Prevent deletion of pre-built (admin) strategies
+    if (strategy.type === 'admin') {
+      throw new Error('Cannot delete pre-built strategies. Only custom user strategies can be deleted.');
+    }
+
+    // Check if this strategy is being used as a template
+    const dependentStrategies = await this.prisma.strategies.findMany({
+      where: { template_id: id },
+      select: { strategy_id: true, name: true },
+    });
+
+    if (dependentStrategies.length > 0) {
+      throw new Error(
+        `Cannot delete strategy. It is being used as a template by ${dependentStrategies.length} other strategies. Please delete the dependent strategies first.`
+      );
+    }
+
+    // Use database transaction for atomicity
+    return this.prisma.$transaction(async (tx) => {
+      // Get all signals for this strategy
+      const signals = await tx.strategy_signals.findMany({
+        where: { strategy_id: id },
+        select: { signal_id: true },
+      });
+      const signalIds = signals.map(s => s.signal_id);
+
+      // PHASE 1: Delete deepest dependencies first
+      if (signalIds.length > 0) {
+        // Delete order executions (if any orders reference these signals)
+        await tx.order_executions.deleteMany({
+          where: {
+            order: {
+              signal_id: { in: signalIds }
+            }
+          }
+        });
+
+        // Delete orders that reference these signals
+        await tx.orders.deleteMany({
+          where: { signal_id: { in: signalIds } },
+        });
+
+        // Delete auto-trade evaluations
+        await tx.auto_trade_evaluations.deleteMany({
+          where: { signal_id: { in: signalIds } },
+        });
+
+        // Delete signal explanations
+        await tx.signal_explanations.deleteMany({
+          where: { signal_id: { in: signalIds } },
+        });
+
+        // Delete signal details
+        await tx.signal_details.deleteMany({
+          where: { signal_id: { in: signalIds } },
+        });
+
+        // Delete strategy signals
+        await tx.strategy_signals.deleteMany({
+          where: { strategy_id: id },
+        });
+      }
+
+      // PHASE 2: Delete strategy-level dependencies
+      // Delete strategy execution jobs
+      await tx.strategy_execution_jobs.deleteMany({
+        where: { strategy_id: id },
+      });
+
+      // Delete strategy parameters
+      await tx.strategy_parameters.deleteMany({
+        where: { strategy_id: id },
+      });
+
+      // PHASE 3: Finally delete the strategy itself
+      return tx.strategies.delete({
+        where: { strategy_id: id },
+      });
     });
   }
 

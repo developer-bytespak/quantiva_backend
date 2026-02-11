@@ -76,7 +76,8 @@ export class StockSignalsCronjobService {
 
   /**
    * Scheduled job that runs every 10 minutes
-   * Fetches trending stocks, runs sentiment analysis, and generates signals for stock-specific strategies
+   * Processes ALL stock strategies (both pre-built admin strategies and custom user strategies)
+   * Fetches stocks, runs sentiment analysis, and generates signals
    */
   @Cron('*/10 * * * *') // Every 10 minutes
   async generateStockSignals(options?: { connectionId?: string }): Promise<void> {
@@ -90,22 +91,23 @@ export class StockSignalsCronjobService {
     this.logger.log('Starting stock signals generation cronjob');
 
     try {
-      // Step 1: Get stock-specific pre-built strategies
-      const allStrategies = await this.preBuiltStrategiesService.getPreBuiltStrategies();
-      const stockStrategies = allStrategies.filter(s => 
-        s.name.includes('Stock') || 
-        s.name === 'Conservative Growth (Stocks)' ||
-        s.name === 'Tech Momentum (Stocks)' ||
-        s.name === 'Value Investing (Stocks)' ||
-        s.name === 'Dividend Income (Stocks)'
-      );
+      // Step 1: Get ALL stock strategies (both pre-built and custom user strategies)
+      const allStrategies = await this.prisma.strategies.findMany({
+        where: {
+          asset_type: 'stock',
+          is_active: true,
+        },
+      });
+      
+      const stockStrategies = allStrategies;
+      const preBuiltCount = stockStrategies.filter(s => s.type === 'admin').length;
+      const customCount = stockStrategies.filter(s => s.type === 'user').length;
+      this.logger.log(`Found ${stockStrategies.length} active stock strategies: ${preBuiltCount} pre-built + ${customCount} custom`);
 
       if (stockStrategies.length === 0) {
-        this.logger.warn('No stock-specific strategies found, skipping signal generation');
+        this.logger.warn('No active stock strategies found, skipping signal generation');
         return;
       }
-
-      this.logger.log(`Found ${stockStrategies.length} stock-specific strategies`);
 
       // Step 2: Fetch stocks to process (use rotation strategy to process all stocks over time)
       // Process 50 stocks per run (every 10 minutes) to avoid overwhelming the system
@@ -254,15 +256,32 @@ export class StockSignalsCronjobService {
     assetId: string,
     connectionInfo: { connectionId: string | null; exchange: string } | null,
   ): Promise<void> {
+    // Get strategy details first to determine type and user_id
+    const strategy = await this.prisma.strategies.findUnique({
+      where: { strategy_id: strategyId },
+    });
+
+    if (!strategy) {
+      throw new Error(`Strategy ${strategyId} not found`);
+    }
+
     // Check if a signal already exists for this strategy+asset within the last 10 minutes
     const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    const whereClause = {
+      strategy_id: strategyId,
+      asset_id: assetId,
+      timestamp: { gte: tenMinutesAgo },
+    };
+
+    // For custom strategies, check with the specific user_id; for admin strategies, check with null user_id
+    if (strategy.type === 'user') {
+      whereClause['user_id'] = strategy.user_id;
+    } else {
+      whereClause['user_id'] = null;
+    }
+
     const existingSignal = await this.prisma.strategy_signals.findFirst({
-      where: {
-        strategy_id: strategyId,
-        asset_id: assetId,
-        user_id: null,
-        timestamp: { gte: tenMinutesAgo },
-      },
+      where: whereClause,
     });
 
     if (existingSignal) {
@@ -272,17 +291,13 @@ export class StockSignalsCronjobService {
       return;
     }
 
-    // Get strategy and asset details
-    const strategy = await this.prisma.strategies.findUnique({
-      where: { strategy_id: strategyId },
-    });
-
+    // Get asset details
     const asset = await this.prisma.assets.findUnique({
       where: { asset_id: assetId },
     });
 
-    if (!strategy || !asset) {
-      throw new Error('Strategy or asset not found');
+    if (!asset) {
+      throw new Error(`Asset ${assetId} not found`);
     }
 
     // Get market data
@@ -294,7 +309,7 @@ export class StockSignalsCronjobService {
 
     // Prepare strategy data
     const strategyData = {
-      user_id: null, // System-level execution
+      user_id: strategy.type === 'user' ? strategy.user_id : null, // Preserve user_id for custom strategies
       entry_rules: strategy.entry_rules || [],
       exit_rules: strategy.exit_rules || [],
       indicators: strategy.indicators || [],
@@ -361,7 +376,7 @@ export class StockSignalsCronjobService {
     const signal = await this.prisma.strategy_signals.create({
       data: {
         strategy_id: strategyId,
-        user_id: null, // System-generated signal
+        user_id: strategy.type === 'user' ? strategy.user_id : null, // Preserve user_id for custom strategies
         asset_id: assetId,
         timestamp: new Date(),
         final_score: signalData.final_score,
