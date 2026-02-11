@@ -895,7 +895,7 @@ export class StrategiesController {
     @Param('id') strategyId: string,
     @CurrentUser() user: TokenPayload,
   ) {
-    // Verify ownership
+    // Verify ownership and strategy type
     const strategy = await this.prisma.strategies.findUnique({
       where: { strategy_id: strategyId },
     });
@@ -908,21 +908,91 @@ export class StrategiesController {
       throw new ForbiddenException('You do not own this strategy');
     }
 
-    // Delete related signals first
-    await this.prisma.strategy_signals.deleteMany({
-      where: { strategy_id: strategyId },
+    // Prevent deletion of pre-built (admin) strategies
+    if (strategy.type === 'admin') {
+      throw new ForbiddenException('Cannot delete pre-built strategies. Only custom user strategies can be deleted.');
+    }
+
+    // Check if this strategy is being used as a template
+    const dependentStrategies = await this.prisma.strategies.findMany({
+      where: { template_id: strategyId },
+      select: { strategy_id: true, name: true },
     });
 
-    // Delete strategy
-    await this.prisma.strategies.delete({
-      where: { strategy_id: strategyId },
+    if (dependentStrategies.length > 0) {
+      throw new BadRequestException(
+        `Cannot delete strategy. It is being used as a template by ${dependentStrategies.length} other strategies. Please delete the dependent strategies first.`
+      );
+    }
+
+    // Use database transaction for atomicity
+    await this.prisma.$transaction(async (tx) => {
+      // Get all signals for this strategy
+      const signals = await tx.strategy_signals.findMany({
+        where: { strategy_id: strategyId },
+        select: { signal_id: true },
+      });
+      const signalIds = signals.map(s => s.signal_id);
+
+      // PHASE 1: Delete deepest dependencies first
+      if (signalIds.length > 0) {
+        // Delete order executions (if any orders reference these signals)
+        await tx.order_executions.deleteMany({
+          where: {
+            order: {
+              signal_id: { in: signalIds }
+            }
+          }
+        });
+
+        // Delete orders that reference these signals
+        await tx.orders.deleteMany({
+          where: { signal_id: { in: signalIds } },
+        });
+
+        // Delete auto-trade evaluations
+        await tx.auto_trade_evaluations.deleteMany({
+          where: { signal_id: { in: signalIds } },
+        });
+
+        // Delete signal explanations
+        await tx.signal_explanations.deleteMany({
+          where: { signal_id: { in: signalIds } },
+        });
+
+        // Delete signal details
+        await tx.signal_details.deleteMany({
+          where: { signal_id: { in: signalIds } },
+        });
+
+        // Delete strategy signals
+        await tx.strategy_signals.deleteMany({
+          where: { strategy_id: strategyId },
+        });
+      }
+
+      // PHASE 2: Delete strategy-level dependencies
+      // Delete strategy execution jobs
+      await tx.strategy_execution_jobs.deleteMany({
+        where: { strategy_id: strategyId },
+      });
+
+      // Delete strategy parameters
+      await tx.strategy_parameters.deleteMany({
+        where: { strategy_id: strategyId },
+      });
+
+      // PHASE 3: Finally delete the strategy itself
+      await tx.strategies.delete({
+        where: { strategy_id: strategyId },
+      });
     });
 
-    this.logger.log(`Deleted strategy ${strategyId} for user ${user.sub}`);
+    this.logger.log(`Successfully deleted strategy ${strategyId} and all related data for user ${user.sub}`);
 
     return {
       success: true,
-      message: 'Strategy deleted successfully',
+      message: 'Strategy and all related data deleted successfully',
     };
   }
 
@@ -1010,12 +1080,9 @@ export class StrategiesController {
       }
     }
 
-    this.logger.log(`Starting signal generation for ${assets.length} assets using cached data`);
+    this.logger.log(`Starting immediate signal generation for ${assets.length} assets`);
     
-    // Option 1: If strategy is already active, signals will be generated in next cronjob
-    // Option 2: Make strategy active and return immediately
-    
-    // Ensure strategy is active so it will be processed by the cronjob
+    // Ensure strategy is active
     if (!strategy.is_active) {
       await this.prisma.strategies.update({
         where: { strategy_id: strategyId },
@@ -1023,8 +1090,33 @@ export class StrategiesController {
       });
     }
 
-    // Get the most recent signals for this strategy (if any exist)
-    const existingSignals = await this.prisma.strategy_signals.findMany({
+    // Generate signals immediately using StrategyExecutionService
+    const generatedSignals = [];
+    const errors = [];
+
+    for (const asset of assets) {
+      try {
+        this.logger.log(`Generating signal for asset ${asset.symbol} (${asset.asset_id})`);
+        
+        const signal = await this.strategyExecutionService.executeStrategy(
+          strategyId,
+          asset.asset_id,
+          false // Don't generate LLM explanation for manual generation
+        );
+
+        if (signal) {
+          generatedSignals.push(signal);
+          this.logger.log(`Successfully generated signal for ${asset.symbol}: ${signal.action}`);
+        }
+      } catch (error: any) {
+        const errorMsg = `Failed to generate signal for ${asset.symbol}: ${error?.message}`;
+        this.logger.error(errorMsg);
+        errors.push(errorMsg);
+      }
+    }
+
+    // Get the most recent signals for this strategy (including newly generated ones)
+    const allSignals = await this.prisma.strategy_signals.findMany({
       where: {
         strategy_id: strategyId,
       },
@@ -1035,24 +1127,18 @@ export class StrategiesController {
       orderBy: {
         timestamp: 'desc',
       },
-      take: 20,
+      take: 50, // Increased to show all recent signals
     });
 
-    // Calculate time until next cronjob run (every 10 minutes at :00, :10, :20, etc.)
-    const now = new Date();
-    const currentMinute = now.getMinutes();
-    const nextRunMinute = Math.ceil(currentMinute / 10) * 10;
-    const minutesUntilNextRun = nextRunMinute === currentMinute ? 10 : (nextRunMinute - currentMinute);
-    
-    this.logger.log(`Strategy ${strategyId} is active. Signals will be generated in ~${minutesUntilNextRun} minutes`);
-    
+    this.logger.log(`Completed signal generation: ${generatedSignals.length} signals generated, ${errors.length} errors`);
+
     return {
       success: true,
-      message: `Strategy is active. Signals will be generated automatically every 10 minutes by ${assetType === 'stock' ? 'stock' : 'crypto'} signal processor (next run in ~${minutesUntilNextRun} minutes). ${existingSignals.length > 0 ? `Showing ${existingSignals.length} existing signals.` : 'No signals yet - check back after the next scheduled run.'}`,
-      scheduled: true,
-      nextRunInMinutes: minutesUntilNextRun,
-      signalsGenerated: existingSignals.length,
-      signals: existingSignals.map(s => ({
+      message: `Generated ${generatedSignals.length} signals immediately for ${assets.length} assets. ${errors.length > 0 ? `${errors.length} errors occurred.` : 'All signals generated successfully.'}`,
+      scheduled: false,
+      signalsGenerated: generatedSignals.length,
+      totalSignals: allSignals.length,
+      signals: allSignals.map(s => ({
         signal_id: s.signal_id,
         asset_id: s.asset_id,
         symbol: s.asset?.symbol,
@@ -1071,7 +1157,7 @@ export class StrategiesController {
           take_profit_1: s.details[0].take_profit_1,
         } : null,
       })),
-      errors: [],
+      errors: errors,
     };
   }
 
@@ -1108,10 +1194,39 @@ export class StrategiesController {
 
     // If latest_only=true, return only one signal per asset (latest per asset) - same as pre-built
     if (latestOnly === 'true' || latestOnly === '1') {
+      // Get target assets from strategy to filter signals
+      const targetAssets = (strategy.target_assets as string[]) || [];
+      
+      // Build where clause - filter by target assets if specified
+      let whereClause: any = {
+        strategy_id: strategyId,
+      };
+      
+      // If strategy has specific target assets, only return signals for those assets
+      if (targetAssets.length > 0) {
+        // Get asset IDs for target symbols
+        const targetAssetRecords = await this.prisma.assets.findMany({
+          where: {
+            symbol: { in: targetAssets },
+            asset_type: strategy.asset_type || 'crypto',
+          },
+          select: { asset_id: true, symbol: true },
+        });
+        
+        const targetAssetIds = targetAssetRecords.map(a => a.asset_id);
+        
+        if (targetAssetIds.length > 0) {
+          whereClause.asset_id = { in: targetAssetIds };
+          this.logger.log(`Filtering signals to target assets: ${targetAssets.join(', ')} (${targetAssetIds.length} asset IDs)`);
+        } else {
+          this.logger.warn(`No assets found for target symbols: ${targetAssets.join(', ')}`);
+          // Return empty array if target assets don't exist in database
+          return [];
+        }
+      }
+      
       const signals = await this.prisma.strategy_signals.findMany({
-        where: {
-          strategy_id: strategyId,
-        },
+        where: whereClause,
         include: {
           asset: true,
           explanations: {
@@ -1171,49 +1286,141 @@ export class StrategiesController {
 
       // Enrich with realtime data if requested (same as pre-built)
       if (enrichWithRealtime) {
-        const { BinanceService } = await import('../binance/binance.service');
-        const binanceService = new BinanceService();
+        this.logger.log(`Enriching ${results.length} signals with realtime data`);
         
-        results = await Promise.all(
-          results.map(async (signal) => {
-            if (signal.asset?.symbol) {
-              try {
-                const realtimeData = await binanceService.getEnrichedMarketData(signal.asset.symbol);
-                const isTradeable = realtimeData.price !== null && realtimeData.price > 0;
-                
-                return {
-                  ...signal,
-                  is_tradeable: isTradeable,
-                  realtime_data: isTradeable ? {
-                    price: realtimeData.price,
-                    priceChangePercent: realtimeData.priceChangePercent,
-                    high24h: realtimeData.high24h,
-                    low24h: realtimeData.low24h,
-                    volume24h: realtimeData.volume24h,
-                    quoteVolume24h: realtimeData.quoteVolume24h,
-                  } : null,
-                };
-              } catch (error: any) {
-                return { ...signal, is_tradeable: false, realtime_data: null };
+        // Check if this is a stock strategy - don't use Binance for stocks
+        const isStockStrategy = strategy.asset_type === 'stock';
+        
+        if (isStockStrategy) {
+          this.logger.warn(`Skipping realtime enrichment for stock strategy - Binance API only supports crypto`);
+          // For stock strategies, mark all as tradeable but without realtime data
+          results = results.map(r => ({
+            ...r,
+            is_tradeable: true,
+            realtime_data: null,
+            fallback_reason: 'stock_strategy_no_realtime_data',
+            note: 'Stock strategies use database prices only - realtime=true parameter ignored'
+          }));
+        } else {
+          // Original crypto enrichment logic
+          const { BinanceService } = await import('../binance/binance.service');
+          const binanceService = new BinanceService();
+          
+          let realtimeFailureCount = 0;
+          let networkErrorCount = 0;
+          
+          results = await Promise.all(
+            results.map(async (signal) => {
+              if (signal.asset?.symbol) {
+                try {
+                  const realtimeData = await binanceService.getEnrichedMarketData(signal.asset.symbol);
+                  const isTradeable = realtimeData.price !== null && realtimeData.price > 0;
+                  
+                  if (!isTradeable) {
+                    this.logger.warn(`Asset ${signal.asset.symbol} not tradeable on Binance`);
+                    realtimeFailureCount++;
+                  }
+                  
+                  return {
+                    ...signal,
+                    is_tradeable: isTradeable,
+                    realtime_data: isTradeable ? {
+                      price: realtimeData.price,
+                      priceChangePercent: realtimeData.priceChangePercent,
+                      high24h: realtimeData.high24h,
+                      low24h: realtimeData.low24h,
+                      volume24h: realtimeData.volume24h,
+                      quoteVolume24h: realtimeData.quoteVolume24h,
+                    } : null,
+                    // Keep database prices as fallback
+                    fallback_reason: !isTradeable ? 'not_tradeable_on_binance' : null,
+                  };
+                } catch (error: any) {
+                  this.logger.error(`Binance API error for ${signal.asset.symbol}:`, error.message);
+                  networkErrorCount++;
+                  
+                  // Return signal with database data as fallback
+                  return { 
+                    ...signal, 
+                    is_tradeable: false, 
+                    realtime_data: null,
+                    fallback_reason: 'binance_api_error',
+                    error_details: error.message,
+                  };
+                }
               }
-            }
-            return { ...signal, is_tradeable: false };
-          })
-        );
+              return { 
+                ...signal, 
+                is_tradeable: false,
+                fallback_reason: 'no_symbol',
+              };
+            })
+          );
+          
+          this.logger.log(`Realtime enrichment results: ${results.length} total, ${realtimeFailureCount} not tradeable, ${networkErrorCount} API errors`);
+          
+          // Only filter out if we have some tradeable results, otherwise keep all with database data
+          const tradeableResults = results.filter(r => r.is_tradeable);
+          
+          if (tradeableResults.length === 0) {
+            // If no tradeable results, return all with database data as fallback
+            this.logger.warn(`No tradeable assets found on Binance, returning ${results.length} signals with database data`);
+            results = results.map(r => ({
+              ...r,
+              is_tradeable: true, // Mark as tradeable to show in UI
+              realtime_data: null, // But no realtime data
+              fallback_mode: true,
+            }));
+          } else if (tradeableResults.length < results.length * 0.5) {
+            // If less than 50% are tradeable, might be API issues - include some database fallbacks
+            this.logger.warn(`Only ${tradeableResults.length}/${results.length} assets tradeable on Binance, including database fallbacks`);
+            const nonTradeableWithDb = results.filter(r => !r.is_tradeable && r.price_usd);
+            results = [...tradeableResults, ...nonTradeableWithDb.slice(0, Math.min(5, nonTradeableWithDb.length))];
+          } else {
+            // Normal case - use only tradeable results
+            results = tradeableResults;
+          }
+        }
         
-        // Filter out non-tradeable assets
-        results = results.filter(r => r.is_tradeable);
-        this.logger.log(`Filtered custom signals to ${results.length} tradeable assets`);
+        this.logger.log(`Final filtered custom signals: ${results.length} assets`);
       }
 
       return results;
     }
 
     // Get all signals with explanations (without deduping) - same format as pre-built
+    // Apply same target assets filtering as latest_only case
+    const targetAssets = (strategy.target_assets as string[]) || [];
+    
+    let whereClause: any = {
+      strategy_id: strategyId,
+    };
+    
+    // If strategy has specific target assets, only return signals for those assets
+    if (targetAssets.length > 0) {
+      // Get asset IDs for target symbols
+      const targetAssetRecords = await this.prisma.assets.findMany({
+        where: {
+          symbol: { in: targetAssets },
+          asset_type: strategy.asset_type || 'crypto',
+        },
+        select: { asset_id: true, symbol: true },
+      });
+      
+      const targetAssetIds = targetAssetRecords.map(a => a.asset_id);
+      
+      if (targetAssetIds.length > 0) {
+        whereClause.asset_id = { in: targetAssetIds };
+        this.logger.log(`Filtering all signals to target assets: ${targetAssets.join(', ')} (${targetAssetIds.length} asset IDs)`);
+      } else {
+        this.logger.warn(`No assets found for target symbols: ${targetAssets.join(', ')}`);
+        // Return empty array if target assets don't exist in database
+        return [];
+      }
+    }
+    
     const signals = await this.prisma.strategy_signals.findMany({
-      where: {
-        strategy_id: strategyId,
-      },
+      where: whereClause,
       include: {
         asset: true,
         explanations: {
@@ -1237,6 +1444,213 @@ export class StrategiesController {
       stop_loss: strategy.stop_loss_value,
       take_profit: strategy.take_profit_value,
     }));
+  }
+
+  /**
+   * Debug endpoint to diagnose why signals might be empty
+   * Endpoint: GET /strategies/my-strategies/:id/debug
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get('my-strategies/:id/debug')
+  async debugMyStrategySignals(
+    @Param('id') strategyId: string,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    // Verify ownership
+    const strategy = await this.prisma.strategies.findUnique({
+      where: { strategy_id: strategyId },
+    });
+
+    if (!strategy) {
+      throw new NotFoundException(`Strategy ${strategyId} not found`);
+    }
+
+    if (strategy.user_id !== user.sub) {
+      throw new ForbiddenException('You do not own this strategy');
+    }
+
+    // Get strategy details
+    const targetAssets = (strategy.target_assets as string[]) || [];
+    const assetType = strategy.asset_type || 'crypto';
+
+    // Check assets in database
+    const assetsInDb = await this.prisma.assets.findMany({
+      where: {
+        symbol: { in: targetAssets },
+        asset_type: assetType,
+      },
+    });
+
+    // Check existing signals
+    const existingSignals = await this.prisma.strategy_signals.findMany({
+      where: { strategy_id: strategyId },
+      include: { asset: true },
+      orderBy: { timestamp: 'desc' },
+      take: 10,
+    });
+
+    // Check how many signals would be filtered by target_assets
+    const targetAssetIds = assetsInDb.map(a => a.asset_id);
+    const filteredSignals = existingSignals.filter(s => 
+      targetAssetIds.length === 0 || targetAssetIds.includes(s.asset_id)
+    );
+
+    // Check recent signal generation attempts
+    const last24Hours = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const recentSignals = filteredSignals.filter(s => 
+      s.timestamp && new Date(s.timestamp) > last24Hours
+    );
+
+    // Get unique asset symbols from all signals vs filtered signals
+    const allSignalSymbols = [...new Set(existingSignals.map(s => s.asset?.symbol).filter(Boolean))];
+    const filteredSignalSymbols = [...new Set(filteredSignals.map(s => s.asset?.symbol).filter(Boolean))];
+
+    // Test Binance API connectivity for diagnosis
+    let binanceApiStatus = 'unknown';
+    let binanceTestResults = [];
+    
+    try {
+      const { BinanceService } = await import('../binance/binance.service');
+      const binanceService = new BinanceService();
+      
+      // Test a few common symbols
+      const testSymbols = ['BTC', 'ETH', 'BNB'];
+      const testPromises = testSymbols.map(async (symbol) => {
+        try {
+          const data = await binanceService.getEnrichedMarketData(symbol);
+          return { symbol, status: 'success', tradeable: data.price !== null };
+        } catch (error) {
+          return { symbol, status: 'error', error: error.message };
+        }
+      });
+      
+      binanceTestResults = await Promise.all(testPromises);
+      const successCount = binanceTestResults.filter(r => r.status === 'success').length;
+      
+      if (successCount === testSymbols.length) {
+        binanceApiStatus = 'healthy';
+      } else if (successCount > 0) {
+        binanceApiStatus = 'partial';
+      } else {
+        binanceApiStatus = 'failed';
+      }
+    } catch (error) {
+      binanceApiStatus = 'error';
+      binanceTestResults = [{ error: error.message }];
+    }
+
+    return {
+      strategy: {
+        name: strategy.name,
+        asset_type: assetType,
+        is_active: strategy.is_active,
+        target_assets: targetAssets,
+        entry_rules: strategy.entry_rules,
+        engine_weights: strategy.engine_weights,
+      },
+      assets_analysis: {
+        requested_symbols: targetAssets,
+        found_in_database: assetsInDb.map(a => ({ symbol: a.symbol, asset_id: a.asset_id })),
+        missing_symbols: targetAssets.filter(symbol => 
+          !assetsInDb.some(asset => asset.symbol === symbol)
+        ),
+      },
+      signals_analysis: {
+        total_signals_ever: existingSignals.length,
+        signals_for_target_assets: filteredSignals.length,
+        recent_signals_24h: recentSignals.length,
+        last_signal_time: existingSignals[0]?.timestamp || null,
+        signal_actions: this.getSignalDistribution(existingSignals),
+        target_asset_actions: this.getSignalDistribution(filteredSignals),
+        all_signal_symbols: allSignalSymbols,
+        target_signal_symbols: filteredSignalSymbols,
+        signals_filtered_out: existingSignals.length - filteredSignals.length,
+      },
+      binance_api_status: {
+        status: binanceApiStatus,
+        test_results: binanceTestResults,
+        note: 'realtime=true depends on Binance API - failures here cause empty signals',
+      },
+      potential_issues: this.identifyPotentialIssues(strategy, assetsInDb, existingSignals, binanceApiStatus),
+    };
+  }
+
+  private getSignalDistribution(signals: any[]) {
+    const distribution = { BUY: 0, SELL: 0, HOLD: 0 };
+    signals.forEach(signal => {
+      if (distribution[signal.action] !== undefined) {
+        distribution[signal.action]++;
+      }
+    });
+    return distribution;
+  }
+
+  private identifyPotentialIssues(strategy: any, assetsInDb: any[], signals: any[], binanceApiStatus?: string) {
+    const issues = [];
+    
+    if (!strategy.is_active) {
+      issues.push("Strategy is not active");
+    }
+    
+    if (!strategy.target_assets || strategy.target_assets.length === 0) {
+      issues.push("No target assets defined");
+    }
+    
+    if (assetsInDb.length === 0) {
+      issues.push("None of the target assets exist in database");
+    }
+    
+    if (assetsInDb.length < strategy.target_assets?.length) {
+      issues.push(`Only ${assetsInDb.length}/${strategy.target_assets?.length} target assets found in database`);
+    }
+    
+    if (signals.length === 0) {
+      issues.push("No signals have ever been generated for this strategy");
+    }
+    
+    // Stock-specific advice about realtime parameter
+    const isStockStrategy = strategy.asset_type === 'stock';
+    if (isStockStrategy) {
+      issues.push("📈 This is a STOCK strategy - don't use realtime=true parameter (Binance API only supports crypto)");
+      issues.push("✅ For stocks, use: .../signals?latest_only=true (without realtime=true)");
+    } else {
+      // Check Binance API issues (major cause of empty signals with realtime=true)
+      if (binanceApiStatus === 'failed') {
+        issues.push("🚨 Binance API is completely unavailable - realtime=true will return empty results");
+      } else if (binanceApiStatus === 'partial') {
+        issues.push("⚠️ Binance API has partial failures - realtime=true may return fewer results");
+      } else if (binanceApiStatus === 'error') {
+        issues.push("❌ Binance API connection error - realtime=true may fail");
+      }
+    }
+    
+    // Check if entry rules are too restrictive
+    const entryRules = strategy.entry_rules || [];
+    const restrictiveRules = entryRules.filter(rule => 
+      (rule.field === 'final_score' && rule.operator === '>' && rule.value > 0.8) ||
+      (rule.field === 'confidence' && rule.operator === '>' && rule.value > 0.9)
+    );
+    
+    if (restrictiveRules.length > 0) {
+      issues.push("Entry rules might be too restrictive (final_score > 0.8 or confidence > 0.9)");
+    }
+    
+    // Add info about signal filtering
+    if (strategy.target_assets && strategy.target_assets.length > 0) {
+      issues.push(`✅ NEW: Signals endpoint now filters to target_assets only (${strategy.target_assets.join(', ')})`);
+      issues.push("📏 Check signals_analysis.signals_filtered_out to see how many old signals were excluded");
+    }
+    
+    // Add specific advice for empty signals issue
+    if (signals.length > 0 && !isStockStrategy && binanceApiStatus !== 'healthy') {
+      issues.push("💡 Try calling the API without realtime=true parameter to get database-only results");
+    }
+    
+    if (issues.length === 0) {
+      issues.push("No obvious issues detected - check backend logs for detailed errors");
+    }
+    
+    return issues;
   }
 
   /**
