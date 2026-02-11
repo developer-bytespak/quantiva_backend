@@ -997,5 +997,49 @@ export class ExchangesService {
       verified: true,
     };
   }
+
+  /**
+   * Get symbol-to-CoinGecko ID mapping from database
+   * Returns null if not found (will trigger dynamic lookup)
+   */
+  async getSymbolMapping(symbol: string): Promise<string | null> {
+    try {
+      // Would use a symbol_mappings table if it exists
+      // For now, this is a placeholder for future database schema
+      // const mapping = await this.prisma.symbol_mappings.findUnique({
+      //   where: { symbol: symbol.toUpperCase() },
+      //   select: { coingecko_id: true },
+      // });
+      // return mapping?.coingecko_id || null;
+      
+      return null; // No database mapping yet
+    } catch (error: any) {
+      this.logger.warn(`Failed to query symbol mapping for ${symbol}: ${error?.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Save symbol-to-CoinGecko ID mapping to database
+   * Called after successful lookup to avoid repeated API calls
+   */
+  async saveSymbolMapping(symbol: string, coingeckoId: string): Promise<void> {
+    try {
+      // Would implement when symbol_mappings table is added
+      // await this.prisma.symbol_mappings.upsert({
+      //   where: { symbol: symbol.toUpperCase() },
+      //   update: { coingecko_id: coingeckoId, updated_at: new Date() },
+      //   create: { 
+      //     symbol: symbol.toUpperCase(), 
+      //     coingecko_id: coingeckoId,
+      //     created_at: new Date(),
+      //     updated_at: new Date(),
+      //   },
+      // });
+      // this.logger.debug(`Saved symbol mapping: ${symbol} -> ${coingeckoId}`);
+    } catch (error: any) {
+      this.logger.warn(`Failed to save symbol mapping ${symbol} -> ${coingeckoId}: ${error?.message}`);
+    }
+  }
 }
 

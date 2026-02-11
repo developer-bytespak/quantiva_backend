@@ -12,9 +12,10 @@ import { ConnectionOwnerGuard } from './guards/connection-owner.guard';
 import { BinanceUserWsService } from './services/binance-user-ws.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
+import { MarketModule } from '../market/market.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, AuthModule],
+  imports: [ConfigModule, PrismaModule, AuthModule, MarketModule],
   controllers: [ExchangesController, /* Health endpoint for paper trading */ PaperTradingController],
   providers: [
     ExchangesService,

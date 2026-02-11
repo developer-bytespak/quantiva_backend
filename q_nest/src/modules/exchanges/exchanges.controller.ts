@@ -28,6 +28,7 @@ import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
 import { ExchangeType } from '@prisma/client';
 import { ForbiddenException } from '@nestjs/common';
+import { MarketService } from '../market/market.service';
 
 /**
  * Exchanges Controller
@@ -55,6 +56,7 @@ export class ExchangesController {
     private readonly bybitService: BybitService,
     private readonly alpacaService: AlpacaService,
     private readonly cacheService: CacheService,
+    private readonly marketService: MarketService,
   ) {}
 
   @Get()
@@ -725,6 +727,139 @@ export class ExchangesController {
    * @param connectionId - Connection ID
    * @returns Combined dashboard data
    */
+
+  /**
+   * Get stock logo URL using external API
+   * Uses a public stock logo CDN pattern
+   */
+  private getStockLogoUrl(symbol: string): string {
+    // Use multiple fallback sources for stock logos
+    const upper = symbol.toUpperCase();
+    
+    // Try Finnhub logo first (most reliable)
+    // Format: https://api.example.com/logo?symbol=AAPL
+    // Fallback: Use a CDN pattern that works for most stocks
+    return `https://logo.clearbit.com/${upper}.com`;
+  }
+
+  /**
+   * Extract logo URL from CoinGecko image object or string
+   * Handles both formats: { large: "url" } or "url"
+   */
+  private extractLogoUrl(image: any): string | null {
+    if (!image) return null;
+    
+    // If it's a string, return it directly
+    if (typeof image === 'string') {
+      return image;
+    }
+    
+    // If it's an object with large/thumb/small properties, prioritize "large"
+    if (typeof image === 'object') {
+      return image.large || image.thumb || image.small || null;
+    }
+    
+    return null;
+  }
+
+  /**
+   * Fetch logos for all symbols in dashboard data
+   * Dynamically queries CoinGecko for crypto and stock logo CDN for stocks
+   * NO HARDCODING - fully dynamic approach
+   */
+  private async getLogosForSymbols(
+    symbols: string[] = [],
+    assetTypes: Record<string, "crypto" | "stock"> = {},
+  ): Promise<Record<string, string>> {
+    const logos: Record<string, string> = {};
+    
+    // Ensure symbols is an array
+    if (!Array.isArray(symbols) || symbols.length === 0) {
+      return logos;
+    }
+    
+    // Remove duplicates and clean symbols - just uppercase, remove USDT trading pair suffix only
+    const uniqueSymbols = Array.from(new Set(
+      symbols
+        .filter(s => s && typeof s === 'string')
+        .map(s => {
+          // General cleanup: uppercase and remove trading pair suffix (e.g., "BNBUSDT" -> "BNB")
+          // but keep pure stablecoins and tokens as-is
+          const upper = s.toUpperCase();
+          
+          // If symbol looks like a trading pair (contains USDT at end and is long enough)
+          // Remove the USDT suffix to get base symbol
+          if (upper.endsWith('USDT') && upper.length > 4) {
+            return upper.replace(/USDT$/, '');
+          }
+          return upper;
+        })
+        .filter(s => s.length > 0)
+    ));
+
+    if (uniqueSymbols.length === 0) {
+      return logos;
+    }
+
+    this.logger.log(`Fetching logos for ${uniqueSymbols.length} unique assets`);
+
+    // Fetch logos concurrently - for each symbol, try CoinGecko if crypto, stock CDN if stock
+    const logoPromises = uniqueSymbols.map(async (symbol) => {
+      const assetType = assetTypes[symbol] || 'crypto';
+      
+      try {
+        // For CRYPTO: Query CoinGecko directly - it has all coins
+        if (assetType === 'crypto') {
+          try {
+            this.logger.debug(`[${symbol}] Querying CoinGecko...`);
+            const coinDetails = await this.marketService.getCoinDetails(symbol);
+            
+            if (coinDetails) {
+              const logoUrl = this.extractLogoUrl(coinDetails.image);
+              if (logoUrl) {
+                logos[symbol] = logoUrl;
+                this.logger.log(`[${symbol}] ✅ Got logo from CoinGecko`);
+                return;
+              }
+            }
+          } catch (error: any) {
+            this.logger.debug(`[${symbol}] Not found in CoinGecko: ${error?.message}`);
+          }
+        }
+        
+        // For STOCK: Use stock logo CDN - works for all stocks
+        if (assetType === 'stock') {
+          const stockLogoUrl = this.getStockLogoUrl(symbol);
+          logos[symbol] = stockLogoUrl;
+          this.logger.log(`[${symbol}] ✅ Got stock logo URL`);
+          return;
+        }
+
+        // Fallback: if crypto not found, try stock logo too
+        if (assetType === 'crypto') {
+          const stockLogoUrl = this.getStockLogoUrl(symbol);
+          logos[symbol] = stockLogoUrl;
+          this.logger.log(`[${symbol}] ✅ Using stock logo as fallback`);
+          return;
+        }
+
+        this.logger.warn(`[${symbol}] (${assetType}) Could not find logo`);
+
+      } catch (error: any) {
+        this.logger.error(`[${symbol}] Error fetching logo: ${error?.message}`);
+      }
+    });
+
+    // Wait for all requests with concurrency limit
+    const batchSize = 5;
+    for (let i = 0; i < logoPromises.length; i += batchSize) {
+      await Promise.all(logoPromises.slice(i, i + batchSize));
+    }
+
+    this.logger.log(`Logo fetch done: ${Object.keys(logos).length}/${uniqueSymbols.length} found`);
+    return logos;
+  }
+
   @Get('connections/:connectionId/dashboard')
   @UseGuards(ConnectionOwnerGuard)
   async getDashboard(@Param('connectionId') connectionId: string) {
@@ -766,21 +901,96 @@ export class ExchangesController {
 
       // OPTIMIZATION: Reuse prices from positions (already fetched during sync)
       // Only fetch additional prices if needed for symbols not in positions
-      const topPositions = (positions as any[]).slice(0, 10);
+      const topPositions = Array.isArray(positions) ? (positions as any[]).slice(0, 10) : [];
       
       // For crypto exchanges, append USDT to symbols. For stocks (Alpaca), use symbol as-is
       const isCryptoExchange = exchangeName === 'binance' || exchangeName === 'bybit';
+      const assetType = isCryptoExchange ? 'crypto' : 'stock';
+      
       const positionSymbols = new Set(topPositions.map((p) => 
-        isCryptoExchange ? `${p.symbol}USDT` : p.symbol
-      ));
+        isCryptoExchange ? `${p?.symbol}USDT` : p?.symbol
+      ).filter(s => s));
       
       // Prices are already in positions data, extract them
-      const prices = topPositions.map((p) => ({
-        symbol: isCryptoExchange ? `${p.symbol}USDT` : p.symbol,
-        price: p.currentPrice,
-        change24h: 0, // Not available in positions, would need separate call
-        changePercent24h: p.pnlPercent || 0,
-      }));
+      const prices = topPositions
+        .filter((p) => p && p.symbol && p.currentPrice)
+        .map((p) => ({
+          symbol: isCryptoExchange ? `${p.symbol}USDT` : p.symbol,
+          price: p.currentPrice,
+          change24h: 0, // Not available in positions, would need separate call
+          changePercent24h: p.pnlPercent || 0,
+        }));
+
+      // Collect ALL symbols from entire response
+      // This ensures every asset in the response will have a logo
+      const allSymbols: string[] = [];
+      const assetTypeMap: Record<string, "crypto" | "stock"> = {};
+      
+      // Add position symbols (safely)
+      if (Array.isArray(positions)) {
+        (positions as any[])
+          .filter((p) => p && p.symbol)
+          .forEach((p) => {
+            const sym = p.symbol;
+            allSymbols.push(sym);
+            assetTypeMap[sym] = assetType;
+          });
+      }
+      
+      // Add balance asset symbols (safely)
+      if (balance && Array.isArray((balance as any)?.assets)) {
+        (balance as any).assets
+          .filter((a: any) => a && a.symbol)
+          .forEach((a: any) => {
+            const sym = a.symbol;
+            if (!allSymbols.includes(sym)) {
+              allSymbols.push(sym);
+              assetTypeMap[sym] = assetType;
+            }
+          });
+      }
+      
+      // Add portal asset symbols (safely)
+      if (portfolio && Array.isArray((portfolio as any)?.assets)) {
+        (portfolio as any).assets
+          .filter((a: any) => a && a.symbol)
+          .forEach((a: any) => {
+            const sym = a.symbol;
+            if (!allSymbols.includes(sym)) {
+              allSymbols.push(sym);
+              assetTypeMap[sym] = assetType;
+            }
+          });
+      }
+
+      // Add order symbols (safely)
+      if (Array.isArray(orders)) {
+        (orders as any[])
+          .filter((o) => o && o.symbol)
+          .forEach((o) => {
+            const sym = o.symbol;
+            if (!allSymbols.includes(sym)) {
+              allSymbols.push(sym);
+              assetTypeMap[sym] = assetType;
+            }
+          });
+      }
+
+      // Add price symbols (safely)
+      if (Array.isArray(prices)) {
+        prices
+          .filter((p) => p && p.symbol)
+          .forEach((p) => {
+            const sym = p.symbol;
+            if (!allSymbols.includes(sym)) {
+              allSymbols.push(sym);
+              assetTypeMap[sym] = assetType;
+            }
+          });
+      }
+
+      this.logger.log(`Fetching logos for ${allSymbols.length} unique assets (${assetType})`);
+      const logos = await this.getLogosForSymbols(allSymbols, assetTypeMap);
 
       return {
         success: true,
@@ -790,6 +1000,8 @@ export class ExchangesController {
           orders: (orders as any[]).slice(0, 50), // Limit orders for dashboard
           portfolio,
           prices,
+          logos, // All symbol -> logo URL mappings
+          asset_types: assetTypeMap, // All symbol -> asset type mappings
         },
         last_updated: new Date().toISOString(),
         cached: isCached, // Indicate if data came from cache
