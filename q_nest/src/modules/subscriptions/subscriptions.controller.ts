@@ -1,9 +1,20 @@
 import { Controller, Get, Post, Put, Delete, Body, Param, Query } from '@nestjs/common';
 import { SubscriptionsService } from './subscriptions.service';
 
-@Controller('subscriptions')
+
+@Controller('/subscriptions')
 export class SubscriptionsController {
-  constructor(private readonly subscriptionsService: SubscriptionsService) {}
+  constructor(private readonly subscriptionsService: SubscriptionsService) { }
+
+  @Post('plans')
+  createPlan(@Body() createPlanDto: any) {
+    return this.subscriptionsService.createPlan(createPlanDto);
+  }
+  @Get('dashboard')
+  async getDashboard(query: any, @Query('userId') userId?: string) {
+    console.log('Dashboard query:', query);
+    return this.subscriptionsService.getDashboard(userId);
+  }
 
   @Get('plans')
   findAllPlans() {
@@ -15,19 +26,15 @@ export class SubscriptionsController {
     return this.subscriptionsService.findPlan(id);
   }
 
-  @Post('plans')
-  createPlan(@Body() createPlanDto: any) {
-    return this.subscriptionsService.createPlan(createPlanDto);
-  }
 
   @Put('plans/:id')
   updatePlan(@Param('id') id: string, @Body() updatePlanDto: any) {
-    return this.subscriptionsService.updatePlan(id, updatePlanDto);
+    // return this.subscriptionsService.updatePlan(id, updatePlanDto);
   }
 
   @Delete('plans/:id')
   removePlan(@Param('id') id: string) {
-    return this.subscriptionsService.deletePlan(id);
+    // return this.subscriptionsService.deletePlan(id);
   }
 
   @Get()
@@ -43,7 +50,7 @@ export class SubscriptionsController {
     return this.subscriptionsService.findSubscription(id);
   }
 
-  @Post()
+  @Post("subscribe")
   createSubscription(@Body() createSubscriptionDto: any) {
     return this.subscriptionsService.createSubscription(createSubscriptionDto);
   }
@@ -57,5 +64,7 @@ export class SubscriptionsController {
   removeSubscription(@Param('id') id: string) {
     return this.subscriptionsService.deleteSubscription(id);
   }
+
+ 
 }
 
