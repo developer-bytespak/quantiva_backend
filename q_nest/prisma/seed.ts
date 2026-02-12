@@ -59,6 +59,24 @@ async function main() {
     console.log('Interactive Brokers exchange already exists');
   }
 
+  // Check if Binance.US exists
+  const existingBinanceUS = await prisma.exchanges.findUnique({
+    where: { name: 'Binance.US' },
+  });
+
+  if (!existingBinanceUS) {
+    const binanceUS = await prisma.exchanges.create({
+      data: {
+        name: 'Binance.US',
+        type: ExchangeType.crypto,
+        supports_oauth: false,
+      },
+    });
+    console.log('Created Binance.US exchange:', binanceUS);
+  } else {
+    console.log('Binance.US exchange already exists');
+  }
+
   console.log('Seeding completed!');
 }
 

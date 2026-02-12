@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { ExchangeType, ConnectionStatus } from '@prisma/client';
 import { EncryptionService } from './services/encryption.service';
 import { BinanceService } from './integrations/binance.service';
+import { BinanceUSService } from './integrations/binance-us.service';
 import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
@@ -17,8 +18,7 @@ import {
 import { OrderBookDto, RecentTradeDto } from './dto/orderbook.dto';
 
 // Type for exchange services that implement common methods
-// Type for exchange services that implement common methods
-type ExchangeService = BinanceService | BybitService | AlpacaService;
+type ExchangeService = BinanceService | BinanceUSService | BybitService | AlpacaService;
 
 @Injectable()
 export class ExchangesService {
@@ -28,6 +28,7 @@ export class ExchangesService {
     private prisma: PrismaService,
     private encryptionService: EncryptionService,
     private binanceService: BinanceService,
+    private binanceUSService: BinanceUSService,
     private bybitService: BybitService,
     private alpacaService: AlpacaService,
     private cacheService: CacheService,
@@ -41,6 +42,8 @@ export class ExchangesService {
     
     if (normalizedName === 'binance') {
       return this.binanceService;
+    } else if (normalizedName === 'binance.us' || normalizedName === 'binanceus') {
+      return this.binanceUSService;
     } else if (normalizedName === 'bybit') {
       return this.bybitService;
     } else if (normalizedName === 'alpaca') {
