@@ -53,11 +53,10 @@ export class TokenService {
     }
   }
 
-  async decodeToken(token: string): Promise<TokenPayload | null> {
+  decodeToken(token: string): TokenPayload | null {
     try {
-      const jwtConfig = this.configService.get('jwt');
-      const payload = await this.jwtService.decode<TokenPayload>(token);
-      return payload;
+      const payload = this.jwtService.decode(token) as TokenPayload;
+      return payload || null;
     } catch (error) {
       return null;
     }
