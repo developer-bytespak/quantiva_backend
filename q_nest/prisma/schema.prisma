@@ -84,20 +84,31 @@ model user_settings {
 }
 
 model kyc_verifications {
-  kyc_id                 String             @id @default(uuid()) @db.Uuid
-  user_id                String             @db.Uuid
-  status                 KycStatus          @default(pending)
-  decision_reason        String?
-  doc_authenticity_score Decimal?           @db.Decimal(5, 4)
-  face_match_score       Decimal?           @db.Decimal(5, 4)
-  liveness_confidence    Decimal?           @db.Decimal(5, 4)
-  liveness_result        String?            @db.VarChar(20)
-  mrz_data               Json?              @db.Json
-  documents              kyc_documents[]
-  face_matches           kyc_face_matches[]
-  user                   users              @relation(fields: [user_id], references: [user_id])
+  kyc_id                  String             @id @default(uuid()) @db.Uuid
+  user_id                 String             @db.Uuid
+  status                  KycStatus          @default(pending)
+  decision_reason         String?
+  doc_authenticity_score  Decimal?           @db.Decimal(5, 4)
+  face_match_score        Decimal?           @db.Decimal(5, 4)
+  liveness_confidence     Decimal?           @db.Decimal(5, 4)
+  liveness_result         String?            @db.VarChar(20)
+  mrz_data                Json?              @db.Json
+  created_at              DateTime           @default(now()) @db.Timestamp(6)
+  updated_at              DateTime?          @updatedAt @db.Timestamp(6)
+  // Sumsub integration fields
+  sumsub_applicant_id     String?            @unique @db.VarChar(255)
+  sumsub_external_user_id String?            @db.VarChar(255)
+  sumsub_review_result    Json?              @db.Json
+  sumsub_review_status    String?            @db.VarChar(50)
+  verification_provider   String             @default("sumsub") @db.VarChar(20)
+  documents               kyc_documents[]
+  face_matches            kyc_face_matches[]
+  user                    users              @relation(fields: [user_id], references: [user_id])
 
   @@index([user_id])
+  @@index([sumsub_applicant_id])
+  @@index([sumsub_external_user_id])
+  @@index([verification_provider])
   @@map("kyc_verifications")
 }
 
