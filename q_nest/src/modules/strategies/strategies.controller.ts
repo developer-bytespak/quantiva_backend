@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode, HttpStatus, UseGuards, NotFoundException, ForbiddenException, BadRequestException, InternalServerErrorException, Logger } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode, HttpStatus, UseGuards, NotFoundException, ForbiddenException, BadRequestException, InternalServerErrorException, Logger, Req } from '@nestjs/common';
+import { Request } from 'express';
 import { StrategiesService } from './strategies.service';
 import { CreateStrategyDto, ValidateStrategyDto } from './dto/create-strategy.dto';
 import { PreBuiltStrategiesService } from './services/pre-built-strategies.service';
@@ -17,6 +18,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { AiInsightsService } from '../../ai-insights/ai-insights.service';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import { FeatureAccessService, FeatureType } from 'src/common/feature-access.service';
 
 @Controller('strategies')
 export class StrategiesController {
@@ -37,6 +39,8 @@ export class StrategiesController {
     private readonly prisma: PrismaService,
     private readonly aiInsightsService: AiInsightsService,
     private readonly configService: ConfigService,
+    private readonly featureAccessService: FeatureAccessService,
+
   ) {
     this.pythonApiUrl = this.configService.get<string>('PYTHON_API_URL') || 'http://localhost:8000/api/v1';
   }
@@ -730,6 +734,7 @@ export class StrategiesController {
   async createStockStrategy(
     @Body() dto: CreateStrategyDto,
     @CurrentUser() user: TokenPayload,
+    @Req() req: any,
   ) {
     this.logger.log(`Creating custom stock strategy for user: ${user.sub}`);
 
@@ -743,10 +748,28 @@ export class StrategiesController {
       throw new BadRequestException('At least one target stock symbol is required');
     }
 
+    const canAccess = await this.featureAccessService.canAccessFeature(
+    user.sub, 
+    FeatureType.CUSTOM_STRATEGIES,
+  );
+
+  if (!canAccess.allowed) {
+    throw new ForbiddenException(
+      `Strategy limit reached. Upgrade your plan to create more strategies.`,
+    );
+  }
+
     // Create the strategy
     const strategy = await this.strategiesService.createCustomStrategy(dto);
 
     this.logger.log(`Created stock strategy ${strategy.strategy_id} for user ${user.sub}`);
+
+     await this.featureAccessService.incrementUsage(
+    req.subscriptionUser?.subscription_id,
+    req.subscriptionUser?.user_id,
+    FeatureType.CUSTOM_STRATEGIES,
+  );
+
 
     return {
       success: true,
@@ -766,6 +789,7 @@ export class StrategiesController {
   async createCryptoStrategy(
     @Body() dto: CreateStrategyDto,
     @CurrentUser() user: TokenPayload,
+    @Req() req: Request,
   ) {
     this.logger.log(`Creating custom crypto strategy for user: ${user.sub}`);
 
@@ -779,10 +803,29 @@ export class StrategiesController {
       throw new BadRequestException('At least one target crypto symbol is required');
     }
 
+    // Check feature access
+    const canAccess = await this.featureAccessService.canAccessFeature(
+      user.sub,
+      FeatureType.CUSTOM_STRATEGIES,
+    );
+
+    if (!canAccess.allowed) {
+      throw new ForbiddenException(
+        `Strategy limit reached. Upgrade your plan to create more strategies.`,
+      );
+    }
+
     // Create the strategy
     const strategy = await this.strategiesService.createCustomStrategy(dto);
 
     this.logger.log(`Created crypto strategy ${strategy.strategy_id} for user ${user.sub}`);
+
+    // Increment feature usage
+    await this.featureAccessService.incrementUsage(
+      req.subscriptionUser?.subscription_id,
+      req.subscriptionUser?.user_id,
+      FeatureType.CUSTOM_STRATEGIES,
+    );
 
     return {
       success: true,

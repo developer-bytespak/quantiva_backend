@@ -1,13 +1,19 @@
 // src/common/middleware/subscription-loader.middleware.ts
 import { Injectable, NestMiddleware, Logger } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
-import { FeatureAccessService } from '../feature-access.service';
+import { PrismaService } from '../../prisma/prisma.service';
+import jwt, { JwtPayload } from 'jsonwebtoken';
 
 declare global {
   namespace Express {
     interface Request {
-      subscription?: any;
-      tier?: string;
+      subscriptionUser?: {
+        user_id?: string;
+        subscription_id?: string;
+        tier?: string;
+        billing_period?: string;
+        subscription?: any;
+      };
     }
   }
 }
@@ -16,42 +22,65 @@ declare global {
 export class SubscriptionLoaderMiddleware implements NestMiddleware {
   private logger = new Logger(SubscriptionLoaderMiddleware.name);
 
-  constructor(private readonly featureAccessService: FeatureAccessService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+  ) {}
 
-  async use(req: Request, res: Response, next: NextFunction) {
+   async use(req: Request, res: Response, next: NextFunction) {
     try {
-      // Only process if user is authenticated
-      const user = req.user as any;
-      if (!user || !user.sub) {
+      // 1. Authorization header se token nikalo
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        this.logger.debug('No authorization header found');
         return next();
       }
 
-      const userId = user.sub;
-
-      // Load subscription
-      const subscription =
-        await this.featureAccessService.getActiveSubscription(userId);
+      // 2. Token extract karo
+      const token = authHeader.slice(7); // "Bearer " ko remove karo
       
-      // Attach to request
-      req.subscription = subscription;
+      // 3. Token verify karo
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'default') as JwtPayload;
+      const userId = decoded?.sub || decoded?.user_id || decoded?.id;
 
-      // Attach tier info
-      if (subscription) {
-        req.tier = subscription.tier;
-      } else {
-        req.tier = 'FREE';
+      if (!userId) {
+        this.logger.warn('No user_id found in JWT token');
+        return next();
       }
 
-      this.logger.debug(
-        `[${req.method} ${req.path}] User ${userId} - Tier: ${req.tier}`,
-      );
-    } catch (error) {
-      this.logger.error(
-        `Error loading subscription for user: ${error.message}`,
-      );
-      // Don't fail request, just log
-    }
+      this.logger.debug(`Loading subscription for user: ${userId}`);
 
-    next();
+      // 4. Database se subscription data nikalo
+      const subscription = await this.prisma.user_subscriptions.findFirst({
+        where: {
+          user_id: userId,
+          status: 'active'
+        },
+        include: {
+          plan: {
+            include: {
+              plan_features: true,
+            },
+          },
+        },
+      });
+
+      this.logger.debug(`Subscription data loaded: ${subscription ? 'Found active subscription' : 'No active subscription'}`);
+
+      // 5. req.subscriptionUser mein inject karo
+      req.subscriptionUser = {
+        user_id: userId,
+        subscription_id: subscription?.subscription_id,
+        tier: subscription?.tier || 'FREE',
+        billing_period: subscription?.billing_period,
+        subscription,
+      };
+
+      this.logger.debug(`Subscription loaded - Tier: ${req.subscriptionUser.tier}, Has Subscription: ${!!subscription}`);
+      next();
+    } catch (error) {
+      // Token invalid ho to sirf next karo
+      this.logger.error(`Middleware error: ${error.message}`);
+      next();
+    }
   }
 }

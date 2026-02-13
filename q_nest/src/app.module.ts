@@ -1,8 +1,10 @@
-import { Module } from '@nestjs/common';
+import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from './prisma/prisma.module';
 import { ConfigModule } from './config/config.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { SubscriptionLoaderMiddleware } from './common/middleware/subscription-loader.middleware';
+import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 import { KycModule } from './kyc/kyc.module';
 import { ExchangesModule } from './modules/exchanges/exchanges.module';
 import { BinanceTestnetModule } from './modules/binance-testnet/binance-testnet.module';
@@ -19,8 +21,6 @@ import { AiInsightsModule } from './ai-insights/ai-insights.module';
 import { TaskSchedulerModule } from './task-scheduler/task-scheduler.module';
 import { PortfolioModule } from './modules/portfolio/portfolio.module';
 import { PaperTradingGateway } from './gateways/paper-trading.gateway';
-import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
-
 @Module({
   imports: [
     ConfigModule,
@@ -48,4 +48,10 @@ import { SubscriptionsModule } from './modules/subscriptions/subscriptions.modul
   controllers: [],
   providers: [PaperTradingGateway],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(SubscriptionLoaderMiddleware)
+      .forRoutes('*'); // Apply to all routes
+  }
+}

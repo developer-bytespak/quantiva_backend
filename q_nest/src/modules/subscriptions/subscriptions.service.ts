@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { SubscriptionStatus} from '@prisma/client';
+import { SubscriptionStatus } from '@prisma/client';
 
 export enum PlanTier {
   FREE = 'FREE',
@@ -23,7 +23,29 @@ export enum FeatureType {
 
 @Injectable()
 export class SubscriptionsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService) { }
+
+  private getMonthlyPeriods(startDate: Date, endDate: Date): { start: Date; end: Date }[] {
+    const periods: { start: Date; end: Date }[] = [];
+    let currentStart = new Date(startDate);
+
+    while (currentStart < endDate) {
+      const currentEnd = new Date(currentStart);
+      currentEnd.setMonth(currentEnd.getMonth() + 1);
+
+      // Last period should not exceed subscription end date
+      const periodEnd = currentEnd > endDate ? endDate : currentEnd;
+
+      periods.push({
+        start: new Date(currentStart),
+        end: periodEnd,
+      });
+
+      currentStart = currentEnd;
+    }
+
+    return periods;
+  }
 
   async findAllPlans() {
     return this.prisma.subscription_plans.findMany({
@@ -285,7 +307,7 @@ export class SubscriptionsService {
     billing_provider?: string;
     auto_renew?: boolean;
   }) {
-    
+
     return this.prisma.$transaction(async (tx) => {
       // 1️⃣ Plan fetch karo to get tier & billing_period
       const plan = await tx.subscription_plans.findUnique({
@@ -361,6 +383,8 @@ export class SubscriptionsService {
       });
 
       // 5️⃣ Subscription usage records initialize karo
+      // createSubscription me Line 489-520 replace karo:
+      // 5️⃣ Subscription usage records initialize karo
       if (plan.plan_features && plan.plan_features.length > 0) {
         await tx.subscription_usage.createMany({
           data: plan.plan_features.map(feature => ({
@@ -373,7 +397,6 @@ export class SubscriptionsService {
           })),
         });
       }
-
       return subscription;
     });
   }
@@ -382,10 +405,108 @@ export class SubscriptionsService {
     status?: SubscriptionStatus;
     expires_at?: Date;
     billing_provider?: string;
+    plan_id?: string;
+    auto_renew?: boolean;
   }) {
-    return this.prisma.user_subscriptions.update({
-      where: { subscription_id: id },
-      data,
+    return this.prisma.$transaction(async (tx) => {
+      // 1️⃣ Get current subscription
+
+      const currentSubscription = await tx.user_subscriptions.findUnique({
+        where: { subscription_id: id },
+        include: { plan: { include: { plan_features: true } } },
+      });
+
+      if (!currentSubscription) {
+        throw new Error('Subscription not found');
+      }
+
+      // 2️⃣ If plan_id is being changed, fetch new plan
+      let newPlan = currentSubscription.plan;
+      let updateData: any = {
+        status: data.status,
+        billing_provider: data.billing_provider,
+        auto_renew: data.auto_renew ?? currentSubscription.auto_renew,
+      };
+
+      if (data.plan_id && data.plan_id !== currentSubscription.plan_id) {
+        newPlan = await tx.subscription_plans.findUnique({
+          where: { plan_id: data.plan_id },
+          include: { plan_features: true },
+        });
+
+        if (!newPlan) {
+          throw new Error('New plan not found');
+        }
+
+        // 3️⃣ Recalculate billing dates for new plan
+        const now = new Date();
+        let current_period_end: Date;
+
+        switch (newPlan.billing_period) {
+          case 'MONTHLY':
+            current_period_end = new Date(now);
+            current_period_end.setMonth(current_period_end.getMonth() + 1);
+            break;
+          case 'QUARTERLY':
+            current_period_end = new Date(now);
+            current_period_end.setMonth(current_period_end.getMonth() + 3);
+            break;
+          case 'YEARLY':
+            current_period_end = new Date(now);
+            current_period_end.setFullYear(current_period_end.getFullYear() + 1);
+            break;
+        }
+
+        updateData = {
+          ...updateData,
+          plan_id: data.plan_id,
+          tier: newPlan.tier,
+          billing_period: newPlan.billing_period,
+          current_period_start: now,
+          current_period_end,
+          next_billing_date: current_period_end,
+          last_payment_date: now,
+        };
+
+        // 4️⃣ Update user tier
+        await tx.users.update({
+          where: { user_id: currentSubscription.user_id },
+          data: { current_tier: newPlan.tier },
+        });
+
+        // 5️⃣ Delete old subscription usage records
+        await tx.subscription_usage.deleteMany({
+          where: { subscription_id: id },
+        });
+
+        // 6️⃣ Create new subscription usage records for new plan features
+        // updateSubscription me Line 489-520 replace karo (same):
+        // 6️⃣ Create new subscription usage records for new plan features
+        if (newPlan.plan_features && newPlan.plan_features.length > 0) {
+          await tx.subscription_usage.createMany({
+            data: newPlan.plan_features.map(feature => ({
+              subscription_id: id,
+              user_id: currentSubscription.user_id,
+              feature_type: feature.feature_type,
+              usage_count: 0,
+              period_start: updateData.current_period_start,
+              period_end: updateData.current_period_end,
+            })),
+          });
+        }
+      }
+
+      // 7️⃣ Update subscription
+      const updated = await tx.user_subscriptions.update({
+        where: { subscription_id: id },
+        data: updateData,
+        include: {
+          plan: { include: { plan_features: true } },
+          subscription_usage: true,
+        },
+      });
+
+      return updated;
     });
   }
 
@@ -396,9 +517,9 @@ export class SubscriptionsService {
   }
 
 
-    /**
-   * Get active subscription with all features
-   */
+  /**
+ * Get active subscription with all features
+ */
   async getActiveSubscriptionWithFeatures(userId: string) {
     return this.prisma.user_subscriptions.findFirst({
       where: {
@@ -477,7 +598,7 @@ export class SubscriptionsService {
     // Current subscription
     const currentSubscription = await this.prisma.user_subscriptions.findFirst({
       where: { user_id: userId, status: 'active' },
-      include: { 
+      include: {
         plan: { include: { plan_features: true } },
         subscription_usage: true,
       },
@@ -493,41 +614,72 @@ export class SubscriptionsService {
 
     // Transform usage array into keyed object by feature_type
     const usage: any = {};
-    
+
     if (currentSubscription?.subscription_usage) {
+      // ✅ Group by feature_type and show current month's usage
+      const now = new Date();
+
       currentSubscription.subscription_usage.forEach((record: any) => {
         const featureLimit = currentSubscription.plan.plan_features.find(
           (f: any) => f.feature_type === record.feature_type
         );
-        
+
         const limit = featureLimit?.limit_value || -1;
-        usage[record.feature_type] = {
+
+        // Check if this record is for current month
+        const isCurrentMonth =
+          new Date(record.period_start) <= now &&
+          new Date(record.period_end) >= now;
+
+        // Initialize if not exists
+        if (!usage[record.feature_type]) {
+          usage[record.feature_type] = {
+            used: 0,
+            limit: limit,
+            percentage: 0,
+            current_period: null,
+            all_periods: [],
+          };
+        }
+
+        // Add to all periods
+        usage[record.feature_type].all_periods.push({
           used: record.usage_count || 0,
-          limit: limit,
-          percentage: limit === -1 ? 0 : (record.usage_count / limit) * 100,
           period_start: record.period_start,
           period_end: record.period_end,
-        };
+          is_current: isCurrentMonth,
+        });
+
+        // Set current month data
+        if (isCurrentMonth) {
+          usage[record.feature_type].used = record.usage_count || 0;
+          usage[record.feature_type].percentage =
+            limit === -1 ? 0 : ((record.usage_count || 0) / limit) * 100;
+          usage[record.feature_type].current_period = {
+            start: record.period_start,
+            end: record.period_end,
+          };
+        }
       });
     }
 
     // Format current subscription
     const current = currentSubscription
       ? {
-          subscription_id: currentSubscription.subscription_id,
-          user_id: currentSubscription.user_id,
-          tier: currentSubscription.tier || 'FREE',
-          plan_id: currentSubscription.plan_id,
-          billing_period: currentSubscription.billing_period || 'MONTHLY',
-          status: currentSubscription.status,
-          current_period_start: currentSubscription.current_period_start,
-          current_period_end: currentSubscription.current_period_end,
-          next_billing_date: currentSubscription.next_billing_date,
-          last_payment_date: currentSubscription.last_payment_date,
-          auto_renew: currentSubscription.auto_renew || false,
-          cancelled_at: currentSubscription.cancelled_at,
-          external_id: currentSubscription.external_id,
-        }
+        subscription_id: currentSubscription.subscription_id,
+        user_id: currentSubscription.user_id,
+        tier: currentSubscription.tier || 'FREE',
+        plan_id: currentSubscription.plan_id,
+        billing_period: currentSubscription.billing_period || 'MONTHLY',
+        status: currentSubscription.status,
+        current_period_start: currentSubscription.current_period_start,
+        current_period_end: currentSubscription.current_period_end,
+        next_billing_date: currentSubscription.next_billing_date,
+        last_payment_date: currentSubscription.last_payment_date,
+        auto_renew: currentSubscription.auto_renew || false,
+        cancelled_at: currentSubscription.cancelled_at,
+        external_id: currentSubscription.external_id,
+      }
       : null;
 
     const allSubscriptions = await this.prisma.subscription_plans.findMany({
@@ -556,6 +708,135 @@ export class SubscriptionsService {
       })),
       allSubscriptions,
     };
+  }
+
+  /**
+ * Check if user can use a feature in current month
+ */
+  // canUseFeature update karo - monthly auto-reset ke saath:
+  async canUseFeature(userId: string, featureType: FeatureType): Promise<{
+    allowed: boolean;
+    used: number;
+    limit: number;
+    currentMonth: { start: Date; end: Date };
+  }> {
+    const now = new Date();
+    const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+
+    const subscription = await this.getActiveSubscriptionWithFeatures(userId);
+
+    if (!subscription) {
+      return {
+        allowed: false,
+        used: 0,
+        limit: 0,
+        currentMonth: { start: currentMonthStart, end: currentMonthEnd },
+      };
+    }
+
+    const feature = subscription.plan.plan_features.find(
+      f => f.feature_type === featureType
+    );
+
+    if (!feature || !feature.enabled) {
+      return {
+        allowed: false,
+        used: 0,
+        limit: 0,
+        currentMonth: { start: currentMonthStart, end: currentMonthEnd },
+      };
+    }
+
+    // ✅ Get usage record
+    let usage = await this.prisma.subscription_usage.findFirst({
+      where: {
+        subscription_id: subscription.subscription_id,
+        user_id: userId,
+        feature_type: featureType,
+      },
+    });
+
+    if (!usage) {
+      return {
+        allowed: false,
+        used: 0,
+        limit: 0,
+        currentMonth: { start: currentMonthStart, end: currentMonthEnd },
+      };
+    }
+
+    // ✅ Check if month has changed - auto reset
+    const usagePeriodStart = new Date(usage.period_start);
+    const isNewMonth = usagePeriodStart.getMonth() !== now.getMonth() ||
+      usagePeriodStart.getFullYear() !== now.getFullYear();
+
+    if (isNewMonth) {
+      // Reset for new month
+      usage = await this.prisma.subscription_usage.update({
+        where: { usage_id: usage.usage_id },
+        data: {
+          usage_count: 0,
+          period_start: currentMonthStart,
+          period_end: currentMonthEnd,
+        },
+      });
+    }
+
+    const used = usage.usage_count || 0;
+    const limit = feature.limit_value || 0;
+
+    return {
+      allowed: limit === -1 || used < limit,
+      used,
+      limit,
+      currentMonth: { start: currentMonthStart, end: currentMonthEnd },
+    };
+  }
+
+  /**
+   * Increment usage for current month
+   */
+  async incrementUsage(userId: string, featureType: FeatureType): Promise<void> {
+    const now = new Date();
+
+    // Get active subscription
+    const subscription = await this.getActiveSubscriptionWithFeatures(userId);
+
+    if (!subscription) {
+      throw new Error('No active subscription found');
+    }
+
+    // Find current month's usage record
+    const usage = await this.prisma.subscription_usage.findFirst({
+      where: {
+        subscription_id: subscription.subscription_id,
+        user_id: userId,
+        feature_type: featureType,
+        period_start: {
+          lte: now,
+        },
+        period_end: {
+          gte: now,
+        },
+      },
+    });
+
+    if (!usage) {
+      throw new Error('Usage record not found for current month');
+    }
+
+    // Increment usage count
+    await this.prisma.subscription_usage.update({
+      where: {
+        usage_id: usage.usage_id,
+      },
+      data: {
+        usage_count: {
+          increment: 1,
+        },
+      },
+    });
   }
 
 }
