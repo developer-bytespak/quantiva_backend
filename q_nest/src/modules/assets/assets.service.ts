@@ -5,9 +5,28 @@ import { PrismaService } from '../../prisma/prisma.service';
 export class AssetsService {
   constructor(private prisma: PrismaService) {}
 
-  async findAll() {
+  async findAll(assetType?: string, limit?: number, search?: string) {
+    const whereClause: any = {
+      is_active: true,
+    };
+
+    // Filter by asset type if provided
+    if (assetType) {
+      whereClause.asset_type = assetType;
+    }
+
+    // Add search conditions if provided
+    if (search) {
+      whereClause.OR = [
+        { symbol: { contains: search, mode: 'insensitive' } },
+        { name: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
     return this.prisma.assets.findMany({
-      where: { is_active: true },
+      where: whereClause,
+      take: limit,
+      orderBy: { symbol: 'asc' },
     });
   }
 

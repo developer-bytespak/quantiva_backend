@@ -87,9 +87,13 @@ export class StrategyExecutionService {
     };
 
     try {
+      this.logger.log(`🎯 Executing strategy ${strategyId} for asset ${assetId} (${asset?.symbol})`);
+      
       // Call Python API to generate signal
       // Pass asset symbol for OHLCV fetching (Python services need symbol, not UUID)
       const assetSymbol = asset.symbol || assetId;
+      this.logger.log(`📡 Calling Python API with: strategyId=${strategyId}, assetId=${assetId}, symbol=${assetSymbol}`);
+      
       const pythonSignal = await this.pythonApi.generateSignal(
         strategyId,
         assetId,
@@ -101,6 +105,8 @@ export class StrategyExecutionService {
           asset_symbol: assetSymbol, // Pass symbol for OHLCV fetching
         },
       );
+
+      this.logger.log(`✅ Python signal received: action=${pythonSignal.action}, score=${pythonSignal.final_score}, confidence=${pythonSignal.confidence}`);
 
       // Store signal in database
       const signal = await this.signalsService.create({
@@ -117,6 +123,8 @@ export class StrategyExecutionService {
         liquidity_score: pythonSignal.engine_scores?.liquidity?.score || 0,
         event_risk_score: pythonSignal.engine_scores?.event_risk?.score || 0,
       });
+
+      this.logger.log(`💾 Signal stored in database: signal_id=${signal.signal_id}`);
 
       // Store signal details if position sizing is available
       if (pythonSignal.position_sizing) {
@@ -223,9 +231,17 @@ export class StrategyExecutionService {
         } : null,
       };
     } catch (error: any) {
-      this.logger.error(
-        `Error executing strategy ${strategyId} on asset ${assetId}: ${error.message}`,
-      );
+      this.logger.error(`❌ Error executing strategy ${strategyId} on asset ${assetId}:`);
+      this.logger.error(`   Asset Symbol: ${asset?.symbol || 'unknown'}`);
+      this.logger.error(`   Error Message: ${error.message}`);
+      this.logger.error(`   Error Type: ${error.constructor.name}`);
+      if (error.response) {
+        this.logger.error(`   HTTP Status: ${error.response.status}`);
+        this.logger.error(`   Response Data: ${JSON.stringify(error.response.data)}`);
+      }
+      if (error.stack) {
+        this.logger.error(`   Stack Trace: ${error.stack.split('\n').slice(0, 3).join('\n')}`);
+      }
       throw error;
     }
   }
