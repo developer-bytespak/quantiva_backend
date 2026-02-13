@@ -1,12 +1,14 @@
 import { Controller, Get, Query, Param, HttpException, HttpStatus, Post } from '@nestjs/common';
 import { MarketService } from './market.service';
 import { CoinDetailsCacheService } from './services/coin-details-cache.service';
+import { ExchangesService } from './services/exchanges.service';
 
 @Controller('api/market')
 export class MarketController {
   constructor(
     private readonly marketService: MarketService,
     private readonly coinDetailsCacheService: CoinDetailsCacheService,
+    private readonly exchangesService: ExchangesService,
   ) {}
 
   /**
@@ -101,6 +103,23 @@ export class MarketController {
       }
       throw new HttpException(
         error.message || 'Failed to search coins',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/market/exchanges/binance/coins
+   * Fetch all coins available on Binance from CoinGecko Pro API
+   */
+  @Get('exchanges/binance/coins')
+  async getBinanceCoins() {
+    try {
+      const coins = await this.exchangesService.getAllBinanceCoins();
+      return { coins };
+    } catch (error: any) {
+      throw new HttpException(
+        error.message || 'Failed to fetch Binance coins',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }

@@ -8,6 +8,7 @@ import { BinanceService } from './integrations/binance.service';
 import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
+import { MarketDetailAggregatorService } from './services/market-detail-aggregator.service';
 import { ConnectionOwnerGuard } from './guards/connection-owner.guard';
 import { BinanceUserWsService } from './services/binance-user-ws.service';
 import { PrismaModule } from '../../prisma/prisma.module';
@@ -24,6 +25,7 @@ import { MarketModule } from '../market/market.module';
     BybitService,
     AlpacaService,
     CacheService,
+    MarketDetailAggregatorService,
     ConnectionOwnerGuard,
     BinanceUserWsService,
   ],
@@ -34,6 +36,7 @@ import { MarketModule } from '../market/market.module';
     BybitService, 
     AlpacaService,
     CacheService,
+    MarketDetailAggregatorService,
     BinanceUserWsService,
   ],
 })
