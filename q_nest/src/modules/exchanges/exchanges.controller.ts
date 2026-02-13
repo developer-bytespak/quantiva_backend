@@ -8,6 +8,7 @@ import {
   Param,
   Query,
   UseGuards,
+  UseInterceptors,
   HttpCode,
   HttpStatus,
   HttpException,
@@ -26,6 +27,9 @@ import { BinanceService } from './integrations/binance.service';
 import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
+import { CacheKeyManager } from './services/cache-key-manager';
+import { CacheHeadersInterceptor, CacheControl } from '../../common/interceptors/cache-headers.interceptor';
+import { MarketDetailAggregatorService } from './services/market-detail-aggregator.service';
 import { ExchangeType } from '@prisma/client';
 import { ForbiddenException } from '@nestjs/common';
 import { MarketService } from '../market/market.service';
@@ -47,6 +51,7 @@ import { MarketService } from '../market/market.service';
  */
 @Controller('exchanges')
 @UseGuards(JwtAuthGuard)
+@UseInterceptors(CacheHeadersInterceptor)
 export class ExchangesController {
   private readonly logger = new Logger(ExchangesController.name);
 
@@ -57,6 +62,7 @@ export class ExchangesController {
     private readonly alpacaService: AlpacaService,
     private readonly cacheService: CacheService,
     private readonly marketService: MarketService,
+    private readonly marketDetailAggregator: MarketDetailAggregatorService,
   ) {}
 
   @Get()
@@ -571,6 +577,7 @@ export class ExchangesController {
 
   @Get('connections/:connectionId/candles/:symbol')
   @UseGuards(ConnectionOwnerGuard)
+  @CacheControl({ maxAge: 300, staleWhileRevalidate: 60, public: false })
   async getCandlestickData(
     @Param('connectionId') connectionId: string,
     @Param('symbol') symbol: string,
@@ -591,13 +598,22 @@ export class ExchangesController {
     const startTimeNum = startTime ? parseInt(startTime, 10) : undefined;
     const endTimeNum = endTime ? parseInt(endTime, 10) : undefined;
 
-    let candles;
-    if (exchangeName === 'bybit') {
-      candles = await this.bybitService.getCandlestickData(symbol, interval, limitNum, startTimeNum, endTimeNum);
-    } else {
-      // Default to Binance
-      candles = await this.binanceService.getCandlestickData(symbol, interval, limitNum, startTimeNum, endTimeNum);
-    }
+    // Use cache for candle data (no custom time range)
+    const cacheKey = CacheKeyManager.candle(connectionId, symbol, interval);
+    const candleTtl = this.cacheService.getTtlForType('candle');
+
+    const candles = await this.cacheService.getOrSet(
+      cacheKey,
+      async () => {
+        if (exchangeName === 'bybit') {
+          return this.bybitService.getCandlestickData(symbol, interval, limitNum, startTimeNum, endTimeNum);
+        } else {
+          return this.binanceService.getCandlestickData(symbol, interval, limitNum, startTimeNum, endTimeNum);
+        }
+      },
+      // Only cache when there's no custom time range (default requests)
+      (!startTime && !endTime) ? candleTtl : 15000,
+    );
 
     return {
       success: true,
@@ -649,9 +665,11 @@ export class ExchangesController {
 
   @Get('connections/:connectionId/coin/:symbol')
   @UseGuards(ConnectionOwnerGuard)
+  @CacheControl({ maxAge: 600, staleWhileRevalidate: 120, public: false })
   async getCoinDetail(
     @Param('connectionId') connectionId: string,
     @Param('symbol') symbol: string,
+    @Query('intervals') intervals?: string,
   ) {
     // Get connection to determine which exchange service to use
     const connection = await this.exchangesService.getConnectionById(connectionId);
@@ -661,61 +679,187 @@ export class ExchangesController {
 
     const exchangeName = connection.exchange.name.toLowerCase();
 
-    // Fetch ticker price (24h stats)
-    let ticker;
-    if (exchangeName === 'bybit') {
-      const tickers = await this.bybitService.getTickerPrices([symbol]);
-      ticker = tickers[0] || null;
-    } else {
-      const tickers = await this.binanceService.getTickerPrices([symbol]);
-      ticker = tickers[0] || null;
+    // Parse requested intervals (default: 1d only for backward compatibility)
+    const requestedIntervals = intervals
+      ? intervals.split(',').map(i => i.trim())
+      : ['1d'];
+
+    // Use unified cache key for coin detail
+    const cacheKey = CacheKeyManager.coinDetail(connectionId, symbol);
+    const coinDetailTtl = this.cacheService.getTtlForType('coin-detail');
+
+    // Check if we have a recent cached version with same or superset intervals
+    const cached = this.cacheService.getCached(cacheKey);
+    if (cached && this.hasAllIntervals(cached, requestedIntervals)) {
+      return {
+        success: true,
+        data: cached,
+        cached: true,
+        last_updated: new Date().toISOString(),
+      };
     }
 
-    // Fetch current candlestick data (default 1d interval, 100 candles)
-    let candles;
-    if (exchangeName === 'bybit') {
-      candles = await this.bybitService.getCandlestickData(symbol, '1d', 100);
-    } else {
-      candles = await this.binanceService.getCandlestickData(symbol, '1d', 100);
-    }
+    // Parallel fetch: ticker + multi-interval candles + balance
+    const [ticker, candlesByInterval, balance] = await Promise.all([
+      // Ticker
+      this.fetchTicker(exchangeName, symbol),
+      // Multi-interval candles (parallel)
+      this.fetchMultiIntervalCandles(exchangeName, connectionId, symbol, requestedIntervals),
+      // Balance
+      this.exchangesService.getConnectionData(connectionId, 'balance').catch(() => null),
+    ]);
 
-    // Fetch account balance for quote currency (USDT)
-    const balance = await this.exchangesService.getConnectionData(connectionId, 'balance') as any;
     const quoteCurrency = 'USDT';
-    const quoteBalance = balance.assets?.find((a: any) => a.symbol === quoteCurrency) || null;
+    const quoteBalance = (balance as any)?.assets?.find((a: any) => a.symbol === quoteCurrency) || null;
     const availableBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
 
-    // Extract 24h high/low from ticker if available (Binance provides this, Bybit may not)
+    // Extract 24h stats from 1d candles if available
     let high24h = 0;
     let low24h = 0;
     let volume24h = 0;
 
-    if (ticker) {
-      // For Binance, we'd need to fetch full ticker data with 24h stats
-      // For now, we'll use the candlestick data to estimate
-      if (candles && candles.length > 0) {
-        const recentCandles = candles.slice(-24); // Last 24 hours worth of 1h candles
-        high24h = Math.max(...recentCandles.map(c => c.high));
-        low24h = Math.min(...recentCandles.map(c => c.low));
-        volume24h = recentCandles.reduce((sum, c) => sum + c.volume, 0);
-      }
+    const dailyCandles = candlesByInterval['1d'] || candlesByInterval[requestedIntervals[0]];
+    if (ticker && dailyCandles && dailyCandles.length > 0) {
+      const recentCandles = dailyCandles.slice(-24);
+      high24h = Math.max(...recentCandles.map(c => c.high));
+      low24h = Math.min(...recentCandles.map(c => c.low));
+      volume24h = recentCandles.reduce((sum, c) => sum + c.volume, 0);
     }
+
+    const result = {
+      symbol,
+      tradingPair: symbol,
+      currentPrice: ticker?.price || 0,
+      change24h: ticker?.change24h || 0,
+      changePercent24h: ticker?.changePercent24h || 0,
+      high24h,
+      low24h,
+      volume24h,
+      availableBalance,
+      quoteCurrency,
+      // Multi-interval candles: { '1d': [...], '1h': [...], '15m': [...] }
+      candlesByInterval,
+      // Backward compatible: default candles from first interval
+      candles: (dailyCandles || []).slice(0, 100),
+    };
+
+    // Cache the result
+    this.cacheService.setCached(cacheKey, result, coinDetailTtl);
 
     return {
       success: true,
-      data: {
-        symbol,
-        tradingPair: symbol,
-        currentPrice: ticker?.price || 0,
-        change24h: ticker?.change24h || 0,
-        changePercent24h: ticker?.changePercent24h || 0,
-        high24h,
-        low24h,
-        volume24h,
-        availableBalance,
-        quoteCurrency,
-        candles: candles.slice(0, 100), // Return last 100 candles
+      data: result,
+      cached: false,
+      last_updated: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Fetch ticker price from correct exchange
+   */
+  private async fetchTicker(exchangeName: string, symbol: string) {
+    try {
+      if (exchangeName === 'bybit') {
+        const tickers = await this.bybitService.getTickerPrices([symbol]);
+        return tickers[0] || null;
+      } else {
+        const tickers = await this.binanceService.getTickerPrices([symbol]);
+        return tickers[0] || null;
+      }
+    } catch (error) {
+      this.logger.warn(`Failed to fetch ticker for ${symbol}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Fetch candles for multiple intervals in parallel.
+   * Each interval is cached individually for reuse.
+   */
+  private async fetchMultiIntervalCandles(
+    exchangeName: string,
+    connectionId: string,
+    symbol: string,
+    intervals: string[],
+  ): Promise<Record<string, any[]>> {
+    const candleTtl = this.cacheService.getTtlForType('candle');
+
+    const results = await Promise.all(
+      intervals.map(async (interval) => {
+        const cacheKey = CacheKeyManager.candle(connectionId, symbol, interval);
+
+        const candles = await this.cacheService.getOrSet(
+          cacheKey,
+          async () => {
+            if (exchangeName === 'bybit') {
+              return this.bybitService.getCandlestickData(symbol, interval, 100);
+            } else {
+              return this.binanceService.getCandlestickData(symbol, interval, 100);
+            }
+          },
+          candleTtl,
+        );
+
+        return { interval, candles };
+      }),
+    );
+
+    const candlesByInterval: Record<string, any[]> = {};
+    for (const { interval, candles } of results) {
+      candlesByInterval[interval] = candles;
+    }
+    return candlesByInterval;
+  }
+
+  /**
+   * Check if cached data already contains all requested intervals
+   */
+  private hasAllIntervals(cachedData: any, requestedIntervals: string[]): boolean {
+    if (!cachedData?.candlesByInterval) return false;
+    return requestedIntervals.every(
+      (interval) => cachedData.candlesByInterval[interval] !== undefined,
+    );
+  }
+
+  /**
+   * UNIFIED ENDPOINT: Get all market detail page data in a single call.
+   * Replaces multiple separate API calls with one aggregated response.
+   *
+   * Query params:
+   *  - intervals: comma-separated list (default: "1d,1h,15m")
+   *  - includeOrderBook: boolean (default: true)
+   *  - includeRecentTrades: boolean (default: true)
+   *  - coinGeckoId: optional specific CoinGecko ID
+   */
+  @Get('connections/:connectionId/market-detail/:symbol')
+  @UseGuards(ConnectionOwnerGuard)
+  @CacheControl({ maxAge: 300, staleWhileRevalidate: 120, public: false })
+  async getMarketDetail(
+    @Param('connectionId') connectionId: string,
+    @Param('symbol') symbol: string,
+    @Query('intervals') intervals?: string,
+    @Query('includeOrderBook') includeOrderBook?: string,
+    @Query('includeRecentTrades') includeRecentTrades?: string,
+    @Query('coinGeckoId') coinGeckoId?: string,
+  ) {
+    const parsedIntervals = intervals
+      ? intervals.split(',').map(i => i.trim())
+      : ['1d', '1h', '15m'];
+
+    const data = await this.marketDetailAggregator.getMarketDetail(
+      connectionId,
+      symbol,
+      {
+        intervals: parsedIntervals,
+        includeOrderBook: includeOrderBook !== 'false',
+        includeRecentTrades: includeRecentTrades !== 'false',
+        coinGeckoId,
       },
+    );
+
+    return {
+      success: true,
+      data,
       last_updated: new Date().toISOString(),
     };
   }

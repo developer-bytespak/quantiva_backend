@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import axios, { AxiosInstance } from 'axios';
 import { CoinDetailsCacheService } from './services/coin-details-cache.service';
+import { ExchangesService } from './services/exchanges.service';
 
 export interface CoinGeckoCoin {
   id: string;
@@ -43,10 +44,14 @@ export class MarketService {
   private coinDetailsCache: Map<string, { data: any; timestamp: number }> = new Map();
   private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes cache
 
+  // Promise deduplication: prevents concurrent API calls for the same coin
+  private inFlightCoinDetails: Map<string, Promise<any>> = new Map();
+
   constructor(
     private configService: ConfigService,
     private prisma: PrismaService,
     private coinDetailsCacheService: CoinDetailsCacheService,
+    private exchangesService: ExchangesService,
   ) {
     this.apiKey = this.configService.get<string>('COINGECKO_API_KEY') || null;
     
@@ -208,21 +213,47 @@ export class MarketService {
   /**
    * Fetch detailed information about a specific coin
    * Accepts either coin ID (e.g., "bitcoin") or symbol (e.g., "BTC")
-   * Implements database cache + 5-minute in-memory cache to reduce API calls
+   * Implements:
+   * - 3-tier cache: memory → DB → API
+   * - Promise deduplication (prevents cache stampede)
+   * - Rate-limit fallback to stale DB data
    */
   async getCoinDetails(coinIdOrSymbol: string): Promise<any> {
-    try {
-      const cacheKey = coinIdOrSymbol.toLowerCase();
-      
-      // 1. Check in-memory cache first (fastest)
-      const memCached = this.coinDetailsCache.get(cacheKey);
-      const now = Date.now();
-      
-      if (memCached && (now - memCached.timestamp) < this.CACHE_TTL) {
-        this.logger.log(`Returning in-memory cached coin details for ${coinIdOrSymbol}`);
-        return memCached.data;
-      }
+    const cacheKey = coinIdOrSymbol.toLowerCase();
 
+    // 1. Check in-memory cache first (fastest)
+    const memCached = this.coinDetailsCache.get(cacheKey);
+    const now = Date.now();
+
+    if (memCached && (now - memCached.timestamp) < this.CACHE_TTL) {
+      this.logger.log(`Returning in-memory cached coin details for ${coinIdOrSymbol}`);
+      return memCached.data;
+    }
+
+    // 2. Check if there's an in-flight request for same key (deduplication)
+    const inFlight = this.inFlightCoinDetails.get(cacheKey);
+    if (inFlight) {
+      this.logger.log(`Deduplicating in-flight request for ${coinIdOrSymbol}`);
+      return inFlight;
+    }
+
+    // 3. Create deduplication-aware fetch promise
+    const fetchPromise = this._fetchCoinDetailsInternal(coinIdOrSymbol, cacheKey, now);
+    this.inFlightCoinDetails.set(cacheKey, fetchPromise);
+
+    try {
+      const result = await fetchPromise;
+      return result;
+    } finally {
+      this.inFlightCoinDetails.delete(cacheKey);
+    }
+  }
+
+  /**
+   * Internal: fetch coin details with DB cache and API fallbacks
+   */
+  private async _fetchCoinDetailsInternal(coinIdOrSymbol: string, cacheKey: string, now: number): Promise<any> {
+    try {
       // 2. Check database cache (fast, reduces API calls)
       const dbCached = await this.coinDetailsCacheService.getCoinDetailsFromDB(coinIdOrSymbol);
       if (dbCached) {
@@ -238,7 +269,6 @@ export class MarketService {
       let coinId = coinIdOrSymbol.toLowerCase();
 
       // Always try to search by symbol first if it looks like a symbol
-      // Symbols are typically 2-5 characters and uppercase
       const isLikelySymbol =
         coinIdOrSymbol.length >= 2 &&
         coinIdOrSymbol.length <= 5 &&
@@ -252,7 +282,7 @@ export class MarketService {
       }
 
       this.logger.log(`Fetching fresh coin details from CoinGecko API for ${coinIdOrSymbol}`);
-      
+
       // Sync to database (fetches from API and saves)
       const freshData = await this.coinDetailsCacheService.syncCoinDetails(coinId);
 
@@ -271,14 +301,26 @@ export class MarketService {
         data: error?.response?.data,
       });
 
+      // Rate-limit fallback: serve stale data from DB if we hit 429
+      if (error?.response?.status === 429 || error?.message?.includes('rate limit')) {
+        this.logger.warn(`Rate limited for ${coinIdOrSymbol}, attempting stale data fallback`);
+        const staleData = await this.coinDetailsCacheService.getStaleData(coinIdOrSymbol);
+        if (staleData) {
+          this.logger.log(`Serving stale data for ${coinIdOrSymbol} due to rate limit`);
+          // Cache stale data in memory with a short TTL so we retry soon
+          this.coinDetailsCache.set(cacheKey, {
+            data: staleData,
+            timestamp: Date.now(),
+          });
+          return staleData;
+        }
+        throw new Error('CoinGecko API rate limit exceeded and no cached data available.');
+      }
+
       if (error?.response?.status === 404) {
         throw new Error(
           `Coin "${coinIdOrSymbol}" not found. Please check if the symbol is correct.`,
         );
-      }
-
-      if (error?.response?.status === 429) {
-        throw new Error('CoinGecko API rate limit exceeded. Please try again later.');
       }
 
       if (error?.response?.status === 401) {
@@ -293,6 +335,7 @@ export class MarketService {
 
   /**
    * Fetch coins from database (cached data from cron job)
+   * Filters to only return Binance coins with USDT pairs
    * Much faster than CoinGecko API calls
    */
   async getCachedMarketData(
@@ -300,6 +343,23 @@ export class MarketService {
     search?: string,
   ): Promise<{ coins: CoinGeckoCoin[]; lastSyncTime: Date | null }> {
     try {
+      // Fetch Binance coins with USDT pairs
+      let binanceCoinsWithUsdt: string[] = [];
+      try {
+        binanceCoinsWithUsdt = await this.exchangesService.getBinanceCoinsWithUsdtPairs();
+        this.logger.log(`Fetching market data for ${binanceCoinsWithUsdt.length} Binance coins with USDT pairs`);
+      } catch (error) {
+        this.logger.error('Failed to fetch Binance USDT pairs, falling back to all Binance coins', error);
+        // Fallback: get all Binance coins if USDT-specific fetch fails
+        binanceCoinsWithUsdt = await this.exchangesService.getAllBinanceCoins();
+        this.logger.log(`Fallback: using all ${binanceCoinsWithUsdt.length} Binance coins`);
+      }
+
+      if (binanceCoinsWithUsdt.length === 0) {
+        this.logger.warn('No Binance coins found');
+        return { coins: [], lastSyncTime: null };
+      }
+
       // Get latest market_rankings timestamp
       const latestRanking = await this.prisma.market_rankings.findFirst({
         orderBy: { rank_timestamp: 'desc' },
@@ -323,11 +383,14 @@ export class MarketService {
           }
         : {};
 
-      // Fetch assets with latest market rankings
+      // Fetch assets with latest market rankings - filtered by Binance coins with USDT pairs
       const assets = await this.prisma.assets.findMany({
         where: {
           asset_type: 'crypto',
           is_active: true,
+          coingecko_id: {
+            in: binanceCoinsWithUsdt,
+          },
           ...searchFilter,
         },
         include: {
@@ -347,7 +410,7 @@ export class MarketService {
         take: limit,
       });
 
-      this.logger.log(`Found ${assets.length} assets with market rankings`);
+      this.logger.log(`Found ${assets.length} Binance coins with USDT pairs in market rankings`);
 
       // Transform to CoinGeckoCoin format
       const coins: CoinGeckoCoin[] = assets

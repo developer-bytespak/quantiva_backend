@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import cookieParser from 'cookie-parser';
+import compression from 'compression';
 import { PreBuiltSignalsCronjobService } from './modules/strategies/services/pre-built-signals-cronjob.service';
 import { json, urlencoded } from 'express';
 
@@ -13,6 +14,17 @@ async function bootstrap() {
   // the size limit is controlled by multer configuration in individual controllers.
   app.use(json({ limit: '10mb' }));
   app.use(urlencoded({ limit: '10mb', extended: true }));
+
+  // Enable gzip/brotli compression for all responses (typically 60-80% size reduction)
+  app.use(compression({
+    threshold: 1024,  // Only compress responses > 1KB
+    level: 6,         // Balanced compression level (1=fastest, 9=best)
+    filter: (req, res) => {
+      // Don't compress SSE or WebSocket upgrade responses
+      if (req.headers['accept'] === 'text/event-stream') return false;
+      return compression.filter(req, res);
+    },
+  }));
 
   // Enable CORS. Support multiple frontend origins via FRONTEND_URLS (comma-separated)
   // Example: FRONTEND_URLS=https://quantiva-hq.vercel.app,https://preview-app.vercel.app
