@@ -1,8 +1,10 @@
-import { Module } from '@nestjs/common';
+import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from './prisma/prisma.module';
 import { ConfigModule } from './config/config.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { SubscriptionLoaderMiddleware } from './common/middleware/subscription-loader.middleware';
+import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 import { KycModule } from './kyc/kyc.module';
 import { ExchangesModule } from './modules/exchanges/exchanges.module';
 import { BinanceTestnetModule } from './modules/binance-testnet/binance-testnet.module';
@@ -49,4 +51,10 @@ import { SubscriptionsModule } from './modules/subscriptions/subscriptions.modul
   controllers: [],
   providers: [PaperTradingGateway, MarketDetailGateway],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(SubscriptionLoaderMiddleware)
+      .forRoutes('*'); // Apply to all routes
+  }
+}

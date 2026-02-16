@@ -777,7 +777,7 @@ model subscription_usage {
   subscription    user_subscriptions @relation(fields: [subscription_id], references: [subscription_id], onDelete: Cascade)
   user            users              @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
 
-  @@unique([subscription_id, feature_type])
+  @@unique([subscription_id, feature_type, period_start])
   @@index([subscription_id])
   @@index([user_id])
   @@map("subscription_usage")

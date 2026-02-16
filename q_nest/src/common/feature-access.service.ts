@@ -3,14 +3,14 @@ import { Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 // import { FeatureType, PlanTier } from '@prisma/client';
 
-const enum FeatureType {
+export enum FeatureType {
   CUSTOM_STRATEGIES = 'CUSTOM_STRATEGIES',
   VC_POOL_ACCESS = 'VC_POOL_ACCESS',
   EARLY_ACCESS = 'EARLY_ACCESS',
   // Add more features as needed
 }
 
-const enum PlanTier {
+export enum PlanTier {
   FREE = 'FREE',
   PRO = 'PRO',
   ELITE = 'ELITE',

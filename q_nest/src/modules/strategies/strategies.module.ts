@@ -22,6 +22,7 @@ import { ExchangesModule } from '../exchanges/exchanges.module';
 import { BinanceModule } from '../binance/binance.module';
 import { AiInsightsModule } from '../../ai-insights/ai-insights.module';
 import { StocksMarketModule } from '../stocks-market/stocks-market.module';
+import { FeatureAccessService } from '../../common/feature-access.service';
 
 @Module({
   imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule), NewsModule, forwardRef(() => ExchangesModule), BinanceModule, ScheduleModule, AiInsightsModule, StocksMarketModule],
@@ -38,6 +39,7 @@ import { StocksMarketModule } from '../stocks-market/stocks-market.module';
     StockSignalsCronjobService,
     CustomStrategyCronjobService,
     StockTrendingService,
+    FeatureAccessService,
   ],
   exports: [
     StrategiesService,
@@ -51,6 +53,7 @@ import { StocksMarketModule } from '../stocks-market/stocks-market.module';
     StockSignalsCronjobService,
     CustomStrategyCronjobService,
     StockTrendingService,
+    FeatureAccessService,
   ],
 })
 export class StrategiesModule {}
