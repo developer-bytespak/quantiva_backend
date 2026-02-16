@@ -24,7 +24,7 @@ import { ChangePasswordDto } from '../dto/change-password.dto';
 import { DeleteAccountDto } from '../dto/delete-account.dto';
 import { VerifyPasswordDto } from '../dto/verify-password.dto';
 import { ConfigService } from '@nestjs/config';
-import { TokenPayload } from '../services/token.service';
+import { TokenPayload, TokenService } from '../services/token.service';
 
 @Controller('auth')
 export class AuthController {
@@ -32,6 +32,7 @@ export class AuthController {
     private authService: AuthService,
     private sessionService: SessionService,
     private configService: ConfigService,
+    private tokenService: TokenService,
   ) {}
 
   private setCookie(
@@ -189,8 +190,11 @@ export class AuthController {
     this.setCookie(res, 'access_token', result.accessToken, 45 * 60);
     this.setCookie(res, 'refresh_token', result.refreshToken, 7 * 24 * 60 * 60);
 
+    // Return tokens in response body for localStorage fallback (cross-origin scenarios)
     return {
       message: 'Tokens refreshed successfully',
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
     };
   }
 
@@ -203,15 +207,42 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ) {
     // Note: logout is @Public because client-JWT logout relies on client removing tokens from localStorage.
-    // If user is authenticated via cookies/JWT, try to revoke their session server-side.
-    if (user && user.sub) {
+    // Since @Public() routes skip JWT guard, we need to manually extract token to get session_id
+    let tokenPayload: TokenPayload | null = null;
+
+    // Manually extract and decode token from Authorization header or cookies
+    try {
+      const authHeader = req.headers.authorization;
+      let token: string | undefined;
+
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        token = authHeader.substring(7);
+      } else if (req.cookies?.access_token) {
+        token = req.cookies.access_token;
+      }
+
+      if (token) {
+        // Decode (not verify) the token - we don't verify because token might be expired
+        // but we still want the session_id from it
+        tokenPayload = this.tokenService.decodeToken(token);
+      }
+    } catch (error) {
+      console.warn('Could not decode token during logout:', error);
+    }
+
+    // Use decoded token payload if available, otherwise fall back to user from guard (if any)
+    const effectiveUser = tokenPayload || user;
+
+    // If user is authenticated via cookies/JWT, try to delete their session server-side.
+    if (effectiveUser && effectiveUser.sub) {
       let sessionDeleted = false;
 
       // Delete the specific session directly using session_id from JWT payload
       // This is much more efficient than matching refresh tokens
-      if (user.session_id) {
+      if (effectiveUser.session_id) {
         try {
-          sessionDeleted = await this.sessionService.deleteSession(user.session_id);
+          sessionDeleted = await this.sessionService.deleteSession(effectiveUser.session_id);
+          console.log(`Session ${effectiveUser.session_id} deleted successfully for user ${effectiveUser.sub}`);
         } catch (error) {
           // Log error but continue with logout to clear cookies
           console.error('Error deleting session during logout:', error);
@@ -226,10 +257,11 @@ export class AuthController {
             // Find session by refresh token and delete it
             const session = await this.sessionService.findSessionByRefreshTokenAndUser(
               refreshToken,
-              user.sub,
+              effectiveUser.sub,
             );
             if (session) {
               sessionDeleted = await this.sessionService.deleteSession(session.session_id);
+              console.log(`Session ${session.session_id} deleted via refresh token for user ${effectiveUser.sub}`);
             }
           } catch (error) {
             console.error('Error deleting session during logout (fallback):', error);
@@ -241,7 +273,8 @@ export class AuthController {
       // (as a fallback, we revoke instead of delete to ensure cleanup)
       if (!sessionDeleted) {
         try {
-          await this.sessionService.revokeCurrentUserSession(user.sub);
+          await this.sessionService.revokeCurrentUserSession(effectiveUser.sub);
+          console.log(`Most recent session revoked for user ${effectiveUser.sub}`);
         } catch (error) {
           console.error('Error revoking session during logout (final fallback):', error);
         }

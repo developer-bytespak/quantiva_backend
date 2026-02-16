@@ -450,4 +450,43 @@ export class CoinDetailsCacheService {
       oldestUpdate: oldest?.last_updated || null,
     };
   }
+
+  /**
+   * Get stale data from DB regardless of age.
+   * Used as a rate-limit fallback — better to show old data than nothing.
+   */
+  async getStaleData(coinIdOrSymbol: string): Promise<any | null> {
+    try {
+      const normalizedInput = coinIdOrSymbol.toLowerCase();
+
+      const coinDetail = await this.prisma.coin_details.findFirst({
+        where: {
+          OR: [
+            { coingecko_id: normalizedInput },
+            { symbol: normalizedInput },
+          ],
+        },
+        orderBy: {
+          last_updated: 'desc',
+        },
+      });
+
+      if (!coinDetail) {
+        this.logger.debug(`No stale data found for "${coinIdOrSymbol}"`);
+        return null;
+      }
+
+      const age = Date.now() - coinDetail.last_updated.getTime();
+      this.logger.log(
+        `Returning stale data for "${coinIdOrSymbol}" (${Math.round(age / 1000 / 60)} minutes old)`,
+      );
+      return this.transformDBToAPIFormat(coinDetail);
+    } catch (error: any) {
+      this.logger.error('Failed to fetch stale data from database', {
+        coinIdOrSymbol,
+        error: error.message,
+      });
+      return null;
+    }
+  }
 }

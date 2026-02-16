@@ -10,8 +10,13 @@ export class AssetsController {
   ) {}
 
   @Get()
-  findAll() {
-    return this.assetsService.findAll();
+  findAll(
+    @Query('asset_type') assetType?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+  ) {
+    const limitNum = limit ? parseInt(limit, 10) : undefined;
+    return this.assetsService.findAll(assetType, limitNum, search);
   }
 
   @Get('trending')

@@ -1,10 +1,16 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { KycStatus } from '@prisma/client';
+import { SumsubService } from '../integrations/sumsub.service';
 
 @Injectable()
 export class ReviewService {
-  constructor(private prisma: PrismaService) {}
+  private readonly logger = new Logger(ReviewService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private sumsubService: SumsubService,
+  ) {}
 
   async approve(kycId: string, reason?: string): Promise<void> {
     const verification = await this.prisma.kyc_verifications.findUnique({
@@ -81,5 +87,74 @@ export class ReviewService {
       orderBy: { kyc_id: 'desc' },
     });
   }
+
+  /**
+   * Get full Sumsub applicant data from Sumsub API
+   */
+  async getSumsubApplicantData(kycId: string): Promise<any> {
+    const verification = await this.prisma.kyc_verifications.findUnique({
+      where: { kyc_id: kycId },
+      select: { sumsub_applicant_id: true, verification_provider: true },
+    });
+
+    if (!verification) {
+      throw new Error('KYC verification not found');
+    }
+
+    if (verification.verification_provider !== 'sumsub') {
+      throw new Error('This verification does not use Sumsub');
+    }
+
+    if (!verification.sumsub_applicant_id) {
+      throw new Error('No Sumsub applicant ID found');
+    }
+
+    return this.sumsubService.getApplicantStatus(verification.sumsub_applicant_id);
+  }
+
+  /**
+   * Reset Sumsub applicant for resubmission
+   */
+  async resetSumsubApplicant(kycId: string): Promise<void> {
+    const verification = await this.prisma.kyc_verifications.findUnique({
+      where: { kyc_id: kycId },
+      select: { sumsub_applicant_id: true, verification_provider: true },
+    });
+
+    if (!verification) {
+      throw new Error('KYC verification not found');
+    }
+
+    if (verification.verification_provider !== 'sumsub') {
+      throw new Error('This verification does not use Sumsub');
+    }
+
+    if (!verification.sumsub_applicant_id) {
+      throw new Error('No Sumsub applicant ID found');
+    }
+
+    await this.sumsubService.resetApplicant(verification.sumsub_applicant_id);
+
+    await this.prisma.kyc_verifications.update({
+      where: { kyc_id: kycId },
+      data: {
+        status: 'pending',
+        decision_reason: 'Applicant reset for resubmission',
+        sumsub_review_status: null,
+        sumsub_review_result: null,
+      },
+    });
+
+    this.logger.log(`Reset Sumsub applicant for KYC: ${kycId}`);
+  }
+
+  /**
+   * Get Sumsub dashboard link for applicant
+   */
+  getSumsubDashboardLink(applicantId: string): string {
+    // Construct Sumsub dashboard link (adjust based on your Sumsub environment)
+    return `https://cockpit.sumsub.com/checkus/#/applicant/${applicantId}`;
+  }
 }
+
 

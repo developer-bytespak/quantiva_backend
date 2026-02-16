@@ -21,6 +21,9 @@ import { AiInsightsModule } from './ai-insights/ai-insights.module';
 import { TaskSchedulerModule } from './task-scheduler/task-scheduler.module';
 import { PortfolioModule } from './modules/portfolio/portfolio.module';
 import { PaperTradingGateway } from './gateways/paper-trading.gateway';
+import { MarketDetailGateway } from './gateways/market-detail.gateway';
+import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
+
 @Module({
   imports: [
     ConfigModule,
@@ -46,7 +49,7 @@ import { PaperTradingGateway } from './gateways/paper-trading.gateway';
     SubscriptionsModule,
   ],
   controllers: [],
-  providers: [PaperTradingGateway],
+  providers: [PaperTradingGateway, MarketDetailGateway],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

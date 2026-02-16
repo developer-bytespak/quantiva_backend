@@ -3,6 +3,19 @@ KYC API Endpoints
 =================
 Document verification, liveness detection, face matching, and OCR endpoints.
 Uses DeepFace for face operations.
+
+⚠️ DEPRECATION NOTICE ⚠️
+-------------------------
+The following endpoints are DEPRECATED and will be removed in a future version:
+- POST /kyc/face-match
+- POST /kyc/liveness
+- POST /kyc/document-authenticity
+- POST /kyc/verify
+
+Reason: KYC verification has been migrated to Sumsub (third-party KYC provider).
+These endpoints are maintained for backward compatibility with legacy verifications only.
+
+For new KYC verifications, use the Sumsub integration in the NestJS backend.
 """
 
 import io
@@ -372,7 +385,13 @@ async def match_faces_endpoint(
     selfie: UploadFile = File(...),
 ):
     """
+    ⚠️ DEPRECATED - Use Sumsub integration instead
+    
     Compare face from ID photo with selfie.
+    
+    This endpoint is deprecated and maintained only for backward compatibility
+    with legacy DeepFace-based KYC verifications. New verifications should use
+    the Sumsub integration in the NestJS backend.
     
     Returns:
         - similarity: Cosine similarity score (0-1)
@@ -384,9 +403,11 @@ async def match_faces_endpoint(
         - id_face_quality: Quality metrics for ID photo face
         - selfie_face_quality: Quality metrics for selfie face
     """
+    logger.warning("⚠️ DEPRECATED ENDPOINT CALLED: /kyc/face-match - Please migrate to Sumsub")
+    
     request_start = time.time()
     logger.info("\n" + "="*70)
-    logger.info("🚀 [API] POST /kyc/face-match - REQUEST RECEIVED")
+    logger.info("🚀 [API] POST /kyc/face-match - REQUEST RECEIVED (DEPRECATED)")
     logger.info("="*70)
     
     try:

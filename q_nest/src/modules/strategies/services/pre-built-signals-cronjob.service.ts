@@ -480,7 +480,8 @@ export class PreBuiltSignalsCronjobService {
   }
 
   /**
-   * Process all active custom (user) strategies
+   * Process all active custom CRYPTO (user) strategies
+   * Stock custom strategies are handled by StockSignalsCronjobService
    * This runs after pre-built strategies to reuse the same cached market data
    */
   private async processActiveCustomStrategies(
@@ -488,12 +489,14 @@ export class PreBuiltSignalsCronjobService {
     connectionInfo: { connectionId: string | null; exchange: string } | null,
   ): Promise<void> {
     try {
-      // Get all active user strategies
+      // Get all active custom CRYPTO strategies (user-created)
+      // Stock custom strategies are now handled by StockSignalsCronjobService
       const customStrategies = await this.prisma.strategies.findMany({
         where: {
           type: StrategyType.user,
           is_active: true,
           user_id: { not: null },
+          asset_type: 'crypto', // Only process crypto custom strategies here
           // Note: target_assets can be null - we'll use all trending assets in that case
         },
         include: {
@@ -506,10 +509,10 @@ export class PreBuiltSignalsCronjobService {
         },
       });
 
-      this.logger.log(`[CustomStrategies] Query completed. Found ${customStrategies.length} strategies`);
+      this.logger.log(`[CustomStrategies] Query completed. Found ${customStrategies.length} crypto custom strategies`);
       
       if (customStrategies.length === 0) {
-        this.logger.log('[CustomStrategies] No active custom strategies found, skipping');
+        this.logger.log('[CustomStrategies] No active crypto custom strategies found, skipping');
         return;
       }
 
@@ -518,7 +521,7 @@ export class PreBuiltSignalsCronjobService {
         this.logger.log(`[CustomStrategies] Found: "${s.name}" (${s.strategy_id}), assets: ${JSON.stringify(s.target_assets)}`);
       }
 
-      this.logger.log(`Processing ${customStrategies.length} active custom strategies`);
+      this.logger.log(`Processing ${customStrategies.length} active crypto custom strategies`);
 
       // Build a map of symbol -> asset from trending assets for quick lookup
       const trendingAssetsMap = new Map<string, any>();
