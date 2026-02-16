@@ -28,15 +28,19 @@ export class SubscriptionLoaderMiddleware implements NestMiddleware {
 
    async use(req: Request, res: Response, next: NextFunction) {
     try {
-      // 1. Authorization header se token nikalo
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        this.logger.debug('No authorization header found');
+      // 1. Authorization header se token nikalo, warna cookie fallback use karo
+      const authHeader = req.headers.authorization as string | undefined;
+      let token: string | undefined;
+
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        token = authHeader.slice(7); // "Bearer " ko remove karo
+      } else if ((req as any).cookies?.access_token) {
+        token = (req as any).cookies.access_token;
+        this.logger.debug('Authorization header missing — using access_token cookie');
+      } else {
+        this.logger.debug('No authorization header or access_token cookie found');
         return next();
       }
-
-      // 2. Token extract karo
-      const token = authHeader.slice(7); // "Bearer " ko remove karo
       
       // 3. Token verify karo
       const decoded = jwt.verify(token, process.env.JWT_SECRET || 'default') as JwtPayload;
