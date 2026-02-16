@@ -22,7 +22,6 @@ import { TaskSchedulerModule } from './task-scheduler/task-scheduler.module';
 import { PortfolioModule } from './modules/portfolio/portfolio.module';
 import { PaperTradingGateway } from './gateways/paper-trading.gateway';
 import { MarketDetailGateway } from './gateways/market-detail.gateway';
-import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 
 @Module({
   imports: [
