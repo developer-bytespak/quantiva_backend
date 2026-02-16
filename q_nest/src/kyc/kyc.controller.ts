@@ -26,6 +26,7 @@ const fileUploadOptions = {
 };
 import { KycService } from './services/kyc.service';
 import { ReviewService } from './services/review.service';
+import { DocumentService } from './services/document.service';
 import { UploadDocumentDto } from './dto/upload-document.dto';
 import { UploadSelfieDto } from './dto/upload-selfie.dto';
 import { ReviewDecisionDto } from './dto/review-decision.dto';
@@ -41,6 +42,7 @@ export class KycController {
   constructor(
     private readonly kycService: KycService,
     private readonly reviewService: ReviewService,
+    private readonly documentService: DocumentService,
     private readonly configService: ConfigService,
   ) {}
 
@@ -59,7 +61,7 @@ export class KycController {
     }
 
     this.logger.debug(
-      `File received - Name: ${file.originalname}, Size: ${file.size}, Buffer length: ${file.buffer?.length || 0}, MIME: ${file.mimetype}`,
+      `File received - Name: ${file.originalname}, Size: ${file.size}, Buffer length: ${file.buffer?.length || 0}, MIME: ${file.mimetype}, Type: ${dto.document_type}, Side: ${dto.document_side || 'N/A'}`,
     );
 
     if (!file.buffer || file.buffer.length === 0) {
@@ -69,7 +71,7 @@ export class KycController {
       throw new BadRequestException('File buffer is empty. Please ensure the file was uploaded correctly.');
     }
 
-    const documentId = await this.kycService.uploadDocument(user.sub, file, dto.document_type);
+    const documentId = await this.kycService.uploadDocument(user.sub, file, dto.document_type, dto.document_side);
 
     return {
       success: true,
@@ -148,6 +150,32 @@ export class KycController {
       success: true,
       message: 'KYC verification submitted successfully',
     };
+  }
+
+  @Get('documents/status/:documentType')
+  async getDocumentStatus(
+    @CurrentUser() user: TokenPayload,
+    @Param('documentType') documentType: string,
+  ) {
+    this.logger.log(`Checking document status for type: ${documentType}`);
+    
+    const verification = await this.kycService.getVerificationForUser(user.sub);
+    
+    if (!verification) {
+      return {
+        frontUploaded: false,
+        backUploaded: false,
+        isComplete: false,
+      };
+    }
+
+    return this.documentService.getDocumentUploadStatus(verification.kyc_id, documentType);
+  }
+
+  @Get('documents/completeness')
+  async checkCompleteness(@CurrentUser() user: TokenPayload) {
+    this.logger.log(`Checking document completeness for user: ${user.sub}`);
+    return this.kycService.checkDocumentCompleteness(user.sub);
   }
 
   @Get('status')

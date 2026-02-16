@@ -34,8 +34,9 @@ export class KycService {
     userId: string,
     file: Express.Multer.File,
     documentType?: string,
+    documentSide?: string,
   ): Promise<string> {
-    this.logger.log(`📄 [KYC-SERVICE] uploadDocument() started for user: ${userId}`);
+    this.logger.log(`📄 [KYC-SERVICE] uploadDocument() - type: ${documentType}, side: ${documentSide || 'N/A'}`);
     
     // Get user info for Sumsub
     const user = await this.prisma.users.findUnique({
@@ -123,6 +124,7 @@ export class KycService {
           file.originalname,
           sumsubDocType,
           user.nationality || undefined,
+          documentSide,
         );
         this.logger.log('✅ Document uploaded to Sumsub successfully');
       } catch (error) {
@@ -134,7 +136,7 @@ export class KycService {
     }
 
     // Always upload to Cloudinary as backup/audit trail
-    return this.documentService.uploadDocument(verification.kyc_id, file, documentType);
+    return this.documentService.uploadDocument(verification.kyc_id, file, documentType, documentSide);
   }
 
   private mapDocumentType(documentType?: string): string {
@@ -469,6 +471,59 @@ export class KycService {
         documents: true,
         face_matches: true,
       },
+    });
+  }
+
+  async checkDocumentCompleteness(userId: string): Promise<{
+    isComplete: boolean;
+    missingDocuments: string[];
+  }> {
+    const verification = await this.prisma.kyc_verifications.findFirst({
+      where: { user_id: userId },
+      include: { documents: true },
+      orderBy: { kyc_id: 'desc' },
+    });
+
+    if (!verification) {
+      return { isComplete: false, missingDocuments: ['No verification found'] };
+    }
+
+    const documents = verification.documents;
+    
+    if (documents.length === 0) {
+      return { isComplete: false, missingDocuments: ['No documents uploaded'] };
+    }
+
+    // Get the document type being used
+    const documentType = documents[0]?.document_type;
+    if (!documentType) {
+      return { isComplete: false, missingDocuments: ['Invalid document type'] };
+    }
+
+    const hasFront = documents.some(d => d.document_side === 'front');
+    const hasBack = documents.some(d => d.document_side === 'back');
+
+    const missingDocuments: string[] = [];
+
+    // Check requirements based on document type
+    if (documentType === 'passport') {
+      if (!hasFront) missingDocuments.push('Passport bio page');
+    } else {
+      // ID card or driver's license - both sides required
+      if (!hasFront) missingDocuments.push(`${documentType} front side`);
+      if (!hasBack) missingDocuments.push(`${documentType} back side`);
+    }
+
+    return {
+      isComplete: missingDocuments.length === 0,
+      missingDocuments,
+    };
+  }
+
+  async getVerificationForUser(userId: string) {
+    return this.prisma.kyc_verifications.findFirst({
+      where: { user_id: userId },
+      orderBy: { kyc_id: 'desc' },
     });
   }
 }

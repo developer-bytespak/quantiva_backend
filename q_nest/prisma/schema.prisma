@@ -122,12 +122,15 @@ model kyc_documents {
   created_at         DateTime          @default(now()) @db.Timestamp(6)
   authenticity_flags Json?             @db.Json
   document_type      String?           @db.VarChar(50)
+  document_side      String?           @db.VarChar(10)
+  is_primary         Boolean           @default(true)
   expiration_date    DateTime?         @db.Date
   issuing_country    String?           @db.VarChar(100)
   mrz_text           String?
   kyc_verifications  kyc_verifications @relation(fields: [kyc_id], references: [kyc_id])
 
   @@index([kyc_id])
+  @@index([kyc_id, document_type, document_side])
   @@map("kyc_documents")
 }
 

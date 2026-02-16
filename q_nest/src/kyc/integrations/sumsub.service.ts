@@ -322,9 +322,10 @@ export class SumsubService implements OnModuleInit {
     filename: string,
     documentType: string = 'IDENTITY',
     country?: string,
+    documentSide?: string,
   ): Promise<SumsubDocumentResponse> {
     const alpha3Country = this.convertToAlpha3(country || '');
-    this.logger.log(`Adding document to applicant: ${applicantId}, country: ${alpha3Country}`);
+    this.logger.log(`Adding document: ${documentType}, side: ${documentSide || 'N/A'}, country: ${alpha3Country}`);
 
     const formData = new FormData();
     
@@ -332,6 +333,12 @@ export class SumsubService implements OnModuleInit {
       idDocType: documentType,
       country: alpha3Country,
     };
+
+    // Log side information for tracking (Sumsub auto-groups by sequential uploads)
+    if (documentSide) {
+      this.logger.log(`📄 Document side: ${documentSide} (Sumsub will auto-group with same metadata)`);
+    }
+    
     formData.append('metadata', JSON.stringify(metadata));
     
     formData.append('content', fileBuffer, {
