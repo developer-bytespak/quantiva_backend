@@ -66,6 +66,37 @@ export class KycService {
       throw new Error('Failed to create verification');
     }
 
+    // Check if applicant was rejected and needs reset
+    if (verification.sumsub_applicant_id && verification.status === 'rejected') {
+      // Count how many documents we have for this verification
+      const docCount = await this.prisma.kyc_documents.count({
+        where: { kyc_id: verification.kyc_id },
+      });
+      
+      this.logger.log(`⚠️  Applicant was rejected. Current docs in DB: ${docCount}`);
+      
+      // If this is the first new upload after rejection, reset the Sumsub applicant
+      if (docCount === 0) {
+        try {
+          this.logger.log(`🔄 Resetting Sumsub applicant ${verification.sumsub_applicant_id} for fresh submission...`);
+          await this.sumsubService.resetApplicant(verification.sumsub_applicant_id);
+          
+          // Update verification status back to pending
+          verification = await this.prisma.kyc_verifications.update({
+            where: { kyc_id: verification.kyc_id },
+            data: {
+              status: 'pending',
+              decision_reason: 'Resubmitting documents after rejection',
+            },
+          });
+          this.logger.log(`✅ Applicant reset successful, ready for new documents`);
+        } catch (error) {
+          this.logger.error(`Failed to reset applicant: ${error.message}`);
+          // Continue anyway - user can still upload
+        }
+      }
+    }
+
     // Try to create Sumsub applicant if not already created
     if (!verification.sumsub_applicant_id) {
       try {
@@ -116,9 +147,9 @@ export class KycService {
     // Upload document to Sumsub if applicant exists
     if (verification.sumsub_applicant_id) {
       try {
-        this.logger.log('Uploading document to Sumsub...');
+        this.logger.log(`📤 Uploading document to Sumsub: type=${documentType}, side=${documentSide || 'N/A'}`);
         const sumsubDocType = this.mapDocumentType(documentType);
-        await this.sumsubService.addDocument(
+        const sumsubResponse = await this.sumsubService.addDocument(
           verification.sumsub_applicant_id,
           file.buffer,
           file.originalname,
@@ -126,13 +157,26 @@ export class KycService {
           user.nationality || undefined,
           documentSide,
         );
-        this.logger.log('✅ Document uploaded to Sumsub successfully');
+        this.logger.log(`✅ Document uploaded to Sumsub successfully`);
+        this.logger.log(`   📋 Sumsub image IDs: ${JSON.stringify(sumsubResponse.imageIds || [])}`);
+        this.logger.log(`   🆔 Applicant ID: ${verification.sumsub_applicant_id}`);
+        
+        // Log current document count for this verification
+        const docCount = await this.prisma.kyc_documents.count({
+          where: { 
+            kyc_id: verification.kyc_id,
+            document_type: documentType,
+          },
+        });
+        this.logger.log(`   📊 Total ${documentType} documents in DB: ${docCount}`);
       } catch (error) {
         this.logger.error(`Failed to upload document to Sumsub: ${error.message}`);
         this.logger.warn('📋 Document will need to be uploaded via Sumsub dashboard');
         this.logger.warn(`🔗 Sumsub Applicant ID: ${verification.sumsub_applicant_id}`);
         // Continue anyway - document will be uploaded to Cloudinary
       }
+    } else {
+      this.logger.warn(`⚠️  No Sumsub applicant ID - document will only be saved to Cloudinary`);
     }
 
     // Always upload to Cloudinary as backup/audit trail
@@ -380,6 +424,28 @@ export class KycService {
 
           this.logger.log(`   Sumsub review status: ${reviewStatus}, answer: ${reviewAnswer || 'N/A'}`);
 
+          // If there's a RED answer regardless of status, log rejection details immediately
+          if (reviewAnswer === 'RED') {
+            const rejectLabels = applicant.review.reviewResult?.rejectLabels;
+            const moderationComment = applicant.review.reviewResult?.moderationComment;
+            const rejectType = applicant.review.reviewResult?.reviewRejectType;
+            const clientComment = applicant.review.reviewResult?.clientComment;
+
+            this.logger.error(`   ❌ REJECTION DETECTED - Status: ${reviewStatus}`);
+            if (rejectLabels?.length) this.logger.error(`   📋 Reject labels: ${rejectLabels.join(', ')}`);
+            if (moderationComment) this.logger.error(`   💬 Moderation comment: ${moderationComment}`);
+            if (clientComment) this.logger.error(`   💬 Client comment: ${clientComment}`);
+            if (rejectType) this.logger.error(`   🏷️  Reject type: ${rejectType}`);
+
+            // Check required docs status to see what's missing
+            try {
+              const requiredDocStatus = await this.sumsubService.getRequiredDocStatus(verification.sumsub_applicant_id);
+              this.logger.error(`   📄 Required docs status: ${JSON.stringify(requiredDocStatus, null, 2)}`);
+            } catch (err) {
+              this.logger.error(`   ⚠️  Could not fetch required docs status: ${err.message}`);
+            }
+          }
+
           // Map Sumsub status to our status
           let newStatus = verification.status;
           let decisionReason = verification.decision_reason;
@@ -525,6 +591,11 @@ export class KycService {
       where: { user_id: userId },
       orderBy: { kyc_id: 'desc' },
     });
+  }
+
+  // Getter for Sumsub service (for debugging/admin endpoints)
+  getSumsubService(): SumsubService {
+    return this.sumsubService;
   }
 }
 
