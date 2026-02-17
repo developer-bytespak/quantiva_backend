@@ -216,11 +216,14 @@ export class MarketDetailAggregatorService {
     const results = await Promise.all(
       intervals.map(async (interval) => {
         const cacheKey = CacheKeyManager.candle(connectionId, symbol, interval);
+        // Normalize interval for Bybit (8h is not supported, use 6h instead)
+        const normalizedInterval = this.normalizeIntervalForExchange(exchangeName, interval);
+        
         const candles = await this.cacheService.getOrSet(
           cacheKey,
           async () => {
             if (exchangeName === 'bybit') {
-              return this.bybitService.getCandlestickData(symbol, interval, 100);
+              return this.bybitService.getCandlestickData(symbol, normalizedInterval, 100);
             }
             return this.binanceService.getCandlestickData(symbol, interval, 100);
           },
@@ -273,5 +276,16 @@ export class MarketDetailAggregatorService {
       }
     }
     return this.marketService.getCoinDetails(baseSymbol);
+  }
+
+  /**
+   * Normalize interval for exchange-specific limitations.
+   * Bybit doesn't support 8h intervals, so we map 8h to 6h for Bybit.
+   */
+  private normalizeIntervalForExchange(exchangeName: string, interval: string): string {
+    if (exchangeName === 'bybit' && interval === '8h') {
+      return '6h';
+    }
+    return interval;
   }
 }
