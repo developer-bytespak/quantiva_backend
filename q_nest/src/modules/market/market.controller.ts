@@ -1,14 +1,21 @@
-import { Controller, Get, Query, Param, HttpException, HttpStatus, Post } from '@nestjs/common';
+import { Controller, Get, Query, Param, HttpException, HttpStatus, Post, UseGuards, Logger } from '@nestjs/common';
 import { MarketService } from './market.service';
 import { CoinDetailsCacheService } from './services/coin-details-cache.service';
-import { ExchangesService } from './services/exchanges.service';
+import { ExchangesService as MarketExchangesService } from './services/exchanges.service';
+import { ExchangesService } from '../exchanges/exchanges.service';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { TokenPayload } from '../auth/services/token.service';
 
 @Controller('api/market')
 export class MarketController {
+  private readonly logger = new Logger(MarketController.name);
+
   constructor(
     private readonly marketService: MarketService,
     private readonly coinDetailsCacheService: CoinDetailsCacheService,
-    private readonly exchangesService: ExchangesService,
+    private readonly exchangesService: MarketExchangesService,
+    private readonly exchangesConnectionService: ExchangesService,
   ) {}
 
   /**
@@ -57,12 +64,14 @@ export class MarketController {
   /**
    * GET /api/market/coins/cached
    * Fetch cached market data from database (updated every 5 minutes)
+   * Automatically filters by user's connected exchange if authenticated
    * Query params: limit (default: 500), search (optional)
    */
   @Get('coins/cached')
   async getCachedMarketData(
     @Query('limit') limit?: string,
     @Query('search') search?: string,
+    @CurrentUser() user?: TokenPayload,
   ) {
     try {
       const limitNum = limit ? parseInt(limit, 10) : 500;
@@ -72,7 +81,24 @@ export class MarketController {
           HttpStatus.BAD_REQUEST,
         );
       }
-      return await this.marketService.getCachedMarketData(limitNum, search);
+
+      // If user is authenticated, get their exchange connection
+      let exchangeName: string | undefined;
+      if (user && user.sub) {
+        try {
+          const connection = await this.exchangesConnectionService.getActiveConnection(user.sub);
+          exchangeName = connection.exchange.name.toLowerCase();
+          // Only use if it's Binance or Bybit
+          if (exchangeName !== 'binance' && exchangeName !== 'bybit') {
+            exchangeName = undefined; // Fall back to default (Binance)
+          }
+        } catch (error) {
+          // If no connection found, fall back to default (Binance)
+          this.logger.debug('No active connection found for user, using default exchange');
+        }
+      }
+
+      return await this.marketService.getCachedMarketData(limitNum, search, exchangeName);
     } catch (error: any) {
       throw new HttpException(
         error.message || 'Failed to fetch cached market data',
@@ -120,6 +146,72 @@ export class MarketController {
     } catch (error: any) {
       throw new HttpException(
         error.message || 'Failed to fetch Binance coins',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/market/exchanges/bybit/coins
+   * Fetch all coins available on Bybit from CoinGecko Pro API
+   */
+  @Get('exchanges/bybit/coins')
+  async getBybitCoins() {
+    try {
+      const coins = await this.exchangesService.getAllBybitCoins();
+      return { coins };
+    } catch (error: any) {
+      throw new HttpException(
+        error.message || 'Failed to fetch Bybit coins',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/market/exchanges/coins
+   * Fetch coins for the user's connected exchange (Binance or Bybit)
+   * Automatically routes based on user's active exchange connection
+   * Requires authentication
+   */
+  @Get('exchanges/coins')
+  @UseGuards(JwtAuthGuard)
+  async getExchangeCoins(@CurrentUser() user: TokenPayload) {
+    try {
+      if (!user || !user.sub) {
+        throw new HttpException(
+          'User not authenticated',
+          HttpStatus.UNAUTHORIZED,
+        );
+      }
+
+      // Get user's active connection
+      const connection = await this.exchangesConnectionService.getActiveConnection(user.sub);
+      const exchangeName = connection.exchange.name.toLowerCase();
+
+      // Route to appropriate exchange based on connection
+      let coins: string[];
+      if (exchangeName === 'bybit') {
+        coins = await this.exchangesService.getBybitCoinsWithUsdtPairs();
+      } else if (exchangeName === 'binance') {
+        coins = await this.exchangesService.getBinanceCoinsWithUsdtPairs();
+      } else {
+        throw new HttpException(
+          `Exchange ${exchangeName} is not supported for coin filtering`,
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+
+      return { 
+        coins,
+        exchange: exchangeName,
+      };
+    } catch (error: any) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new HttpException(
+        error.message || 'Failed to fetch exchange coins',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
