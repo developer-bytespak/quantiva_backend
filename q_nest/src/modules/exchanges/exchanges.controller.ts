@@ -604,6 +604,9 @@ export class ExchangesController {
     const startTimeNum = startTime ? parseInt(startTime, 10) : undefined;
     const endTimeNum = endTime ? parseInt(endTime, 10) : undefined;
 
+    // Normalize interval for Bybit (8h is not supported, use 6h instead)
+    const normalizedInterval = this.normalizeIntervalForExchange(exchangeName, interval);
+
     // Use cache for candle data (no custom time range)
     const cacheKey = CacheKeyManager.candle(connectionId, symbol, interval);
     const candleTtl = this.cacheService.getTtlForType('candle');
@@ -612,7 +615,7 @@ export class ExchangesController {
       cacheKey,
       async () => {
         if (exchangeName === 'bybit') {
-          return this.bybitService.getCandlestickData(symbol, interval, limitNum, startTimeNum, endTimeNum);
+          return this.bybitService.getCandlestickData(symbol, normalizedInterval, limitNum, startTimeNum, endTimeNum);
         } else {
           return this.binanceService.getCandlestickData(symbol, interval, limitNum, startTimeNum, endTimeNum);
         }
@@ -793,12 +796,14 @@ export class ExchangesController {
     const results = await Promise.all(
       intervals.map(async (interval) => {
         const cacheKey = CacheKeyManager.candle(connectionId, symbol, interval);
+        // Normalize interval for Bybit (8h is not supported, use 6h instead)
+        const normalizedInterval = this.normalizeIntervalForExchange(exchangeName, interval);
 
         const candles = await this.cacheService.getOrSet(
           cacheKey,
           async () => {
             if (exchangeName === 'bybit') {
-              return this.bybitService.getCandlestickData(symbol, interval, 100);
+              return this.bybitService.getCandlestickData(symbol, normalizedInterval, 100);
             } else {
               return this.binanceService.getCandlestickData(symbol, interval, 100);
             }
@@ -825,6 +830,17 @@ export class ExchangesController {
     return requestedIntervals.every(
       (interval) => cachedData.candlesByInterval[interval] !== undefined,
     );
+  }
+
+  /**
+   * Normalize interval for exchange-specific limitations.
+   * Bybit doesn't support 8h intervals, so we map 8h to 6h for Bybit.
+   */
+  private normalizeIntervalForExchange(exchangeName: string, interval: string): string {
+    if (exchangeName === 'bybit' && interval === '8h') {
+      return '6h';
+    }
+    return interval;
   }
 
   /**
