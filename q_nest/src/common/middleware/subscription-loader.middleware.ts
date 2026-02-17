@@ -32,13 +32,14 @@ export class SubscriptionLoaderMiddleware implements NestMiddleware {
       const authHeader = req.headers.authorization as string | undefined;
       let token: string | undefined;
 
-      this.logger.debug(`Authorization header: ${req.cookies.access_token}`);
-
-      if (req.cookies?.access_token) {
-        token = (req as any).cookies.access_token;
-        this.logger.debug('Authorization header missing — using access_token cookie');
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        token = authHeader.substring(7);
+        this.logger.debug('Using token from Authorization header');
+      } else if (req.cookies?.access_token) {
+        token = req.cookies.access_token;
+        this.logger.debug('Using token from access_token cookie');
       } else {
-        this.logger.debug('No authorization header or access_token cookie found');
+        this.logger.debug('No Authorization header or access_token cookie found');
         return next();
       }
       
