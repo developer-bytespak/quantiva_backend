@@ -12,7 +12,14 @@ async function bootstrap() {
   // Increase body size limit to 10MB for file uploads (default is 100kb)
   // This applies to JSON and URL-encoded bodies. For multipart/form-data (file uploads),
   // the size limit is controlled by multer configuration in individual controllers.
-  app.use(json({ limit: '10mb' }));
+  // The `verify` callback preserves the raw body buffer on the request object
+  // so that webhook signature verification can use the exact bytes sent by the caller.
+  app.use(json({
+    limit: '10mb',
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    },
+  }));
   app.use(urlencoded({ limit: '10mb', extended: true }));
 
   // Enable gzip/brotli compression for all responses (typically 60-80% size reduction)
