@@ -239,7 +239,13 @@ export class ExchangesController {
           HttpStatus.UNAUTHORIZED,
         );
       }
-
+      //first delete the previous connection if exists
+      const existingConnection = await this.exchangesService.getActiveConnection(user.sub);
+      if (existingConnection) {
+        this.logger.log(`User ${user.sub} already has an active connection. Deleting previous connection ${existingConnection.connection_id} before creating new one.`);
+        await this.exchangesService.deleteConnection(existingConnection.connection_id);
+      }
+      
       // If verification passes, create the connection
       const connection = await this.exchangesService.createConnection({
         user_id: user.sub,
