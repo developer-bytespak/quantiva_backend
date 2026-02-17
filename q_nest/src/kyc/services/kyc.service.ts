@@ -10,6 +10,12 @@ import { SumsubService } from '../integrations/sumsub.service';
 export class KycService {
   private readonly logger = new Logger(KycService.name);
 
+  // In-memory cache to throttle Sumsub API polling.
+  // Key: sumsub_applicant_id, Value: { timestamp, data }
+  // Prevents hitting Sumsub rate limits when frontend polls every few seconds.
+  private readonly sumsubStatusCache = new Map<string, { ts: number; data: any }>();
+  private readonly SUMSUB_POLL_TTL_MS = 30_000; // Only poll Sumsub once every 30 seconds per applicant
+
   constructor(
     private prisma: PrismaService,
     private documentService: DocumentService,
@@ -75,25 +81,31 @@ export class KycService {
       
       this.logger.log(`⚠️  Applicant was rejected. Current docs in DB: ${docCount}`);
       
-      // If this is the first new upload after rejection, reset the Sumsub applicant
-      if (docCount === 0) {
-        try {
-          this.logger.log(`🔄 Resetting Sumsub applicant ${verification.sumsub_applicant_id} for fresh submission...`);
-          await this.sumsubService.resetApplicant(verification.sumsub_applicant_id);
-          
-          // Update verification status back to pending
-          verification = await this.prisma.kyc_verifications.update({
-            where: { kyc_id: verification.kyc_id },
-            data: {
-              status: 'pending',
-              decision_reason: 'Resubmitting documents after rejection',
-            },
-          });
-          this.logger.log(`✅ Applicant reset successful, ready for new documents`);
-        } catch (error) {
-          this.logger.error(`Failed to reset applicant: ${error.message}`);
-          // Continue anyway - user can still upload
-        }
+      // Always reset Sumsub applicant when status is rejected
+      // This ensures we start fresh even if db has old documents
+      try {
+        this.logger.log(`🔄 Resetting Sumsub applicant ${verification.sumsub_applicant_id} for fresh submission...`);
+        await this.sumsubService.resetApplicant(verification.sumsub_applicant_id);
+        
+        // Delete all old documents from database to sync with reset
+        const deleted = await this.prisma.kyc_documents.deleteMany({
+          where: { kyc_id: verification.kyc_id },
+        });
+        this.logger.log(`🗑️  Deleted ${deleted.count} old documents from database`);
+        
+        // Update verification status back to pending
+        verification = await this.prisma.kyc_verifications.update({
+          where: { kyc_id: verification.kyc_id },
+          data: {
+            status: 'pending',
+            decision_reason: 'Resubmitting documents after rejection',
+          },
+        });
+        this.logger.log(`✅ Applicant reset successful, ready for new documents`);
+      } catch (error) {
+        this.logger.error(`Failed to reset applicant: ${error.message}`);
+        // If reset fails, stop here - don't allow upload to rejected applicant
+        throw new Error('Cannot upload to rejected applicant. Please use the clear endpoint first.');
       }
     }
 
@@ -158,7 +170,8 @@ export class KycService {
           documentSide,
         );
         this.logger.log(`✅ Document uploaded to Sumsub successfully`);
-        this.logger.log(`   📋 Sumsub image IDs: ${JSON.stringify(sumsubResponse.imageIds || [])}`);
+        this.logger.log(`   🖼️  Sumsub image ID (from header): ${sumsubResponse.imageId || 'N/A'}`);
+        this.logger.log(`   📋 Sumsub metadata: idDocType=${sumsubResponse.idDocType}, country=${sumsubResponse.country}`);
         this.logger.log(`   🆔 Applicant ID: ${verification.sumsub_applicant_id}`);
         
         // Log current document count for this verification
@@ -290,10 +303,20 @@ export class KycService {
         this.logger.log(`   Selfie upload completed in ${Date.now() - step2Start}ms`);
 
         // Step 3: Request verification check
+        // Note: Sumsub returns 409 if the applicant is already in pending/queued/prechecked status.
+        // This can happen when Sumsub auto-moves the applicant to pending after all docs are uploaded.
         this.logger.log('🔍 [KYC-SERVICE] Step 3: Requesting Sumsub verification check...');
         const step3Start = Date.now();
-        await this.sumsubService.requestCheck(verification.sumsub_applicant_id);
-        this.logger.log(`   Check requested in ${Date.now() - step3Start}ms`);
+        try {
+          await this.sumsubService.requestCheck(verification.sumsub_applicant_id);
+          this.logger.log(`   Check requested in ${Date.now() - step3Start}ms`);
+        } catch (checkError: any) {
+          if (checkError?.status === 409 || checkError?.response?.status === 409) {
+            this.logger.log(`   Applicant already in pending/review state — check not needed (${Date.now() - step3Start}ms)`);
+          } else {
+            throw checkError;
+          }
+        }
 
         // Step 4: Update database with pending status
         this.logger.log('💾 [KYC-SERVICE] Step 4: Updating database...');
@@ -409,14 +432,28 @@ export class KycService {
       };
     }
 
-    // If status is still pending and we have a Sumsub applicant, poll Sumsub for latest status
+    // If status is still pending and we have a Sumsub applicant, poll Sumsub for latest status.
+    // Throttled: only call Sumsub if we haven't polled this applicant within SUMSUB_POLL_TTL_MS.
     if (
       verification.sumsub_applicant_id &&
       (verification.status === 'pending' || verification.status === 'review')
     ) {
+      const cacheKey = verification.sumsub_applicant_id;
+      const cached = this.sumsubStatusCache.get(cacheKey);
+      const now = Date.now();
+
+      if (cached && (now - cached.ts) < this.SUMSUB_POLL_TTL_MS) {
+        this.logger.debug(`Sumsub poll skipped (cached ${Math.round((now - cached.ts) / 1000)}s ago): ${cacheKey}`);
+      }
+
+      // Only poll Sumsub if cache is stale or absent
+      if (!cached || (now - cached.ts) >= this.SUMSUB_POLL_TTL_MS) {
       try {
         this.logger.log(`🔄 Polling Sumsub for applicant status: ${verification.sumsub_applicant_id}`);
         const applicant = await this.sumsubService.getApplicantStatus(verification.sumsub_applicant_id);
+
+        // Update cache
+        this.sumsubStatusCache.set(cacheKey, { ts: Date.now(), data: applicant });
 
         if (applicant.review) {
           const reviewStatus = applicant.review.reviewStatus; // init, pending, completed, onHold
@@ -446,22 +483,31 @@ export class KycService {
             }
           }
 
-          // Map Sumsub status to our status
+          // Map Sumsub status to our status.
+          // Sumsub reviewStatus values: init, pending, prechecked, completed, onHold.
+          // A reviewAnswer (GREEN/RED/YELLOW) can appear at "prechecked" (automated check done)
+          // or "completed" (full review done). Both are actionable.
           let newStatus = verification.status;
           let decisionReason = verification.decision_reason;
+          let newReviewResult = verification.sumsub_review_result;
 
-          if (reviewStatus === 'completed' && reviewAnswer) {
+          const hasActionableAnswer = reviewAnswer && (reviewStatus === 'completed' || reviewStatus === 'prechecked');
+
+          if (hasActionableAnswer) {
             newStatus = this.sumsubService.parseReviewResult(reviewAnswer);
             const rejectLabels = applicant.review.reviewResult?.rejectLabels;
             const moderationComment = applicant.review.reviewResult?.moderationComment;
             const rejectType = applicant.review.reviewResult?.reviewRejectType;
 
-            decisionReason = `Sumsub review completed: ${reviewAnswer}`;
+            decisionReason = `Sumsub review ${reviewStatus}: ${reviewAnswer}`;
             if (moderationComment) decisionReason += ` - ${moderationComment}`;
             if (rejectLabels?.length) decisionReason += ` (Labels: ${rejectLabels.join(', ')})`;
             if (rejectType) decisionReason += ` [Type: ${rejectType}]`;
 
-            this.logger.log(`   ✅ Synced Sumsub result → ${newStatus.toUpperCase()}`);
+            // Persist the full reviewResult so review_reject_type is available
+            newReviewResult = applicant.review.reviewResult as any;
+
+            this.logger.log(`   ✅ Synced Sumsub result (${reviewStatus}) → ${newStatus.toUpperCase()}`);
             if (rejectLabels?.length) this.logger.log(`   Reject labels: ${rejectLabels.join(', ')}`);
             if (moderationComment) this.logger.log(`   Moderation comment: ${moderationComment}`);
             if (rejectType) this.logger.log(`   Reject type: ${rejectType}`);
@@ -478,6 +524,7 @@ export class KycService {
                 status: newStatus as any,
                 decision_reason: decisionReason,
                 sumsub_review_status: reviewStatus,
+                sumsub_review_result: newReviewResult as any,
               },
               include: {
                 documents: true,
@@ -504,6 +551,65 @@ export class KycService {
         this.logger.warn(`Failed to poll Sumsub status: ${error.message}`);
         // Continue with DB status — don't fail the request
       }
+      } // end: if cache stale
+    }
+
+    // Extract reviewRejectType from the stored Sumsub review result JSON
+    const reviewResult = verification.sumsub_review_result as Record<string, any> | null;
+    const reviewRejectType = reviewResult?.reviewRejectType as string | undefined;
+
+    // Fetch human-readable rejection reasons when status is rejected
+    let rejectionReasons: string[] = [];
+    if (
+      (verification.status === 'rejected' || verification.status === 'review') &&
+      verification.sumsub_applicant_id
+    ) {
+      try {
+        const moderationStates = await this.sumsubService.getModerationStates(
+          verification.sumsub_applicant_id,
+        );
+        const buttonIds = new Set<string>();
+
+        if (moderationStates.imagesStates) {
+          Object.values(moderationStates.imagesStates).forEach((id: any) =>
+            buttonIds.add(String(id)),
+          );
+        }
+        if (moderationStates.applicantState?.buttonId) {
+          buttonIds.add(moderationStates.applicantState.buttonId);
+        }
+
+        // Fallback: use buttonIds from stored review result if moderation states returned none
+        if (buttonIds.size === 0 && reviewResult?.buttonIds?.length) {
+          reviewResult.buttonIds.forEach((id: string) => buttonIds.add(id));
+        }
+
+        rejectionReasons = [...buttonIds]
+          .map((bid) => this.sumsubService.getRejectionReasonLabel(bid))
+          .filter(Boolean);
+
+        // Fallback: use rejectLabels (e.g. FORGERY, UNSATISFACTORY_PHOTOS) if no buttonIds
+        if (rejectionReasons.length === 0 && reviewResult?.rejectLabels?.length) {
+          const labelMap: Record<string, string> = {
+            FORGERY: 'Document authenticity could not be verified. Please upload a genuine, unaltered document.',
+            UNSATISFACTORY_PHOTOS: 'Photo quality did not meet requirements. Please upload clearer photos.',
+            GRAPHIC_EDITOR: 'Photo appears edited. Please upload an unmodified photo.',
+            BAD_SELFIE: 'Selfie did not meet requirements. Please retake in good lighting.',
+            BAD_FACE_MATCHING: 'Face could not be matched to your ID. Please ensure your face is clearly visible.',
+            SCREENSHOTS: 'Screenshots are not accepted. Please photograph your physical document.',
+          };
+          rejectionReasons = reviewResult.rejectLabels
+            .map((l: string) => labelMap[l] || l.replace(/_/g, ' '))
+            .filter(Boolean);
+        }
+      } catch (err) {
+        this.logger.warn(`Could not fetch rejection reasons: ${err.message}`);
+        if (reviewResult?.buttonIds?.length) {
+          rejectionReasons = reviewResult.buttonIds.map((bid: string) =>
+            this.sumsubService.getRejectionReasonLabel(bid),
+          );
+        }
+      }
     }
 
     return {
@@ -520,6 +626,8 @@ export class KycService {
       doc_authenticity_score: verification.doc_authenticity_score
         ? Number(verification.doc_authenticity_score)
         : null,
+      review_reject_type: reviewRejectType || null,
+      rejection_reasons: rejectionReasons.length > 0 ? rejectionReasons : undefined,
     };
   }
 

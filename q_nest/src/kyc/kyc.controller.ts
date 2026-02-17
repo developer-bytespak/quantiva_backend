@@ -389,12 +389,9 @@ export class KycController {
 
     // Reset Sumsub applicant if exists
     if (verification.sumsub_applicant_id) {
-      try {
-        await this.kycService.getSumsubService().resetApplicant(verification.sumsub_applicant_id);
-        this.logger.log(`✅ Sumsub applicant reset: ${verification.sumsub_applicant_id}`);
-      } catch (error) {
-        this.logger.error(`Failed to reset Sumsub applicant: ${error.message}`);
-      }
+      this.logger.log(`🔄 Resetting Sumsub applicant: ${verification.sumsub_applicant_id}`);
+      await this.kycService.getSumsubService().resetApplicant(verification.sumsub_applicant_id);
+      this.logger.log(`✅ Sumsub applicant reset successful: ${verification.sumsub_applicant_id}`);
     }
 
     // Update verification status

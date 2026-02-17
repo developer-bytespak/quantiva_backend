@@ -8,5 +8,9 @@ export class KycStatusDto {
   liveness_confidence?: number;
   face_match_score?: number;
   doc_authenticity_score?: number;
+  /** Sumsub rejection type: "RETRY" (temporary, user can resubmit) or "FINAL" (permanent) */
+  review_reject_type?: string;
+  /** Human-readable rejection reasons (from Sumsub moderation states / buttonIds) */
+  rejection_reasons?: string[];
 }
 
