@@ -42,31 +42,31 @@ export class AuthController {
     maxAge: number,
   ) {
     const jwtConfig = this.configService.get('jwt');
-    const isProduction = jwtConfig.isProduction;
+    const crossOrigin = jwtConfig.useCrossOriginCookies ?? jwtConfig.isProduction;
 
-    // For localhost development, use 'lax' sameSite and don't set domain
-    // For production, use 'none' to allow cross-site cookies (required when frontend and backend are on different domains)
+    // crossOrigin: SameSite=None + Secure so browser sends cookie on cross-origin requests
+    // (e.g. Vercel frontend → Render backend, or localhost frontend → Render backend)
     const cookieOptions: any = {
       httpOnly: true,
-      secure: isProduction,
-      sameSite: isProduction ? 'none' : 'lax', // Use 'lax' for localhost development; 'none' in production for cross-site cookies
-      maxAge: maxAge * 1000, // Convert to milliseconds
+      secure: crossOrigin, // Secure required when SameSite=None
+      sameSite: crossOrigin ? 'none' : 'lax',
+      maxAge: maxAge * 1000,
       path: '/',
     };
 
     // Do not set cookie domain explicitly. Let the browser scope the cookie to the
-    // backend host that set it. Setting a cross-site domain here can prevent the
-    // browser from sending the cookie on subsequent requests.
+    // backend host that set it.
 
     res.cookie(name, value, cookieOptions);
   }
 
   private clearCookie(res: Response, name: string) {
     const jwtConfig = this.configService.get('jwt');
+    const crossOrigin = jwtConfig.useCrossOriginCookies ?? jwtConfig.isProduction;
     const cookieOptions: any = {
       httpOnly: true,
-      secure: jwtConfig.isProduction,
-      sameSite: jwtConfig.isProduction ? 'none' : 'lax',
+      secure: crossOrigin,
+      sameSite: crossOrigin ? 'none' : 'lax',
       path: '/',
     };
 

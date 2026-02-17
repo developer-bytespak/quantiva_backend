@@ -45,7 +45,13 @@ async function bootstrap() {
   // Always allow localhost during development
   if (process.env.NODE_ENV !== 'production') {
     allowedOrigins.add('http://localhost:3000');
-    // Common alternative dev origin (Next.js default dev port)
+    allowedOrigins.add('http://localhost:3001');
+    allowedOrigins.add('http://127.0.0.1:3001');
+  }
+  // Allow localhost even in production when testing against Render backend.
+  // Set ALLOW_LOCALHOST_ORIGIN=true on Render env if needed.
+  if (process.env.ALLOW_LOCALHOST_ORIGIN === 'true') {
+    allowedOrigins.add('http://localhost:3000');
     allowedOrigins.add('http://localhost:3001');
     allowedOrigins.add('http://127.0.0.1:3001');
   }
