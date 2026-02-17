@@ -115,11 +115,21 @@ export class FeatureAccessService {
     subscriptionId: string,
     featureType: FeatureType,
   ): Promise<number> {
+    const subscription = await this.prisma.user_subscriptions.findUnique({
+      where: { subscription_id: subscriptionId },
+      select: { current_period_start: true },
+    });
+
+    if (!subscription?.current_period_start) {
+      return 0;
+    }
+
     const usage = await this.prisma.subscription_usage.findUnique({
       where: {
-        subscription_id_feature_type: {
+        subscription_id_feature_type_period_start: {
           subscription_id: subscriptionId,
           feature_type: featureType,
+          period_start: subscription.current_period_start,
         },
       },
     });
@@ -150,9 +160,10 @@ export class FeatureAccessService {
 
     await this.prisma.subscription_usage.upsert({
       where: {
-        subscription_id_feature_type: {
+        subscription_id_feature_type_period_start: {
           subscription_id: subscriptionId,
           feature_type: featureType,
+          period_start: periodStart,
         },
       },
       update: {

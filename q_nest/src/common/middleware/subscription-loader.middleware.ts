@@ -32,9 +32,9 @@ export class SubscriptionLoaderMiddleware implements NestMiddleware {
       const authHeader = req.headers.authorization as string | undefined;
       let token: string | undefined;
 
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        token = authHeader.slice(7); // "Bearer " ko remove karo
-      } else if ((req as any).cookies?.access_token) {
+      this.logger.debug(`Authorization header: ${req.cookies.access_token}`);
+
+      if (req.cookies?.access_token) {
         token = (req as any).cookies.access_token;
         this.logger.debug('Authorization header missing — using access_token cookie');
       } else {
@@ -50,6 +50,10 @@ export class SubscriptionLoaderMiddleware implements NestMiddleware {
         this.logger.warn('No user_id found in JWT token');
         return next();
       }
+
+      // console.log(`User ID: ${userId}`);
+      (req as any).userId = userId;
+      console.log(`User ID middleware: ${userId}`);
 
       this.logger.debug(`Loading subscription for user: ${userId}`);
 
@@ -73,10 +77,10 @@ export class SubscriptionLoaderMiddleware implements NestMiddleware {
       // 5. req.subscriptionUser mein inject karo
       req.subscriptionUser = {
         user_id: userId,
-        subscription_id: subscription?.subscription_id,
+        subscription_id: subscription?.subscription_id || null,
         tier: subscription?.tier || 'FREE',
-        billing_period: subscription?.billing_period,
-        subscription,
+        billing_period: subscription?.billing_period || null,
+        subscription: subscription || null,
       };
 
       this.logger.debug(`Subscription loaded - Tier: ${req.subscriptionUser.tier}, Has Subscription: ${!!subscription}`);

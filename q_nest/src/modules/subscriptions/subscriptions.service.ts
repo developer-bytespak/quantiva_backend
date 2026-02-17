@@ -194,7 +194,7 @@ export class SubscriptionsService {
         }
 
         return plan;
-      });
+      }, { timeout: 15000 });
 
       results.push(result);
     }
@@ -382,23 +382,30 @@ export class SubscriptionsService {
         data: { current_tier: plan.tier },
       });
 
-      // 5️⃣ Subscription usage records initialize karo
-      // createSubscription me Line 489-520 replace karo:
-      // 5️⃣ Subscription usage records initialize karo
+      // 5️⃣ Subscription usage records initialize karo - MONTHLY BREAKDOWN
       if (plan.plan_features && plan.plan_features.length > 0) {
+        const monthlyPeriods = this.getMonthlyPeriods(current_period_start, current_period_end);
+        
+        const usageRecords = [];
+        for (const period of monthlyPeriods) {
+          for (const feature of plan.plan_features) {
+            usageRecords.push({
+              subscription_id: subscription.subscription_id,
+              user_id: data.user_id,
+              feature_type: feature.feature_type,
+              usage_count: 0,
+              period_start: period.start,
+              period_end: period.end,
+            });
+          }
+        }
+        
         await tx.subscription_usage.createMany({
-          data: plan.plan_features.map(feature => ({
-            subscription_id: subscription.subscription_id,
-            user_id: data.user_id,
-            feature_type: feature.feature_type,
-            usage_count: 0,
-            period_start: current_period_start,
-            period_end: current_period_end,
-          })),
+          data: usageRecords,
         });
       }
       return subscription;
-    });
+    }, { timeout: 30000 });
   }
 
   async updateSubscription(id: string, data: {
@@ -479,19 +486,26 @@ export class SubscriptionsService {
           where: { subscription_id: id },
         });
 
-        // 6️⃣ Create new subscription usage records for new plan features
-        // updateSubscription me Line 489-520 replace karo (same):
-        // 6️⃣ Create new subscription usage records for new plan features
+        // 6️⃣ Create new subscription usage records for new plan features - MONTHLY BREAKDOWN
         if (newPlan.plan_features && newPlan.plan_features.length > 0) {
+          const monthlyPeriods = this.getMonthlyPeriods(updateData.current_period_start, updateData.current_period_end);
+          
+          const usageRecords = [];
+          for (const period of monthlyPeriods) {
+            for (const feature of newPlan.plan_features) {
+              usageRecords.push({
+                subscription_id: id,
+                user_id: currentSubscription.user_id,
+                feature_type: feature.feature_type,
+                usage_count: 0,
+                period_start: period.start,
+                period_end: period.end,
+              });
+            }
+          }
+          
           await tx.subscription_usage.createMany({
-            data: newPlan.plan_features.map(feature => ({
-              subscription_id: id,
-              user_id: currentSubscription.user_id,
-              feature_type: feature.feature_type,
-              usage_count: 0,
-              period_start: updateData.current_period_start,
-              period_end: updateData.current_period_end,
-            })),
+            data: usageRecords,
           });
         }
       }
@@ -507,7 +521,7 @@ export class SubscriptionsService {
       });
 
       return updated;
-    });
+    }, { timeout: 30000 });
   }
 
   async deleteSubscription(id: string) {
@@ -595,6 +609,7 @@ export class SubscriptionsService {
   }
 
   async getDashboard(userId: string) {
+    console.log(`Dashboard request for user: ${userId}`);
     // Current subscription
     const currentSubscription = await this.prisma.user_subscriptions.findFirst({
       where: { user_id: userId, status: 'active' },
@@ -604,6 +619,39 @@ export class SubscriptionsService {
       },
       orderBy: { created_at: 'desc' },
     });
+
+    if(!currentSubscription) {
+      const currentTier = await this.prisma.users.findUnique({
+        where: { user_id: userId },
+        select: { current_tier: true },
+      });
+
+      if(currentTier?.current_tier === 'FREE') {
+        const allSubscriptions = await this.prisma.subscription_plans.findMany({
+          orderBy: [{ tier: 'asc' }, { billing_period: 'asc' }],
+          include: { plan_features: true },
+        });
+        return {
+          current: {
+            subscription_id: null,
+            user_id: userId,
+            tier: 'FREE',
+            plan_id: null,
+            billing_period: 'MONTHLY',
+            status: 'active',
+            current_period_start: null,
+            current_period_end: null,
+            next_billing_date: null,
+          },
+          usage: null,
+          payments: null,
+          allSubscriptions: allSubscriptions,
+        };
+      }
+
+
+     
+    }
 
     // Payment history
     const payments = await this.prisma.payment_history.findMany({

@@ -19,6 +19,7 @@ import { ChangePasswordDto } from '../dto/change-password.dto';
 import { DeleteAccountDto } from '../dto/delete-account.dto';
 import { StorageService } from '../../../storage/storage.service';
 import { CloudinaryService } from '../../../storage/cloudinary.service';
+import { SubscriptionsService } from '../../subscriptions/subscriptions.service';
 
 @Injectable()
 export class AuthService {
@@ -31,6 +32,7 @@ export class AuthService {
     private configService: ConfigService,
     private storageService: StorageService,
     private cloudinaryService: CloudinaryService,
+    private subscriptionsService: SubscriptionsService,
   ) {}
 
   private getGoogleClient() {
@@ -74,6 +76,25 @@ export class AuthService {
       },
     });
 
+    // Register ke baad FREE plan subscription auto-create (user_subscriptions me inject)
+    let subscriptionCreated = false;
+    try {
+      const freePlan = await this.prisma.subscription_plans.findFirst({
+        where: { tier: 'FREE', billing_period: 'MONTHLY', is_active: true },
+      });
+      if (freePlan) {
+        await this.subscriptionsService.createSubscription({
+          user_id: user.user_id,
+          plan_id: freePlan.plan_id,
+          status: 'active',
+          auto_renew: false,
+        });
+        subscriptionCreated = true;
+      }
+    } catch {
+      // FREE plan na mile ya create fail ho to register ko fail mat karo
+    }
+
     return {
       user: {
         user_id: user.user_id,
@@ -83,6 +104,7 @@ export class AuthService {
         kyc_status: user.kyc_status,
       },
       message: 'User registered successfully. 2FA is enabled.',
+      subscriptionCreated,
     };
   }
 
@@ -184,6 +206,8 @@ export class AuthService {
     };
 
     const accessToken = await this.tokenService.generateAccessToken(payload);
+
+    
 
     return {
       user: {
