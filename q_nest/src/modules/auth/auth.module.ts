@@ -15,11 +15,13 @@ import { RefreshTokenGuard } from './guards/refresh-token.guard';
 import { TwoFactorGuard } from './guards/two-factor.guard';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { StorageModule } from '../../storage/storage.module';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 
 @Module({
   imports: [
     PrismaModule,
     StorageModule,
+    SubscriptionsModule,
     PassportModule,
     ConfigModule,
     ScheduleModule,
