@@ -7,25 +7,35 @@ import {
   HttpCode,
   HttpStatus,
   UnauthorizedException,
+  Req,
 } from '@nestjs/common';
+import { Request } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { SumsubService } from './integrations/sumsub.service';
+
+interface RawBodyRequest extends Request {
+  rawBody?: Buffer;
+}
 
 interface SumsubWebhookPayload {
   applicantId: string;
   inspectionId: string;
   correlationId: string;
   externalUserId: string;
+  levelName?: string;
   type: string;
   reviewResult?: {
     reviewAnswer: string; // GREEN, RED, YELLOW
     rejectLabels?: string[];
-    reviewRejectType?: string;
+    reviewRejectType?: string; // FINAL, RETRY
     moderationComment?: string;
     clientComment?: string;
+    buttonIds?: string[];
   };
   reviewStatus: string; // init, pending, completed, onHold
-  createdAt: string;
+  sandboxMode?: boolean;
+  createdAtMs: string;
+  clientId?: string;
 }
 
 @Controller('kyc/webhooks')
@@ -40,6 +50,7 @@ export class KycWebhookController {
   @Post('sumsub')
   @HttpCode(HttpStatus.OK)
   async handleSumsubWebhook(
+    @Req() req: RawBodyRequest,
     @Body() payload: SumsubWebhookPayload,
     @Headers('x-payload-digest') signature: string,
   ): Promise<{ success: boolean }> {
@@ -51,8 +62,8 @@ export class KycWebhookController {
     this.logger.log(`   Type: ${payload.type}`);
     this.logger.log(`   Review Status: ${payload.reviewStatus}`);
 
-    // Verify webhook signature
-    if (!this.verifySignature(payload, signature)) {
+    // Verify webhook signature using the raw request body (not re-serialized JSON)
+    if (!this.verifySignature(req, signature)) {
       this.logger.error('❌ Invalid webhook signature');
       throw new UnauthorizedException('Invalid webhook signature');
     }
@@ -75,6 +86,7 @@ export class KycWebhookController {
       // Handle different webhook types
       switch (payload.type) {
         case 'applicantReviewed':
+        case 'applicantPrechecked':
           await this.handleApplicantReviewed(verification.kyc_id, payload);
           break;
         case 'applicantPending':
@@ -96,15 +108,23 @@ export class KycWebhookController {
     }
   }
 
-  private verifySignature(payload: any, signature: string): boolean {
+  private verifySignature(req: RawBodyRequest, signature: string): boolean {
     if (!signature) {
       this.logger.warn('No signature provided in webhook');
       return false;
     }
 
     try {
-      const payloadString = JSON.stringify(payload);
-      return this.sumsubService.verifyWebhookSignature(payloadString, signature);
+      // Use the raw body buffer preserved by the verify callback in main.ts.
+      // This ensures the HMAC is computed on the exact bytes Sumsub sent,
+      // rather than a re-serialized JSON string which may differ in key
+      // ordering, whitespace, or unicode escaping.
+      const rawBody = req.rawBody;
+      if (!rawBody) {
+        this.logger.error('Raw body not available — ensure json({ verify }) middleware is configured');
+        return false;
+      }
+      return this.sumsubService.verifyWebhookSignature(rawBody, signature);
     } catch (error) {
       this.logger.error(`Signature verification error: ${error.message}`);
       return false;

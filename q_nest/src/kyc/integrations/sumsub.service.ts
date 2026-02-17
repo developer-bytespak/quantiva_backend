@@ -30,9 +30,12 @@ interface SumsubApplicant {
 }
 
 interface SumsubDocumentResponse {
-  documentId: string;
-  applicantId: string;
-  imageIds: string[];
+  idDocType: string;
+  country: string;
+  imageId?: string; // From X-Image-Id response header, NOT the body
+  imageIds?: string[];
+  warnings?: Array<{ description: string }>;
+  errors?: Array<{ description: string }>;
 }
 
 interface SumsubReviewResult {
@@ -137,12 +140,13 @@ export class SumsubService implements OnModuleInit {
   /**
    * Make authenticated request with FormData using axios
    * Key: signature MUST include FormData buffer (per official Sumsub examples)
+   * Returns both data and the X-Image-Id header from response
    */
   private async makeFormDataRequest<T>(
     method: string,
     path: string,
     formData: FormData,
-  ): Promise<T> {
+  ): Promise<{ data: T; imageId?: string }> {
     const timestamp = Math.floor(Date.now() / 1000);
     
     // CRITICAL: Include FormData buffer in signature calculation!
@@ -154,6 +158,7 @@ export class SumsubService implements OnModuleInit {
       'X-App-Token': this.config.appToken,
       'X-App-Access-Ts': timestamp.toString(),
       'X-App-Access-Sig': signature,
+      'X-Return-Doc-Warnings': 'true',
       ...formData.getHeaders(),
     };
 
@@ -169,8 +174,12 @@ export class SumsubService implements OnModuleInit {
         maxBodyLength: Infinity,
         maxContentLength: Infinity,
       });
+      // Sumsub returns the imageId in the X-Image-Id response header (not in the body)
+      const imageId = response.headers?.['x-image-id'] as string | undefined;
       this.logger.log(`✅ Sumsub file upload successful`);
-      return response.data;
+      this.logger.log(`🖼️  X-Image-Id from response header: ${imageId || 'N/A'}`);
+      this.logger.debug(`📦 Sumsub response body: ${JSON.stringify(response.data)}`);
+      return { data: response.data, imageId };
     } catch (error) {
       this.logger.error(
         `Sumsub API error: ${error.response?.status} - ${JSON.stringify(error.response?.data)}`,
@@ -191,9 +200,10 @@ export class SumsubService implements OnModuleInit {
     data?: any,
     isFormData = false,
   ): Promise<T> {
-    // Use native HTTPS for FormData to avoid axios issues
+    // Use FormData-specific request handler (returns { data, imageId })
     if (isFormData && data) {
-      return this.makeFormDataRequest<T>(method, path, data);
+      const result = await this.makeFormDataRequest<T>(method, path, data);
+      return result.data;
     }
 
     const timestamp = Math.floor(Date.now() / 1000);
@@ -314,7 +324,94 @@ export class SumsubService implements OnModuleInit {
   }
 
   /**
-   * Add document to applicant
+   * Clarify rejection reason - returns per-image and applicant-level rejection details.
+   * imagesStates: { imageId: buttonId } - specific reason for each rejected image
+   * applicantState: { buttonId } - applicant-level rejection reason
+   */
+  async getModerationStates(applicantId: string): Promise<{
+    imagesStates?: Record<string, string>;
+    applicantState?: { buttonId?: string };
+  }> {
+    try {
+      this.logger.log(`Fetching moderation states (rejection reasons): ${applicantId}`);
+      const path = `/resources/moderationStates/-;applicantId=${encodeURIComponent(applicantId)}`;
+      return await this.makeRequest<any>('GET', path);
+    } catch (error) {
+      this.logger.warn(`Failed to get moderation states: ${error.message}`);
+      return {};
+    }
+  }
+
+  /**
+   * Map Sumsub buttonId to human-readable rejection reason for display to users.
+   */
+  getRejectionReasonLabel(buttonId: string): string {
+    const labels: Record<string, string> = {
+      // Selfie
+      'selfie_lowQuality': 'Selfie quality is too low. Please take a clearer photo in good lighting.',
+      'selfie_webcamSelfie': 'Liveness check failed. Please take a live selfie (no photos or screenshots).',
+      'selfie_badFaceComparison': 'Face could not be matched to your ID. Ensure your face is clearly visible and well-lit.',
+      'selfie_selfieLiveness': 'Liveness check failed. Please try again with a live selfie.',
+      'selfie': 'Selfie did not meet requirements. Please retake in good lighting with your face clearly visible.',
+      // Bad photo
+      'badPhoto_lowQuality': 'ID document photo is low quality. Please upload a clearer image.',
+      'badPhoto_screenshot': 'Screenshots are not accepted. Please photograph your physical ID document.',
+      'badPhoto_dataNotVisible': 'ID document details are not readable. Ensure all text is clear and visible.',
+      'badPhoto_imageEditor': 'Photo appears edited. Please upload an unmodified photo of your document.',
+      'badPhoto': 'ID document photo quality is insufficient. Please upload a clear, unedited photo.',
+      // Bad document
+      'badDocument_dataNotVisible': 'Document information is illegible. Please upload a clearer photo.',
+      'badDocument_withoutFace': 'Face on the ID document is not clearly visible.',
+      'badDocument': 'ID document did not meet requirements. Please ensure it is clear and readable.',
+      // Additional pages
+      'additionalPages_anotherSide': 'Back side of the document is required.',
+      'additionalPages_mainPageId': 'Document is missing the required page.',
+      // Forgery/fake
+      'fake_forgedId': 'Document appears tampered. Please upload a genuine, unaltered document.',
+      'fake_editedMrz': 'Document data appears modified. Please upload an original document.',
+      'fake_editedId': 'Document appears modified. Please upload an original, unaltered document.',
+      'fake': 'Document authenticity could not be verified. Please upload a genuine document.',
+      // Other
+      'spam': 'Irrelevant images were uploaded. Please provide valid ID and selfie.',
+      'fraudulentPatterns_selfieMismatch': 'Selfie does not match the photo on your ID document.',
+      'fraudulentPatterns_fake': 'Verification could not be completed. Please provide valid documents.',
+    };
+    if (labels[buttonId]) return labels[buttonId];
+    return buttonId ? `Verification issue: ${buttonId.replace(/_/g, ' ')}` : 'Verification could not be completed.';
+  }
+
+  /**
+   * Map frontend document side ('front'/'back') to Sumsub idDocSubType.
+   * Per Sumsub docs: double-sided documents MUST include idDocSubType
+   * with values FRONT_SIDE or BACK_SIDE, otherwise only 1 image is registered.
+   */
+  private mapDocumentSideToSubType(documentSide?: string): string | undefined {
+    if (!documentSide) return undefined;
+    const sideMap: { [key: string]: string } = {
+      front: 'FRONT_SIDE',
+      back: 'BACK_SIDE',
+    };
+    return sideMap[documentSide.toLowerCase()];
+  }
+
+  /**
+   * Check if a document type requires two sides (front + back).
+   */
+  private isDoubleSidedDocument(documentType: string): boolean {
+    const doubleSidedTypes = ['ID_CARD', 'DRIVERS', 'RESIDENCE_PERMIT'];
+    return doubleSidedTypes.includes(documentType);
+  }
+
+  /**
+   * Add document to applicant.
+   *
+   * IMPORTANT (from Sumsub docs):
+   * - For double-sided documents (ID_CARD, DRIVERS, etc.), you MUST include
+   *   `idDocSubType` in the metadata with values `FRONT_SIDE` or `BACK_SIDE`.
+   * - Each side is uploaded as a separate POST request.
+   * - The `imageId` is returned in the `X-Image-Id` response HEADER, not the body.
+   * - Without `idDocSubType`, the second upload overwrites the first and Sumsub
+   *   rejects with DOCUMENT_PAGE_MISSING / shouldBeDoubleSided.
    */
   async addDocument(
     applicantId: string,
@@ -322,16 +419,34 @@ export class SumsubService implements OnModuleInit {
     filename: string,
     documentType: string = 'IDENTITY',
     country?: string,
+    documentSide?: string,
   ): Promise<SumsubDocumentResponse> {
     const alpha3Country = this.convertToAlpha3(country || '');
-    this.logger.log(`Adding document to applicant: ${applicantId}, country: ${alpha3Country}`);
+    const idDocSubType = this.mapDocumentSideToSubType(documentSide);
+    
+    this.logger.log(`Adding document: type=${documentType}, side=${documentSide || 'N/A'}, ` +
+      `idDocSubType=${idDocSubType || 'N/A'}, country=${alpha3Country}`);
 
     const formData = new FormData();
     
-    const metadata = {
+    const metadata: Record<string, string> = {
       idDocType: documentType,
       country: alpha3Country,
     };
+
+    // CRITICAL: For double-sided documents, include idDocSubType
+    // Without this, Sumsub treats both uploads as the same side and rejects with DOCUMENT_PAGE_MISSING
+    if (idDocSubType) {
+      metadata.idDocSubType = idDocSubType;
+      this.logger.log(`📄 Setting idDocSubType=${idDocSubType} for ${documentSide} side`);
+    } else if (this.isDoubleSidedDocument(documentType) && !documentSide) {
+      // Warn if uploading a double-sided doc type without specifying the side
+      this.logger.warn(`⚠️  Document type ${documentType} is double-sided but no side specified! ` +
+        `This may cause DOCUMENT_PAGE_MISSING rejection. Defaulting to FRONT_SIDE.`);
+      metadata.idDocSubType = 'FRONT_SIDE';
+    }
+    
+    this.logger.log(`📋 Sumsub metadata: ${JSON.stringify(metadata)}`);
     formData.append('metadata', JSON.stringify(metadata));
     
     formData.append('content', fileBuffer, {
@@ -339,12 +454,27 @@ export class SumsubService implements OnModuleInit {
       contentType: this.getContentType(filename),
     });
 
-    return this.makeRequest<SumsubDocumentResponse>(
+    const result = await this.makeFormDataRequest<SumsubDocumentResponse>(
       'POST',
       `/resources/applicants/${applicantId}/info/idDoc`,
       formData,
-      true,
     );
+
+    // Attach the imageId from the response header to the response object
+    const response = result.data;
+    if (result.imageId) {
+      response.imageId = result.imageId;
+    }
+
+    // Log any warnings or errors from Sumsub
+    if (response.warnings?.length) {
+      this.logger.warn(`⚠️  Sumsub doc warnings: ${JSON.stringify(response.warnings)}`);
+    }
+    if (response.errors?.length) {
+      this.logger.error(`❌ Sumsub doc errors: ${JSON.stringify(response.errors)}`);
+    }
+
+    return response;
   }
 
   /**
@@ -367,12 +497,17 @@ export class SumsubService implements OnModuleInit {
       contentType: this.getContentType(filename),
     });
 
-    return this.makeRequest<any>(
+    const result = await this.makeFormDataRequest<any>(
       'POST',
       `/resources/applicants/${applicantId}/info/idDoc`,
       formData,
-      true,
     );
+
+    const response = result.data;
+    if (result.imageId) {
+      response.imageId = result.imageId;
+    }
+    return response;
   }
 
   /**
@@ -413,15 +548,21 @@ export class SumsubService implements OnModuleInit {
   }
 
   /**
-   * Verify webhook signature
+   * Verify webhook signature using the raw request body.
+   * Sumsub computes HMAC-SHA256 of the raw payload bytes with the webhook secret key
+   * and sends the result in the x-payload-digest header.
    */
-  verifyWebhookSignature(payload: string, signature: string): boolean {
+  verifyWebhookSignature(payload: Buffer | string, signature: string): boolean {
     const expectedSignature = crypto
       .createHmac('sha256', this.config.webhookSecret)
       .update(payload)
       .digest('hex');
 
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature));
+    // Use constant-time comparison; buffers must be the same length
+    const sigBuf = Buffer.from(signature, 'utf8');
+    const expectedBuf = Buffer.from(expectedSignature, 'utf8');
+    if (sigBuf.length !== expectedBuf.length) return false;
+    return crypto.timingSafeEqual(sigBuf, expectedBuf);
   }
 
   /**
