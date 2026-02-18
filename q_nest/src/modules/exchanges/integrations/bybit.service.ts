@@ -278,14 +278,18 @@ export class BybitService {
     const url = queryString ? `${endpoint}?${queryString}` : endpoint;
 
     try {
+      this.logger.debug(`Making Bybit public request: ${url}`);
       const response = await this.apiClient.get(url);
       
       // Bybit v5 returns data in result object
       if (response.data.retCode === 0) {
+        this.logger.debug(`Bybit API success: retCode=0, result keys: ${Object.keys(response.data.result || {}).join(',')}`);
         return response.data.result;
       } else {
         const errorCode = response.data.retCode;
         const errorMsg = response.data.retMsg || 'Bybit API error';
+        
+        this.logger.warn(`Bybit API error: retCode=${errorCode}, retMsg=${errorMsg}`);
         
         if (errorCode === 10006) {
           throw new BybitRateLimitException(errorMsg);
@@ -295,11 +299,13 @@ export class BybitService {
       }
     } catch (error: any) {
       if (error instanceof BybitApiException || error instanceof BybitRateLimitException) {
+        this.logger.warn(`Bybit API exception: ${error.message}`);
         throw error;
       }
       if (error.response?.status === 429) {
         throw new BybitRateLimitException();
       }
+      this.logger.error(`Bybit API request failed: ${error.message}, URL: ${url}, Response: ${JSON.stringify(error.response?.data)}`);
       throw new BybitApiException(error.message || 'Failed to fetch data from Bybit');
     }
   }
@@ -571,54 +577,118 @@ export class BybitService {
     try {
       // Bybit v5 allows fetching multiple tickers
       const symbolParam = symbols.join(',');
+      this.logger.debug(`Fetching ticker prices for symbols: ${symbolParam}`);
+      
       const result = await this.makePublicRequest('/v5/market/tickers', {
         category: 'spot',
         symbol: symbolParam,
       });
 
-      const tickers = (result.list || []) as BybitTicker[];
+      this.logger.debug(`Bybit API response for ${symbolParam}: ${JSON.stringify(result)}`);
 
-      return tickers.map((ticker) => {
-        const price = parseFloat(String(ticker.lastPrice || '0'));
-        const prevPriceStr = ticker.prevPrice24h 
-          ? String(ticker.prevPrice24h) 
-          : price.toString();
-        const prevPrice = parseFloat(prevPriceStr);
-        const change24h = price - prevPrice;
-        const changePercent24h = prevPrice > 0 ? (change24h / prevPrice) * 100 : 0;
+      const tickers = (result?.list || []) as BybitTicker[];
 
-        return {
-          symbol: ticker.symbol,
-          price,
-          change24h,
-          changePercent24h,
-        };
+      // If no tickers returned, try fallback for single symbol
+      if (tickers.length === 0 && symbols.length === 1) {
+        this.logger.warn(`No tickers returned for ${symbols[0]}, trying fallback. Full response: ${JSON.stringify(result)}`);
+        // Fall through to catch block fallback logic
+        throw new Error('Empty ticker list');
+      }
+
+      if (tickers.length === 0) {
+        this.logger.warn(`No tickers returned for symbols: ${symbolParam}. Full response: ${JSON.stringify(result)}`);
+        return [];
+      }
+
+      this.logger.debug(`Successfully fetched ${tickers.length} ticker(s) for ${symbolParam}`);
+
+      // For single symbol requests, if API returns a ticker, use it (even if symbol doesn't match exactly)
+      // This handles cases where the API might return the ticker with slightly different formatting
+      if (symbols.length === 1 && tickers.length > 0) {
+        const requestedSymbol = symbols[0].toUpperCase();
+        // Try exact match first
+        let matchedTicker = tickers.find(t => t.symbol?.toUpperCase() === requestedSymbol);
+        
+        // If no exact match, use first ticker (API returned it for this symbol, so it's likely correct)
+        if (!matchedTicker) {
+          this.logger.warn(`Symbol format mismatch for ${requestedSymbol}: API returned ${tickers.map(t => t.symbol).join(',')}, using first ticker`);
+          matchedTicker = tickers[0];
+        }
+        
+        return [this.mapTickerToDto(matchedTicker, symbolParam)];
+      }
+
+      // For multiple symbols, filter to match requested symbols (case-insensitive)
+      const requestedSymbols = symbols.map(s => s.toUpperCase());
+      const matchedTickers = tickers.filter(ticker => {
+        const tickerSymbol = ticker.symbol?.toUpperCase();
+        return requestedSymbols.includes(tickerSymbol);
       });
+
+      if (matchedTickers.length === 0 && tickers.length > 0) {
+        this.logger.warn(`Symbol mismatch! Requested: ${requestedSymbols.join(',')}, Got: ${tickers.map(t => t.symbol).join(',')}`);
+      }
+
+      return matchedTickers.length > 0 ? matchedTickers.map((ticker) => this.mapTickerToDto(ticker, symbolParam)) : [];
     } catch (error: any) {
+      this.logger.warn(`getTickerPrices error for ${symbols.join(',')}: ${error.message}`);
       // Fallback: fetch prices one by one if batch fails
       if (symbols.length === 1) {
-        const result = await this.makePublicRequest('/v5/market/tickers', {
-          category: 'spot',
-          symbol: symbols[0],
-        });
-        
-        const tickers = (result.list || []) as BybitTicker[];
-        if (tickers.length > 0) {
-          const ticker = tickers[0];
-          const price = parseFloat(String(ticker.lastPrice || '0'));
-          const prevPriceStr = ticker.prevPrice24h 
-            ? String(ticker.prevPrice24h) 
-            : price.toString();
-          const prevPrice = parseFloat(prevPriceStr);
-          const change24h = price - prevPrice;
-          const changePercent24h = prevPrice > 0 ? (change24h / prevPrice) * 100 : 0;
+        try {
+          this.logger.debug(`Trying fallback for single symbol: ${symbols[0]}`);
+          const result = await this.makePublicRequest('/v5/market/tickers', {
+            category: 'spot',
+            symbol: symbols[0],
+          });
+          
+          this.logger.debug(`Fallback API response for ${symbols[0]}: ${JSON.stringify(result)}`);
+          
+          const tickers = (result?.list || []) as BybitTicker[];
+          if (tickers.length > 0) {
+            // Find the ticker that matches the requested symbol (case-insensitive)
+            const requestedSymbol = symbols[0].toUpperCase();
+            let ticker = tickers.find(t => t.symbol?.toUpperCase() === requestedSymbol);
+            
+            // If no exact match, use the first ticker (API might return it with different casing)
+            if (!ticker && tickers.length > 0) {
+              this.logger.warn(`Symbol mismatch in fallback: requested ${requestedSymbol}, got ${tickers.map(t => t.symbol).join(',')}, using first ticker`);
+              ticker = tickers[0];
+            }
+            
+            if (ticker) {
+              const price = parseFloat(String(ticker.lastPrice || '0'));
+              
+              // Use price24hPcnt if prevPrice24h is not available
+              let prevPrice = 0;
+              let change24h = 0;
+              let changePercent24h = 0;
+              
+              if (ticker.prevPrice24h) {
+                prevPrice = parseFloat(String(ticker.prevPrice24h));
+                change24h = price - prevPrice;
+                changePercent24h = prevPrice > 0 ? (change24h / prevPrice) * 100 : 0;
+              } else if (ticker.price24hPcnt) {
+                const percentChange = parseFloat(String(ticker.price24hPcnt));
+                changePercent24h = percentChange;
+                if (percentChange !== 0 && price > 0) {
+                  prevPrice = price / (1 + percentChange / 100);
+                  change24h = price - prevPrice;
+                }
+              }
 
-          return [{
-            symbol: ticker.symbol,
-            price,
-            change24h,
-            changePercent24h,
-          }];
+              this.logger.debug(`Fallback successful for ${symbols[0]}: price=${price}, change24h=${change24h}`);
+              return [{
+                symbol: ticker.symbol,
+                price,
+                change24h,
+                changePercent24h,
+              }];
+            }
+          } else {
+            this.logger.error(`Fallback also returned empty list for ${symbols[0]}. Response: ${JSON.stringify(result)}`);
+          }
+        } catch (fallbackError: any) {
+          this.logger.error(`Fallback also failed for ${symbols[0]}: ${fallbackError.message}`);
         }
       }
 
@@ -661,6 +731,54 @@ export class BybitService {
   }
 
   /**
+   * Maps a Bybit ticker to TickerPriceDto
+   */
+  private mapTickerToDto(ticker: BybitTicker, requestedSymbol?: string): TickerPriceDto {
+    // Log raw ticker data for debugging
+    this.logger.debug(`Raw ticker data: ${JSON.stringify(ticker)}`);
+    
+    // Extract price - try multiple possible field names
+    const price = parseFloat(String(ticker.lastPrice || (ticker as any).lastPrice || (ticker as any).price || '0'));
+    
+    // Calculate 24h change - use prevPrice24h if available, otherwise calculate from price24hPcnt
+    let prevPrice = 0;
+    let change24h = 0;
+    let changePercent24h = 0;
+    
+    if (ticker.prevPrice24h) {
+      prevPrice = parseFloat(String(ticker.prevPrice24h));
+      change24h = price - prevPrice;
+      changePercent24h = prevPrice > 0 ? (change24h / prevPrice) * 100 : 0;
+    } else if (ticker.price24hPcnt) {
+      // Calculate prevPrice from percentage change
+      const percentChange = parseFloat(String(ticker.price24hPcnt));
+      changePercent24h = percentChange;
+      if (percentChange !== 0 && price > 0) {
+        prevPrice = price / (1 + percentChange / 100);
+        change24h = price - prevPrice;
+      }
+    } else {
+      // Fallback: assume no change if we can't calculate
+      prevPrice = price;
+      change24h = 0;
+      changePercent24h = 0;
+    }
+
+    this.logger.debug(`Mapped ticker ${ticker.symbol}: price=${price}, prevPrice=${prevPrice}, change24h=${change24h}, changePercent24h=${changePercent24h}`);
+
+    if (price === 0) {
+      this.logger.error(`⚠️ Price is 0 for ticker ${ticker.symbol} on Bybit! Raw data: ${JSON.stringify(ticker)}`);
+    }
+
+    return {
+      symbol: ticker.symbol,
+      price,
+      change24h,
+      changePercent24h,
+    };
+  }
+
+  /**
    * Maps interval to Bybit format
    */
   private mapInterval(interval: string): string {
@@ -671,6 +789,7 @@ export class BybitService {
       '30m': '30',
       '1h': '60',
       '4h': '240',
+      '6h': '360',
       '8h': '480',
       '1d': 'D',
       '1w': 'W',
@@ -735,6 +854,7 @@ export class BybitService {
       '30m': 30 * 60 * 1000,
       '1h': 60 * 60 * 1000,
       '4h': 4 * 60 * 60 * 1000,
+      '6h': 6 * 60 * 60 * 1000,
       '8h': 8 * 60 * 60 * 1000,
       '1d': 24 * 60 * 60 * 1000,
       '1w': 7 * 24 * 60 * 60 * 1000,

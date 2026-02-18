@@ -109,7 +109,7 @@ export class MarketDetailAggregatorService {
     const orderBook = orderBookResult.status === 'fulfilled' ? orderBookResult.value : null;
     const recentTrades = recentTradesResult.status === 'fulfilled' ? recentTradesResult.value : null;
 
-    // Log any errors
+    // Log any errors and ticker status
     [tickerResult, candlesResult, balanceResult, coinGeckoResult, orderBookResult, recentTradesResult]
       .forEach((r, i) => {
         if (r.status === 'rejected') {
@@ -117,6 +117,17 @@ export class MarketDetailAggregatorService {
           this.logger.warn(`Failed to fetch ${names[i]} for ${symbol}: ${r.reason?.message}`);
         }
       });
+
+    // Log ticker result details
+    if (tickerResult.status === 'fulfilled') {
+      if (!tickerResult.value) {
+        this.logger.warn(`Ticker fetch succeeded but returned null/undefined for ${symbol} on ${exchangeName}`);
+      } else {
+        this.logger.debug(`Ticker fetched successfully for ${symbol}: price=${tickerResult.value.price}, change24h=${tickerResult.value.change24h}`);
+      }
+    } else {
+      this.logger.error(`Ticker fetch failed for ${symbol} on ${exchangeName}: ${tickerResult.reason?.message || 'Unknown error'}`);
+    }
 
     // Derive 24h stats
     const dailyCandles = candlesByInterval['1d'] || candlesByInterval[intervals[0]] || [];
@@ -127,6 +138,42 @@ export class MarketDetailAggregatorService {
       high24h = Math.max(...recent.map((c: any) => c.high));
       low24h = Math.min(...recent.map((c: any) => c.low));
       volume24h = recent.reduce((sum: number, c: any) => sum + c.volume, 0);
+    }
+
+    // Always use the latest candle's close price as the most accurate current price
+    // Ticker data can be stale or incorrect, so candles are more reliable
+    let currentPrice = 0;
+    let change24h = 0;
+    let changePercent24h = 0;
+
+    if (dailyCandles.length > 0) {
+      // Get current price from the latest (most recent) daily candle
+      const latestCandle = dailyCandles[dailyCandles.length - 1];
+      if (latestCandle && latestCandle.close) {
+        currentPrice = latestCandle.close;
+        
+        // Calculate 24h change: subtract previous day candle's close price
+        if (dailyCandles.length >= 2) {
+          const previousDayCandle = dailyCandles[dailyCandles.length - 2];
+          if (previousDayCandle && previousDayCandle.close) {
+            const price24hAgo = previousDayCandle.close;
+            change24h = currentPrice - price24hAgo;
+            changePercent24h = price24hAgo > 0 ? (change24h / price24hAgo) * 100 : 0;
+            this.logger.debug(`Using latest candle price: ${currentPrice}, 24h change: ${change24h} (${changePercent24h.toFixed(2)}%) from previous day ${price24hAgo}`);
+          }
+        }
+        
+        // If ticker exists but price differs significantly, log a warning
+        if (ticker && ticker.price && Math.abs(ticker.price - currentPrice) > (currentPrice * 0.05)) {
+          this.logger.warn(`Ticker price (${ticker.price}) differs significantly from latest candle price (${currentPrice}) for ${symbol}, using candle price`);
+        }
+      }
+    } else if (ticker) {
+      // Fallback to ticker if no candles available
+      currentPrice = ticker.price || 0;
+      change24h = ticker.change24h || 0;
+      changePercent24h = ticker.changePercent24h || 0;
+      this.logger.warn(`No candles available for ${symbol}, using ticker price: ${currentPrice}`);
     }
 
     // Balance
@@ -142,9 +189,9 @@ export class MarketDetailAggregatorService {
       exchange: exchangeName,
 
       // Price data
-      currentPrice: ticker?.price || 0,
-      change24h: ticker?.change24h || 0,
-      changePercent24h: ticker?.changePercent24h || 0,
+      currentPrice,
+      change24h,
+      changePercent24h,
       high24h,
       low24h,
       volume24h,
@@ -197,12 +244,25 @@ export class MarketDetailAggregatorService {
   // ── Private helpers ──────────────────────────────────────
 
   private async fetchTicker(exchangeName: string, symbol: string) {
-    if (exchangeName === 'bybit') {
-      const tickers = await this.bybitService.getTickerPrices([symbol]);
+    try {
+      if (exchangeName === 'bybit') {
+        const tickers = await this.bybitService.getTickerPrices([symbol]);
+        if (!tickers || tickers.length === 0) {
+          this.logger.warn(`No ticker data returned for ${symbol} on Bybit`);
+          return null;
+        }
+        return tickers[0] || null;
+      }
+      const tickers = await this.binanceService.getTickerPrices([symbol]);
+      if (!tickers || tickers.length === 0) {
+        this.logger.warn(`No ticker data returned for ${symbol} on Binance`);
+        return null;
+      }
       return tickers[0] || null;
+    } catch (error: any) {
+      this.logger.error(`Failed to fetch ticker for ${symbol} on ${exchangeName}: ${error.message}`);
+      return null;
     }
-    const tickers = await this.binanceService.getTickerPrices([symbol]);
-    return tickers[0] || null;
   }
 
   private async fetchMultiIntervalCandles(
@@ -216,11 +276,14 @@ export class MarketDetailAggregatorService {
     const results = await Promise.all(
       intervals.map(async (interval) => {
         const cacheKey = CacheKeyManager.candle(connectionId, symbol, interval);
+        // Normalize interval for Bybit (8h is not supported, use 6h instead)
+        const normalizedInterval = this.normalizeIntervalForExchange(exchangeName, interval);
+        
         const candles = await this.cacheService.getOrSet(
           cacheKey,
           async () => {
             if (exchangeName === 'bybit') {
-              return this.bybitService.getCandlestickData(symbol, interval, 100);
+              return this.bybitService.getCandlestickData(symbol, normalizedInterval, 100);
             }
             return this.binanceService.getCandlestickData(symbol, interval, 100);
           },
@@ -273,5 +336,16 @@ export class MarketDetailAggregatorService {
       }
     }
     return this.marketService.getCoinDetails(baseSymbol);
+  }
+
+  /**
+   * Normalize interval for exchange-specific limitations.
+   * Bybit doesn't support 8h intervals, so we map 8h to 6h for Bybit.
+   */
+  private normalizeIntervalForExchange(exchangeName: string, interval: string): string {
+    if (exchangeName === 'bybit' && interval === '8h') {
+      return '6h';
+    }
+    return interval;
   }
 }
