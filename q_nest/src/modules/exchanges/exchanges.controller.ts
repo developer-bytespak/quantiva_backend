@@ -12,7 +12,6 @@ import {
   HttpCode,
   HttpStatus,
   HttpException,
-  Logger,
 } from '@nestjs/common';
 import { ExchangesService } from './exchanges.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -53,8 +52,6 @@ import { MarketService } from '../market/market.service';
 @UseGuards(JwtAuthGuard)
 @UseInterceptors(CacheHeadersInterceptor)
 export class ExchangesController {
-  private readonly logger = new Logger(ExchangesController.name);
-
   constructor(
     private readonly exchangesService: ExchangesService,
     private readonly binanceService: BinanceService,
@@ -91,16 +88,6 @@ export class ExchangesController {
         data: connection,
       };
     } catch (error: any) {
-      // Log the full error for debugging
-      console.error('Error in getActiveConnection controller:', {
-        message: error?.message,
-        stack: error?.stack,
-        statusCode: error?.statusCode,
-        response: error?.response,
-        name: error?.name,
-        user: user?.sub,
-      });
-
       // Re-throw HTTP exceptions as-is (ConnectionNotFoundException extends HttpException)
       if (error instanceof HttpException || error?.statusCode) {
         throw error;
@@ -125,11 +112,7 @@ export class ExchangesController {
    */
   @Get('my-connections')
   async getUserConnectionsForCurrentUser(@CurrentUser() user: TokenPayload) {
-    console.log('[GET my-connections] Route hit');
-    console.log('[GET my-connections] User:', user);
-    
     if (!user || !user.sub) {
-      console.error('[GET my-connections] No user in request');
       throw new HttpException(
         {
           code: 'UNAUTHORIZED',
@@ -139,13 +122,8 @@ export class ExchangesController {
       );
     }
 
-    console.log('[GET my-connections] Fetching connections for userId:', user.sub);
-    
     const connections = await this.exchangesService.getUserConnections(user.sub);
-    
-    console.log('[GET my-connections] Success! Found', connections?.length || 0, 'connections');
-    console.log('[GET my-connections] Connections:', JSON.stringify(connections, null, 2).substring(0, 500));
-    
+
     return {
       success: true,
       data: connections || [],
@@ -239,10 +217,8 @@ export class ExchangesController {
           HttpStatus.UNAUTHORIZED,
         );
       }
-      //first delete the previous connection if exists
       const existingConnection = await this.exchangesService.getActiveConnection(user.sub);
       if (existingConnection) {
-        this.logger.log(`User ${user.sub} already has an active connection. Deleting previous connection ${existingConnection.connection_id} before creating new one.`);
         await this.exchangesService.deleteConnection(existingConnection.connection_id);
       }
       
@@ -421,7 +397,6 @@ export class ExchangesController {
         last_updated: new Date().toISOString(),
       };
     } catch (error: any) {
-      console.error('Error fetching connection profile:', error?.message || error);
       if (error instanceof HttpException) {
         throw error;
       }
@@ -776,7 +751,6 @@ export class ExchangesController {
         return tickers[0] || null;
       }
     } catch (error) {
-      this.logger.warn(`Failed to fetch ticker for ${symbol}: ${error.message}`);
       return null;
     }
   }
@@ -967,62 +941,45 @@ export class ExchangesController {
       return logos;
     }
 
-    this.logger.log(`Fetching logos for ${uniqueSymbols.length} unique assets`);
-
-    // Fetch logos concurrently - for each symbol, try CoinGecko if crypto, stock CDN if stock
     const logoPromises = uniqueSymbols.map(async (symbol) => {
       const assetType = assetTypes[symbol] || 'crypto';
-      
+
       try {
-        // For CRYPTO: Query CoinGecko directly - it has all coins
         if (assetType === 'crypto') {
           try {
-            this.logger.debug(`[${symbol}] Querying CoinGecko...`);
             const coinDetails = await this.marketService.getCoinDetails(symbol);
-            
             if (coinDetails) {
               const logoUrl = this.extractLogoUrl(coinDetails.image);
               if (logoUrl) {
                 logos[symbol] = logoUrl;
-                this.logger.log(`[${symbol}] ✅ Got logo from CoinGecko`);
                 return;
               }
             }
           } catch (error: any) {
-            this.logger.debug(`[${symbol}] Not found in CoinGecko: ${error?.message}`);
+            // Not found in CoinGecko
           }
         }
-        
-        // For STOCK: Use stock logo CDN - works for all stocks
+
         if (assetType === 'stock') {
           const stockLogoUrl = this.getStockLogoUrl(symbol);
           logos[symbol] = stockLogoUrl;
-          this.logger.log(`[${symbol}] ✅ Got stock logo URL`);
           return;
         }
 
-        // Fallback: if crypto not found, try stock logo too
         if (assetType === 'crypto') {
           const stockLogoUrl = this.getStockLogoUrl(symbol);
           logos[symbol] = stockLogoUrl;
-          this.logger.log(`[${symbol}] ✅ Using stock logo as fallback`);
-          return;
         }
-
-        this.logger.warn(`[${symbol}] (${assetType}) Could not find logo`);
-
       } catch (error: any) {
-        this.logger.error(`[${symbol}] Error fetching logo: ${error?.message}`);
+        // Skip failed logo fetch
       }
     });
 
-    // Wait for all requests with concurrency limit
     const batchSize = 5;
     for (let i = 0; i < logoPromises.length; i += batchSize) {
       await Promise.all(logoPromises.slice(i, i + batchSize));
     }
 
-    this.logger.log(`Logo fetch done: ${Object.keys(logos).length}/${uniqueSymbols.length} found`);
     return logos;
   }
 
@@ -1037,11 +994,8 @@ export class ExchangesController {
       }
 
       const exchangeName = connection.exchange.name.toLowerCase();
-      this.logger.log(`Dashboard request for ${exchangeName} connection: ${connectionId}, status: ${connection.status}`);
-      
-      // Check if connection is active
+
       if (connection.status !== 'active') {
-        this.logger.warn(`Connection ${connectionId} is not active, status: ${connection.status}`);
         throw new HttpException(
           `Connection status is ${connection.status}. Please reconnect your exchange account.`,
           HttpStatus.BAD_REQUEST
@@ -1052,9 +1006,7 @@ export class ExchangesController {
       // This prevents unnecessary API calls to external exchanges
       const isCached = this.exchangesService.isDashboardDataCached(connectionId, exchangeName);
       
-      // Only sync if cache is missing (saves external API calls)
       if (!isCached) {
-        this.logger.log(`Cache miss, syncing data for ${connectionId}`);
         await this.exchangesService.syncConnectionData(connectionId);
       }
 
@@ -1155,7 +1107,6 @@ export class ExchangesController {
           });
       }
 
-      this.logger.log(`Fetching logos for ${allSymbols.length} unique assets (${assetType})`);
       const logos = await this.getLogosForSymbols(allSymbols, assetTypeMap);
 
       return {
@@ -1173,7 +1124,6 @@ export class ExchangesController {
         cached: isCached, // Indicate if data came from cache
       };
     } catch (error) {
-      this.logger.error(`Dashboard error for ${connectionId}:`, error?.stack || error);
       throw error;
     }
   }

@@ -2,7 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DocumentService } from './document.service';
-import { FaceMatchingService } from './face-matching.service';
 import { DecisionEngineService } from './decision-engine.service';
 import { SumsubService } from '../integrations/sumsub.service';
 
@@ -19,7 +18,6 @@ export class KycService {
   constructor(
     private prisma: PrismaService,
     private documentService: DocumentService,
-    private faceMatchingService: FaceMatchingService,
     private decisionEngine: DecisionEngineService,
     private configService: ConfigService,
     private sumsubService: SumsubService,
@@ -379,7 +377,12 @@ export class KycService {
       throw new Error('No KYC verification found');
     }
 
-    // Run decision engine to evaluate verification based on all checks
+    // For Sumsub verifications, status is updated via webhook - skip legacy decision engine
+    if (verification.verification_provider === 'sumsub') {
+      return;
+    }
+
+    // Run decision engine for legacy (non-Sumsub) verifications
     await this.decisionEngine.applyDecision(verification.kyc_id);
   }
 

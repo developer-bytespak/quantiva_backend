@@ -30,32 +30,21 @@ export class PreBuiltSignalsCronjobService {
   @Cron('*/10 * * * *') // Every 10 minutes
   async generatePreBuiltSignals(options?: { connectionId?: string }): Promise<void> {
     if (this.isRunning) {
-      this.logger.warn('Previous signal generation job still running, skipping this execution');
       return;
     }
 
     this.isRunning = true;
-    const startTime = Date.now();
-    this.logger.log('Starting pre-built signals generation cronjob');
 
     try {
-      // Step 1: Get all 4 pre-built strategies
       const strategies = await this.preBuiltStrategiesService.getPreBuiltStrategies();
       if (strategies.length === 0) {
-        this.logger.warn('No pre-built strategies found, skipping signal generation');
         return;
       }
 
-      this.logger.log(`Found ${strategies.length} pre-built strategies`);
-
-      // Step 2: Fetch trending assets
       const trendingAssets = await this.preBuiltStrategiesService.getTopTrendingAssets(50);
       if (trendingAssets.length === 0) {
-        this.logger.warn('No trending assets found, skipping signal generation');
         return;
       }
-
-      this.logger.log(`Processing ${trendingAssets.length} trending assets`);
 
       // Step 3: Get first available connection for OHLCV data (or use provided override)
       let connectionInfo = null;
@@ -70,13 +59,10 @@ export class PreBuiltSignalsCronjobService {
               connectionId: conn.connection_id,
               exchange: conn.exchange.name.toLowerCase() || 'binance',
             };
-            this.logger.log(`Using overridden connection ${options.connectionId} for OHLCV data`);
           } else {
-            this.logger.warn(`Connection ${options.connectionId} not found or has no exchange; falling back to first available`);
             connectionInfo = await this.getFirstAvailableConnection();
           }
         } catch (err: any) {
-          this.logger.warn(`Error fetching override connection ${options.connectionId}: ${err.message}`);
           connectionInfo = await this.getFirstAvailableConnection();
         }
       } else {
@@ -90,10 +76,6 @@ export class PreBuiltSignalsCronjobService {
       // Process assets in batches
       for (let i = 0; i < trendingAssets.length; i += this.BATCH_SIZE) {
         const batch = trendingAssets.slice(i, i + this.BATCH_SIZE);
-        const batchNum = Math.floor(i / this.BATCH_SIZE) + 1;
-        const totalBatches = Math.ceil(trendingAssets.length / this.BATCH_SIZE);
-
-        this.logger.log(`Processing batch ${batchNum}/${totalBatches} (${batch.length} assets)`);
 
         await Promise.allSettled(
           batch.map(async (asset) => {
@@ -102,9 +84,6 @@ export class PreBuiltSignalsCronjobService {
               processedCount++;
             } catch (error: any) {
               errorCount++;
-              this.logger.error(
-                `Error processing asset ${asset.symbol} (${asset.asset_id}): ${error.message}`,
-              );
             }
           }),
         );
@@ -118,13 +97,7 @@ export class PreBuiltSignalsCronjobService {
       // Step 5: Generate LLM explanations for top N signals per strategy
       await this.generateLLMExplanationsForTopSignals(strategies);
 
-      // Step 6: Process active custom (user) strategies
       await this.processActiveCustomStrategies(trendingAssets, connectionInfo);
-
-      const duration = Date.now() - startTime;
-      this.logger.log(
-        `Pre-built signals generation completed: ${processedCount} processed, ${errorCount} errors, ${duration}ms`,
-      );
     } catch (error: any) {
       this.logger.error(`Fatal error in pre-built signals generation: ${error.message}`, error.stack);
     } finally {
@@ -155,14 +128,10 @@ export class PreBuiltSignalsCronjobService {
             connectionInfo,
           );
         } catch (error: any) {
-          this.logger.warn(
-            `Error generating signal for strategy ${strategy.name} on asset ${asset.symbol}: ${error.message}`,
-          );
           // Continue with other strategies
         }
       }
     } catch (error: any) {
-      this.logger.error(`Error processing asset ${asset.symbol}: ${error.message}`);
       throw error;
     }
   }
@@ -173,19 +142,13 @@ export class PreBuiltSignalsCronjobService {
   private async runSentimentAnalysis(asset: any): Promise<void> {
     try {
       if (!asset.symbol || !asset.asset_type) {
-        this.logger.warn(`Skipping sentiment for asset ${asset.asset_id}: missing symbol or asset_type`);
         return;
       }
-
-      // Call Python API to analyze sentiment
       await this.pythonApi.post('/api/v1/sentiment/analyze', {
         asset_id: asset.symbol,
         asset_type: asset.asset_type,
       });
-
-      this.logger.debug(`Sentiment analysis completed for ${asset.symbol}`);
     } catch (error: any) {
-      this.logger.warn(`Error running sentiment analysis for ${asset.symbol}: ${error.message}`);
       // Don't throw - continue with signal generation even if sentiment fails
     }
   }
@@ -289,14 +252,7 @@ export class PreBuiltSignalsCronjobService {
           },
         });
       }
-
-      this.logger.debug(
-        `Generated signal for strategy ${strategy.name} on asset ${asset.symbol}: ${pythonSignal.action}`,
-      );
     } catch (error: any) {
-      this.logger.error(
-        `Error executing strategy ${strategyId} on asset ${assetId}: ${error.message}`,
-      );
       throw error;
     }
   }
@@ -305,8 +261,6 @@ export class PreBuiltSignalsCronjobService {
    * Generate LLM explanations for top N signals per strategy
    */
   private async generateLLMExplanationsForTopSignals(strategies: any[]): Promise<void> {
-    this.logger.log('Generating LLM explanations for top signals');
-
     for (const strategy of strategies) {
       try {
         // Get all signals for this strategy (without explanations)
@@ -328,7 +282,6 @@ export class PreBuiltSignalsCronjobService {
         });
 
         if (signals.length === 0) {
-          this.logger.debug(`No signals found for strategy ${strategy.name}`);
           continue;
         }
 
@@ -345,16 +298,11 @@ export class PreBuiltSignalsCronjobService {
           .sort((a, b) => (b.sortScore || 0) - (a.sortScore || 0))
           .slice(0, this.LLM_LIMIT);
 
-        this.logger.log(
-          `Generating LLM explanations for top ${signalsWithScores.length} signals of strategy ${strategy.name}`,
-        );
-
         // Generate LLM explanations
         for (const signal of signalsWithScores) {
           try {
             const asset = signal.asset;
             if (!asset) {
-              this.logger.warn(`Asset not found for signal ${signal.signal_id}`);
               continue;
             }
 
@@ -395,14 +343,8 @@ export class PreBuiltSignalsCronjobService {
                   retry_count: 0,
                 },
               });
-
-              this.logger.debug(`Generated LLM explanation for signal ${signal.signal_id}`);
             }
           } catch (error: any) {
-            this.logger.error(
-              `Failed to generate LLM explanation for signal ${signal.signal_id}: ${error.message}`,
-            );
-            // Create failed explanation record
             try {
               await this.prisma.signal_explanations.create({
                 data: {
@@ -414,16 +356,12 @@ export class PreBuiltSignalsCronjobService {
                 },
               });
             } catch (dbError: any) {
-              this.logger.error(
-                `Failed to record failed explanation for signal ${signal.signal_id}: ${dbError.message}`,
-              );
+              // Ignore
             }
           }
         }
       } catch (error: any) {
-        this.logger.error(
-          `Error generating LLM explanations for strategy ${strategy.name}: ${error.message}`,
-        );
+        // Ignore per-strategy LLM errors
       }
     }
   }
@@ -455,10 +393,8 @@ export class PreBuiltSignalsCronjobService {
         };
       }
 
-      this.logger.debug('No active connection found, proceeding without OHLCV data');
       return null;
     } catch (error: any) {
-      this.logger.warn(`Error fetching connection: ${error.message}`);
       return null;
     }
   }
@@ -509,19 +445,9 @@ export class PreBuiltSignalsCronjobService {
         },
       });
 
-      this.logger.log(`[CustomStrategies] Query completed. Found ${customStrategies.length} crypto custom strategies`);
-      
       if (customStrategies.length === 0) {
-        this.logger.log('[CustomStrategies] No active crypto custom strategies found, skipping');
         return;
       }
-
-      // Log each strategy for debugging
-      for (const s of customStrategies) {
-        this.logger.log(`[CustomStrategies] Found: "${s.name}" (${s.strategy_id}), assets: ${JSON.stringify(s.target_assets)}`);
-      }
-
-      this.logger.log(`Processing ${customStrategies.length} active crypto custom strategies`);
 
       // Build a map of symbol -> asset from trending assets for quick lookup
       const trendingAssetsMap = new Map<string, any>();
@@ -540,8 +466,6 @@ export class PreBuiltSignalsCronjobService {
           const assetsToProcess = targetAssets.length > 0
             ? targetAssets
             : trendingAssets.map(a => a.symbol);
-          
-          this.logger.log(`Processing custom strategy "${strategy.name}" with ${assetsToProcess.length} assets${targetAssets.length === 0 ? ' (using all trending)' : ''}`);
 
           // Get user-specific connection if available
           const userConnectionInfo = await this.getUserConnection(strategy.user_id, strategy.asset_type || 'crypto');
@@ -583,23 +507,13 @@ export class PreBuiltSignalsCronjobService {
               customSignalsGenerated++;
             } catch (error: any) {
               customErrors++;
-              this.logger.warn(
-                `Error processing ${symbol} for custom strategy ${strategy.name}: ${error.message}`,
-              );
             }
           }
         } catch (error: any) {
-          this.logger.error(
-            `Error processing custom strategy ${strategy.name}: ${error.message}`,
-          );
+          // Continue with next strategy
         }
       }
-
-      this.logger.log(
-        `Custom strategies processed: ${customSignalsGenerated} signals generated, ${customErrors} errors`,
-      );
     } catch (error: any) {
-      this.logger.error(`Error processing custom strategies: ${error.message}`);
       // Don't throw - continue with the rest of the cronjob
     }
   }
@@ -685,14 +599,7 @@ export class PreBuiltSignalsCronjobService {
           },
         });
       }
-
-      this.logger.debug(
-        `Generated signal for custom strategy ${strategy.name} on asset ${asset.symbol}: ${pythonSignal.action}`,
-      );
     } catch (error: any) {
-      this.logger.error(
-        `Error executing custom strategy ${strategy.strategy_id} on asset ${asset.asset_id}: ${error.message}`,
-      );
       throw error;
     }
   }
@@ -727,7 +634,6 @@ export class PreBuiltSignalsCronjobService {
 
       return null;
     } catch (error: any) {
-      this.logger.warn(`Error getting user connection for ${userId}: ${error.message}`);
       return null;
     }
   }
@@ -747,7 +653,6 @@ export class PreBuiltSignalsCronjobService {
     processed: number;
     errors: number;
   }> {
-    this.logger.log('Manual pre-built signals generation triggered');
     await this.generatePreBuiltSignals(options);
     return {
       message: 'Manual generation completed',

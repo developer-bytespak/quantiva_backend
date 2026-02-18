@@ -71,9 +71,6 @@ export class AlpacaMarketService {
       },
     });
 
-    this.logger.log(
-      `Alpaca Market Service initialized with Data API: ${this.baseUrl}`,
-    );
   }
 
   /**
@@ -88,12 +85,7 @@ export class AlpacaMarketService {
     }
 
     try {
-      // Split into batches of maxBatchSize
       const batches = this.chunkArray(symbols, this.maxBatchSize);
-
-      this.logger.log(
-        `Fetching quotes for ${symbols.length} symbols in ${batches.length} batches`,
-      );
 
       // Process all batches in parallel
       const batchPromises = batches.map((batch) =>
@@ -117,43 +109,22 @@ export class AlpacaMarketService {
       });
 
       if (symbolsNeedingHistory.length > 0) {
-        this.logger.log(
-          `Fetching historical data for ${symbolsNeedingHistory.length} symbols with missing change data`,
-        );
         try {
           const historicalData = await this.fetchHistoricalBars(symbolsNeedingHistory);
-          
-          this.logger.log(
-            `Retrieved historical data for ${historicalData.size}/${symbolsNeedingHistory.length} symbols`,
-          );
 
-          // Update quotes with historical data
-          let updatedCount = 0;
           historicalData.forEach((prevClose, symbol) => {
             const quote = results.get(symbol);
             if (quote && prevClose > 0) {
               quote.change24h = quote.price - prevClose;
               quote.changePercent24h = (quote.change24h / prevClose) * 100;
-              updatedCount++;
-              this.logger.debug(
-                `Updated ${symbol}: price=${quote.price.toFixed(2)}, prevClose=${prevClose.toFixed(2)}, change=${quote.changePercent24h.toFixed(2)}%`,
-              );
             }
           });
-
-          this.logger.log(
-            `Successfully updated ${updatedCount} symbols with historical change data`,
-          );
         } catch (error: any) {
           this.logger.error(
             `Failed to fetch historical data: ${error?.message}`,
           );
         }
       }
-
-      this.logger.log(
-        `Successfully fetched ${results.size}/${symbols.length} quotes`,
-      );
 
       return results;
     } catch (error: any) {
@@ -180,10 +151,6 @@ export class AlpacaMarketService {
       start.setDate(start.getDate() - 10); // Look back 10 days to ensure we get data even with holidays
 
       const symbolsParam = symbols.join(',');
-      
-      this.logger.debug(
-        `Fetching historical bars from ${start.toISOString().split('T')[0]} to ${end.toISOString().split('T')[0]}`,
-      );
 
       const response = await this.apiClient.get<{
         bars: Record<string, AlpacaBar[]>;
@@ -199,29 +166,12 @@ export class AlpacaMarketService {
 
       const barsData = response.data?.bars || {};
 
-      this.logger.debug(
-        `Received bars data for ${Object.keys(barsData).length} symbols`,
-      );
-
-      // Extract the second-to-last bar's close price (previous day)
       Object.entries(barsData).forEach(([symbol, bars]) => {
         if (bars && bars.length >= 2) {
-          // Use the second-to-last bar as previous close
           const prevBar = bars[bars.length - 2];
           results.set(symbol, prevBar.c);
-          this.logger.debug(
-            `${symbol}: Found ${bars.length} bars, using prevClose=${prevBar.c} from ${prevBar.t}`,
-          );
         } else if (bars && bars.length === 1) {
-          // If only one bar, use its open as previous close
           results.set(symbol, bars[0].o);
-          this.logger.debug(
-            `${symbol}: Only 1 bar found, using open=${bars[0].o}`,
-          );
-        } else {
-          this.logger.debug(
-            `${symbol}: No bars found`,
-          );
         }
       });
 
@@ -253,10 +203,6 @@ export class AlpacaMarketService {
         return await this.fetchBatch(symbols);
       } catch (error: any) {
         lastError = error;
-        this.logger.warn(
-          `Batch fetch attempt ${attempt}/${maxRetries} failed: ${error?.message}`,
-        );
-
         if (attempt < maxRetries) {
           // Exponential backoff: 1s, 2s, 4s
           const delay = Math.pow(2, attempt - 1) * 1000;
@@ -296,9 +242,7 @@ export class AlpacaMarketService {
           const quote = this.processSnapshot(symbol, snapshot);
           results.set(symbol, quote);
         } catch (error: any) {
-          this.logger.warn(
-            `Failed to process snapshot for ${symbol}: ${error?.message}`,
-          );
+          // Skip failed snapshot
         }
       });
 
@@ -439,13 +383,7 @@ export class AlpacaMarketService {
     try {
       // Map timeframe to Alpaca format (handles both lowercase and already-formatted)
       const alpacaTimeframe = this.mapTimeframeToAlpaca(timeframe);
-      
-      // Calculate start date based on timeframe and limit
       const start = this.calculateStartDate(alpacaTimeframe.toLowerCase(), limit);
-      
-      this.logger.debug(
-        `Fetching ${limit} bars for ${symbol} (timeframe: ${alpacaTimeframe}, start: ${start.toISOString()})`,
-      );
 
       // Use multi-symbol endpoint for consistent response format
       const response = await this.apiClient.get<{
@@ -463,11 +401,6 @@ export class AlpacaMarketService {
 
       // Multi-symbol endpoint returns { bars: { SYMBOL: [...] } }
       const bars = response.data?.bars?.[symbol.toUpperCase()] || [];
-      
-      this.logger.debug(
-        `Retrieved ${bars.length} bars for ${symbol} (${timeframe})`,
-      );
-
       return bars;
     } catch (error: any) {
       this.logger.error(

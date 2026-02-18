@@ -56,15 +56,6 @@ export class SubscriptionsController {
   createPlan(@Body() createPlanDto: any) {
     return this.subscriptionsService.createPlan(createPlanDto);
   }
-  @Get('dashboard')
-  async getDashboard(@Req() req:any) {
-
-    const user_id = req.userId;
-    console.log('user_id', user_id);
-    
-    return this.subscriptionsService.getDashboard(user_id);
-  }
-
   @Get('plans')
   findAllPlans() {
     return this.subscriptionsService.findAllPlans();
@@ -87,6 +78,12 @@ export class SubscriptionsController {
   }
 
   @Get()
+  getMySubscription(@Req() req: any) {
+    const user_id = req.userId;
+    return this.subscriptionsService.getMySubscription(user_id);
+  }
+
+  @Get('list')
   findAllSubscriptions(@Query('userId') userId?: string) {
     if (userId) {
       return this.subscriptionsService.findByUser(userId);

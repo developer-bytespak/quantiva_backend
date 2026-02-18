@@ -7,7 +7,9 @@ import { PreBuiltSignalsCronjobService } from './modules/strategies/services/pre
 import { json, urlencoded } from 'express';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, {
+    logger: ['error', 'warn'], // Suppress RouterExplorer "Mapped ... route" logs
+  });
 
   // Increase body size limit to 10MB for file uploads (default is 100kb)
   // This applies to JSON and URL-encoded bodies. For multipart/form-data (file uploads),

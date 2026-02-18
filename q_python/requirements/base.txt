@@ -16,16 +16,7 @@ gunicorn>=20.1.0
 # - python-dotenv: For loading LUNARCRUSH_API_KEY from .env file (already listed below)
 python-dateutil>=2.8.2
 
-# OCR libraries (disabled for memory optimization)
-# easyocr>=1.7.0  # Removed - too heavy for 512MB limit
-# pytesseract>=0.3.10  # Requires Tesseract OCR to be installed on system
-
-# Face recognition (DeepFace only - InsightFace removed)
-deepface>=0.0.79
-# ONNX Runtime (for model inference)
-onnxruntime>=1.16.0
-# Utilities for face matching
-scikit-learn>=1.3.0
+# KYC is handled by Sumsub (third-party). DeepFace, OCR, liveness removed.
 
 # ML Model Dependencies (FinBERT)
 # FinBERT: Financial sentiment analysis using ProsusAI/finbert model
