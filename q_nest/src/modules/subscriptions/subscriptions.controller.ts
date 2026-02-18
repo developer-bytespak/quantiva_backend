@@ -57,9 +57,12 @@ export class SubscriptionsController {
     return this.subscriptionsService.createPlan(createPlanDto);
   }
   @Get('dashboard')
-  async getDashboard(@Query('userId') userId?: string) {
+  async getDashboard(@Req() req:any) {
+
+    const user_id = req.userId;
+    console.log('user_id', user_id);
     
-    return this.subscriptionsService.getDashboard(userId);
+    return this.subscriptionsService.getDashboard(user_id);
   }
 
   @Get('plans')
