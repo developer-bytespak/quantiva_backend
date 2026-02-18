@@ -608,8 +608,7 @@ export class SubscriptionsService {
     });
   }
 
-  async getDashboard(userId: string) {
-    console.log(`Dashboard request for user: ${userId}`);
+  async getMySubscription(userId: string) {
     // Current subscription
     const currentSubscription = await this.prisma.user_subscriptions.findFirst({
       where: { user_id: userId, status: 'active' },

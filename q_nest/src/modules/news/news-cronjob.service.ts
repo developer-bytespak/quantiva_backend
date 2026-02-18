@@ -1,14 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Injectable } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
 import { BinanceService } from '../binance/binance.service';
 import { NewsService } from './news.service';
 
-
 @Injectable()
 export class NewsCronjobService {
-  private readonly logger = new Logger(NewsCronjobService.name);
   private readonly BATCH_SIZE = 3; // Process 3 assets in parallel (reduced for rate limits)
   private readonly BATCH_DELAY_MS = 5000; // 5 seconds between batches (rate limit protection)
   private readonly MAX_ASSETS_PER_RUN = 15; // Process max 15 assets per run (rate limit: 15 assets × 2 calls = 30 API calls per 10min)
@@ -28,11 +26,7 @@ export class NewsCronjobService {
    */
   @Cron('*/10 * * * *') // Every 10 minutes
   async syncTrendingStocksFromFinnhub(): Promise<void> {
-    this.logger.log('📈 Starting Finnhub trending stocks sync');
-    const startTime = Date.now();
-
     try {
-      // Call Python API to fetch trending stocks
       const response = await this.pythonApi.get('/stocks/trending', {
         params: { limit: 50 },
         timeout: 30000,
@@ -41,11 +35,8 @@ export class NewsCronjobService {
       const trendingStocks = response.data?.stocks || response.data || [];
 
       if (!Array.isArray(trendingStocks) || trendingStocks.length === 0) {
-        this.logger.warn('No trending stocks received from Finnhub');
         return;
       }
-
-      this.logger.log(`Received ${trendingStocks.length} trending stocks from Finnhub`);
 
       let successCount = 0;
       let errorCount = 0;
@@ -122,18 +113,11 @@ export class NewsCronjobService {
 
           successCount++;
         } catch (err: any) {
-          this.logger.error(`Error syncing stock ${stock.symbol}:`, err);
           errorCount++;
         }
       }
-
-      const duration = Date.now() - startTime;
-      this.logger.log(
-        `✅ Finnhub sync completed: ${successCount} stocks synced, ${errorCount} errors, ${duration}ms`,
-      );
     } catch (error: any) {
-      const duration = Date.now() - startTime;
-      this.logger.error(`❌ Finnhub sync failed after ${duration}ms:`, error);
+      // Fatal sync failure - silent
     }
   }
 
@@ -145,10 +129,7 @@ export class NewsCronjobService {
    */
   @Cron('*/10 * * * *') // Every 10 minutes
   async aggregateNewsForTopSymbols(): Promise<void> {
-    this.logger.log('🚀 Starting news aggregation for active crypto assets');
-    const startTime = Date.now();
     let processedCount = 0;
-    let skippedCount = 0;
     let errorCount = 0;
 
     try {
@@ -188,9 +169,7 @@ export class NewsCronjobService {
         }
       }
 
-      // Fallback: If no assets in trending_assets, get from assets table
       if (symbols.length === 0) {
-        this.logger.warn('No trending assets found, fetching from assets table');
         const allAssets = await this.prisma.assets.findMany({
           where: {
             is_active: true,
@@ -205,53 +184,29 @@ export class NewsCronjobService {
       }
 
       if (symbols.length === 0) {
-        this.logger.warn('No active crypto assets found in database');
         return;
       }
 
-      this.logger.log(`📊 Found ${symbols.length} assets to process (rate limit: ${this.MAX_ASSETS_PER_RUN} max)`);
-      this.logger.log(`Assets: ${symbols.join(', ')}`);
-
-      // Process in batches to avoid overwhelming APIs
       for (let i = 0; i < symbols.length; i += this.BATCH_SIZE) {
         const batch = symbols.slice(i, i + this.BATCH_SIZE);
-        const batchNumber = Math.floor(i / this.BATCH_SIZE) + 1;
-        const totalBatches = Math.ceil(symbols.length / this.BATCH_SIZE);
-
-        this.logger.log(`📦 Processing batch ${batchNumber}/${totalBatches}: ${batch.join(', ')}`);
 
         await Promise.all(
-          batch.map(async (symbol, index) => {
-            const symbolPosition = i + index + 1;
+          batch.map(async (symbol) => {
             try {
-              this.logger.log(`  [${symbolPosition}/${symbols.length}] Processing ${symbol}...`);
-              
-              // Use the refactored method from NewsService
               await this.newsService.fetchAndStoreNewsFromPython(symbol, 20);
-              
               processedCount++;
-              this.logger.log(`  ✅ [${symbolPosition}/${symbols.length}] ${symbol} completed`);
             } catch (error: any) {
               errorCount++;
-              this.logger.error(`  ❌ [${symbolPosition}/${symbols.length}] ${symbol} failed: ${error.message}`);
-              // Continue with next symbol - don't let one failure break all
             }
           }),
         );
 
-        // Rate limit protection: wait between batches (except last batch)
         if (i + this.BATCH_SIZE < symbols.length) {
-          this.logger.debug(`⏳ Waiting ${this.BATCH_DELAY_MS / 1000}s before next batch...`);
           await this.sleep(this.BATCH_DELAY_MS);
         }
       }
-
-      const duration = Math.round((Date.now() - startTime) / 1000);
-      this.logger.log(
-        `✨ News aggregation completed: ${processedCount} processed, ${errorCount} errors, ${duration}s elapsed`,
-      );
     } catch (error: any) {
-      this.logger.error(`❌ Fatal error in news aggregation: ${error.message}`);
+      // Fatal error - silent
     }
   }
 
@@ -263,8 +218,6 @@ export class NewsCronjobService {
    */
   @Cron('*/10 * * * *') // Every 10 minutes
   async aggregateNewsSentiment(): Promise<void> {
-    this.logger.log('Starting news sentiment aggregation cronjob (CRYPTO ONLY)');
-    const startTime = Date.now();
     let processedCount = 0;
     let skippedCount = 0;
     let errorCount = 0;
@@ -294,14 +247,9 @@ export class NewsCronjobService {
           return true; // Process: No recent data
         }
         skippedCount++;
-        return false; // Skip: Recently updated
+        return false;
       });
 
-      this.logger.log(
-        `Processing ${assetsToProcess.length} assets (${skippedCount} skipped, updated within ${this.UPDATE_INTERVAL_MINUTES}min)`,
-      );
-
-      // Process in parallel batches of 5
       for (let i = 0; i < assetsToProcess.length; i += this.BATCH_SIZE) {
         const batch = assetsToProcess.slice(i, i + this.BATCH_SIZE);
 
@@ -316,25 +264,16 @@ export class NewsCronjobService {
               processedCount++;
             } catch (error: any) {
               errorCount++;
-              this.logger.error(
-                `Error processing sentiment for asset ${asset.symbol} (${asset.asset_id}): ${error.message}`,
-              );
             }
           }),
         );
 
-        // Small delay between batches to avoid overwhelming API
         if (i + this.BATCH_SIZE < assetsToProcess.length) {
           await this.sleep(500);
         }
       }
-
-      const duration = Date.now() - startTime;
-      this.logger.log(
-        `News sentiment aggregation completed: ${processedCount} processed, ${skippedCount} skipped, ${errorCount} errors, ${duration}ms`,
-      );
     } catch (error: any) {
-      this.logger.error(`Fatal error in news sentiment aggregation: ${error.message}`);
+      // Fatal error - silent
     }
   }
 
@@ -347,7 +286,6 @@ export class NewsCronjobService {
     assetType: string | null,
   ): Promise<void> {
     if (!symbol || !assetType) {
-      this.logger.warn(`Skipping asset ${assetId}: missing symbol or asset_type`);
       return;
     }
 
@@ -361,7 +299,6 @@ export class NewsCronjobService {
       const sentimentData = response.data;
 
       if (!sentimentData || sentimentData.score === undefined) {
-        this.logger.warn(`No sentiment data returned for ${symbol}`);
         return;
       }
 
@@ -414,7 +351,7 @@ export class NewsCronjobService {
             try {
               marketData = await this.binanceService.getEnrichedMarketData(symbol);
             } catch (error: any) {
-              this.logger.warn(`Could not fetch Binance data for ${symbol}: ${error.message}`);
+              // Skip Binance fetch
             }
           }
 
@@ -433,27 +370,17 @@ export class NewsCronjobService {
               volume_24h: marketData?.volume24h || socialMetrics.volume_24h || null,
               high_24h: marketData?.high24h || null,
               low_24h: marketData?.low24h || null,
-              market_cap: null, // Not available from Binance
+              market_cap: null,
             },
           });
-          this.logger.debug(
-            `Stored trending asset for ${symbol}: galaxy_score=${socialMetrics.galaxy_score}, alt_rank=${socialMetrics.alt_rank}, price=${marketData?.price || socialMetrics.price}`,
-          );
         } catch (error: any) {
-          // Ignore duplicate key errors (same timestamp + asset_id)
           if (!error.message?.includes('Unique constraint')) {
-            this.logger.warn(
-              `Error storing trending assets for ${symbol}: ${error.message}`,
-            );
+            // Skip storage error
           }
         }
-      } else {
-        this.logger.debug(`No social metrics available for ${symbol}, skipping trending_assets storage`);
       }
 
-      this.logger.debug(`Updated sentiment for ${symbol}: score=${sentimentData.score}`);
     } catch (error: any) {
-      this.logger.error(`Error processing sentiment for ${symbol}: ${error.message}`);
       throw error;
     }
   }
@@ -485,32 +412,26 @@ export class NewsCronjobService {
     skipped: number;
     errors: number;
   }> {
-    this.logger.log(`🔧 Manual aggregation triggered${specificSymbol ? ` for ${specificSymbol}` : ''}`);
-    const startTime = Date.now();
     let processedCount = 0;
     let skippedCount = 0;
     let errorCount = 0;
 
     try {
-      // If specific symbol requested, process only that one
       if (specificSymbol) {
         try {
           await this.newsService.fetchAndStoreNewsFromPython(specificSymbol.toUpperCase(), 20);
           processedCount++;
         } catch (error: any) {
           errorCount++;
-          this.logger.error(`Failed for ${specificSymbol}: ${error.message}`);
         }
       } else {
-        // No specific symbol, skip (use cron job instead)
-        this.logger.warn('Manual aggregation requires a specific symbol parameter');
-        return;
+        return {
+          message: 'Manual aggregation requires a specific symbol',
+          processed: 0,
+          skipped: 0,
+          errors: 0,
+        };
       }
-
-      const duration = Math.round((Date.now() - startTime) / 1000);
-      this.logger.log(
-        `Manual aggregation completed: ${processedCount} processed, ${skippedCount} skipped, ${errorCount} errors, ${duration}s`,
-      );
 
       return {
         message: 'Manual aggregation completed',
@@ -519,7 +440,6 @@ export class NewsCronjobService {
         errors: errorCount,
       };
     } catch (error: any) {
-      this.logger.error(`Fatal error in manual aggregation: ${error.message}`);
       throw error;
     }
   }
@@ -581,54 +501,31 @@ export class NewsCronjobService {
    */
   @Cron('*/15 * * * *') // Every 15 minutes
   async aggregateStockNews(): Promise<void> {
-    this.logger.log('📈 Starting stock news aggregation');
-    const startTime = Date.now();
+    const stockSymbols = [
+      'AAPL', 'TSLA', 'GOOGL', 'AMZN', 'MSFT',
+      'NVDA', 'META', 'AMD', 'NFLX', 'DIS'
+    ];
+
+    const STOCK_BATCH_SIZE = 2;
 
     try {
-      // Popular stocks to fetch news for
-      const stockSymbols = [
-        'AAPL', 'TSLA', 'GOOGL', 'AMZN', 'MSFT',
-        'NVDA', 'META', 'AMD', 'NFLX', 'DIS'
-      ];
-
-      this.logger.log(`📊 Fetching news for ${stockSymbols.length} stocks: ${stockSymbols.join(', ')}`);
-
-      // Process stocks in small batches to avoid timeouts
-      const STOCK_BATCH_SIZE = 2;
-      let processedCount = 0;
-      let errorCount = 0;
-
       for (let i = 0; i < stockSymbols.length; i += STOCK_BATCH_SIZE) {
         const batch = stockSymbols.slice(i, i + STOCK_BATCH_SIZE);
-        const batchNumber = Math.floor(i / STOCK_BATCH_SIZE) + 1;
-        const totalBatches = Math.ceil(stockSymbols.length / STOCK_BATCH_SIZE);
 
-        this.logger.log(`📦 Stock batch ${batchNumber}/${totalBatches}: ${batch.join(', ')}`);
-
-        // Process each stock in the batch sequentially to avoid overloading
         for (const symbol of batch) {
           try {
             await this.newsService.fetchAndStoreStockNewsFromPython(symbol, 10);
-            processedCount++;
-            this.logger.log(`  ✅ ${symbol} news fetched and stored`);
           } catch (error: any) {
-            errorCount++;
-            this.logger.error(`  ❌ ${symbol} failed: ${error.message}`);
+            // Skip failed symbol
           }
         }
 
-        // Wait between batches
         if (i + STOCK_BATCH_SIZE < stockSymbols.length) {
-          await this.sleep(3000); // 3 seconds between batches
+          await this.sleep(3000);
         }
       }
-
-      const duration = Math.round((Date.now() - startTime) / 1000);
-      this.logger.log(
-        `✨ Stock news aggregation completed: ${processedCount} processed, ${errorCount} errors, ${duration}s elapsed`,
-      );
     } catch (error: any) {
-      this.logger.error(`❌ Fatal error in stock news aggregation: ${error.message}`);
+      // Fatal error - silent
     }
   }
 
@@ -641,43 +538,31 @@ export class NewsCronjobService {
     processed: number;
     errors: number;
   }> {
-    this.logger.log('🔧 Manual stock news aggregation triggered');
     const startTime = Date.now();
     let processedCount = 0;
     let errorCount = 0;
-
-    // Default to just 2 stocks to avoid overwhelming the Python server
     const stockSymbols = symbols || ['AAPL', 'TSLA'];
 
     try {
-      // Process sequentially with delay to avoid overwhelming Python server
       for (const symbol of stockSymbols) {
         try {
           await this.newsService.fetchAndStoreStockNewsFromPython(symbol, 10);
           processedCount++;
-          this.logger.log(`✅ ${symbol} completed`);
-          
-          // Wait 5 seconds between stocks to let FinBERT recover
           if (stockSymbols.indexOf(symbol) < stockSymbols.length - 1) {
-            this.logger.debug('⏳ Waiting 5s before next stock...');
             await this.sleep(5000);
           }
         } catch (error: any) {
           errorCount++;
-          this.logger.error(`❌ ${symbol} failed: ${error.message}`);
         }
       }
 
       const duration = Math.round((Date.now() - startTime) / 1000);
-      this.logger.log(`Manual aggregation completed in ${duration}s`);
-
       return {
         message: `Stock news aggregation completed in ${duration}s`,
         processed: processedCount,
         errors: errorCount,
       };
     } catch (error: any) {
-      this.logger.error(`Fatal error: ${error.message}`);
       throw error;
     }
   }
@@ -689,27 +574,16 @@ export class NewsCronjobService {
    */
   @Cron('0 2 * * *') // Every day at 2:00 AM
   async deleteOldNews(): Promise<void> {
-    this.logger.log('🧹 Starting cleanup: deleting news older than 7 days');
-    const startTime = Date.now();
-
     try {
-      // Calculate date 7 days ago
       const sevenDaysAgo = new Date();
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-      // Delete old news records
-      const deleteResult = await this.prisma.trending_news.deleteMany({
+      await this.prisma.trending_news.deleteMany({
         where: {
           poll_timestamp: { lt: sevenDaysAgo },
         },
       });
-
-      const duration = Math.round((Date.now() - startTime) / 1000);
-      this.logger.log(
-        `✅ Cleanup completed: Deleted ${deleteResult.count} old news records (older than ${sevenDaysAgo.toISOString()}) in ${duration}s`,
-      );
     } catch (error: any) {
-      this.logger.error(`❌ Error deleting old news: ${error.message}`);
       // Don't throw - let the cron continue to next run
     }
   }

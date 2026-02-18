@@ -27,39 +27,17 @@ export class AssetsSyncCronjobService implements OnModuleInit {
   @Cron('*/5 * * * *') // Every 5 minutes
   async syncAssetsFromCoinGecko(): Promise<void> {
     if (this.isRunning) {
-      this.logger.warn('Sync already in progress, skipping this run');
       return;
     }
 
     this.isRunning = true;
-    this.logger.log('Starting CoinGecko assets sync cronjob');
-    const startTime = Date.now();
     let createdCount = 0;
     let updatedCount = 0;
     let errorCount = 0;
     let marketRankingsCount = 0;
 
     try {
-      // Fetch top 500 coins from CoinGecko
-      this.logger.log('Fetching top 500 coins from CoinGecko (Pro tier)...');
       const coins = await this.marketService.getTop500Coins();
-
-      this.logger.log(`Fetched ${coins.length} coins from CoinGecko`);
-      
-      // Log first coin to see structure
-      if (coins.length > 0) {
-        const firstCoin = coins[0];
-        this.logger.debug(`First coin structure:`, {
-          id: firstCoin.id,
-          symbol: firstCoin.symbol,
-          name: firstCoin.name,
-          current_price: firstCoin.current_price,
-          market_cap_rank: firstCoin.market_cap_rank,
-          price_change_percentage_24h: firstCoin.price_change_percentage_24h,
-          price_change_24h: firstCoin.price_change_24h,
-        });
-      }
-      
       const rankTimestamp = new Date();
 
       for (const coin of coins) {
@@ -176,25 +154,15 @@ export class AssetsSyncCronjobService implements OnModuleInit {
               }
             } catch (updateError: any) {
               errorCount++;
-              this.logger.error(
-                `Error updating asset ${coin.symbol} after duplicate error: ${updateError.message}`,
-              );
             }
           } else {
             errorCount++;
-            this.logger.error(
-              `Error syncing asset ${coin.symbol}: ${error.message}`,
-            );
           }
           // Continue with next coin
         }
       }
 
-      const duration = Date.now() - startTime;
       this.lastSyncTime = new Date();
-      this.logger.log(
-        `CoinGecko assets sync completed: ${createdCount} created, ${updatedCount} updated, ${marketRankingsCount} market snapshots, ${errorCount} errors, ${duration}ms`,
-      );
     } catch (error: any) {
       this.logger.error(`Fatal error in CoinGecko assets sync: ${error.message}`);
     } finally {
@@ -211,14 +179,6 @@ export class AssetsSyncCronjobService implements OnModuleInit {
     rankTimestamp: Date,
   ): Promise<void> {
     try {
-      // Log the values being saved
-      this.logger.debug(`Saving market ranking for ${coin.symbol}:`, {
-        price_change_percentage_24h: coin.price_change_percentage_24h,
-        price_change_24h: coin.price_change_24h,
-        current_price: coin.current_price,
-        market_cap_rank: coin.market_cap_rank,
-      });
-
       await this.prisma.market_rankings.upsert({
         where: {
           rank_timestamp_asset_id: {
@@ -246,9 +206,7 @@ export class AssetsSyncCronjobService implements OnModuleInit {
         },
       });
     } catch (error: any) {
-      this.logger.debug(
-        `Could not create market_rankings for asset ${assetId}: ${error.message}`,
-      );
+      // Skip failed market_rankings for this asset
     }
   }
 
@@ -269,7 +227,6 @@ export class AssetsSyncCronjobService implements OnModuleInit {
    * Manual sync method (can be called via API endpoint)
    */
   async manualSync(): Promise<{ created: number; updated: number; errors: number; total: number; marketSnapshots: number }> {
-    const startTime = Date.now();
     let createdCount = 0;
     let updatedCount = 0;
     let errorCount = 0;
@@ -277,7 +234,6 @@ export class AssetsSyncCronjobService implements OnModuleInit {
 
     try {
       const coins = await this.marketService.getTop500Coins();
-      this.logger.log(`Manually syncing ${coins.length} coins from CoinGecko`);
       const rankTimestamp = new Date();
 
       for (const coin of coins) {
@@ -394,21 +350,12 @@ export class AssetsSyncCronjobService implements OnModuleInit {
               }
             } catch (updateError: any) {
               errorCount++;
-              this.logger.error(
-                `Error updating asset ${coin.symbol} after duplicate error: ${updateError.message}`,
-              );
             }
           } else {
             errorCount++;
-            this.logger.error(`Error syncing asset ${coin.symbol}: ${error.message}`);
           }
         }
       }
-
-      const duration = Date.now() - startTime;
-      this.logger.log(
-        `Manual sync completed: ${createdCount} created, ${updatedCount} updated, ${marketRankingsCount} market snapshots, ${errorCount} errors, ${duration}ms`,
-      );
 
       return {
         created: createdCount,

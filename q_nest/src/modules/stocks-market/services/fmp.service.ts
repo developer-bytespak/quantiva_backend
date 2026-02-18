@@ -66,16 +66,7 @@ export class FmpService {
       },
     });
 
-    if (this.apiKey) {
-      const keyLength = this.apiKey.length;
-      const keyPreview = keyLength > 4 ? `${this.apiKey.substring(0, 4)}...` : '***';
-      this.logger.log(`FMP Service initialized with API key (${keyPreview}, length: ${keyLength})`);
-      
-      // Validate API key format (FMP keys are typically 32+ characters)
-      if (keyLength < 10) {
-        this.logger.warn('FMP API key seems too short - please verify it is correct');
-      }
-    } else {
+    if (!this.apiKey) {
       this.logger.warn('FMP Service initialized WITHOUT API key - market cap data will not be available');
     }
   }
@@ -97,17 +88,10 @@ export class FmpService {
       const cached = this.cache.get(cacheKey);
 
       if (cached && Date.now() - cached.timestamp < this.cacheTTL) {
-        this.logger.log(
-          `Returning cached FMP data for ${symbols.length} symbols`,
-        );
         return cached.data;
       }
 
-      // Split into batches
       const batches = this.chunkArray(symbols, this.maxBatchSize);
-      this.logger.log(
-        `Fetching FMP profiles for ${symbols.length} symbols in ${batches.length} batches`,
-      );
 
       // Fetch all batches in parallel with retry
       const batchPromises = batches.map((batch) =>
@@ -187,8 +171,7 @@ export class FmpService {
 
     try {
       const symbolsParam = symbols.join(',');
-      this.logger.log(`Fetching FMP data for symbols: ${symbolsParam}`);
-      
+
       // New FMP API: Use profile endpoint which includes market cap
       // For single symbol: /profile?symbol=AAPL
       // For multiple: fetch individually or use batch if available
@@ -239,9 +222,6 @@ export class FmpService {
               timestamp: Date.now(),
             };
             results.set(quote.symbol, quote);
-            this.logger.log(`FMP profile data for ${quote.symbol}: marketCap=${quote.marketCap}, price=${quote.price}`);
-          } else {
-            this.logger.warn(`FMP profile response for ${symbols[0]} is invalid or empty:`, response.data);
           }
         } catch (profileError: any) {
           this.logger.error(`Failed to fetch FMP profile for ${symbols[0]}:`, {
@@ -255,14 +235,11 @@ export class FmpService {
         // Multiple symbols - fetch in smaller batches with rate limiting
         // FMP free tier has strict rate limits (typically 250 requests/day)
         // Process in batches of 5 with delays to avoid hitting limits
-        this.logger.log(`Fetching ${symbols.length} symbols in batches with rate limiting...`);
-        
-        const batchSize = 5; // Process 5 at a time
-        const delayBetweenBatches = 2000; // 2 seconds between batches
-        
+        const batchSize = 5;
+        const delayBetweenBatches = 2000;
+
         for (let i = 0; i < symbols.length; i += batchSize) {
           const batch = symbols.slice(i, i + batchSize);
-          this.logger.log(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(symbols.length / batchSize)} (${batch.length} symbols)`);
           
           const batchPromises = batch.map(async (symbol, batchIndex) => {
             // Add small delay between requests in same batch
@@ -319,13 +296,9 @@ export class FmpService {
             } catch (err: any) {
               lastError = err;
               
-                // If rate limited, wait longer before retry
                 if (err?.response?.status === 429) {
-                  const waitTime = Math.min(2000 * Math.pow(2, attempt - 1), 15000); // Exponential backoff, max 15s
+                  const waitTime = Math.min(2000 * Math.pow(2, attempt - 1), 15000);
                   if (attempt < 3) {
-                    this.logger.warn(
-                      `Rate limited for ${symbol}, waiting ${waitTime}ms before retry ${attempt + 1}/3`,
-                    );
                     await this.sleep(waitTime);
                     continue;
                   }
@@ -336,10 +309,6 @@ export class FmpService {
               }
             }
             
-            // If all retries failed, log and return null
-            if (lastError) {
-              this.logger.warn(`Failed to fetch profile for ${symbol} after 3 attempts: ${lastError?.message}`);
-            }
             return null;
           });
 
@@ -355,11 +324,8 @@ export class FmpService {
             await this.sleep(delayBetweenBatches);
           }
         }
-        
-        this.logger.log(`Completed batch processing: ${results.size}/${symbols.length} profiles fetched`);
       }
 
-      this.logger.log(`Successfully fetched FMP data for ${results.size}/${symbols.length} symbols`);
       return results;
     } catch (error: any) {
 
