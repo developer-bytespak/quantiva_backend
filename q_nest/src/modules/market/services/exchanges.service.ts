@@ -17,6 +17,14 @@ export class ExchangesService {
   private binanceCoinUsdtCache: string[] | null = null;
   private cacheTimestampUsdt: number | null = null;
 
+  // Cache for Bybit coins list
+  private bybitCoinCache: string[] | null = null;
+  private bybitCacheTimestamp: number | null = null;
+
+  // Cache for Bybit coins with USDT pairs
+  private bybitCoinUsdtCache: string[] | null = null;
+  private bybitCacheTimestampUsdt: number | null = null;
+
   constructor(private configService: ConfigService) {
     this.apiKey = this.configService.get<string>('COINGECKO_API_KEY') || null;
   }
@@ -215,13 +223,210 @@ export class ExchangesService {
   }
 
   /**
-   * Clear the cached Binance coins (useful for manual refresh)
+   * Get all coins available on Bybit from CoinGecko Pro API
+   * Paginates through the API and removes duplicates using a Set
+   */
+  async getAllBybitCoins(): Promise<string[]> {
+    const now = Date.now();
+
+    // Check cache
+    if (
+      this.bybitCoinCache &&
+      this.bybitCacheTimestamp &&
+      now - this.bybitCacheTimestamp < this.CACHE_DURATION
+    ) {
+      this.logger.log('Using cached Bybit coins');
+      return this.bybitCoinCache;
+    }
+
+    // Fetch fresh data
+    const coins = await this.fetchBybitCoinsFromAPI();
+
+    // Update cache
+    this.bybitCoinCache = coins;
+    this.bybitCacheTimestamp = now;
+
+    return coins;
+  }
+
+  /**
+   * Fetch Bybit coins from CoinGecko Pro API with pagination
+   */
+  private async fetchBybitCoinsFromAPI(): Promise<string[]> {
+    if (!this.apiKey) {
+      const errorMsg =
+        'CoinGecko API key not configured. Set COINGECKO_API_KEY environment variable.';
+      this.logger.error(errorMsg);
+      throw new Error(errorMsg);
+    }
+
+    const allCoins = new Set<string>();
+    let page = 1;
+    let hasMorePages = true;
+
+    while (hasMorePages) {
+      try {
+        this.logger.log(`Fetching Bybit tickers page ${page}...`);
+
+        const response = await axios.get(
+          `${this.baseUrl}/exchanges/bybit/tickers`,
+          {
+            headers: {
+              'x-cg-pro-api-key': this.apiKey,
+            },
+            params: {
+              page,
+              per_page: 100,
+            },
+            timeout: 30000,
+          },
+        );
+
+        const tickers = response.data.tickers || [];
+
+        if (tickers.length === 0) {
+          hasMorePages = false;
+          break;
+        }
+
+        // Extract coin IDs from each ticker
+        tickers.forEach((ticker: any) => {
+          if (ticker.coin_id) {
+            allCoins.add(ticker.coin_id);
+          }
+        });
+
+        page++;
+
+        // Rate limiting: wait between requests
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      } catch (error: any) {
+        this.logger.error(
+          `Error fetching page ${page}: ${error.message}`,
+          error.response?.data || error,
+        );
+        if (page === 1) {
+          throw error; // Fail on first page - no data to return
+        }
+        break; // Stop if we already have some data from previous pages
+      }
+    }
+
+    this.logger.log(
+      `Successfully fetched ${allCoins.size} unique coins from Bybit`,
+    );
+    return Array.from(allCoins);
+  }
+
+  /**
+   * Get Bybit coins that have USDT trading pairs
+   * Filters tickers to only include those with USDT as target
+   */
+  async getBybitCoinsWithUsdtPairs(): Promise<string[]> {
+    const now = Date.now();
+
+    // Check cache
+    if (
+      this.bybitCoinUsdtCache &&
+      this.bybitCacheTimestampUsdt &&
+      now - this.bybitCacheTimestampUsdt < this.CACHE_DURATION
+    ) {
+      this.logger.log('Using cached Bybit coins with USDT pairs');
+      return this.bybitCoinUsdtCache;
+    }
+
+    // Fetch fresh data
+    const coins = await this.fetchBybitCoinsUsdtFromAPI();
+
+    // Update cache
+    this.bybitCoinUsdtCache = coins;
+    this.bybitCacheTimestampUsdt = now;
+
+    return coins;
+  }
+
+  /**
+   * Fetch Bybit coins with USDT pairs from CoinGecko Pro API
+   * Filters to only include tickers where target is USDT
+   */
+  private async fetchBybitCoinsUsdtFromAPI(): Promise<string[]> {
+    if (!this.apiKey) {
+      const errorMsg =
+        'CoinGecko API key not configured. Set COINGECKO_API_KEY environment variable.';
+      this.logger.error(errorMsg);
+      throw new Error(errorMsg);
+    }
+
+    const coinsWithUsdt = new Set<string>();
+    let page = 1;
+    let hasMorePages = true;
+
+    while (hasMorePages) {
+      try {
+        this.logger.log(`Fetching Bybit USDT pairs page ${page}...`);
+
+        const response = await axios.get(
+          `${this.baseUrl}/exchanges/bybit/tickers`,
+          {
+            headers: {
+              'x-cg-pro-api-key': this.apiKey,
+            },
+            params: {
+              page,
+              per_page: 100,
+            },
+            timeout: 30000,
+          },
+        );
+
+        const tickers = response.data.tickers || [];
+
+        if (tickers.length === 0) {
+          hasMorePages = false;
+          break;
+        }
+
+        // Extract coin IDs only for USDT pairs
+        tickers.forEach((ticker: any) => {
+          if (ticker.coin_id && ticker.target === 'USDT') {
+            coinsWithUsdt.add(ticker.coin_id);
+          }
+        });
+
+        page++;
+
+        // Rate limiting: wait between requests
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      } catch (error: any) {
+        this.logger.error(
+          `Error fetching USDT pairs page ${page}: ${error.message}`,
+          error.response?.data || error,
+        );
+        if (page === 1) {
+          throw error; // Fail on first page - no data to return
+        }
+        break; // Stop if we already have some data from previous pages
+      }
+    }
+
+    this.logger.log(
+      `Successfully fetched ${coinsWithUsdt.size} unique coins with USDT pairs from Bybit`,
+    );
+    return Array.from(coinsWithUsdt);
+  }
+
+  /**
+   * Clear the cached Binance and Bybit coins (useful for manual refresh)
    */
   clearCache(): void {
     this.binanceCoinCache = null;
     this.cacheTimestamp = null;
     this.binanceCoinUsdtCache = null;
     this.cacheTimestampUsdt = null;
-    this.logger.log('Cleared Binance coins cache (all coins and USDT pairs)');
+    this.bybitCoinCache = null;
+    this.bybitCacheTimestamp = null;
+    this.bybitCoinUsdtCache = null;
+    this.bybitCacheTimestampUsdt = null;
+    this.logger.log('Cleared Binance and Bybit coins cache (all coins and USDT pairs)');
   }
 }

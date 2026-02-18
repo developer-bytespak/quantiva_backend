@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ExchangesController } from './exchanges.controller';
 import { PaperTradingController } from './paper-trading.controller';
@@ -16,7 +16,7 @@ import { AuthModule } from '../auth/auth.module';
 import { MarketModule } from '../market/market.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, AuthModule, MarketModule],
+  imports: [ConfigModule, PrismaModule, AuthModule, forwardRef(() => MarketModule)],
   controllers: [ExchangesController, /* Health endpoint for paper trading */ PaperTradingController],
   providers: [
     ExchangesService,

@@ -335,29 +335,46 @@ export class MarketService {
 
   /**
    * Fetch coins from database (cached data from cron job)
-   * Filters to only return Binance coins with USDT pairs
+   * Filters to only return coins with USDT pairs for the specified exchange
    * Much faster than CoinGecko API calls
+   * @param limit - Maximum number of coins to return
+   * @param search - Optional search query
+   * @param exchangeName - Optional exchange name ('binance' or 'bybit'). Defaults to 'binance' for backward compatibility
    */
   async getCachedMarketData(
     limit: number = 500,
     search?: string,
-  ): Promise<{ coins: CoinGeckoCoin[]; lastSyncTime: Date | null }> {
+    exchangeName?: string,
+  ): Promise<{ coins: CoinGeckoCoin[]; lastSyncTime: Date | null; exchange?: string }> {
     try {
-      // Fetch Binance coins with USDT pairs
-      let binanceCoinsWithUsdt: string[] = [];
+      // Default to Binance for backward compatibility
+      const exchange = (exchangeName || 'binance').toLowerCase();
+      
+      // Fetch coins with USDT pairs for the specified exchange
+      let coinsWithUsdt: string[] = [];
       try {
-        binanceCoinsWithUsdt = await this.exchangesService.getBinanceCoinsWithUsdtPairs();
-        this.logger.log(`Fetching market data for ${binanceCoinsWithUsdt.length} Binance coins with USDT pairs`);
+        if (exchange === 'bybit') {
+          coinsWithUsdt = await this.exchangesService.getBybitCoinsWithUsdtPairs();
+          this.logger.log(`Fetching market data for ${coinsWithUsdt.length} Bybit coins with USDT pairs`);
+        } else {
+          // Default to Binance
+          coinsWithUsdt = await this.exchangesService.getBinanceCoinsWithUsdtPairs();
+          this.logger.log(`Fetching market data for ${coinsWithUsdt.length} Binance coins with USDT pairs`);
+        }
       } catch (error) {
-        this.logger.error('Failed to fetch Binance USDT pairs, falling back to all Binance coins', error);
-        // Fallback: get all Binance coins if USDT-specific fetch fails
-        binanceCoinsWithUsdt = await this.exchangesService.getAllBinanceCoins();
-        this.logger.log(`Fallback: using all ${binanceCoinsWithUsdt.length} Binance coins`);
+        this.logger.error(`Failed to fetch ${exchange} USDT pairs, falling back to all ${exchange} coins`, error);
+        // Fallback: get all coins if USDT-specific fetch fails
+        if (exchange === 'bybit') {
+          coinsWithUsdt = await this.exchangesService.getAllBybitCoins();
+        } else {
+          coinsWithUsdt = await this.exchangesService.getAllBinanceCoins();
+        }
+        this.logger.log(`Fallback: using all ${coinsWithUsdt.length} ${exchange} coins`);
       }
 
-      if (binanceCoinsWithUsdt.length === 0) {
-        this.logger.warn('No Binance coins found');
-        return { coins: [], lastSyncTime: null };
+      if (coinsWithUsdt.length === 0) {
+        this.logger.warn(`No ${exchange} coins found`);
+        return { coins: [], lastSyncTime: null, exchange };
       }
 
       // Get latest market_rankings timestamp
@@ -383,13 +400,13 @@ export class MarketService {
           }
         : {};
 
-      // Fetch assets with latest market rankings - filtered by Binance coins with USDT pairs
+      // Fetch assets with latest market rankings - filtered by exchange coins with USDT pairs
       const assets = await this.prisma.assets.findMany({
         where: {
           asset_type: 'crypto',
           is_active: true,
           coingecko_id: {
-            in: binanceCoinsWithUsdt,
+            in: coinsWithUsdt,
           },
           ...searchFilter,
         },
@@ -410,7 +427,7 @@ export class MarketService {
         take: limit,
       });
 
-      this.logger.log(`Found ${assets.length} Binance coins with USDT pairs in market rankings`);
+      this.logger.log(`Found ${assets.length} ${exchange} coins with USDT pairs in market rankings`);
 
       // Transform to CoinGeckoCoin format
       const coins: CoinGeckoCoin[] = assets
@@ -457,6 +474,7 @@ export class MarketService {
       return {
         coins,
         lastSyncTime: latestRanking.rank_timestamp,
+        exchange,
       };
     } catch (error: any) {
       this.logger.error('Failed to fetch cached market data from database', {
