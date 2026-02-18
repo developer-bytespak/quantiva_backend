@@ -57,7 +57,7 @@ export class USComplianceGuard implements CanActivate {
     if (exchangeName) {
       const normalized = exchangeName.toLowerCase().trim();
 
-      // US nationals cannot use Binance (must use Binance.US)
+      // US nationals cannot use international Binance (must use Binance.US for compliance)
       if (isUS && normalized === 'binance') {
         this.logger.warn(
           `US national ${userId} attempted to access Binance. Blocking request.`
@@ -67,15 +67,7 @@ export class USComplianceGuard implements CanActivate {
         );
       }
 
-      // Non-US nationals cannot use Binance.US (must use Binance)
-      if (!isUS && (normalized === 'binance.us' || normalized === 'binanceus')) {
-        this.logger.warn(
-          `Non-US user ${userId} attempted to access Binance.US. Blocking request.`
-        );
-        throw new ForbiddenException(
-          'Binance.US is only available for US residents. Please use Binance instead.'
-        );
-      }
+      // Non-US users may use Binance.US e.g. when managing a US client's account or using keys provided by a US client
     }
 
     return true;

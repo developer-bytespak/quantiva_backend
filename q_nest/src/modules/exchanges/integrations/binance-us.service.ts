@@ -117,6 +117,14 @@ export class BinanceUSService {
           continue;
         }
 
+        // 403 Forbidden – usually IP whitelist: request from an IP not allowed on the API key
+        if (error.response?.status === 403) {
+          const msg =
+            error.response?.data?.msg ||
+            'Access denied (403). Your Binance.US API key may have IP restrictions. In Binance.US API Management, either add this server’s IP to the whitelist or disable "Restrict access to trusted IPs only" to allow the connection.';
+          throw new InvalidApiKeyException(msg);
+        }
+
         // Handle specific Binance.US error codes
         if (error.response?.data?.code) {
           const binanceCode = error.response.data.code;
