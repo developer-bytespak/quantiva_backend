@@ -14,9 +14,10 @@ import { BinanceUserWsService } from './services/binance-user-ws.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
 import { MarketModule } from '../market/market.module';
+import { StocksMarketModule } from '../stocks-market/stocks-market.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, AuthModule, forwardRef(() => MarketModule)],
+  imports: [ConfigModule, PrismaModule, AuthModule, forwardRef(() => MarketModule), StocksMarketModule],
   controllers: [ExchangesController, /* Health endpoint for paper trading */ PaperTradingController],
   providers: [
     ExchangesService,
