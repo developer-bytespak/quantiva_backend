@@ -32,6 +32,7 @@ import { MarketDetailAggregatorService } from './services/market-detail-aggregat
 import { ExchangeType } from '@prisma/client';
 import { ForbiddenException } from '@nestjs/common';
 import { MarketService } from '../market/market.service';
+import { MarketStocksDbService } from '../stocks-market/services/market-stocks-db.service';
 
 /**
  * Exchanges Controller
@@ -60,6 +61,7 @@ export class ExchangesController {
     private readonly cacheService: CacheService,
     private readonly marketService: MarketService,
     private readonly marketDetailAggregator: MarketDetailAggregatorService,
+    private readonly marketStocksDbService: MarketStocksDbService,
   ) {}
 
   @Get()
@@ -735,6 +737,99 @@ export class ExchangesController {
       data: result,
       cached: false,
       last_updated: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Get stock historical bars using the user's Alpaca connection (Data API).
+   * Only available for Alpaca connections. Declared before stock/:symbol so /bars is matched.
+   */
+  @Get('connections/:connectionId/stock/:symbol/bars')
+  @UseGuards(ConnectionOwnerGuard)
+  @CacheControl({ maxAge: 300, staleWhileRevalidate: 60, public: false })
+  async getStockBars(
+    @Param('connectionId') connectionId: string,
+    @Param('symbol') symbol: string,
+    @Query('timeframe') timeframe?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const connection = await this.exchangesService.getConnectionById(connectionId);
+    if (!connection?.exchange) {
+      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    }
+    const exchangeName = connection.exchange.name.toLowerCase();
+    if (exchangeName !== 'alpaca') {
+      throw new HttpException(
+        'Stock bars are only available for Alpaca connections',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+    const bars = await this.alpacaService.getStockBars(
+      apiKey,
+      apiSecret,
+      symbol,
+      timeframe || '1Day',
+      limit ? parseInt(limit, 10) : 100,
+    );
+    return {
+      symbol: symbol.toUpperCase(),
+      timeframe: timeframe || '1Day',
+      bars: bars.map((b) => ({
+        timestamp: b.t,
+        open: b.o,
+        high: b.h,
+        low: b.l,
+        close: b.c,
+        volume: b.v,
+      })),
+    };
+  }
+
+  /**
+   * Get stock detail using the user's Alpaca connection (Data API).
+   * Uses the connection's API key so rate limits are per user, not shared.
+   * Only available for Alpaca connections.
+   */
+  @Get('connections/:connectionId/stock/:symbol')
+  @UseGuards(ConnectionOwnerGuard)
+  @CacheControl({ maxAge: 60, staleWhileRevalidate: 30, public: false })
+  async getStockDetail(
+    @Param('connectionId') connectionId: string,
+    @Param('symbol') symbol: string,
+  ) {
+    const connection = await this.exchangesService.getConnectionById(connectionId);
+    if (!connection?.exchange) {
+      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    }
+    const exchangeName = connection.exchange.name.toLowerCase();
+    if (exchangeName !== 'alpaca') {
+      throw new HttpException(
+        'Stock data is only available for Alpaca connections',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+    const sym = symbol.toUpperCase();
+    const [quote, dbStocks] = await Promise.all([
+      this.alpacaService.getStockSnapshot(apiKey, apiSecret, sym),
+      this.marketStocksDbService.getBySymbols([sym]).catch(() => []),
+    ]);
+    const metadata = dbStocks[0] ?? null;
+    return {
+      symbol: quote.symbol,
+      name: metadata?.name ?? quote.symbol,
+      price: quote.price,
+      change24h: quote.change24h,
+      changePercent24h: quote.changePercent24h,
+      volume24h: quote.volume24h,
+      marketCap: metadata?.marketCap ?? null,
+      sector: metadata?.sector ?? 'Unknown',
+      high24h: quote.dayHigh,
+      low24h: quote.dayLow,
+      prevClose: quote.prevClose,
+      open: quote.dayOpen,
+      timestamp: new Date().toISOString(),
     };
   }
 

@@ -1,6 +1,40 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 
+const DATA_API_BASE = 'https://data.alpaca.markets';
+
+/** Snapshot from Alpaca Data API */
+interface AlpacaSnapshot {
+  symbol: string;
+  latestTrade?: { t: string; p: number };
+  latestQuote?: { ap: number; bp: number };
+  prevDailyBar?: { o: number; h: number; l: number; c: number; v: number; t: string };
+  dailyBar?: { o: number; h: number; l: number; c: number; v: number; t: string };
+}
+
+/** Quote-like shape for stock detail (from Data API snapshot) */
+export interface AlpacaStockQuote {
+  symbol: string;
+  price: number;
+  change24h: number;
+  changePercent24h: number;
+  volume24h: number;
+  dayHigh: number;
+  dayLow: number;
+  dayOpen: number;
+  prevClose: number;
+}
+
+/** Bar from Alpaca Data API */
+export interface AlpacaBarDto {
+  t: string;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
 /**
  * Alpaca supported cryptocurrencies (base symbols without /USD)
  * These are the crypto assets available for trading on Alpaca
@@ -127,19 +161,20 @@ export class AlpacaService {
   }
 
   /**
-   * Get account balance - simplified version
+   * Get account balance. When apiKey/apiSecret provided (e.g. from connection), uses that key and returns
+   * shape compatible with AccountBalanceDto (assets, totalValueUSD, buyingPower).
    */
-  async getAccountBalance(): Promise<any> {
-    const account = await this.getAccountInfo();
+  async getAccountBalance(apiKey?: string, apiSecret?: string): Promise<any> {
+    const account = await this.getAccountInfo(apiKey, apiSecret);
+    const buyingPower = parseFloat(account.buying_power || account.cash || '0') || 0;
+    const cash = parseFloat(account.cash || '0') || 0;
+    const totalValueUSD = parseFloat(account.portfolio_value || account.equity || '0') || 0;
     return {
-      balances: [
-        {
-          asset: 'USD',
-          free: parseFloat(account.cash || 0),
-          locked: 0,
-        },
+      assets: [
+        { symbol: 'USD', free: buyingPower.toString(), locked: '0', total: cash.toString() },
       ],
-      totalBalance: parseFloat(account.portfolio_value || 0),
+      totalValueUSD,
+      buyingPower,
     };
   }
 
@@ -194,7 +229,9 @@ export class AlpacaService {
   }
 
   /**
-   * Place a market or limit order
+   * Place a market or limit order.
+   * When apiKey/apiSecret are provided (e.g. from user connection), uses that key so paper vs live
+   * is determined by the key prefix (PK = paper, AK = live). Otherwise uses configured instance key.
    */
   async placeOrder(
     symbol: string,
@@ -202,9 +239,11 @@ export class AlpacaService {
     type: 'MARKET' | 'LIMIT',
     quantity: number,
     limitPrice?: number,
+    apiKey?: string,
+    apiSecret?: string,
   ): Promise<any> {
     try {
-      // Convert symbol format: BTCUSDT -> BTC/USD
+      // Convert symbol format: BTCUSDT -> BTC/USD; stocks pass through as-is
       const alpacaSymbol = this.convertToAlpacaSymbol(symbol);
 
       const orderData: any = {
@@ -219,10 +258,12 @@ export class AlpacaService {
         orderData.limit_price = limitPrice.toString();
       }
 
+      const client = apiKey ? this.getClientForKey(apiKey) : this.getClient();
+      const headers = this.getAuthHeaders(apiKey, apiSecret);
       this.logger.log(`Placing ${type} ${side} order: ${quantity} ${alpacaSymbol}`);
 
-      const res = await this.getClient().post('/v2/orders', orderData, {
-        headers: this.getAuthHeaders(),
+      const res = await client.post('/v2/orders', orderData, {
+        headers,
       });
 
       const order = res.data;
@@ -246,8 +287,8 @@ export class AlpacaService {
   }
 
   /**
-   * Place a bracket order (entry + take profit + stop loss)
-   * This is Alpaca's equivalent to Binance OCO
+   * Place a bracket order (entry + take profit + stop loss).
+   * When apiKey/apiSecret provided, uses that key (paper vs live by key prefix).
    */
   async placeBracketOrder(
     symbol: string,
@@ -255,6 +296,8 @@ export class AlpacaService {
     quantity: number,
     takeProfitPrice: number,
     stopLossPrice: number,
+    apiKey?: string,
+    apiSecret?: string,
   ): Promise<any> {
     try {
       const alpacaSymbol = this.convertToAlpacaSymbol(symbol);
@@ -274,12 +317,14 @@ export class AlpacaService {
         },
       };
 
+      const client = apiKey ? this.getClientForKey(apiKey) : this.getClient();
+      const headers = this.getAuthHeaders(apiKey, apiSecret);
       this.logger.log(
         `Placing bracket order: ${quantity} ${alpacaSymbol}, TP=${takeProfitPrice}, SL=${stopLossPrice}`,
       );
 
-      const res = await this.getClient().post('/v2/orders', orderData, {
-        headers: this.getAuthHeaders(),
+      const res = await client.post('/v2/orders', orderData, {
+        headers,
       });
 
       const order = res.data;
@@ -346,7 +391,12 @@ export class AlpacaService {
       return upperSymbol.replace('USD', '/USD');
     }
 
-    // Default: assume it's base/USD
+    // Stock ticker (e.g. AAPL, NVDA, BRK.B) – use as-is for Alpaca stocks API
+    if (/^[A-Z.]{1,6}$/.test(upperSymbol)) {
+      return upperSymbol;
+    }
+
+    // Default: assume it's base/USD (crypto)
     return `${upperSymbol}/USD`;
   }
 
@@ -370,5 +420,107 @@ export class AlpacaService {
       },
     });
     return res.data || [];
+  }
+
+  /**
+   * Alpaca Data API client with given credentials (used for market data, not trading).
+   * Same API keys work for data.alpaca.markets.
+   */
+  private getDataApiClient(apiKey: string, apiSecret: string): AxiosInstance {
+    return axios.create({
+      baseURL: DATA_API_BASE,
+      timeout: 15000,
+      headers: {
+        'APCA-API-KEY-ID': apiKey,
+        'APCA-API-SECRET-KEY': apiSecret,
+        'Content-Type': 'application/json',
+      },
+    });
+  }
+
+  /**
+   * Get stock snapshot (quote) from Alpaca Data API using the user's credentials.
+   * Use this for connection-scoped stock detail so each user's requests use their own Alpaca key (rate limits per user).
+   */
+  async getStockSnapshot(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+  ): Promise<AlpacaStockQuote> {
+    const client = this.getDataApiClient(apiKey, apiSecret);
+    const sym = symbol.toUpperCase();
+    const res = await client.get<Record<string, AlpacaSnapshot>>('/v2/stocks/snapshots', {
+      params: { symbols: sym },
+    });
+    const snapshot = res.data?.[sym];
+    if (!snapshot) {
+      throw new Error(`Stock ${symbol} not found`);
+    }
+    const price = snapshot.latestTrade?.p ?? snapshot.latestQuote?.ap ?? 0;
+    const prevClose = snapshot.prevDailyBar?.c ?? snapshot.dailyBar?.c ?? 0;
+    const volume24h = snapshot.dailyBar?.v ?? 0;
+    let change24h = 0;
+    let changePercent24h = 0;
+    if (prevClose > 0 && price > 0) {
+      change24h = price - prevClose;
+      changePercent24h = (change24h / prevClose) * 100;
+    }
+    return {
+      symbol: sym,
+      price,
+      change24h,
+      changePercent24h,
+      volume24h,
+      dayHigh: snapshot.dailyBar?.h ?? 0,
+      dayLow: snapshot.dailyBar?.l ?? 0,
+      dayOpen: snapshot.dailyBar?.o ?? 0,
+      prevClose,
+    };
+  }
+
+  /**
+   * Get historical bars for a stock from Alpaca Data API using the user's credentials.
+   */
+  async getStockBars(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    timeframe: string = '1Day',
+    limit: number = 100,
+  ): Promise<AlpacaBarDto[]> {
+    const client = this.getDataApiClient(apiKey, apiSecret);
+    const sym = symbol.toUpperCase();
+    const alpacaTf = this.mapDataApiTimeframe(timeframe);
+    const start = this.calculateBarsStart(alpacaTf, limit);
+    const res = await client.get<{ bars?: Record<string, AlpacaBarDto[]> }>('/v2/stocks/bars', {
+      params: {
+        symbols: sym,
+        timeframe: alpacaTf,
+        start: start.toISOString(),
+        limit,
+        adjustment: 'split',
+      },
+    });
+    return res.data?.bars?.[sym] ?? [];
+  }
+
+  private mapDataApiTimeframe(tf: string): string {
+    const m: Record<string, string> = {
+      '1d': '1Day', '4h': '4Hour', '1h': '1Hour', '15m': '15Min', '5m': '5Min', '1m': '1Min',
+      '1Day': '1Day', '4Hour': '4Hour', '1Hour': '1Hour', '15Min': '15Min', '5Min': '5Min', '1Min': '1Min',
+    };
+    return m[tf] ?? tf ?? '1Day';
+  }
+
+  private calculateBarsStart(alpacaTf: string, limit: number): Date {
+    const now = new Date();
+    const tf = alpacaTf.toLowerCase();
+    let daysBack = 30;
+    if (tf === '1day') daysBack = limit + 10;
+    else if (tf === '4hour' || tf === '1hour') daysBack = Math.ceil((limit * 4) / 6) + 10;
+    else if (tf === '15min' || tf === '5min' || tf === '1min') daysBack = Math.ceil((limit * 15) / (6 * 60)) + 5;
+    const d = new Date(now);
+    d.setDate(d.getDate() - daysBack);
+    return d;
   }
 }

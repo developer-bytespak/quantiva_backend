@@ -219,6 +219,23 @@ export class ExchangesService {
   }
 
   /**
+   * Returns decrypted API credentials for a connection. Call only after connection ownership is verified (e.g. ConnectionOwnerGuard).
+   */
+  async getDecryptedCredentials(connectionId: string): Promise<{ apiKey: string; apiSecret: string }> {
+    const connection = await this.getConnectionById(connectionId);
+    if (!connection) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+    if (!connection.api_key_encrypted || !connection.api_secret_encrypted) {
+      throw new ConnectionNotFoundException('Connection missing API credentials');
+    }
+    return {
+      apiKey: this.encryptionService.decryptApiKey(connection.api_key_encrypted),
+      apiSecret: this.encryptionService.decryptApiKey(connection.api_secret_encrypted),
+    };
+  }
+
+  /**
    * Returns account/profile information for a connection by calling the underlying exchange integration.
    */
   async getConnectionProfile(connectionId: string): Promise<any> {
@@ -508,18 +525,28 @@ export class ExchangesService {
           } as PositionDto;
         });
 
-        // Map balance: use accountInfo.portfolio_value and cash if available
+        // Map balance: portfolio_value, cash, buying_power; include USD for buying power (e.g. stock panel)
         const totalValueUSD = parseFloat(accountInfo.portfolio_value || accountInfo.equity || '0') || 0;
+        const buyingPower = parseFloat(accountInfo.buying_power || accountInfo.cash || '0') || 0;
+        const cash = parseFloat(accountInfo.cash || '0') || 0;
         const assets = (positions || []).map((pos) => ({
           symbol: pos.symbol,
           free: pos.quantity.toString(),
           locked: '0',
           total: pos.quantity.toString(),
         }));
+        // Add USD so frontend can show buying power (e.g. StockTradingPanel)
+        assets.unshift({
+          symbol: 'USD',
+          free: buyingPower.toString(),
+          locked: '0',
+          total: cash.toString(),
+        });
 
         balance = {
           assets,
           totalValueUSD,
+          buyingPower,
         } as AccountBalanceDto;
 
         // Map orders
@@ -775,11 +802,21 @@ export class ExchangesService {
     // Get the appropriate exchange service
     const exchangeService = this.getExchangeService(connection.exchange.name);
 
-    // Place order
+    // Place order (Alpaca: paper vs live is determined by the user's key prefix PK vs AK)
     if (exchangeService instanceof BinanceService) {
       return this.binanceService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
     } else if (exchangeService instanceof BybitService) {
       return this.bybitService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
+    } else if (exchangeService instanceof AlpacaService) {
+      return this.alpacaService.placeOrder(
+        symbol,
+        side,
+        type,
+        quantity,
+        price,
+        apiKey,
+        apiSecret,
+      );
     } else {
       throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
     }
