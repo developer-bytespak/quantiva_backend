@@ -161,6 +161,7 @@ export class AlpacaMarketService {
           start: start.toISOString().split('T')[0],
           end: end.toISOString().split('T')[0],
           limit: 10,
+          feed: 'iex',
         },
       });
 
@@ -231,7 +232,7 @@ export class AlpacaMarketService {
       const response = await this.apiClient.get<
         Record<string, AlpacaSnapshot>
       >(`/v2/stocks/snapshots`, {
-        params: { symbols: symbolsParam },
+        params: { symbols: symbolsParam, feed: 'iex' },
       });
 
       const snapshots = response.data;
@@ -329,7 +330,7 @@ export class AlpacaMarketService {
       const response = await this.apiClient.get<Record<string, AlpacaSnapshot>>(
         `/v2/stocks/snapshots`,
         {
-          params: { symbols: symbol },
+          params: { symbols: symbol, feed: 'iex' },
         },
       );
 
@@ -354,7 +355,7 @@ export class AlpacaMarketService {
     try {
       // Try to fetch a single snapshot for a well-known symbol
       await this.apiClient.get('/v2/stocks/snapshots', {
-        params: { symbols: 'AAPL' },
+        params: { symbols: 'AAPL', feed: 'iex' },
       });
 
       return { online: true };
@@ -396,6 +397,7 @@ export class AlpacaMarketService {
           start: start.toISOString(),
           limit: limit,
           adjustment: 'split', // Adjust for stock splits
+          feed: 'iex',
         },
       });
 
