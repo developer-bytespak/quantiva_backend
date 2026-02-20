@@ -25,6 +25,7 @@ import { DeleteAccountDto } from '../dto/delete-account.dto';
 import { VerifyPasswordDto } from '../dto/verify-password.dto';
 import { ConfigService } from '@nestjs/config';
 import { TokenPayload, TokenService } from '../services/token.service';
+import { isNegative } from 'class-validator';
 
 @Controller('auth')
 export class AuthController {
@@ -155,23 +156,42 @@ export class AuthController {
   @Public()
   @Post('google')
   @HttpCode(HttpStatus.OK)
-  async googleAuth(
+  async googleLogin(
     @Body() body: { idToken?: string },
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
     const ipAddress = req.ip || req.socket.remoteAddress;
     const deviceId = req.headers['x-device-id'] as string;
-
     const result = await this.authService.loginWithGoogle(body.idToken, ipAddress, deviceId);
-
-    // Return tokens in response body (client JWT flow)
     return {
       user: result.user,
       accessToken: result.accessToken,
       refreshToken: result.refreshToken,
       sessionId: result.sessionId,
+      isNewUser: result.user.isNewUser,
       message: 'Authentication successful',
+    };
+  }
+
+  @Public()
+  @Post('signup/google')
+  @HttpCode(HttpStatus.OK)
+  async googleSignup(
+    @Body() body: { idToken?: string },
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const ipAddress = req.ip || req.socket.remoteAddress;
+    const deviceId = req.headers['x-device-id'] as string;
+    const result = await this.authService.signupWithGoogle(body.idToken, ipAddress, deviceId);
+    return {
+      user: result.user,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      sessionId: result.sessionId,
+      isNewUser: result.user.isNewUser,
+      message: 'Signup successful',
     };
   }
 
@@ -346,6 +366,39 @@ export class AuthController {
     this.clearCookie(res, 'access_token');
     this.clearCookie(res, 'refresh_token');
 
+    return result;
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('check-google-email')
+  @HttpCode(HttpStatus.OK)
+  async verifyGoogleEmail(@CurrentUser() user: TokenPayload) {
+    const result = await this.authService.verifyGoogleEmail(user.sub);
+    console.log("result", result);
+    return result;
+  }
+
+  @Post('forgot-password/send-otp')
+  @HttpCode(HttpStatus.OK)
+  async forgotPassword(@Body() body: { email: string }) {
+    const result = await this.authService.forgotPassword(body.email);
+    console.log("result", result);
+    return result;
+  }
+
+  @Post('forgot-password/verify-otp')
+  @HttpCode(HttpStatus.OK)
+  async verifyOtp(@Body() body: { email: string, code: string }) {
+    const result = await this.authService.verifyOtp(body.email, body.code);
+    console.log("result", result);
+    return result;
+  }
+
+  @Post('forgot-password/reset')
+  @HttpCode(HttpStatus.OK)
+  async resetPassword(@Body() body: { email: string, newPassword: string }) {
+    const result = await this.authService.resetPassword(body.email, body.newPassword);
+    console.log("result", result);
     return result;
   }
 }

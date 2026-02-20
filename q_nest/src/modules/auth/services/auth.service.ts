@@ -123,11 +123,15 @@ export class AuthService {
       },
     });
 
-    if (!user || !user.password_hash) {
+    if (!user) {
       if (ipAddress) {
         this.rateLimitService.recordFailedAttempt(ipAddress);
       }
       throw new UnauthorizedException('Invalid credentials');
+    }
+
+    if(user.password_hash === null) {
+      throw new UnauthorizedException('Password is not set. Please use Google login');
     }
 
     // Verify password
@@ -136,7 +140,7 @@ export class AuthService {
       if (ipAddress) {
         this.rateLimitService.recordFailedAttempt(ipAddress);
       }
-      throw new UnauthorizedException('Invalid credentials');
+      throw new UnauthorizedException('Password is incorrect');
     }
 
     // Generate and send 2FA code
@@ -378,85 +382,106 @@ export class AuthService {
     return user;
   }
 
-  // Google Sign-in: verify id token, find or create user, create session + tokens
-  async loginWithGoogle(idToken: string, ipAddress?: string, deviceId?: string) {
+  /** Verify Google idToken and return payload (email, name, picture). Throws if invalid. */
+  private async verifyGoogleIdToken(idToken: string): Promise<{ email: string; name: string | null; picture: string | null }> {
     if (!idToken) throw new BadRequestException('Missing idToken');
-
     const client = this.getGoogleClient();
     let payload: any;
     try {
       const ticket = await client.verifyIdToken({ idToken });
       payload = ticket.getPayload();
-    } catch (err) {
+    } catch {
       throw new UnauthorizedException('Invalid Google id token');
     }
-
     if (!payload || !payload.email) {
       throw new UnauthorizedException('Invalid Google token payload');
     }
-
     if (!payload.email_verified) {
-      // depending on policy you may still allow, but safer to require verified
       throw new UnauthorizedException('Google account email is not verified');
     }
+    return {
+      email: payload.email,
+      name: payload.name || null,
+      picture: payload.picture || null,
+    };
+  }
 
-    const email: string = payload.email;
-    const name: string = payload.name || null;
-    const picture: string = payload.picture || null;
-
-    // Try find existing user by email
-    let user = await this.prisma.users.findUnique({ where: { email } });
-
-    let isNewUser = false;
+  /** Google Login: only existing users. If account does not exist, throws. */
+  async loginWithGoogle(idToken: string, ipAddress?: string, deviceId?: string) {
+    const { email } = await this.verifyGoogleIdToken(idToken);
+    const user = await this.prisma.users.findUnique({ where: { email } });
     if (!user) {
-      isNewUser = true;
-      // create a username from email local part (ensure uniqueness by appending short id if needed)
-      const local = email.split('@')[0].replace(/[^a-zA-Z0-9_\-\.]/g, '');
-      let username = local;
-      // ensure username unique
-      let suffix = 0;
-      while (await this.prisma.users.findUnique({ where: { username } })) {
-        suffix += 1;
-        username = `${local}${suffix}`;
-      }
-
-      // create user
-      user = await this.prisma.users.create({
-        data: {
-          email,
-          username,
-          email_verified: true,
-          // Don't set full_name here - user should complete personal-info during onboarding
-          // full_name: name,
-          profile_pic_url: picture,
-          // leave password_hash null for social logins
-        },
-      });
+      throw new UnauthorizedException('Your account does not exist. Please sign up first.');
     }
+    return this.createGoogleAuthResponse(user, ipAddress, deviceId, false);
+  }
 
-    // Generate refresh token and session similar to verify2FA flow
+  /** Google Signup: create new user only. If account already exists, throws. */
+  async signupWithGoogle(idToken: string, ipAddress?: string, deviceId?: string) {
+    const { email, picture } = await this.verifyGoogleIdToken(idToken);
+    let user = await this.prisma.users.findUnique({ where: { email } });
+    console.log("user", user);
+    if (user) {
+      console.log("user already exists");
+      throw new ConflictException('Account already exists. Please login.');
+    }
+    const local = email.split('@')[0].replace(/[^a-zA-Z0-9_\-\.]/g, '');
+    let username = local;
+    let suffix = 0;
+    while (await this.prisma.users.findUnique({ where: { username } })) {
+      suffix += 1;
+      username = `${local}${suffix}`;
+    }
+    user = await this.prisma.users.create({
+      data: {
+        email,
+        username,
+        email_verified: true,
+        profile_pic_url: picture,
+        kyc_status: 'pending',
+      },
+    });
+    try {
+      const freePlan = await this.prisma.subscription_plans.findFirst({
+        where: { tier: 'FREE', billing_period: 'MONTHLY', is_active: true },
+      });
+      if (freePlan) {
+        await this.subscriptionsService.createSubscription({
+          user_id: user.user_id,
+          plan_id: freePlan.plan_id,
+          status: 'active',
+          auto_renew: false,
+        });
+      }
+    } catch {
+      // don't fail signup if subscription create fails
+    }
+    return this.createGoogleAuthResponse(user, ipAddress, deviceId, true);
+  }
+
+  private async createGoogleAuthResponse(
+    user: { user_id: string; email: string; username: string; email_verified: boolean; kyc_status: string },
+    ipAddress?: string,
+    deviceId?: string,
+    isNewUser = false,
+  ) {
     const refreshToken = await this.tokenService.generateRefreshToken({
       sub: user.user_id,
       email: user.email,
       username: user.username,
     });
-
     const sessionId = await this.sessionService.createSession(
       user.user_id,
       refreshToken,
       ipAddress,
       deviceId,
     );
-
-    const payloadForAccess = {
+    const accessToken = await this.tokenService.generateAccessToken({
       sub: user.user_id,
       email: user.email,
       username: user.username,
       session_id: sessionId,
-    } as TokenPayload;
-
-    const accessToken = await this.tokenService.generateAccessToken(payloadForAccess);
-
+    } as TokenPayload);
     return {
       user: {
         user_id: user.user_id,
@@ -464,6 +489,7 @@ export class AuthService {
         username: user.username,
         email_verified: user.email_verified,
         kyc_status: user.kyc_status,
+        isNewUser,
       },
       accessToken,
       refreshToken,
@@ -545,11 +571,10 @@ export class AuthService {
       throw new UnauthorizedException('User not found');
     }
 
+
     // Verify password
-    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
-    if (!isPasswordValid) {
-      throw new UnauthorizedException('Invalid password');
-    }
+    
+     let isPasswordValid = null;
 
     // Verify 2FA code
     const isValid = await this.twoFactorService.validateCode(
@@ -951,6 +976,68 @@ export class AuthService {
         },
       },
     };
+  }
+
+  async verifyGoogleEmail(userId: string) {
+    const user = await this.prisma.users.findUnique({ where: { user_id: userId } });
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+    if(user.password_hash === null) {
+      return{
+        message: 'Google Email',
+        email_verified: user.email_verified,
+        google_email: true,
+      }
+    }
+    return {
+      message: 'Email is not verified',
+      email_verified: user.email_verified,
+      google_email: false,
+    }
+  }
+
+  async forgotPassword(email: string) {
+    const user = await this.prisma.users.findUnique({ where: { email } });
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+    if(user.password_hash === null) {
+      throw new UnauthorizedException('Password is not set. Please use Google login');
+    }
+
+    const code = await this.twoFactorService.generateCode(user.user_id, 'password_reset');
+    await this.twoFactorService.sendCodeByEmail(user.email, code);
+    return {
+      message: '2FA code sent to your email',
+      code,
+    }
+  }
+
+  async verifyOtp(email: string, code: string) {
+    const user = await this.prisma.users.findUnique({ where: { email } });
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+    const isValid = await this.twoFactorService.validateCode(user.user_id, code, 'password_reset');
+    if (!isValid) {
+      throw new UnauthorizedException('Invalid OTP');
+    }
+    return {
+      message: 'OTP verified successfully',
+    }
+  }
+
+  async resetPassword(email: string, newPassword: string) {
+    const user = await this.prisma.users.findUnique({ where: { email } });
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await this.prisma.users.update({ where: { user_id: user.user_id }, data: { password_hash: passwordHash } });
+    return {
+      message: 'Password reset successfully',
+    }
   }
 }
 
