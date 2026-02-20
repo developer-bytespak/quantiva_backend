@@ -3,13 +3,24 @@ import axios, { AxiosInstance } from 'axios';
 
 const DATA_API_BASE = 'https://data.alpaca.markets';
 
-/** Snapshot from Alpaca Data API */
+/** Snapshot from Alpaca Data API (ap/bp/as/bs may be number or string) */
 interface AlpacaSnapshot {
   symbol: string;
   latestTrade?: { t: string; p: number };
-  latestQuote?: { ap: number; bp: number };
+  latestQuote?: { ap?: number | string; bp?: number | string; as?: number | string; bs?: number | string };
   prevDailyBar?: { o: number; h: number; l: number; c: number; v: number; t: string };
   dailyBar?: { o: number; h: number; l: number; c: number; v: number; t: string };
+}
+
+function toNum(v: number | string | undefined): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  const n = typeof v === 'string' ? parseFloat(v) : v;
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function toNumOrZero(v: number | string | undefined): number {
+  const n = toNum(v);
+  return typeof n === 'number' ? n : 0;
 }
 
 /** Quote-like shape for stock detail (from Data API snapshot) */
@@ -23,6 +34,13 @@ export interface AlpacaStockQuote {
   dayLow: number;
   dayOpen: number;
   prevClose: number;
+  /** Real bid/ask from Alpaca latestQuote when available */
+  bidPrice?: number;
+  askPrice?: number;
+  bidSize?: number;
+  askSize?: number;
+  spread?: number;
+  spreadPercent?: number;
 }
 
 /** Bar from Alpaca Data API */
@@ -450,20 +468,31 @@ export class AlpacaService {
     const client = this.getDataApiClient(apiKey, apiSecret);
     const sym = symbol.toUpperCase();
     const res = await client.get<Record<string, AlpacaSnapshot>>('/v2/stocks/snapshots', {
-      params: { symbols: sym },
+      params: { symbols: sym, feed: 'iex' },
     });
     const snapshot = res.data?.[sym];
     if (!snapshot) {
       throw new Error(`Stock ${symbol} not found`);
     }
-    const price = snapshot.latestTrade?.p ?? snapshot.latestQuote?.ap ?? 0;
-    const prevClose = snapshot.prevDailyBar?.c ?? snapshot.dailyBar?.c ?? 0;
+    const price = toNumOrZero(snapshot.latestTrade?.p ?? snapshot.latestQuote?.ap);
+    const prevClose = toNumOrZero(snapshot.prevDailyBar?.c ?? snapshot.dailyBar?.c);
     const volume24h = snapshot.dailyBar?.v ?? 0;
     let change24h = 0;
     let changePercent24h = 0;
     if (prevClose > 0 && price > 0) {
       change24h = price - prevClose;
       changePercent24h = (change24h / prevClose) * 100;
+    }
+    const q = snapshot.latestQuote;
+    const bidPrice = toNum(q?.bp);
+    const askPrice = toNum(q?.ap);
+    const bidSize = toNum(q?.bs);
+    const askSize = toNum(q?.as);
+    let spread: number | undefined;
+    let spreadPercent: number | undefined;
+    if (typeof bidPrice === 'number' && typeof askPrice === 'number' && bidPrice > 0) {
+      spread = askPrice - bidPrice;
+      spreadPercent = (spread / bidPrice) * 100;
     }
     return {
       symbol: sym,
@@ -475,6 +504,12 @@ export class AlpacaService {
       dayLow: snapshot.dailyBar?.l ?? 0,
       dayOpen: snapshot.dailyBar?.o ?? 0,
       prevClose,
+      ...(typeof bidPrice === 'number' && { bidPrice }),
+      ...(typeof askPrice === 'number' && { askPrice }),
+      ...(typeof bidSize === 'number' && { bidSize }),
+      ...(typeof askSize === 'number' && { askSize }),
+      ...(typeof spread === 'number' && { spread }),
+      ...(typeof spreadPercent === 'number' && { spreadPercent }),
     };
   }
 
@@ -499,6 +534,7 @@ export class AlpacaService {
         start: start.toISOString(),
         limit,
         adjustment: 'split',
+        feed: 'iex',
       },
     });
     return res.data?.bars?.[sym] ?? [];

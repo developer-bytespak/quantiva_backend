@@ -36,6 +36,7 @@ export interface FmpQuote {
   earningsAnnouncement: string;
   sharesOutstanding: number;
   timestamp: number;
+  description?: string;
 }
 
 @Injectable()

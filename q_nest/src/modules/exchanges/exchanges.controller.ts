@@ -33,6 +33,7 @@ import { ExchangeType } from '@prisma/client';
 import { ForbiddenException } from '@nestjs/common';
 import { MarketService } from '../market/market.service';
 import { MarketStocksDbService } from '../stocks-market/services/market-stocks-db.service';
+import { FmpService } from '../stocks-market/services/fmp.service';
 
 /**
  * Exchanges Controller
@@ -62,6 +63,7 @@ export class ExchangesController {
     private readonly marketService: MarketService,
     private readonly marketDetailAggregator: MarketDetailAggregatorService,
     private readonly marketStocksDbService: MarketStocksDbService,
+    private readonly fmpService: FmpService,
   ) {}
 
   @Get()
@@ -830,6 +832,12 @@ export class ExchangesController {
       prevClose: quote.prevClose,
       open: quote.dayOpen,
       timestamp: new Date().toISOString(),
+      ...(quote.bidPrice != null && { bidPrice: quote.bidPrice }),
+      ...(quote.askPrice != null && { askPrice: quote.askPrice }),
+      ...(quote.bidSize != null && { bidSize: quote.bidSize }),
+      ...(quote.askSize != null && { askSize: quote.askSize }),
+      ...(quote.spread != null && { spread: quote.spread }),
+      ...(quote.spreadPercent != null && { spreadPercent: quote.spreadPercent }),
     };
   }
 
