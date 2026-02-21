@@ -6,11 +6,11 @@ import { IsString, IsNotEmpty, IsOptional, Length } from 'class-validator';
  */
 export class DeleteAccountDto {
   @IsString()
-  @IsNotEmpty({ message: 'Password is required to delete account' })
+  @IsOptional()
   password: string;
 
   @IsString()
-  @IsNotEmpty({ message: '2FA code is required to delete account' })
+  @IsOptional()
   @Length(6, 6, { message: '2FA code must be exactly 6 digits' })
   twoFactorCode: string;
 
