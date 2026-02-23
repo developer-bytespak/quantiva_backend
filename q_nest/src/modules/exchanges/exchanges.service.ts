@@ -139,72 +139,53 @@ export class ExchangesService {
     }
   }
 
+  /**
+   * Returns the user's active connection or null. Use when you need to check without throwing (e.g. before creating a new connection).
+   */
+  async getActiveConnectionOrNull(userId: string): Promise<{
+    connection_id: string;
+    exchange: { exchange_id: string; name: string; type: string; supports_oauth: boolean; created_at: string | null };
+    status: string;
+  } | null> {
+    const connection = await this.prisma.user_exchange_connections.findFirst({
+      where: { user_id: userId, status: ConnectionStatus.active },
+      orderBy: { created_at: 'desc' },
+    });
+    if (!connection) return null;
+    const exchange = await this.prisma.exchanges.findUnique({
+      where: { exchange_id: connection.exchange_id },
+    });
+    if (!exchange) return null;
+    return {
+      connection_id: connection.connection_id,
+      exchange: {
+        exchange_id: exchange.exchange_id,
+        name: exchange.name,
+        type: exchange.type,
+        supports_oauth: exchange.supports_oauth,
+        created_at: exchange.created_at?.toISOString() || null,
+      },
+      status: connection.status,
+    };
+  }
+
   async getActiveConnection(userId: string) {
     try {
       this.logger.debug(`Fetching active connection for user: ${userId}`);
-      
-      // First, find the connection without include to avoid potential relation issues
-    const connection = await this.prisma.user_exchange_connections.findFirst({
-      where: {
-        user_id: userId,
-        status: ConnectionStatus.active,
-      },
-      orderBy: {
-        created_at: 'desc', // Get most recent active connection
-      },
-    });
-
-    if (!connection) {
+      const result = await this.getActiveConnectionOrNull(userId);
+    if (!result) {
         this.logger.warn(`No active connection found for user: ${userId}`);
       throw new ConnectionNotFoundException('No active connection found');
     }
-
-      this.logger.debug(`Found connection: ${connection.connection_id}, Exchange ID: ${connection.exchange_id}`);
-
-      // Fetch exchange separately to avoid relation issues
-      const exchange = await this.prisma.exchanges.findUnique({
-        where: { exchange_id: connection.exchange_id },
-      });
-      
-      if (!exchange) {
-        this.logger.error(
-          `Exchange ${connection.exchange_id} does not exist in database. Connection may be orphaned.`,
-        );
-        throw new ConnectionNotFoundException(
-          `Exchange not found for this connection. The exchange record is missing. Please reconnect your account.`,
-        );
-      }
-
-      this.logger.debug(`Found exchange: ${exchange.name} (${exchange.exchange_id})`);
-      
-      // Return the data in a clean format with proper serialization
-    return {
-      connection_id: connection.connection_id,
-        exchange: {
-          exchange_id: exchange.exchange_id,
-          name: exchange.name,
-          type: exchange.type,
-          supports_oauth: exchange.supports_oauth,
-          created_at: exchange.created_at?.toISOString() || null,
-        },
-      status: connection.status,
-    };
+    return result;
     } catch (error: any) {
-      // Re-throw known exceptions
-      if (error instanceof ConnectionNotFoundException) {
-        this.logger.warn(`ConnectionNotFoundException: ${error.message}`);
-        throw error;
-      }
-      
-      // Log unexpected errors with full details
+      if (error instanceof ConnectionNotFoundException) throw error;
       this.logger.error(`Unexpected error fetching active connection for user ${userId}:`, {
         message: error?.message,
         stack: error?.stack,
         name: error?.name,
         code: error?.code,
       });
-      
-      // Re-throw as ConnectionNotFoundException to maintain consistent error format
       throw new ConnectionNotFoundException(
         `Failed to fetch active connection: ${error?.message || 'Unknown error'}`,
       );
