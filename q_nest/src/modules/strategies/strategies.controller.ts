@@ -13,6 +13,8 @@ import { NewsCronjobService } from '../news/news-cronjob.service';
 import { NewsService } from '../news/news.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { TierAccessGuard } from '../../common/guards/tier-access.guard';
+import { AllowTier } from '../../common/decorators/allow-tier.decorator';
 import { TokenPayload } from '../auth/services/token.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AiInsightsService } from '../../ai-insights/ai-insights.service';
@@ -67,6 +69,12 @@ export class StrategiesController {
     return this.preBuiltStrategiesService.getPreBuiltStrategies(assetType);
   }
 
+  /**
+   * Get trending assets (crypto). Used by Top Trades page.
+   * Restricted to PRO and ELITE plans (same as stocks/top-trades).
+   */
+  @UseGuards(JwtAuthGuard, TierAccessGuard)
+  @AllowTier('PRO', 'ELITE')
   @Get('trending-assets')
   getTrendingAssets(
     @Query('limit') limit?: string,
@@ -2208,7 +2216,10 @@ export class StrategiesController {
    * @param realtime If 'true', force fetch live data from Alpaca (slower, use sparingly)
    * 
    * Endpoint: GET /strategies/stocks/top-trades
+   * Restricted to PRO and ELITE plans.
    */
+  @UseGuards(JwtAuthGuard, TierAccessGuard)
+  @AllowTier('PRO', 'ELITE')
   @Get('stocks/top-trades')
   async getStocksForTopTrades(
     @Query('limit') limit?: string,
