@@ -221,11 +221,12 @@ export class ExchangesController {
           HttpStatus.UNAUTHORIZED,
         );
       }
-      const existingConnection = await this.exchangesService.getActiveConnection(user.sub);
+      // Replace any existing active connection (don't use getActiveConnection - it throws when none exists)
+      const existingConnection = await this.exchangesService.getActiveConnectionOrNull(user.sub);
       if (existingConnection) {
         await this.exchangesService.deleteConnection(existingConnection.connection_id);
       }
-      
+
       // If verification passes, create the connection
       const connection = await this.exchangesService.createConnection({
         user_id: user.sub,
