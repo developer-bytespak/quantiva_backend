@@ -49,6 +49,16 @@ export class KycController {
     private readonly prisma: PrismaService,
   ) {}
 
+  @Get('sdk-token')
+  async getSdkToken(@CurrentUser() user: TokenPayload) {
+    const tokenData = await this.kycService.generateSdkToken(user.sub);
+    return {
+      success: true,
+      token: tokenData.token,
+      userId: tokenData.userId,
+    };
+  }
+
   @Post('documents')
   @UseInterceptors(FileInterceptor('file', fileUploadOptions))
   async uploadDocument(

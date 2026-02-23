@@ -23,6 +23,85 @@ export class KycService {
     private sumsubService: SumsubService,
   ) {}
 
+  /**
+   * Generate an SDK access token for the SumSub Web SDK.
+   * Creates or reuses the kyc_verifications record and SumSub applicant,
+   * then returns a short-lived token the frontend passes to the SDK.
+   */
+  async generateSdkToken(userId: string): Promise<{ token: string; userId: string }> {
+    this.logger.log(`Generating SDK token for user: ${userId}`);
+
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+    });
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    let verification = await this.prisma.kyc_verifications.findFirst({
+      where: { user_id: userId },
+      orderBy: { kyc_id: 'desc' },
+    });
+
+    if (!verification) {
+      const kycId = await this.createVerification(userId);
+      verification = await this.prisma.kyc_verifications.findUnique({
+        where: { kyc_id: kycId },
+      });
+    }
+
+    if (!verification) {
+      throw new Error('Failed to create verification record');
+    }
+
+    // Ensure a SumSub applicant exists so the SDK can attach to it
+    if (!verification.sumsub_applicant_id) {
+      try {
+        const applicant = await this.sumsubService.createApplicant(
+          userId,
+          user.email,
+          user.phone_number || undefined,
+        );
+        verification = await this.prisma.kyc_verifications.update({
+          where: { kyc_id: verification.kyc_id },
+          data: {
+            sumsub_applicant_id: applicant.id,
+            sumsub_external_user_id: userId,
+            verification_provider: 'sumsub',
+          },
+        });
+        this.logger.log(`Created SumSub applicant: ${applicant.id}`);
+      } catch (error: any) {
+        if (error.status === 409 || error.message?.includes('already exists')) {
+          const existing = await this.sumsubService.getApplicantByExternalUserId(userId);
+          if (existing) {
+            verification = await this.prisma.kyc_verifications.update({
+              where: { kyc_id: verification.kyc_id },
+              data: {
+                sumsub_applicant_id: existing.id,
+                sumsub_external_user_id: userId,
+                verification_provider: 'sumsub',
+              },
+            });
+            this.logger.log(`Linked existing SumSub applicant: ${existing.id}`);
+          }
+        } else {
+          this.logger.error(`Failed to create SumSub applicant: ${error.message}`);
+          throw error;
+        }
+      }
+    }
+
+    const result = await this.sumsubService.generateSdkAccessToken(
+      userId,
+      user.email,
+      user.phone_number || undefined,
+    );
+
+    this.logger.log(`SDK token generated successfully for user: ${userId}`);
+    return result;
+  }
+
   async createVerification(userId: string): Promise<string> {
     const verification = await this.prisma.kyc_verifications.create({
       data: {
