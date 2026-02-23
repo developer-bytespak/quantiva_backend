@@ -23,11 +23,13 @@ import { BinanceModule } from '../binance/binance.module';
 import { AiInsightsModule } from '../../ai-insights/ai-insights.module';
 import { StocksMarketModule } from '../stocks-market/stocks-market.module';
 import { FeatureAccessService } from '../../common/feature-access.service';
+import { TierAccessGuard } from '../../common/guards/tier-access.guard';
 
 @Module({
   imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule), NewsModule, forwardRef(() => ExchangesModule), BinanceModule, ScheduleModule, AiInsightsModule, StocksMarketModule],
   controllers: [StrategiesController],
   providers: [
+    TierAccessGuard,
     StrategiesService,
     StrategyValidationService,
     PreBuiltStrategiesService,
