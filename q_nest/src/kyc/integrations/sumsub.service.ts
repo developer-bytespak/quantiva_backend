@@ -403,6 +403,8 @@ export class SumsubService implements OnModuleInit {
   }
 
   /**
+   * @deprecated Use the SumSub Web SDK instead. Kept for fallback/admin use.
+   *
    * Add document to applicant.
    *
    * IMPORTANT (from Sumsub docs):
@@ -478,6 +480,8 @@ export class SumsubService implements OnModuleInit {
   }
 
   /**
+   * @deprecated Use the SumSub Web SDK instead. Kept for fallback/admin use.
+   *
    * Upload selfie image (selfie is a document type in Sumsub)
    */
   async uploadSelfie(applicantId: string, fileBuffer: Buffer, filename: string, country?: string): Promise<any> {
@@ -511,6 +515,8 @@ export class SumsubService implements OnModuleInit {
   }
 
   /**
+   * @deprecated Use the SumSub Web SDK instead. Kept for fallback/admin use.
+   *
    * Request verification check for applicant
    */
   async requestCheck(applicantId: string): Promise<any> {
@@ -519,22 +525,36 @@ export class SumsubService implements OnModuleInit {
   }
 
   /**
-   * Generate access token for SDK (optional, for future use)
+   * Generate an access token for the SumSub Web SDK.
+   * Uses the /resources/accessTokens/sdk endpoint which accepts
+   * userId + levelName and returns a short-lived token the frontend
+   * passes to the embedded SDK iframe.
    */
-  async generateAccessToken(
-    externalUserId: string,
+  async generateSdkAccessToken(
+    userId: string,
+    email?: string,
+    phone?: string,
     levelName?: string,
     ttlInSecs: number = 600,
   ): Promise<{ token: string; userId: string }> {
-    const payload = {
-      externalUserId,
+    this.logger.log(`Generating SDK access token for user: ${userId}`);
+
+    const payload: Record<string, any> = {
+      userId,
       levelName: levelName || this.config.levelName,
       ttlInSecs,
     };
 
+    if (email || phone) {
+      payload.applicantIdentifiers = {
+        ...(email && { email }),
+        ...(phone && { phone }),
+      };
+    }
+
     return this.makeRequest<{ token: string; userId: string }>(
       'POST',
-      '/resources/accessTokens',
+      '/resources/accessTokens/sdk',
       payload,
     );
   }
