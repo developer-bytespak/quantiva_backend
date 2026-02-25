@@ -3,6 +3,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from './prisma/prisma.module';
 import { ConfigModule } from './config/config.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { AdminAuthModule } from './modules/admin-auth/admin-auth.module';
 import { SubscriptionLoaderMiddleware } from './common/middleware/subscription-loader.middleware';
 import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 import { KycModule } from './kyc/kyc.module';
@@ -29,6 +30,7 @@ import { MarketDetailGateway } from './gateways/market-detail.gateway';
     PrismaModule,
     ScheduleModule.forRoot(),
     AuthModule,
+    AdminAuthModule,
 
     KycModule,
     ExchangesModule,
