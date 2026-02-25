@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SubscriptionStatus } from '@prisma/client';
 
@@ -382,24 +382,42 @@ export class SubscriptionsService {
         data: { current_tier: plan.tier },
       });
 
-      // 5️⃣ Subscription usage records initialize karo - MONTHLY BREAKDOWN
+      // 5️⃣ Subscription usage records: CUSTOM_STRATEGIES = 1 row per billing period; others = monthly breakdown
       if (plan.plan_features && plan.plan_features.length > 0) {
-        const monthlyPeriods = this.getMonthlyPeriods(current_period_start, current_period_end);
-        
-        const usageRecords = [];
-        for (const period of monthlyPeriods) {
-          for (const feature of plan.plan_features) {
+        const usageRecords: Array<{
+          subscription_id: string;
+          user_id: string;
+          feature_type: (typeof plan.plan_features)[0]['feature_type'];
+          usage_count: number;
+          period_start: Date;
+          period_end: Date;
+        }> = [];
+
+        for (const feature of plan.plan_features) {
+          if (feature.feature_type === FeatureType.CUSTOM_STRATEGIES) {
             usageRecords.push({
               subscription_id: subscription.subscription_id,
               user_id: data.user_id,
               feature_type: feature.feature_type,
               usage_count: 0,
-              period_start: period.start,
-              period_end: period.end,
+              period_start: current_period_start,
+              period_end: current_period_end,
             });
+          } else {
+            const monthlyPeriods = this.getMonthlyPeriods(current_period_start, current_period_end);
+            for (const period of monthlyPeriods) {
+              usageRecords.push({
+                subscription_id: subscription.subscription_id,
+                user_id: data.user_id,
+                feature_type: feature.feature_type,
+                usage_count: 0,
+                period_start: period.start,
+                period_end: period.end,
+              });
+            }
           }
         }
-        
+
         await tx.subscription_usage.createMany({
           data: usageRecords,
         });
@@ -414,6 +432,7 @@ export class SubscriptionsService {
     billing_provider?: string;
     plan_id?: string;
     auto_renew?: boolean;
+    external_id?: string;
   }) {
     return this.prisma.$transaction(async (tx) => {
       // 1️⃣ Get current subscription
@@ -433,6 +452,7 @@ export class SubscriptionsService {
         status: data.status,
         billing_provider: data.billing_provider,
         auto_renew: data.auto_renew ?? currentSubscription.auto_renew,
+        ...(data.external_id !== undefined && { external_id: data.external_id }),
       };
 
       if (data.plan_id && data.plan_id !== currentSubscription.plan_id) {
@@ -443,6 +463,25 @@ export class SubscriptionsService {
 
         if (!newPlan) {
           throw new Error('New plan not found');
+        }
+
+        // Elite → Pro downgrade: block if user has more than 5 custom strategies (Pro limit)
+        if (
+          currentSubscription.plan.tier === PlanTier.ELITE &&
+          newPlan.tier === PlanTier.PRO
+        ) {
+          const customCount = await tx.strategies.count({
+            where: {
+              user_id: currentSubscription.user_id,
+              type: 'user',
+            },
+          });
+          const proLimit = 5;
+          if (customCount > proLimit) {
+            throw new BadRequestException(
+              `Cannot downgrade to Pro: you have ${customCount} custom strategies. Pro plan allows maximum ${proLimit}. Delete ${customCount - proLimit} strategy(ies) first, then try again.`,
+            );
+          }
         }
 
         // 3️⃣ Recalculate billing dates for new plan
@@ -473,6 +512,7 @@ export class SubscriptionsService {
           current_period_end,
           next_billing_date: current_period_end,
           last_payment_date: now,
+          expires_at: current_period_end,
         };
 
         // 4️⃣ Update user tier
@@ -486,24 +526,55 @@ export class SubscriptionsService {
           where: { subscription_id: id },
         });
 
-        // 6️⃣ Create new subscription usage records for new plan features - MONTHLY BREAKDOWN
+        // 6️⃣ Create new subscription usage records: CUSTOM_STRATEGIES = 1 row with current strategy count (no reset); others = monthly breakdown
         if (newPlan.plan_features && newPlan.plan_features.length > 0) {
-          const monthlyPeriods = this.getMonthlyPeriods(updateData.current_period_start, updateData.current_period_end);
-          
-          const usageRecords = [];
-          for (const period of monthlyPeriods) {
-            for (const feature of newPlan.plan_features) {
+          const usageRecords: Array<{
+            subscription_id: string;
+            user_id: string;
+            feature_type: (typeof newPlan.plan_features)[0]['feature_type'];
+            usage_count: number;
+            period_start: Date;
+            period_end: Date;
+          }> = [];
+
+          let customStrategyCount = 0;
+          const hasCustomStrategiesFeature = newPlan.plan_features.some(
+            (f) => f.feature_type === FeatureType.CUSTOM_STRATEGIES,
+          );
+          if (hasCustomStrategiesFeature) {
+            customStrategyCount = await tx.strategies.count({
+              where: {
+                user_id: currentSubscription.user_id,
+                type: 'user',
+              },
+            });
+          }
+
+          for (const feature of newPlan.plan_features) {
+            if (feature.feature_type === FeatureType.CUSTOM_STRATEGIES) {
               usageRecords.push({
                 subscription_id: id,
                 user_id: currentSubscription.user_id,
                 feature_type: feature.feature_type,
-                usage_count: 0,
-                period_start: period.start,
-                period_end: period.end,
+                usage_count: customStrategyCount,
+                period_start: updateData.current_period_start,
+                period_end: updateData.current_period_end,
               });
+            } else {
+              const monthlyPeriods = this.getMonthlyPeriods(updateData.current_period_start, updateData.current_period_end);
+              for (const period of monthlyPeriods) {
+                usageRecords.push({
+                  subscription_id: id,
+                  user_id: currentSubscription.user_id,
+                  feature_type: feature.feature_type,
+                  usage_count: 0,
+                  period_start: period.start,
+                  period_end: period.end,
+                });
+              }
             }
           }
-          
+
           await tx.subscription_usage.createMany({
             data: usageRecords,
           });
@@ -530,6 +601,34 @@ export class SubscriptionsService {
     });
   }
 
+  /**
+   * Validate before checkout: Elite → Pro downgrade allowed only if user has ≤ 5 custom strategies.
+   * Call this before creating Stripe checkout session; throws if invalid.
+   */
+  async validateDowngradeToProBeforeCheckout(
+    userId: string,
+    newPlanId: string,
+  ): Promise<void> {
+    const newPlan = await this.prisma.subscription_plans.findUnique({
+      where: { plan_id: newPlanId },
+    });
+    if (!newPlan || newPlan.tier !== PlanTier.PRO) return;
+
+    const current = await this.getActiveSubscriptionWithFeatures(userId);
+    if (!current?.plan || current.plan.tier !== PlanTier.ELITE) return;
+
+    const customCount = await this.prisma.strategies.count({
+      where: { user_id: userId, type: 'user' },
+    });
+    const proLimit = 5;
+    if (customCount > proLimit) {
+      console.log("customCount", customCount);
+      throw new BadRequestException(
+        `Cannot switch to Pro: you have ${customCount} custom strategies. Pro allows maximum ${proLimit}. Delete ${customCount - proLimit} strategy(ies) first, then try again.`,
+      );
+    }
+    
+  }
 
   /**
  * Get active subscription with all features
@@ -584,6 +683,9 @@ export class SubscriptionsService {
     payment_provider?: string;
     external_payment_id?: string;
     payment_method?: string;
+    invoice_url?: string | null;
+    receipt_url?: string | null;
+    failure_reason?: string | null;
   }) {
     return this.prisma.payment_history.create({
       data: {
@@ -606,6 +708,94 @@ export class SubscriptionsService {
         auto_renew: false,
       },
     });
+  }
+
+  async cancelUserSubscription(userId: string, options?: {
+    subscriptionId?: string;
+    stripeCurrentPeriodEnd?: Date | null;
+    stripeSubscriptionId?: string;
+  }) {
+    const where: any = {
+      user_id: userId,
+      status: 'active',
+      billing_provider: 'stripe',
+    };
+
+    if (options?.subscriptionId) {
+      where.subscription_id = options.subscriptionId;
+    }
+
+    if (options?.stripeSubscriptionId) {
+      where.external_id = options.stripeSubscriptionId;
+    }
+
+    const active = await this.prisma.user_subscriptions.findFirst({
+      where,
+      orderBy: { created_at: 'desc' },
+    });
+
+    if (!active) {
+      throw new Error('No active Stripe subscription found for user');
+    }
+
+    const periodEnd =
+      options?.stripeCurrentPeriodEnd ??
+      active.current_period_end ??
+      active.expires_at ??
+      null;
+
+    const updated = await this.prisma.user_subscriptions.update({
+      where: { subscription_id: active.subscription_id },
+      data: {
+        auto_renew: false,
+        current_period_end: periodEnd,
+        expires_at: periodEnd,
+        status: active.status,
+      },
+    });
+
+    return updated;
+  }
+
+  async handleStripeSubscriptionCancelled(stripeSubscriptionId: string, stripeCurrentPeriodEnd?: Date | null) {
+    const existing = await this.prisma.user_subscriptions.findFirst({
+      where: {
+        external_id: stripeSubscriptionId,
+        billing_provider: 'stripe',
+      },
+    });
+
+    if (!existing) {
+      return null;
+    }
+
+    const now = new Date();
+    const finalPeriodEnd =
+      stripeCurrentPeriodEnd ??
+      existing.current_period_end ??
+      existing.expires_at ??
+      now;
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const subscription = await tx.user_subscriptions.update({
+        where: { subscription_id: existing.subscription_id },
+        data: {
+          status: SubscriptionStatus.cancelled,
+          cancelled_at: now,
+          expires_at: finalPeriodEnd,
+          auto_renew: false,
+        },
+      });
+
+      await tx.users.update({
+        where: { user_id: subscription.user_id },
+        data: { current_tier: PlanTier.FREE },
+      });
+
+      return subscription;
+    });
+
+    return updated;
   }
 
   async getMySubscription(userId: string) {

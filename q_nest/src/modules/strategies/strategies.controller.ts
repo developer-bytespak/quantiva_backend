@@ -764,12 +764,17 @@ export class StrategiesController {
 
     this.logger.log(`Created stock strategy ${strategy.strategy_id} for user ${user.sub}`);
 
-     await this.featureAccessService.incrementUsage(
-    req.subscriptionUser?.subscription_id,
-    req.subscriptionUser?.user_id,
-    FeatureType.CUSTOM_STRATEGIES,
-  );
-
+    const sub = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: user.sub, status: 'active' },
+      select: { subscription_id: true },
+    });
+    if (sub) {
+      await this.featureAccessService.incrementUsage(
+        sub.subscription_id,
+        user.sub,
+        FeatureType.CUSTOM_STRATEGIES,
+      );
+    }
 
     return {
       success: true,
@@ -820,12 +825,17 @@ export class StrategiesController {
 
     this.logger.log(`Created crypto strategy ${strategy.strategy_id} for user ${user.sub}`);
 
-    // Increment feature usage
-    await this.featureAccessService.incrementUsage(
-      req.subscriptionUser?.subscription_id,
-      req.subscriptionUser?.user_id,
-      FeatureType.CUSTOM_STRATEGIES,
-    );
+    const sub = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: user.sub, status: 'active' },
+      select: { subscription_id: true },
+    });
+    if (sub) {
+      await this.featureAccessService.incrementUsage(
+        sub.subscription_id,
+        user.sub,
+        FeatureType.CUSTOM_STRATEGIES,
+      );
+    }
 
     return {
       success: true,
@@ -1032,6 +1042,18 @@ export class StrategiesController {
     });
 
     this.logger.log(`Successfully deleted strategy ${strategyId} and all related data for user ${user.sub}`);
+
+    const subscription = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: user.sub, status: 'active' },
+      select: { subscription_id: true },
+    });
+    if (subscription) {
+      await this.featureAccessService.decrementUsage(
+        subscription.subscription_id,
+        user.sub,
+        FeatureType.CUSTOM_STRATEGIES,
+      );
+    }
 
     return {
       success: true,
