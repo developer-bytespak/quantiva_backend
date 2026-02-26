@@ -515,6 +515,7 @@ export class AlpacaService {
 
   /**
    * Get historical bars for a stock from Alpaca Data API using the user's credentials.
+   * Uses end=now and returns the last `limit` bars so charts (e.g. 8H) show latest data.
    */
   async getStockBars(
     apiKey: string,
@@ -527,17 +528,21 @@ export class AlpacaService {
     const sym = symbol.toUpperCase();
     const alpacaTf = this.mapDataApiTimeframe(timeframe);
     const start = this.calculateBarsStart(alpacaTf, limit);
+    const end = new Date();
+    const requestLimit = Math.min(10000, Math.max(limit, 500));
     const res = await client.get<{ bars?: Record<string, AlpacaBarDto[]> }>('/v2/stocks/bars', {
       params: {
         symbols: sym,
         timeframe: alpacaTf,
         start: start.toISOString(),
-        limit,
+        end: end.toISOString(),
+        limit: requestLimit,
         adjustment: 'split',
         feed: 'iex',
       },
     });
-    return res.data?.bars?.[sym] ?? [];
+    const bars = res.data?.bars?.[sym] ?? [];
+    return bars.length <= limit ? bars : bars.slice(-limit);
   }
 
   private mapDataApiTimeframe(tf: string): string {

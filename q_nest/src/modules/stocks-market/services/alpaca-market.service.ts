@@ -385,6 +385,11 @@ export class AlpacaMarketService {
       // Map timeframe to Alpaca format (handles both lowercase and already-formatted)
       const alpacaTimeframe = this.mapTimeframeToAlpaca(timeframe);
       const start = this.calculateStartDate(alpacaTimeframe.toLowerCase(), limit);
+      const end = new Date(); // End at "now" so we get bars up to the latest data
+
+      // Request more bars than needed so we can slice to the last `limit` (Alpaca returns
+      // bars in ascending order from start; without end we'd get the oldest bars in the range).
+      const requestLimit = Math.min(10000, Math.max(limit, 500));
 
       // Use multi-symbol endpoint for consistent response format
       const response = await this.apiClient.get<{
@@ -395,15 +400,17 @@ export class AlpacaMarketService {
           symbols: symbol.toUpperCase(),
           timeframe: alpacaTimeframe,
           start: start.toISOString(),
-          limit: limit,
+          end: end.toISOString(),
+          limit: requestLimit,
           adjustment: 'split', // Adjust for stock splits
           feed: 'iex',
         },
       });
 
-      // Multi-symbol endpoint returns { bars: { SYMBOL: [...] } }
+      // Multi-symbol endpoint returns { bars: { SYMBOL: [...] } } in ascending time order.
+      // Take the last `limit` bars so we return the most recent data (fixes 8H chart showing old data).
       const bars = response.data?.bars?.[symbol.toUpperCase()] || [];
-      return bars;
+      return bars.length <= limit ? bars : bars.slice(-limit);
     } catch (error: any) {
       this.logger.error(
         `Failed to fetch historical bars for ${symbol}: ${error?.message}`,
