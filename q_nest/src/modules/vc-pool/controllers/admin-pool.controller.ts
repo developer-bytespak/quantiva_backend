@@ -75,4 +75,12 @@ export class AdminPoolController {
   ) {
     return this.poolService.clonePool(admin.sub, id);
   }
+
+  @Put(':id/start')
+  async startPool(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.poolService.startPool(admin.sub, id);
+  }
 }
