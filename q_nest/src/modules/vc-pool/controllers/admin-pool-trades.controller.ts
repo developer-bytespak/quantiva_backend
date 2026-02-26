@@ -15,11 +15,21 @@ import { CurrentAdmin } from '../../admin-auth/decorators/current-admin.decorato
 import { AdminTokenPayload } from '../../admin-auth/services/admin-token.service';
 import { ManualTradeDto } from '../dto/manual-trade.dto';
 import { CloseTradeDto } from '../dto/close-trade.dto';
+import { ApplySignalDto } from '../dto/apply-signal.dto';
 
 @Controller('admin/pools')
 @UseGuards(AdminJwtAuthGuard)
 export class AdminPoolTradesController {
   constructor(private readonly tradingService: PoolTradingService) {}
+
+  @Post(':poolId/trades/from-signal')
+  async openTradeFromSignal(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+    @Body() dto: ApplySignalDto,
+  ) {
+    return this.tradingService.openTradeFromSignal(admin.sub, poolId, dto.signal_id);
+  }
 
   @Post(':poolId/trades')
   async openTrade(

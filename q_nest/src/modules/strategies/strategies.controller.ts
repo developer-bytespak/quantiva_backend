@@ -12,6 +12,7 @@ import { CustomStrategyCronjobService } from './services/custom-strategy-cronjob
 import { NewsCronjobService } from '../news/news-cronjob.service';
 import { NewsService } from '../news/news.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { AdminOrUserJwtGuard } from '../admin-auth/guards/admin-or-user-jwt.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TierAccessGuard } from '../../common/guards/tier-access.guard';
 import { AllowTier } from '../../common/decorators/allow-tier.decorator';
@@ -60,10 +61,12 @@ export class StrategiesController {
 
   // Move specific routes BEFORE the generic :id route
   /**
-   * Get all pre-built strategies (admin type)
-   * @param asset_type Optional filter: 'crypto' | 'stock'
+   * Get all pre-built strategies (admin type).
+   * Allowed: admin JWT or user JWT (PRO/ELITE). Same as Top Trades.
    * Endpoint: GET /strategies/pre-built?asset_type=crypto
    */
+  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
+  @AllowTier('PRO', 'ELITE')
   @Get('pre-built')
   getPreBuiltStrategies(@Query('asset_type') assetType?: 'crypto' | 'stock') {
     return this.preBuiltStrategiesService.getPreBuiltStrategies(assetType);
@@ -86,9 +89,12 @@ export class StrategiesController {
   }
 
   /**
-   * Get trending assets with AI insights for top 2 per strategy
+   * Get trending assets with AI insights for top 2 per strategy.
+   * Allowed: admin JWT or user JWT (PRO/ELITE).
    * Endpoint: GET /strategies/pre-built/:id/trending-with-insights
    */
+  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
+  @AllowTier('PRO', 'ELITE')
   @Get('pre-built/:id/trending-with-insights')
   async getTrendingAssetsWithInsights(
     @Param('id') strategyId: string,
@@ -296,6 +302,11 @@ export class StrategiesController {
     }
   }
 
+  /**
+   * Get signals for a pre-built strategy. Allowed: admin JWT or user JWT (PRO/ELITE).
+   */
+  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
+  @AllowTier('PRO', 'ELITE')
   @Get('pre-built/:id/signals')
   async getPreBuiltStrategySignals(
     @Param('id') id: string,

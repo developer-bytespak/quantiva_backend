@@ -10,6 +10,7 @@ import { AdminSessionService } from './services/admin-session.service';
 import { AdminSettingsService } from './services/admin-settings.service';
 import { AdminJwtStrategy } from './strategies/admin-jwt.strategy';
 import { AdminJwtAuthGuard } from './guards/admin-jwt-auth.guard';
+import { AdminOrUserJwtGuard } from './guards/admin-or-user-jwt.guard';
 import { PrismaModule } from '../../prisma/prisma.module';
 
 @Module({
@@ -38,12 +39,14 @@ import { PrismaModule } from '../../prisma/prisma.module';
     AdminSettingsService,
     AdminJwtStrategy,
     AdminJwtAuthGuard,
+    AdminOrUserJwtGuard,
   ],
   exports: [
     AdminAuthService,
     AdminTokenService,
     AdminSessionService,
     AdminJwtAuthGuard,
+    AdminOrUserJwtGuard,
   ],
 })
 export class AdminAuthModule {}
