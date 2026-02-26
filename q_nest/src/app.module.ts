@@ -3,6 +3,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from './prisma/prisma.module';
 import { ConfigModule } from './config/config.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { AdminAuthModule } from './modules/admin-auth/admin-auth.module';
 import { SubscriptionLoaderMiddleware } from './common/middleware/subscription-loader.middleware';
 import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 import { KycModule } from './kyc/kyc.module';
@@ -20,6 +21,7 @@ import { StrategiesModule } from './modules/strategies/strategies.module';
 import { AiInsightsModule } from './ai-insights/ai-insights.module';
 import { TaskSchedulerModule } from './task-scheduler/task-scheduler.module';
 import { PortfolioModule } from './modules/portfolio/portfolio.module';
+import { VcPoolModule } from './modules/vc-pool/vc-pool.module';
 import { PaperTradingGateway } from './gateways/paper-trading.gateway';
 import { MarketDetailGateway } from './gateways/market-detail.gateway';
 
@@ -29,6 +31,7 @@ import { MarketDetailGateway } from './gateways/market-detail.gateway';
     PrismaModule,
     ScheduleModule.forRoot(),
     AuthModule,
+    AdminAuthModule,
 
     KycModule,
     ExchangesModule,
@@ -45,6 +48,7 @@ import { MarketDetailGateway } from './gateways/market-detail.gateway';
     AiInsightsModule,
     TaskSchedulerModule,
     PortfolioModule,
+    VcPoolModule,
     SubscriptionsModule,
   ],
   controllers: [],
