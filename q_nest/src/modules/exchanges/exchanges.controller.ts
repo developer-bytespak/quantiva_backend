@@ -72,7 +72,10 @@ export class ExchangesController {
   }
 
   @Get('connections/active')
-  async getActiveConnection(@CurrentUser() user: TokenPayload) {
+  async getActiveConnection(
+    @CurrentUser() user: TokenPayload,
+    @Query('type') type?: 'crypto' | 'stocks',
+  ) {
     try {
       if (!user || !user.sub) {
         throw new HttpException(
@@ -84,9 +87,20 @@ export class ExchangesController {
         );
       }
 
-      const connection = await this.exchangesService.getActiveConnection(user.sub);
-      
-      // Ensure the response is properly serialized
+      const connection = type
+        ? await this.exchangesService.getActiveConnectionByType(user.sub, type)
+        : await this.exchangesService.getActiveConnection(user.sub);
+
+      if (!connection) {
+        throw new HttpException(
+          {
+            code: 'NOT_FOUND',
+            message: `No active ${type || ''} connection found`,
+          },
+          HttpStatus.NOT_FOUND,
+        );
+      }
+
       return {
         success: true,
         data: connection,
@@ -221,8 +235,12 @@ export class ExchangesController {
           HttpStatus.UNAUTHORIZED,
         );
       }
-      // Replace any existing active connection (don't use getActiveConnection - it throws when none exists)
-      const existingConnection = await this.exchangesService.getActiveConnectionOrNull(user.sub);
+      // Replace any existing active connection for the SAME exchange type (crypto or stocks),
+      // but keep connections of other types so "Both" accounts can have crypto + stocks.
+      const existingConnection = await this.exchangesService.getActiveConnectionByType(
+        user.sub,
+        exchange.type as 'crypto' | 'stocks',
+      );
       if (existingConnection) {
         await this.exchangesService.deleteConnection(existingConnection.connection_id);
       }

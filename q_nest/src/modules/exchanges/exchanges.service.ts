@@ -169,6 +169,37 @@ export class ExchangesService {
     };
   }
 
+  /**
+   * Returns the user's active connection for a specific exchange type, or null.
+   */
+  async getActiveConnectionByType(userId: string, type: 'crypto' | 'stocks'): Promise<{
+    connection_id: string;
+    exchange: { exchange_id: string; name: string; type: string; supports_oauth: boolean; created_at: string | null };
+    status: string;
+  } | null> {
+    const connection = await this.prisma.user_exchange_connections.findFirst({
+      where: {
+        user_id: userId,
+        status: ConnectionStatus.active,
+        exchange: { type: type as ExchangeType },
+      },
+      include: { exchange: true },
+      orderBy: { created_at: 'desc' },
+    });
+    if (!connection || !connection.exchange) return null;
+    return {
+      connection_id: connection.connection_id,
+      exchange: {
+        exchange_id: connection.exchange.exchange_id,
+        name: connection.exchange.name,
+        type: connection.exchange.type,
+        supports_oauth: connection.exchange.supports_oauth,
+        created_at: connection.exchange.created_at?.toISOString() || null,
+      },
+      status: connection.status,
+    };
+  }
+
   async getActiveConnection(userId: string) {
     try {
       this.logger.debug(`Fetching active connection for user: ${userId}`);
