@@ -75,10 +75,15 @@ export class FeatureAccessService {
 
     // Check usage limits
     if (feature.limit_value !== null && feature.limit_value > 0) {
-      const usage = await this.getFeatureUsage(
-        subscription.subscription_id,
-        featureType,
-      );
+      const usage =
+        featureType === FeatureType.CUSTOM_STRATEGIES
+          ? await this.prisma.strategies.count({
+              where: { user_id: userId, type: 'user' },
+            })
+          : await this.getFeatureUsage(
+              subscription.subscription_id,
+              featureType,
+            );
 
       const remaining = Math.max(0, feature.limit_value - usage);
 
@@ -109,12 +114,24 @@ export class FeatureAccessService {
   }
 
   /**
-   * Get current usage count for a feature
+   * Get current usage count for a feature.
+   * For CUSTOM_STRATEGIES returns actual count of user's custom strategies (no period reset).
    */
   async getFeatureUsage(
     subscriptionId: string,
     featureType: FeatureType,
   ): Promise<number> {
+    if (featureType === FeatureType.CUSTOM_STRATEGIES) {
+      const subscription = await this.prisma.user_subscriptions.findUnique({
+        where: { subscription_id: subscriptionId },
+        select: { user_id: true },
+      });
+      if (!subscription) return 0;
+      return this.prisma.strategies.count({
+        where: { user_id: subscription.user_id, type: 'user' },
+      });
+    }
+
     const subscription = await this.prisma.user_subscriptions.findUnique({
       where: { subscription_id: subscriptionId },
       select: { current_period_start: true },
@@ -180,6 +197,48 @@ export class FeatureAccessService {
         period_start: periodStart,
         period_end: periodEnd,
       },
+    });
+  }
+
+  /**
+   * Decrement feature usage (e.g. when user deletes a custom strategy).
+   * Keeps usage_count in subscription_usage in sync; never goes below 0.
+   */
+  async decrementUsage(
+    subscriptionId: string,
+    userId: string,
+    featureType: FeatureType,
+  ): Promise<void> {
+    const subscription = await this.prisma.user_subscriptions.findUnique({
+      where: { subscription_id: subscriptionId },
+      select: { current_period_start: true },
+    });
+
+    if (!subscription?.current_period_start) return;
+
+    const periodStart = subscription.current_period_start;
+    const usage = await this.prisma.subscription_usage.findUnique({
+      where: {
+        subscription_id_feature_type_period_start: {
+          subscription_id: subscriptionId,
+          feature_type: featureType,
+          period_start: periodStart,
+        },
+      },
+    });
+
+    if (!usage) return;
+
+    const newCount = Math.max(0, (usage.usage_count || 0) - 1);
+    await this.prisma.subscription_usage.update({
+      where: {
+        subscription_id_feature_type_period_start: {
+          subscription_id: subscriptionId,
+          feature_type: featureType,
+          period_start: periodStart,
+        },
+      },
+      data: { usage_count: newCount, updated_at: new Date() },
     });
   }
 

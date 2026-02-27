@@ -6,6 +6,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { AdminAuthModule } from './modules/admin-auth/admin-auth.module';
 import { SubscriptionLoaderMiddleware } from './common/middleware/subscription-loader.middleware';
 import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
+import { StripeModule } from './modules/stripe/stripe.module';
 import { KycModule } from './kyc/kyc.module';
 import { ExchangesModule } from './modules/exchanges/exchanges.module';
 import { BinanceTestnetModule } from './modules/binance-testnet/binance-testnet.module';
@@ -50,6 +51,7 @@ import { MarketDetailGateway } from './gateways/market-detail.gateway';
     PortfolioModule,
     VcPoolModule,
     SubscriptionsModule,
+    StripeModule,
   ],
   controllers: [],
   providers: [PaperTradingGateway, MarketDetailGateway],

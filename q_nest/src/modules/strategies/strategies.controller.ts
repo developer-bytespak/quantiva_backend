@@ -678,7 +678,7 @@ export class StrategiesController {
         whereClause.asset_type = assetType;
       }
 
-      const strategies = await this.prisma.strategies.findMany({
+      let strategies = await this.prisma.strategies.findMany({
         where: whereClause,
         include: {
           signals: {
@@ -691,6 +691,30 @@ export class StrategiesController {
         },
         orderBy: { created_at: 'desc' },
       });
+
+      // PRO: only top 5 active strategies (is_active true, oldest first); ELITE: all
+      const subscription = await this.prisma.user_subscriptions.findFirst({
+        where: { user_id: user.sub, status: 'active' },
+        include: { plan: { include: { plan_features: true } } },
+      });
+      let tier: string | undefined = subscription?.plan?.tier;
+      if (tier == null) {
+        const u = await this.prisma.users.findUnique({
+          where: { user_id: user.sub },
+          select: { current_tier: true },
+        });
+        tier = u?.current_tier ?? undefined;
+      }
+      const tierUpper = typeof tier === 'string' ? tier.toUpperCase() : '';
+      if (tierUpper === 'PRO') {
+        const activeOnly = strategies
+        const sortedByCreatedAsc = [...activeOnly].sort(
+          (a, b) =>
+            new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+        );
+        strategies = sortedByCreatedAsc.slice(0, 5);
+      }
+      // ELITE or other: strategies unchanged (all)
 
       // Calculate performance metrics for each strategy
       const strategiesWithMetrics = await Promise.all(
@@ -783,12 +807,17 @@ export class StrategiesController {
 
     this.logger.log(`Created stock strategy ${strategy.strategy_id} for user ${user.sub}`);
 
-     await this.featureAccessService.incrementUsage(
-    req.subscriptionUser?.subscription_id,
-    req.subscriptionUser?.user_id,
-    FeatureType.CUSTOM_STRATEGIES,
-  );
-
+    const sub = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: user.sub, status: 'active' },
+      select: { subscription_id: true },
+    });
+    if (sub) {
+      await this.featureAccessService.incrementUsage(
+        sub.subscription_id,
+        user.sub,
+        FeatureType.CUSTOM_STRATEGIES,
+      );
+    }
 
     return {
       success: true,
@@ -839,12 +868,17 @@ export class StrategiesController {
 
     this.logger.log(`Created crypto strategy ${strategy.strategy_id} for user ${user.sub}`);
 
-    // Increment feature usage
-    await this.featureAccessService.incrementUsage(
-      req.subscriptionUser?.subscription_id,
-      req.subscriptionUser?.user_id,
-      FeatureType.CUSTOM_STRATEGIES,
-    );
+    const sub = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: user.sub, status: 'active' },
+      select: { subscription_id: true },
+    });
+    if (sub) {
+      await this.featureAccessService.incrementUsage(
+        sub.subscription_id,
+        user.sub,
+        FeatureType.CUSTOM_STRATEGIES,
+      );
+    }
 
     return {
       success: true,
@@ -1052,6 +1086,18 @@ export class StrategiesController {
 
     this.logger.log(`Successfully deleted strategy ${strategyId} and all related data for user ${user.sub}`);
 
+    const subscription = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: user.sub, status: 'active' },
+      select: { subscription_id: true },
+    });
+    if (subscription) {
+      await this.featureAccessService.decrementUsage(
+        subscription.subscription_id,
+        user.sub,
+        FeatureType.CUSTOM_STRATEGIES,
+      );
+    }
+
     return {
       success: true,
       message: 'Strategy and all related data deleted successfully',
@@ -1143,13 +1189,12 @@ export class StrategiesController {
     }
 
     this.logger.log(`Starting immediate signal generation for ${assets.length} assets`);
-    
-    // Ensure strategy is active
+
+    // Block generation if strategy is inactive (e.g. PRO plan limit)
     if (!strategy.is_active) {
-      await this.prisma.strategies.update({
-        where: { strategy_id: strategyId },
-        data: { is_active: true },
-      });
+      throw new BadRequestException(
+        'this strategy is inactive. Activate the strategy first or upgrade your plan.',
+      );
     }
 
     // Generate signals immediately using StrategyExecutionService
@@ -2142,6 +2187,13 @@ export class StrategiesController {
     const strategy = await this.strategiesService.findOne(id);
     if (!strategy) {
       throw new NotFoundException(`Strategy ${id} not found`);
+    }
+
+    // Block generation if strategy is inactive
+    if (!strategy.is_active) {
+      throw new BadRequestException(
+        'Cannot generate signals: this strategy is inactive. Activate the strategy first or upgrade your plan.',
+      );
     }
 
     // Get asset IDs

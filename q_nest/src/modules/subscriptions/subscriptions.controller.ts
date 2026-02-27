@@ -40,15 +40,21 @@ export class SubscriptionsController {
   @Put('update')
   updateSubscription(@Req() req:any, @Body() updateSubscriptionDto: any) {
     const id =  req.subscriptionUser?.subscription_id;
-    // return {
-    //   message: `chala hy updated successfully `,
-    //   subscriptionId: id,
-    //   updateData: updateSubscriptionDto,
-    // }
+    const tier = req.subscriptionUser?.tier;
+
     if(!id) {
       throw new BadRequestException('Subscription ID is required to update subscription');
     }
-    
+
+    // User must cancel current PRO/ELITE subscription before updating
+    if (tier === 'PRO' || tier === 'ELITE') {
+      throw new BadRequestException(
+        'Cancel your current subscription.',
+      );
+    }
+
+    console.log("updateSubscriptionDto", updateSubscriptionDto);
+
     return this.subscriptionsService.updateSubscription(id, updateSubscriptionDto);
   }
 
