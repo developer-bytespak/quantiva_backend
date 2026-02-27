@@ -16,6 +16,7 @@ import { memoryStorage } from 'multer';
 import { PoolManagementService } from '../services/pool-management.service';
 import { SeatReservationService } from '../services/seat-reservation.service';
 import { ScreenshotUploadService } from '../services/screenshot-upload.service';
+import { PoolCancellationService } from '../services/pool-cancellation.service';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { TierAccessGuard } from '../../../common/guards/tier-access.guard';
 import { AllowTier } from '../../../common/decorators/allow-tier.decorator';
@@ -42,6 +43,7 @@ export class UserPoolController {
     private readonly poolService: PoolManagementService,
     private readonly seatService: SeatReservationService,
     private readonly screenshotService: ScreenshotUploadService,
+    private readonly cancellationService: PoolCancellationService,
   ) {}
 
   @Get('available')
@@ -54,6 +56,12 @@ export class UserPoolController {
       page: page ? parseInt(page, 10) : undefined,
       limit: limit ? parseInt(limit, 10) : undefined,
     });
+  }
+
+  @Get('my-pools')
+  @AllowTier('ELITE')
+  async getMyPools(@CurrentUser() user: TokenPayload) {
+    return this.cancellationService.getMyPools(user.sub);
   }
 
   @Get(':id')
@@ -93,5 +101,23 @@ export class UserPoolController {
       throw new BadRequestException('Screenshot file is required');
     }
     return this.screenshotService.uploadScreenshot(user.sub, id, file);
+  }
+
+  @Post(':id/cancel-membership')
+  @AllowTier('ELITE')
+  async cancelMembership(
+    @CurrentUser() user: TokenPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.cancellationService.requestCancellation(user.sub, id);
+  }
+
+  @Get(':id/my-cancellation')
+  @AllowTier('ELITE')
+  async getMyCancellation(
+    @CurrentUser() user: TokenPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.cancellationService.getMyCancellation(user.sub, id);
   }
 }
