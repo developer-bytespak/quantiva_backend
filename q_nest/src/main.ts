@@ -58,41 +58,41 @@ async function bootstrap() {
     allowedOrigins.add('http://127.0.0.1:3001');
   }
 
-  // app.enableCors({
-  //   origin: (origin, callback) => {
-  //     // Allow non-browser requests (no origin)
-  //     if (!origin) return callback(null, true);
-  //     // If origin exactly matches an allowed origin, allow it
-  //     if (allowedOrigins.has(origin)) return callback(null, true);
-  //     // Allow Vercel preview/deploy domains (they vary per preview deployment).
-  //     // This accepts any origin that ends with .vercel.app (e.g. preview deploys).
-  //     try {
-  //       const lower = String(origin).toLowerCase();
-  //       if (lower.endsWith('.vercel.app')) return callback(null, true);
-  //     } catch (err) {
-  //       // ignore and continue to deny
-  //     }
-  //     // As a last resort, if NODE_ENV is not production allow (useful for unknown preview URLs)
-  //     if (process.env.NODE_ENV !== 'production') return callback(null, true);
-  //     // Do not throw an error here (that causes a 500 for preflight). Instead, deny CORS
-  //     // by returning false and log the rejected origin so you can add it to FRONTEND_URLS.
-  //     console.warn(`CORS: rejecting origin ${origin}`);
-  //     return callback(null, false);
-  //   },
-  //   credentials: true,
-  //   allowedHeaders: ['Content-Type', 'Authorization', 'x-device-id'],
-  //   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  // });
-
   app.enableCors({
-    origin: [
-      'http://localhost:3001',
-      'http://127.0.0.1:3001',
-    ],
+    origin: (origin, callback) => {
+      // Allow non-browser requests (no origin)
+      if (!origin) return callback(null, true);
+      // If origin exactly matches an allowed origin, allow it
+      if (allowedOrigins.has(origin)) return callback(null, true);
+      // Allow Vercel preview/deploy domains (they vary per preview deployment).
+      // This accepts any origin that ends with .vercel.app (e.g. preview deploys).
+      try {
+        const lower = String(origin).toLowerCase();
+        if (lower.endsWith('.vercel.app')) return callback(null, true);
+      } catch (err) {
+        // ignore and continue to deny
+      }
+      // As a last resort, if NODE_ENV is not production allow (useful for unknown preview URLs)
+      if (process.env.NODE_ENV !== 'production') return callback(null, true);
+      // Do not throw an error here (that causes a 500 for preflight). Instead, deny CORS
+      // by returning false and log the rejected origin so you can add it to FRONTEND_URLS.
+      console.warn(`CORS: rejecting origin ${origin}`);
+      return callback(null, false);
+    },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-device-id'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });
+
+  // app.enableCors({
+  //   origin: [
+  //     'http://localhost:3001',
+  //     'http://127.0.0.1:3001',
+  //   ],
+  //   credentials: true,
+  //   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  //   allowedHeaders: ['Content-Type', 'Authorization', 'x-device-id'],
+  // });
 
   // Cookie parser middleware
   app.use(cookieParser());
