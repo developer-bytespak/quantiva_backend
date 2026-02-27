@@ -35,6 +35,11 @@ export class TierAccessGuard implements CanActivate {
       throw new ForbiddenException('Authentication required');
     }
 
+    // Admin JWT (from AdminOrUserJwtGuard) bypasses tier check
+    if (request.user.role === 'admin') {
+      return true;
+    }
+
     const userId = request.user.sub;
     const userTier = await this.featureAccessService.getUserTier(userId);
 

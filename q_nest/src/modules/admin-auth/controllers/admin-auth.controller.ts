@@ -24,6 +24,7 @@ import {
   UpdateBinanceSettingsDto,
   UpdateFeeSettingsDto,
 } from '../dto/update-admin-settings.dto';
+
 @Controller('admin')
 export class AdminAuthController {
   constructor(
@@ -211,7 +212,4 @@ export class AdminAuthController {
   async getMe(@CurrentAdmin() admin: AdminTokenPayload) {
     return this.adminAuthService.getAdminById(admin.sub);
   }
-
-  // ── Temporary test helpers (remove before production) ──
-
 }

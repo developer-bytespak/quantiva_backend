@@ -379,6 +379,63 @@ export class PoolManagementService {
     };
   }
 
+  // ── Admin: Start Pool (full → active) ──
+
+  async startPool(adminId: string, poolId: string) {
+    const pool = await this.findPoolOrFail(poolId);
+
+    if (pool.admin_id !== adminId) {
+      throw new ForbiddenException('You do not own this pool');
+    }
+
+    if (pool.status !== POOL_STATUS.full) {
+      throw new BadRequestException('Only full pools can be started');
+    }
+
+    if (pool.verified_members_count < pool.max_members) {
+      throw new BadRequestException('Pool does not have all members verified yet');
+    }
+
+    const members = await this.prisma.vc_pool_members.findMany({
+      where: { pool_id: poolId, is_active: true },
+      select: { member_id: true, invested_amount_usdt: true },
+    });
+
+    const totalInvested = members.reduce(
+      (sum, m) => sum + Number(m.invested_amount_usdt),
+      0,
+    );
+
+    const endDate = new Date();
+    endDate.setDate(endDate.getDate() + pool.duration_days);
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // Calculate and set share_percent for each member
+      for (const member of members) {
+        const share = (Number(member.invested_amount_usdt) / totalInvested) * 100;
+        await tx.vc_pool_members.update({
+          where: { member_id: member.member_id },
+          data: { share_percent: share },
+        });
+      }
+
+      return tx.vc_pools.update({
+        where: { pool_id: poolId },
+        data: {
+          status: POOL_STATUS.active as any,
+          started_at: new Date(),
+          end_date: endDate,
+          total_invested_usdt: totalInvested,
+          current_pool_value_usdt: totalInvested,
+          total_profit_usdt: 0,
+        },
+      });
+    });
+
+    this.logger.log(`Pool ${poolId} started (full → active) by admin ${adminId}`);
+    return updated;
+  }
+
   // ── Helpers ──
 
   private async findPoolOrFail(poolId: string) {
