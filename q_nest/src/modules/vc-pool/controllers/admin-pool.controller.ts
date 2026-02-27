@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Put,
+  Delete,
   Body,
   Param,
   Query,
@@ -90,6 +91,14 @@ export class AdminPoolController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.poolService.startPool(admin.sub, id);
+  }
+
+  @Delete(':id')
+  async deletePool(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.poolService.deletePool(admin.sub, id);
   }
 
   @Get(':id/cancellations')

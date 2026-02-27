@@ -182,6 +182,28 @@ export class PoolManagementService {
     return clone;
   }
 
+  // ── Admin: Delete Pool (soft delete: draft only) ──
+
+  async deletePool(adminId: string, poolId: string) {
+    const pool = await this.findPoolOrFail(poolId);
+
+    if (pool.admin_id !== adminId) {
+      throw new ForbiddenException('You do not own this pool');
+    }
+
+    if (pool.status !== POOL_STATUS.draft) {
+      throw new BadRequestException('Only draft pools can be deleted');
+    }
+
+    await this.prisma.vc_pools.update({
+      where: { pool_id: poolId },
+      data: { is_archived: true, status: POOL_STATUS.cancelled },
+    });
+
+    this.logger.log(`Pool ${poolId} deleted (archived) by admin ${adminId}`);
+    return { message: 'Pool deleted successfully' };
+  }
+
   // ── Admin: List Pools ──
 
   async listAdminPools(
