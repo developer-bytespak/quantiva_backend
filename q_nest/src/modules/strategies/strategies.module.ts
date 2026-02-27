@@ -1,5 +1,8 @@
 import { Module, forwardRef } from '@nestjs/common';
+import { JwtModule } from '@nestjs/jwt';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 import { StrategiesController } from './strategies.controller';
 import { StrategiesService } from './strategies.service';
 import { StrategyValidationService } from './services/strategy-validation.service';
@@ -26,7 +29,30 @@ import { FeatureAccessService } from '../../common/feature-access.service';
 import { TierAccessGuard } from '../../common/guards/tier-access.guard';
 
 @Module({
-  imports: [PrismaModule, KycModule, forwardRef(() => SignalsModule), NewsModule, forwardRef(() => ExchangesModule), BinanceModule, ScheduleModule, AiInsightsModule, StocksMarketModule],
+  imports: [
+    PrismaModule,
+    AdminAuthModule,
+    KycModule,
+    forwardRef(() => SignalsModule),
+    NewsModule,
+    forwardRef(() => ExchangesModule),
+    BinanceModule,
+    ScheduleModule,
+    AiInsightsModule,
+    StocksMarketModule,
+    ConfigModule,
+    JwtModule.registerAsync({
+      imports: [ConfigModule],
+      useFactory: async (configService: ConfigService) => {
+        const jwtConfig = configService.get('jwt');
+        return {
+          secret: jwtConfig.secret,
+          signOptions: { expiresIn: jwtConfig.accessTokenExpiry },
+        };
+      },
+      inject: [ConfigService],
+    }),
+  ],
   controllers: [StrategiesController],
   providers: [
     TierAccessGuard,

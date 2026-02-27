@@ -14,6 +14,8 @@ import { ScreenshotUploadService } from './services/screenshot-upload.service';
 import { PaymentReviewService } from './services/payment-review.service';
 import { PoolTradingService } from './services/pool-trading.service';
 import { PoolValueService } from './services/pool-value.service';
+import { PoolCancellationService } from './services/pool-cancellation.service';
+import { PoolPayoutService } from './services/pool-payout.service';
 import { SeatExpiryScheduler } from './schedulers/seat-expiry.scheduler';
 import { PoolValueUpdateScheduler } from './schedulers/pool-value-update.scheduler';
 import { FeatureAccessService } from '../../common/feature-access.service';
@@ -34,6 +36,8 @@ import { TierAccessGuard } from '../../common/guards/tier-access.guard';
     PaymentReviewService,
     PoolTradingService,
     PoolValueService,
+    PoolCancellationService,
+    PoolPayoutService,
     SeatExpiryScheduler,
     PoolValueUpdateScheduler,
     FeatureAccessService,

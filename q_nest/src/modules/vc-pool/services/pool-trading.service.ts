@@ -42,6 +42,88 @@ export class PoolTradingService {
     return trade;
   }
 
+  /**
+   * Create a pool trade from a strategy signal (Top Trades–style apply to pool).
+   * Only crypto signals are supported (VC pool value uses Binance).
+   */
+  async openTradeFromSignal(
+    adminId: string,
+    poolId: string,
+    signalId: string,
+  ) {
+    await this.validateActivePool(adminId, poolId);
+
+    const signal = await this.prisma.strategy_signals.findUnique({
+      where: { signal_id: signalId },
+      include: {
+        asset: true,
+        details: {
+          orderBy: { created_at: 'desc' },
+          take: 1,
+        },
+      },
+    });
+
+    if (!signal) {
+      throw new NotFoundException('Signal not found');
+    }
+
+    if (signal.action === 'HOLD') {
+      throw new BadRequestException(
+        'Cannot apply HOLD signal as a trade. Only BUY or SELL signals can be applied.',
+      );
+    }
+
+    if (!signal.asset?.symbol) {
+      throw new BadRequestException('Signal has no asset or symbol');
+    }
+
+    const assetType = (signal.asset?.asset_type || '').toLowerCase();
+    if (assetType === 'stock') {
+      throw new BadRequestException(
+        'Only crypto signals can be applied to VC pools. Stock signals are not supported.',
+      );
+    }
+
+    const detail = signal.details?.[0];
+    if (!detail?.entry_price || detail.entry_price == null) {
+      throw new BadRequestException(
+        'Signal has no entry price. Apply a signal that includes trade details.',
+      );
+    }
+    if (!detail?.position_size || Number(detail.position_size) <= 0) {
+      throw new BadRequestException(
+        'Signal has no valid position size. Apply a signal that includes trade details.',
+      );
+    }
+
+    const symbol = signal.asset.symbol.trim().toUpperCase();
+    const assetPair = symbol.endsWith('USDT') ? symbol : `${symbol}USDT`;
+    const quantity = Number(detail.position_size);
+    const entryPrice = Number(detail.entry_price);
+
+    const trade = await this.prisma.vc_pool_trades.create({
+      data: {
+        pool_id: poolId,
+        admin_id: adminId,
+        strategy_id: signal.strategy_id || null,
+        asset_pair: assetPair,
+        action: signal.action as any,
+        quantity,
+        entry_price_usdt: entryPrice,
+        notes: `Applied from signal ${signalId}`,
+        is_open: true,
+        traded_at: new Date(),
+      },
+    });
+
+    this.logger.log(
+      `Trade ${trade.trade_id} opened from signal ${signalId}: ${signal.action} ${quantity} ${assetPair} @ ${entryPrice}`,
+    );
+
+    return trade;
+  }
+
   async closeTrade(
     adminId: string,
     poolId: string,
