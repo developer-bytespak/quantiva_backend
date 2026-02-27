@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SubscriptionStatus } from '@prisma/client';
+import { cursorTo } from 'readline';
 
 export enum PlanTier {
   FREE = 'FREE',
@@ -421,6 +422,35 @@ export class SubscriptionsService {
         await tx.subscription_usage.createMany({
           data: usageRecords,
         });
+
+        // FREE → PRO: top N strategies active, rest inactive (N = plan CUSTOM_STRATEGIES limit, default 5)
+        if (plan.tier === PlanTier.PRO) {
+          const proLimit =
+            plan.plan_features?.find(
+              (f) => f.feature_type === FeatureType.CUSTOM_STRATEGIES,
+            )?.limit_value ?? 5;
+          const rows = await tx.strategies.findMany({
+            where: { user_id: data.user_id, type: 'user' },
+            orderBy: { created_at: 'asc' },
+            select: { strategy_id: true },
+          });
+          const idsToKeepActive = rows
+            .slice(0, proLimit)
+            .map((r) => r.strategy_id);
+          const idsToDeactivate = rows.slice(proLimit).map((r) => r.strategy_id);
+          if (idsToKeepActive.length > 0) {
+            await tx.strategies.updateMany({
+              where: { strategy_id: { in: idsToKeepActive } },
+              data: { is_active: true },
+            });
+          }
+          if (idsToDeactivate.length > 0) {
+            await tx.strategies.updateMany({
+              where: { strategy_id: { in: idsToDeactivate } },
+              data: { is_active: false },
+            });
+          }
+        }
       }
       return subscription;
     }, { timeout: 30000 });
@@ -465,24 +495,14 @@ export class SubscriptionsService {
           throw new Error('New plan not found');
         }
 
-        // Elite → Pro downgrade: block if user has more than 5 custom strategies (Pro limit)
-        if (
-          currentSubscription.plan.tier === PlanTier.ELITE &&
-          newPlan.tier === PlanTier.PRO
-        ) {
-          const customCount = await tx.strategies.count({
-            where: {
-              user_id: currentSubscription.user_id,
-              type: 'user',
-            },
-          });
-          const proLimit = 5;
-          if (customCount > proLimit) {
-            throw new BadRequestException(
-              `Cannot downgrade to Pro: you have ${customCount} custom strategies. Pro plan allows maximum ${proLimit}. Delete ${customCount - proLimit} strategy(ies) first, then try again.`,
-            );
-          }
-        }
+        // PRO limit from plan_features (CUSTOM_STRATEGIES limit_value; default 5)
+        const customStrategiesFeature = newPlan.plan_features?.find(
+          (f) => f.feature_type === FeatureType.CUSTOM_STRATEGIES,
+        );
+        const proCustomStrategyLimit =
+          customStrategiesFeature?.limit_value ?? 5;
+
+        // Elite → Pro: allow downgrade; updateSubscription will set top N active, rest inactive
 
         // 3️⃣ Recalculate billing dates for new plan
         const now = new Date();
@@ -552,11 +572,17 @@ export class SubscriptionsService {
 
           for (const feature of newPlan.plan_features) {
             if (feature.feature_type === FeatureType.CUSTOM_STRATEGIES) {
+              const usageCount =
+                newPlan.tier === PlanTier.ELITE
+                  ? customStrategyCount
+                  : newPlan.tier === PlanTier.PRO
+                    ? Math.min(customStrategyCount, proCustomStrategyLimit)
+                    : customStrategyCount;
               usageRecords.push({
                 subscription_id: id,
                 user_id: currentSubscription.user_id,
                 feature_type: feature.feature_type,
-                usage_count: customStrategyCount,
+                usage_count: usageCount,
                 period_start: updateData.current_period_start,
                 period_end: updateData.current_period_end,
               });
@@ -578,6 +604,36 @@ export class SubscriptionsService {
           await tx.subscription_usage.createMany({
             data: usageRecords,
           });
+
+          // PRO (FREE→PRO or ELITE→PRO): top N active, rest inactive; usage_count already set to min(count, limit)
+          if (newPlan.tier === PlanTier.PRO) {
+            const rows = await tx.strategies.findMany({
+              where: {
+                user_id: currentSubscription.user_id,
+                type: 'user',
+              },
+              orderBy: { created_at: 'asc' },
+              select: { strategy_id: true },
+            });
+            const idsToKeepActive = rows
+              .slice(0, proCustomStrategyLimit)
+              .map((r) => r.strategy_id);
+            const idsToDeactivate = rows
+              .slice(proCustomStrategyLimit)
+              .map((r) => r.strategy_id);
+            if (idsToKeepActive.length > 0) {
+              await tx.strategies.updateMany({
+                where: { strategy_id: { in: idsToKeepActive } },
+                data: { is_active: true },
+              });
+            }
+            if (idsToDeactivate.length > 0) {
+              await tx.strategies.updateMany({
+                where: { strategy_id: { in: idsToDeactivate } },
+                data: { is_active: false },
+              });
+            }
+          }
         }
       }
 
@@ -609,25 +665,8 @@ export class SubscriptionsService {
     userId: string,
     newPlanId: string,
   ): Promise<void> {
-    const newPlan = await this.prisma.subscription_plans.findUnique({
-      where: { plan_id: newPlanId },
-    });
-    if (!newPlan || newPlan.tier !== PlanTier.PRO) return;
-
-    const current = await this.getActiveSubscriptionWithFeatures(userId);
-    if (!current?.plan || current.plan.tier !== PlanTier.ELITE) return;
-
-    const customCount = await this.prisma.strategies.count({
-      where: { user_id: userId, type: 'user' },
-    });
-    const proLimit = 5;
-    if (customCount > proLimit) {
-      console.log("customCount", customCount);
-      throw new BadRequestException(
-        `Cannot switch to Pro: you have ${customCount} custom strategies. Pro allows maximum ${proLimit}. Delete ${customCount - proLimit} strategy(ies) first, then try again.`,
-      );
-    }
-    
+    // No longer blocking Elite→Pro; updateSubscription will set top N strategies active, rest inactive
+    return;
   }
 
   /**
@@ -637,7 +676,6 @@ export class SubscriptionsService {
     return this.prisma.user_subscriptions.findFirst({
       where: {
         user_id: userId,
-        status: 'active',
       },
       include: {
         plan: {
@@ -758,16 +796,25 @@ export class SubscriptionsService {
   }
 
   async handleStripeSubscriptionCancelled(stripeSubscriptionId: string, stripeCurrentPeriodEnd?: Date | null) {
+    console.log("stripeSubscriptionId",stripeSubscriptionId)
     const existing = await this.prisma.user_subscriptions.findFirst({
       where: {
-        external_id: stripeSubscriptionId,
         billing_provider: 'stripe',
+        external_id:stripeSubscriptionId
       },
     });
+
+    console.log("existing--1",existing)
 
     if (!existing) {
       return null;
     }
+
+    if (existing.status === SubscriptionStatus.cancelled) {
+      return existing;
+    }
+
+    console.log("existing--",existing)
 
     const now = new Date();
     const finalPeriodEnd =
@@ -775,6 +822,11 @@ export class SubscriptionsService {
       existing.current_period_end ??
       existing.expires_at ??
       now;
+
+    
+    const plan = await this.prisma.subscription_plans.findFirst({
+      where: { tier: PlanTier.FREE, billing_period: BillingPeriod.MONTHLY },
+    });
 
     const updated = await this.prisma.$transaction(async (tx) => {
       const subscription = await tx.user_subscriptions.update({
@@ -784,12 +836,20 @@ export class SubscriptionsService {
           cancelled_at: now,
           expires_at: finalPeriodEnd,
           auto_renew: false,
+          tier: PlanTier.FREE,
+          billing_period: BillingPeriod.MONTHLY,
+          plan_id: plan?.plan_id,
         },
       });
 
       await tx.users.update({
         where: { user_id: subscription.user_id },
         data: { current_tier: PlanTier.FREE },
+      });
+
+      await tx.strategies.updateMany({
+        where: { user_id: subscription.user_id, is_active: true },
+        data: { is_active: false },
       });
 
       return subscription;

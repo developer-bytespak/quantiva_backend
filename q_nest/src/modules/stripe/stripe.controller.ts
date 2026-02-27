@@ -33,6 +33,14 @@ export class StripeController {
     @Req() req: any,
   ) {
 
+
+    const tier = req.subscriptionUser?.tier;
+
+    if (tier === 'PRO' || tier === 'ELITE') {
+      throw new BadRequestException(
+        'Cancel your current subscription.',
+      );
+    } 
     
     const { price_id, success_url, cancel_url, plan_id } = req.body;
 
@@ -42,19 +50,19 @@ export class StripeController {
     }
     const userId = req.subscriptionUser?.user_id;
     if (!userId) {
-      throw new UnauthorizedException('User not authenticated');
+      throw new UnauthorizedException('User not authenticated!');
     }
 
-    if (plan_id) {
-      try {
-        await this.subscriptionsService.validateDowngradeToProBeforeCheckout(
-        userId,
-        plan_id,
-      );
-      } catch (error) {
-        throw new BadRequestException((error as Error).message);
-      }
-    }
+    // if (plan_id) {
+    //   try {
+    //     await this.subscriptionsService.validateDowngradeToProBeforeCheckout(
+    //     userId,
+    //     plan_id,
+    //   );
+    //   } catch (error) {
+    //     throw new BadRequestException((error as Error).message);
+    //   }
+    // }
 
     console.log('userId', userId + ' - ' + price_id + ' - ' + plan_id + ' - ' + success_url + ' - ' + cancel_url);
 
@@ -76,6 +84,14 @@ export class StripeController {
       throw new UnauthorizedException('User not authenticated');
     }
 
+    const tier = req.subscriptionUser?.tier;
+
+    console.log("tier",tier)
+
+    if(tier == 'FREE'){
+      throw new BadRequestException('You are already on the FREE tier');
+    }
+
     const active = await this.subscriptionsService.getActiveSubscriptionWithFeatures(
       userId,
     );
@@ -84,20 +100,12 @@ export class StripeController {
       throw new BadRequestException('No active Stripe subscription to cancel');
     }
 
-    const stripeSub: any = await this.stripeService.cancelSubscriptionAtPeriodEnd(
+    await this.stripeService.cancelSubscriptionImmediately(active.external_id);
+
+    const updated = await this.subscriptionsService.handleStripeSubscriptionCancelled(
       active.external_id,
+      new Date(),
     );
-
-    const currentPeriodEndUnix: number | null = stripeSub.current_period_end ?? null;
-    const currentPeriodEnd = currentPeriodEndUnix
-      ? new Date(currentPeriodEndUnix * 1000)
-      : null;
-
-    const updated = await this.subscriptionsService.cancelUserSubscription(userId, {
-      subscriptionId: active.subscription_id,
-      stripeCurrentPeriodEnd: currentPeriodEnd,
-      stripeSubscriptionId: active.external_id,
-    });
 
     return {
       subscription_id: updated.subscription_id,
@@ -120,7 +128,7 @@ export class StripeController {
       throw new UnauthorizedException('Webhook signature verification failed');
     }
 
-    console.log("RAW BODY", rawBody);
+    // console.log("RAW BODY", rawBody);
 
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
     console.log("WEBHOOK SECRET", webhookSecret);
@@ -229,32 +237,7 @@ export class StripeController {
               `Subscription updated for user ${userId}, plan ${planId} and payment recorded`,
             );
           } else {
-            const created = await this.subscriptionsService.createSubscription({
-              user_id: userId,
-              plan_id: planId,
-              status: 'active',
-              external_id: externalId,
-              billing_provider: 'stripe',
-            });
-
-            // Payment history entry for new subscription
-            await this.subscriptionsService.recordPayment({
-              subscription_id: created.subscription_id,
-              user_id: created.user_id,
-              amount,
-              currency,
-              status: 'succeeded',
-              payment_provider: 'stripe',
-              external_payment_id: externalId || session.id,
-              payment_method: paymentMethod,
-              invoice_url: invoiceUrl || null,
-              receipt_url: receiptUrl || null,
-              failure_reason: null,
-            });
-
-            this.logger.log(
-              `Subscription created for user ${userId}, plan ${planId} and payment recorded`,
-            );
+            throw new BadRequestException('Subscription not found');
           }
         } catch (err: any) {
           this.logger.error(
@@ -288,11 +271,14 @@ export class StripeController {
         stripeStatus === 'canceled'
       ) {
         try {
+          console.log("CUSTOMER.SUBSCRIPTION.DELETED or CUSTOMER.SUBSCRIPTION.UPDATED", stripeSubscriptionId, stripeStatus, currentPeriodEnd);
           await this.subscriptionsService.handleStripeSubscriptionCancelled(
             stripeSubscriptionId,
             currentPeriodEnd,
           );
         } catch (err: any) {
+
+          console.log("ERR--s", err);
           this.logger.error(
             `Failed to handle Stripe subscription cancel for ${stripeSubscriptionId}: ${err?.message}`,
           );

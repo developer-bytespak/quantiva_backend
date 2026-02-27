@@ -69,4 +69,9 @@ export class StripeService {
       cancel_at_period_end: true,
     });
   }
+
+  /** Cancel subscription immediately (no schedule for period end). */
+  async cancelSubscriptionImmediately(stripeSubscriptionId: string) {
+    return this.stripe.subscriptions.cancel(stripeSubscriptionId);
+  }
 }
