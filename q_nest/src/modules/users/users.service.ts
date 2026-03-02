@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { KycStatus } from '@prisma/client';
 import { UpdatePersonalInfoDto } from './dto/update-personal-info.dto';
@@ -49,6 +49,25 @@ export class UsersService {
   }
 
   async delete(id: string) {
+    // Prevent deleting a user who is involved in any VC pool
+    const [membershipsCount, seatReservationsCount, paymentSubmissionsCount] =
+      await Promise.all([
+        this.prisma.vc_pool_members.count({ where: { user_id: id } }),
+        this.prisma.vc_pool_seat_reservations.count({ where: { user_id: id } }),
+        this.prisma.vc_pool_payment_submissions.count({ where: { user_id: id } }),
+      ]);
+
+    if (
+      membershipsCount > 0 ||
+      seatReservationsCount > 0 ||
+      paymentSubmissionsCount > 0
+    ) {
+      throw new BadRequestException(
+        'Cannot delete user: this account is linked to one or more VC pools. ' +
+          'Please remove the user from all VC pools before deleting the account.',
+      );
+    }
+
     return this.prisma.users.delete({
       where: { user_id: id },
     });
