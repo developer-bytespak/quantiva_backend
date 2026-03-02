@@ -120,31 +120,9 @@ export class StockSignalsCronjobService {
 
       this.logger.log(`Processing ${stocksToProcess.length} stocks (rotating through all active stocks)`);
 
-      // Step 3: Get Alpaca connection for OHLCV data (or use provided override)
-      let connectionInfo = null;
-      if (options?.connectionId) {
-        try {
-          const conn = await this.prisma.user_exchange_connections.findUnique({
-            where: { connection_id: options.connectionId },
-            include: { exchange: true },
-          });
-          if (conn && conn.exchange) {
-            connectionInfo = {
-              connectionId: conn.connection_id,
-              exchange: conn.exchange.name.toLowerCase() || 'alpaca',
-            };
-            this.logger.log(`Using overridden connection ${options.connectionId} for OHLCV data`);
-          } else {
-            this.logger.warn(`Connection ${options.connectionId} not found or has no exchange; falling back to first available`);
-            connectionInfo = await this.getFirstAlpacaConnection();
-          }
-        } catch (err: any) {
-          this.logger.warn(`Error fetching override connection ${options.connectionId}: ${err.message}`);
-          connectionInfo = await this.getFirstAlpacaConnection();
-        }
-      } else {
-        connectionInfo = await this.getFirstAlpacaConnection();
-      }
+      // Step 3: For system stock signals, never pass user connection_id so Python
+      // uses the system candles endpoint (Alpaca from env) for OHLCV and trend score.
+      const connectionInfo = { connectionId: null as string | null, exchange: 'alpaca' as string };
 
       // Step 4: Process each stock through sentiment analysis and signal generation
       let processedCount = 0;
