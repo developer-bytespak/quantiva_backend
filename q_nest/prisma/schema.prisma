@@ -1013,6 +1013,7 @@ model admins {
   sessions               admin_sessions[]
   pools                  vc_pools[]
   pool_trades            vc_pool_trades[]
+  pool_exchange_orders   vc_pool_exchange_orders[]
   reviewed_payments      vc_pool_payment_submissions[] @relation("PaymentReviewer")
   reviewed_cancellations vc_pool_cancellations[]
 
@@ -1083,6 +1084,7 @@ model vc_pools {
   seat_reservations   vc_pool_seat_reservations[]
   payment_submissions vc_pool_payment_submissions[]
   trades              vc_pool_trades[]
+  exchange_orders     vc_pool_exchange_orders[]
   payouts             vc_pool_payouts[]
   cancellations       vc_pool_cancellations[]
 
@@ -1206,6 +1208,32 @@ model vc_pool_trades {
   @@index([is_open])
   @@index([pool_id, strategy_id])
   @@map("vc_pool_trades")
+}
+
+model vc_pool_exchange_orders {
+  order_id          String    @id @default(uuid()) @db.Uuid
+  pool_id           String    @db.Uuid
+  admin_id          String    @db.Uuid
+  symbol            String    @db.VarChar(20)
+  side              String    @db.VarChar(10)
+  order_type        String    @db.VarChar(20)
+  quantity          Decimal   @db.Decimal(30, 10)
+  entry_price_usdt  Decimal   @db.Decimal(20, 8)
+  exchange_order_id String?   @db.VarChar(100)
+  is_open           Boolean   @default(true)
+  exit_price_usdt   Decimal?  @db.Decimal(20, 8)
+  realized_pnl_usdt Decimal?  @db.Decimal(20, 8)
+  opened_at         DateTime  @default(now()) @db.Timestamp(6)
+  closed_at         DateTime? @db.Timestamp(6)
+  created_at        DateTime  @default(now()) @db.Timestamp(6)
+
+  pool  vc_pools @relation(fields: [pool_id], references: [pool_id])
+  admin admins   @relation(fields: [admin_id], references: [admin_id])
+
+  @@index([pool_id])
+  @@index([pool_id, is_open])
+  @@index([admin_id])
+  @@map("vc_pool_exchange_orders")
 }
 
 model vc_pool_cancellations {

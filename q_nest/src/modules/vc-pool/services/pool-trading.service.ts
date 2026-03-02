@@ -8,6 +8,9 @@ import {
 import { PrismaService } from '../../../prisma/prisma.service';
 import { ManualTradeDto } from '../dto/manual-trade.dto';
 import { CloseTradeDto } from '../dto/close-trade.dto';
+import { PlacePoolOrderDto } from '../dto/place-pool-order.dto';
+import { BinanceService } from '../../exchanges/integrations/binance.service';
+import { EncryptionService } from '../../exchanges/services/encryption.service';
 
 const POOL_STATUS = { active: 'active' } as const;
 
@@ -15,7 +18,11 @@ const POOL_STATUS = { active: 'active' } as const;
 export class PoolTradingService {
   private readonly logger = new Logger(PoolTradingService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly binanceService: BinanceService,
+    private readonly encryptionService: EncryptionService,
+  ) {}
 
   async openTrade(adminId: string, poolId: string, dto: ManualTradeDto) {
     const pool = await this.validateActivePool(adminId, poolId);
@@ -220,6 +227,154 @@ export class PoolTradingService {
       summary: { open_trades: openCount, closed_trades: closedCount, realized_pnl: realizedPnl },
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     };
+  }
+
+  async listExchangeOrders(adminId: string, poolId: string, filters?: { status?: string; page?: number; limit?: number }) {
+    await this.validatePoolOwnership(adminId, poolId);
+
+    const page = filters?.page && filters.page > 0 ? filters.page : 1;
+    const limit = filters?.limit && filters.limit > 0 ? Math.min(filters.limit, 50) : 20;
+    const skip = (page - 1) * limit;
+
+    const where: Record<string, any> = { pool_id: poolId };
+    if (filters?.status === 'open') where.is_open = true;
+    if (filters?.status === 'closed') where.is_open = false;
+
+    const [orders, total] = await this.prisma.$transaction([
+      this.prisma.vc_pool_exchange_orders.findMany({
+        where,
+        orderBy: { opened_at: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.vc_pool_exchange_orders.count({ where }),
+    ]);
+
+    const allOrders = await this.prisma.vc_pool_exchange_orders.findMany({
+      where: { pool_id: poolId },
+      select: { is_open: true, realized_pnl_usdt: true },
+    });
+    const openCount = allOrders.filter((o) => o.is_open).length;
+    const closedCount = allOrders.filter((o) => !o.is_open).length;
+    const realizedPnl = allOrders
+      .filter((o) => !o.is_open && o.realized_pnl_usdt)
+      .reduce((sum, o) => sum + Number(o.realized_pnl_usdt), 0);
+
+    return {
+      orders: orders.map((o) => ({
+        order_id: o.order_id,
+        pool_id: o.pool_id,
+        admin_id: o.admin_id,
+        symbol: o.symbol,
+        side: o.side,
+        order_type: o.order_type,
+        quantity: Number(o.quantity),
+        entry_price_usdt: Number(o.entry_price_usdt),
+        exchange_order_id: o.exchange_order_id,
+        is_open: o.is_open,
+        exit_price_usdt: o.exit_price_usdt ? Number(o.exit_price_usdt) : null,
+        realized_pnl_usdt: o.realized_pnl_usdt ? Number(o.realized_pnl_usdt) : null,
+        opened_at: o.opened_at,
+        closed_at: o.closed_at,
+        created_at: o.created_at,
+      })),
+      summary: { open_positions: openCount, closed_positions: closedCount, realized_pnl_usdt: realizedPnl },
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
+  }
+
+  async closeExchangeOrder(
+    adminId: string,
+    poolId: string,
+    orderId: string,
+    exitPriceUsdt: number,
+  ) {
+    await this.validateActivePool(adminId, poolId);
+
+    const order = await this.prisma.vc_pool_exchange_orders.findFirst({
+      where: { order_id: orderId, pool_id: poolId },
+    });
+    if (!order) throw new NotFoundException('Pool exchange order not found');
+    if (!order.is_open) throw new BadRequestException('Order is already closed');
+
+    const entry = Number(order.entry_price_usdt);
+    const qty = Number(order.quantity);
+    const side = (order.side || '').toUpperCase();
+    const realizedPnl =
+      side === 'BUY' ? (exitPriceUsdt - entry) * qty : (entry - exitPriceUsdt) * qty;
+
+    const updated = await this.prisma.vc_pool_exchange_orders.update({
+      where: { order_id: orderId },
+      data: {
+        is_open: false,
+        exit_price_usdt: exitPriceUsdt,
+        realized_pnl_usdt: realizedPnl,
+        closed_at: new Date(),
+      },
+    });
+
+    this.logger.log(
+      `Pool exchange order ${orderId} closed: exit=${exitPriceUsdt}, PnL=${realizedPnl.toFixed(8)}`,
+    );
+    return updated;
+  }
+
+  /**
+   * Place a real exchange order for a VC pool using the admin's Binance API keys.
+   * Same exchange flow as user place-order, but uses admin credentials and records to vc_pool_exchange_orders.
+   */
+  async placePoolOrder(adminId: string, poolId: string, dto: PlacePoolOrderDto) {
+    const pool = await this.validateActivePool(adminId, poolId);
+
+    const admin = await this.prisma.admins.findUnique({
+      where: { admin_id: adminId },
+      select: { binance_api_key_encrypted: true, binance_api_secret_encrypted: true },
+    });
+
+    if (!admin?.binance_api_key_encrypted || !admin?.binance_api_secret_encrypted) {
+      throw new BadRequestException(
+        'Admin Binance API credentials are not set. Configure them in admin settings to place pool orders.',
+      );
+    }
+
+    const apiKey = this.encryptionService.decryptApiKey(admin.binance_api_key_encrypted);
+    const apiSecret = this.encryptionService.decryptApiKey(admin.binance_api_secret_encrypted);
+
+    const symbol = dto.symbol.toUpperCase();
+    if (dto.type === 'LIMIT' && (dto.price == null || dto.price <= 0)) {
+      throw new BadRequestException('Price is required for LIMIT orders');
+    }
+
+    const order = await this.binanceService.placeOrder(
+      apiKey,
+      apiSecret,
+      symbol,
+      dto.side,
+      dto.type,
+      dto.quantity,
+      dto.price,
+    );
+
+    const entryPrice = order?.price ?? dto.price ?? 0;
+
+    const record = await this.prisma.vc_pool_exchange_orders.create({
+      data: {
+        pool_id: poolId,
+        admin_id: adminId,
+        symbol,
+        side: order?.side ?? dto.side,
+        order_type: order?.type ?? dto.type,
+        quantity: dto.quantity,
+        entry_price_usdt: entryPrice,
+        exchange_order_id: order?.orderId ?? null,
+        is_open: true,
+      },
+    });
+
+    this.logger.log(
+      `Pool exchange order placed: ${record.order_id} ${dto.side} ${dto.quantity} ${symbol} @ ${entryPrice}`,
+    );
+    return { order: record, exchangeResponse: order };
   }
 
   async recalculatePoolValue(poolId: string) {
