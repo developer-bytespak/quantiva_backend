@@ -643,14 +643,36 @@ export class AuthService {
       );
     }
 
-    // Step 5: Check for pending KYC (warn but allow)
+    // Step 5: Check VC Pool participation (memberships, reservations, payments)
+    const [
+      vcPoolMembershipsCount,
+      vcPoolSeatReservationsCount,
+      vcPoolPaymentSubmissionsCount,
+    ] = await Promise.all([
+      this.prisma.vc_pool_members.count({ where: { user_id: userId } }),
+      this.prisma.vc_pool_seat_reservations.count({ where: { user_id: userId } }),
+      this.prisma.vc_pool_payment_submissions.count({ where: { user_id: userId } }),
+    ]);
+
+    if (
+      vcPoolMembershipsCount > 0 ||
+      vcPoolSeatReservationsCount > 0 ||
+      vcPoolPaymentSubmissionsCount > 0
+    ) {
+      throw new BadRequestException(
+        'Cannot delete account: your profile is linked to one or more VC pools. ' +
+          'Please exit or cancel all VC pool participation before deleting your account.',
+      );
+    }
+
+    // Step 6: Check for pending KYC (warn but allow)
     if (user.kyc_status === 'review' || user.kyc_status === 'pending') {
       console.warn(
         `[ACCOUNT_DELETION] User ${userId} (${user.email}) is deleting account with KYC status: ${user.kyc_status}`,
       );
     }
 
-    // Step 6: Collect all cloud storage files for deletion BEFORE transaction
+    // Step 7: Collect all cloud storage files for deletion BEFORE transaction
     const filesToDelete: string[] = [];
 
     // Collect profile picture
@@ -682,7 +704,7 @@ export class AuthService {
 
     // ===== ALL SAFETY CHECKS PASSED - Proceed with deletion =====
 
-    // Step 7: Use database transaction to delete all related entities
+    // Step 8: Use database transaction to delete all related entities
     // Deletion order: child entities → parent entities
     // Note: timeout set to 60 seconds (default 5s) to allow deletion of users with large amounts of data
     const deletionSummary = await this.prisma.$transaction(
