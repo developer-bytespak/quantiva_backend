@@ -4,6 +4,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 import { StrategiesController } from './strategies.controller';
+import { SystemCandlesController } from './system-candles.controller';
 import { StrategiesService } from './strategies.service';
 import { StrategyValidationService } from './services/strategy-validation.service';
 import { PreBuiltStrategiesService } from './services/pre-built-strategies.service';
@@ -53,7 +54,7 @@ import { TierAccessGuard } from '../../common/guards/tier-access.guard';
       inject: [ConfigService],
     }),
   ],
-  controllers: [StrategiesController],
+  controllers: [StrategiesController, SystemCandlesController],
   providers: [
     TierAccessGuard,
     StrategiesService,

@@ -29,7 +29,7 @@ class TechnicalEngine(BaseEngine):
     
     def __init__(self):
         super().__init__("TechnicalEngine")
-        self.nestjs_api_url = NESTJS_API_URL
+        self.nestjs_api_url = NESTJS_API_URL.rstrip('/')
         self.api_timeout = NESTJS_API_TIMEOUT
     
     def calculate(
@@ -71,6 +71,15 @@ class TechnicalEngine(BaseEngine):
                     )
                 except Exception as e:
                     self.logger.warning(f"Failed to fetch multi-timeframe data: {str(e)}")
+                    multi_timeframe_data = None
+            else:
+                # No user connection (e.g. cronjob): use system candles endpoint (Binance/Alpaca from env)
+                try:
+                    multi_timeframe_data = self._fetch_multi_timeframe_ohlcv_from_system(
+                        asset_symbol, exchange, asset_type
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch system candles: {str(e)}")
                     multi_timeframe_data = None
             
             # Use multi-timeframe data if available, otherwise fallback to provided ohlcv_data
@@ -464,7 +473,67 @@ class TechnicalEngine(BaseEngine):
         except Exception as e:
             self.logger.error(f"Unexpected error fetching OHLCV data: {str(e)}")
             return None
-    
+
+    def _fetch_ohlcv_from_system(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int,
+        asset_type: str = 'crypto',
+    ) -> Optional[pd.DataFrame]:
+        """
+        Fetch OHLCV from NestJS system candles endpoint (env-based Binance/Alpaca).
+        Used when no user connection_id (e.g. cronjob). No auth required.
+        """
+        try:
+            url = f"{self.nestjs_api_url}/candles/system/{symbol}"
+            params = {'interval': interval, 'limit': str(limit), 'asset_type': asset_type}
+            response = requests.get(url, params=params, timeout=self.api_timeout)
+            response.raise_for_status()
+            data = response.json()
+            if not data.get('success') or not data.get('data'):
+                return None
+            candles = data['data']
+            df_data = []
+            for candle in candles:
+                df_data.append({
+                    'open': float(candle.get('open', 0)),
+                    'high': float(candle.get('high', 0)),
+                    'low': float(candle.get('low', 0)),
+                    'close': float(candle.get('close', 0)),
+                    'volume': float(candle.get('volume', 0)),
+                    'timestamp': pd.to_datetime(candle.get('openTime', 0), unit='ms'),
+                })
+            df = pd.DataFrame(df_data)
+            if not df.empty:
+                df.set_index('timestamp', inplace=True)
+                df.sort_index(inplace=True)
+            return df
+        except Exception as e:
+            self.logger.debug(f"System candles fetch failed for {symbol} {interval}: {e}")
+            return None
+
+    def _fetch_multi_timeframe_ohlcv_from_system(
+        self,
+        symbol: str,
+        exchange: str,
+        asset_type: str,
+    ) -> Optional[Dict[str, pd.DataFrame]]:
+        """
+        Fetch multi-timeframe OHLCV from system candles endpoint (no user connection).
+        """
+        # Crypto: symbol is base (e.g. BTC); NestJS expects symbol in path (e.g. BTC or BTCUSDT)
+        # Stock: symbol is ticker (e.g. AAPL)
+        symbol_for_url = symbol.upper()
+        if asset_type == 'crypto' and not symbol_for_url.endswith('USDT'):
+            symbol_for_url = f"{symbol_for_url}USDT"
+        result = {}
+        for tf, interval, limit in [('1d', '1d', 200), ('4h', '4h', 200), ('1h', '1h', 24)]:
+            df = self._fetch_ohlcv_from_system(symbol_for_url, interval, limit, asset_type)
+            if df is not None and not df.empty:
+                result[tf] = df
+        return result if result else None
+
     def _calculate_multi_timeframe_trend_score(
         self,
         ohlcv_1d: Optional[pd.DataFrame],
