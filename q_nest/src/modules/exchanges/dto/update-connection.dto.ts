@@ -16,11 +16,11 @@ export class UpdateConnectionDto {
   api_secret: string;
 
   @IsString()
-  @IsNotEmpty()
+  @IsOptional()
   @MinLength(6, {
     message: 'Password must be at least 6 characters',
   })
-  password: string;
+  password?: string;
 
   @IsString()
   @IsOptional()
