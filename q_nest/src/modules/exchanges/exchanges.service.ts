@@ -814,7 +814,6 @@ export class ExchangesService {
     // Get the appropriate exchange service
     const exchangeService = this.getExchangeService(connection.exchange.name);
 
-    // Place order (Alpaca: paper vs live is determined by the user's key prefix PK vs AK)
     if (exchangeService instanceof BinanceService) {
       return this.binanceService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
     } else if (exchangeService instanceof BybitService) {
@@ -956,7 +955,7 @@ export class ExchangesService {
     userId: string,
     api_key: string,
     api_secret: string,
-    password: string,
+    password?: string,
     passphrase?: string,
   ): Promise<any> {
     // Step 1: Verify connection exists and belongs to user
@@ -977,21 +976,22 @@ export class ExchangesService {
       throw new ConnectionNotFoundException('Exchange not found for this connection');
     }
 
-    // Step 2: Verify user password (ensures user authorization)
+    // Step 2: Verify user password if the user has one (skip for OAuth-only accounts)
     const user = await this.prisma.users.findUnique({
       where: { user_id: userId },
       select: { password_hash: true },
     });
 
-    if (!user || !user.password_hash) {
-      throw new Error('User not found or password not set');
+    if (!user) {
+      throw new Error('User not found');
     }
 
-    // Import bcrypt for password comparison
-    const bcrypt = require('bcryptjs');
-    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
-    if (!isPasswordValid) {
-      throw new Error('Invalid password');
+    if (user.password_hash && password) {
+      const bcrypt = require('bcryptjs');
+      const isPasswordValid = await bcrypt.compare(password, user.password_hash);
+      if (!isPasswordValid) {
+        throw new Error('Invalid password');
+      }
     }
 
     // Step 3: Verify the new credentials with the exchange

@@ -21,17 +21,27 @@ export class PoolValueService {
 
     const totalInvested = Number(pool.total_invested_usdt);
 
-    // Realized PnL from closed trades
+    // Realized PnL from closed manual trades
     const closedTrades = await this.prisma.vc_pool_trades.findMany({
       where: { pool_id: poolId, is_open: false },
       select: { pnl_usdt: true },
     });
-    const closedPnl = closedTrades.reduce(
+    let closedPnl = closedTrades.reduce(
       (sum, t) => sum + (t.pnl_usdt ? Number(t.pnl_usdt) : 0),
       0,
     );
 
-    // Unrealized PnL from open trades (fetch live prices)
+    // Realized PnL from closed pool-tagged exchange orders
+    const closedExchangeOrders = await this.prisma.vc_pool_exchange_orders.findMany({
+      where: { pool_id: poolId, is_open: false },
+      select: { realized_pnl_usdt: true },
+    });
+    closedPnl += closedExchangeOrders.reduce(
+      (sum, o) => sum + (o.realized_pnl_usdt ? Number(o.realized_pnl_usdt) : 0),
+      0,
+    );
+
+    // Unrealized PnL from open manual trades (fetch live prices)
     const openTrades = await this.prisma.vc_pool_trades.findMany({
       where: { pool_id: poolId, is_open: true },
       select: { trade_id: true, asset_pair: true, action: true, quantity: true, entry_price_usdt: true },
@@ -52,6 +62,30 @@ export class PoolValueService {
       } catch (err) {
         this.logger.warn(
           `Could not fetch price for ${trade.asset_pair}: ${err.message}. Skipping unrealized PnL.`,
+        );
+      }
+    }
+
+    // Unrealized PnL from open pool-tagged exchange orders
+    const openExchangeOrders = await this.prisma.vc_pool_exchange_orders.findMany({
+      where: { pool_id: poolId, is_open: true },
+      select: { symbol: true, side: true, quantity: true, entry_price_usdt: true },
+    });
+    for (const ord of openExchangeOrders) {
+      try {
+        const symbol = ord.symbol.includes('USDT') ? ord.symbol : `${ord.symbol}USDT`;
+        const currentPrice = await this.binance.getPrice(symbol);
+        const entry = Number(ord.entry_price_usdt);
+        const qty = Number(ord.quantity);
+        const side = (ord.side || '').toUpperCase();
+        if (side === 'BUY') {
+          unrealizedPnl += (currentPrice - entry) * qty;
+        } else {
+          unrealizedPnl += (entry - currentPrice) * qty;
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Could not fetch price for ${ord.symbol}: ${err?.message}. Skipping unrealized PnL.`,
         );
       }
     }

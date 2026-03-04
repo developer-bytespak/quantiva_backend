@@ -345,12 +345,12 @@ export class ExchangesController {
     return this.exchangesService.delete(id);
   }
 
-  @Delete('connections/:id')
+  @Delete('connections/:connectionId')
   @UseGuards(ConnectionOwnerGuard)
-  async removeConnection(@Param('id') id: string) {
+  async removeConnection(@Param('connectionId') connectionId: string) {
     // Invalidate cache before deletion
-    this.cacheService.invalidate(id);
-    await this.exchangesService.deleteConnection(id);
+    this.cacheService.invalidate(connectionId);
+    await this.exchangesService.deleteConnection(connectionId);
     return {
       success: true,
       message: 'Connection deleted successfully',

@@ -40,28 +40,42 @@ export class PoolPayoutService {
       throw new BadRequestException('Only active pools can be completed');
     }
 
-    // Check for open trades
+    // Check for open manual trades
     const openTrades = await this.prisma.vc_pool_trades.findFirst({
       where: { pool_id: poolId, is_open: true },
     });
-
     if (openTrades) {
       throw new BadRequestException('Close all open trades before completing the pool');
     }
 
-    // Calculate final pool value from closed trades
+    // Check for open pool-tagged exchange orders
+    const openExchangeOrders = await this.prisma.vc_pool_exchange_orders.findFirst({
+      where: { pool_id: poolId, is_open: true },
+    });
+    if (openExchangeOrders) {
+      throw new BadRequestException('Close all open pool exchange positions before completing the pool');
+    }
+
+    // Calculate final pool value from closed trades and closed exchange orders
     const closedTrades = await this.prisma.vc_pool_trades.findMany({
       where: { pool_id: poolId, is_open: false },
       select: { pnl_usdt: true },
     });
-
     const closedPnl = closedTrades.reduce(
       (sum, t) => sum + (t.pnl_usdt ? Number(t.pnl_usdt) : 0),
       0,
     );
+    const closedExchangeOrders = await this.prisma.vc_pool_exchange_orders.findMany({
+      where: { pool_id: poolId, is_open: false },
+      select: { realized_pnl_usdt: true },
+    });
+    const closedExchangePnl = closedExchangeOrders.reduce(
+      (sum, o) => sum + (o.realized_pnl_usdt ? Number(o.realized_pnl_usdt) : 0),
+      0,
+    );
 
     const totalInvested = Number(pool.total_invested_usdt);
-    const finalPoolValue = totalInvested + closedPnl;
+    const finalPoolValue = totalInvested + closedPnl + closedExchangePnl;
     const totalProfit = finalPoolValue - totalInvested;
 
     // Get all active members

@@ -16,6 +16,8 @@ import { AdminTokenPayload } from '../../admin-auth/services/admin-token.service
 import { ManualTradeDto } from '../dto/manual-trade.dto';
 import { CloseTradeDto } from '../dto/close-trade.dto';
 import { ApplySignalDto } from '../dto/apply-signal.dto';
+import { CloseExchangeOrderDto } from '../dto/close-exchange-order.dto';
+import { PlacePoolOrderDto } from '../dto/place-pool-order.dto';
 
 @Controller('admin/pools')
 @UseGuards(AdminJwtAuthGuard)
@@ -63,5 +65,44 @@ export class AdminPoolTradesController {
     @Body() dto: CloseTradeDto,
   ) {
     return this.tradingService.closeTrade(admin.sub, poolId, tradeId, dto);
+  }
+
+  @Post(':poolId/orders/place')
+  async placePoolOrder(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+    @Body() dto: PlacePoolOrderDto,
+  ) {
+    return this.tradingService.placePoolOrder(admin.sub, poolId, dto);
+  }
+
+  @Get(':poolId/exchange-trades')
+  async listExchangeTrades(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+    @Query('status') status?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.tradingService.listExchangeOrders(admin.sub, poolId, {
+      status,
+      page: page ? parseInt(page, 10) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+  }
+
+  @Put(':poolId/exchange-orders/:orderId/close')
+  async closeExchangeOrder(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Body() dto: CloseExchangeOrderDto,
+  ) {
+    return this.tradingService.closeExchangeOrder(
+      admin.sub,
+      poolId,
+      orderId,
+      dto.exit_price_usdt,
+    );
   }
 }

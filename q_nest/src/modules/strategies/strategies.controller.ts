@@ -137,13 +137,14 @@ export class StrategiesController {
       return { assets: [], insights: [] };
     }
 
-    // Get signals for these assets with this strategy
+    // Get signals for these assets with this strategy (BUY only - we only use buy signals)
     const assetIds = assets.map(a => a.asset_id);
     const signals = await this.prisma.strategy_signals.findMany({
       where: {
         strategy_id: strategyId,
         asset_id: { in: assetIds },
         user_id: null,
+        action: 'BUY',
       },
       include: {
         details: {
@@ -193,13 +194,15 @@ export class StrategiesController {
       signal: signalMap.get(asset.asset_id) || null,
     }));
 
-    const finalAssets = [
+    let finalAssets = [
       ...assetsWithInsights.map(a => ({
         ...a,
         signal: signalMap.get(a.asset_id) || null,
       })),
       ...remaining,
     ];
+    // Only return assets that have a BUY signal (signal map only contains BUY)
+    finalAssets = finalAssets.filter(a => a.signal != null);
     
     this.logger.log(`Returning ${finalAssets.length} assets (${assetsWithInsights.length} with insights, ${remaining.length} without)`);
     
@@ -324,12 +327,13 @@ export class StrategiesController {
 
     const enrichWithRealtime = realtime === 'true' || realtime === '1';
 
-    // If latest_only=true, return only one signal per asset (latest per asset)
+    // If latest_only=true, return only one signal per asset (latest per asset). BUY only.
     if (latestOnly === 'true' || latestOnly === '1') {
       const signals = await this.prisma.strategy_signals.findMany({
         where: {
           strategy_id: id,
           user_id: null, // Only system-generated signals
+          action: 'BUY',
         },
         include: {
           asset: true,
@@ -438,11 +442,12 @@ export class StrategiesController {
       return results;
     }
 
-    // Get all signals with explanations (without deduping)
+    // Get all signals with explanations (without deduping). BUY only.
     const signals = await this.prisma.strategy_signals.findMany({
       where: {
         strategy_id: id,
         user_id: null, // Only system-generated signals
+        action: 'BUY',
       },
       include: {
         asset: true,
@@ -530,11 +535,12 @@ export class StrategiesController {
       throw new NotFoundException(`Strategy ${id} not found`);
     }
 
-    // If latest_only=true, return only one signal per asset (latest per asset)
+    // If latest_only=true, return only one signal per asset (latest per asset). BUY only.
     if (latestOnly === 'true' || latestOnly === '1') {
       const signals = await this.prisma.strategy_signals.findMany({
         where: {
           strategy_id: id,
+          action: 'BUY',
         },
         include: {
           asset: true,
@@ -573,10 +579,11 @@ export class StrategiesController {
       });
     }
 
-    // Get all signals with explanations (without deduping)
+    // Get all signals with explanations (without deduping). BUY only.
     const signals = await this.prisma.strategy_signals.findMany({
       where: {
         strategy_id: id,
+        action: 'BUY',
       },
       include: {
         asset: true,
@@ -1304,9 +1311,10 @@ export class StrategiesController {
       // Get target assets from strategy to filter signals
       const targetAssets = (strategy.target_assets as string[]) || [];
       
-      // Build where clause - filter by target assets if specified
+      // Build where clause - filter by target assets if specified. BUY only.
       let whereClause: any = {
         strategy_id: strategyId,
+        action: 'BUY',
       };
       
       // If strategy has specific target assets, only return signals for those assets
@@ -1495,12 +1503,13 @@ export class StrategiesController {
       return results;
     }
 
-    // Get all signals with explanations (without deduping) - same format as pre-built
+    // Get all signals with explanations (without deduping) - same format as pre-built. BUY only.
     // Apply same target assets filtering as latest_only case
     const targetAssets = (strategy.target_assets as string[]) || [];
     
     let whereClause: any = {
       strategy_id: strategyId,
+      action: 'BUY',
     };
     
     // If strategy has specific target assets, only return signals for those assets
@@ -1833,12 +1842,13 @@ export class StrategiesController {
       };
     }
 
-    // Get signals for these assets with this strategy
+    // Get signals for these assets with this strategy (BUY only)
     const assetIds = assets.map(a => a.asset_id).filter(Boolean);
     const signals = await this.prisma.strategy_signals.findMany({
       where: {
         strategy_id: strategyId,
         asset_id: { in: assetIds },
+        action: 'BUY',
       },
       include: {
         details: {
@@ -1888,13 +1898,15 @@ export class StrategiesController {
       signal: signalMap.get(asset.asset_id) || null,
     }));
 
-    const finalAssets = [
+    let finalAssets = [
       ...assetsWithInsights.map(a => ({
         ...a,
         signal: signalMap.get(a.asset_id) || null,
       })),
       ...remaining,
     ];
+    // Only return assets that have a BUY signal
+    finalAssets = finalAssets.filter(a => a.signal != null);
     
     this.logger.log(`Returning ${finalAssets.length} assets for custom strategy (${assetsWithInsights.length} with insights)`);
     
