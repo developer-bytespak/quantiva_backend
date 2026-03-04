@@ -43,6 +43,7 @@ model users {
   pool_memberships         vc_pool_members[]
   pool_seat_reservations   vc_pool_seat_reservations[]
   pool_payment_submissions vc_pool_payment_submissions[]
+  notifications            notifications[]
 
   @@index([current_tier])
   @@map("users")
@@ -86,6 +87,26 @@ model user_settings {
   user                users         @relation(fields: [user_id], references: [user_id])
 
   @@map("user_settings")
+}
+
+model notifications {
+  id         String           @id @default(uuid()) @db.Uuid
+  user_id    String           @db.Uuid
+  type       NotificationType
+  title      String           @db.VarChar(255)
+  message    String           @db.Text
+  read       Boolean          @default(false)
+  read_at    DateTime?        @db.Timestamp(6)
+  metadata   Json?
+  created_at DateTime         @default(now()) @db.Timestamp(6)
+
+  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([user_id, read])
+  @@index([user_id, created_at])
+  @@index([type])
+  @@map("notifications")
 }
 
 model kyc_verifications {
@@ -984,6 +1005,40 @@ enum PoolPayoutStatus {
 enum PayoutType {
   completion
   pool_cancelled
+}
+
+enum NotificationType {
+  // KYC
+  kyc_approved
+  kyc_rejected
+  kyc_under_review
+  // VC Pool
+  seat_reserved
+  payment_verified
+  payment_rejected
+  seat_released_timeout
+  pool_full
+  payout_processed
+  share_credited
+  // Orders / Trading
+  order_filled
+  order_cancelled
+  order_failed
+  // Signals
+  new_signal
+  // Auth / Security
+  two_fa_code_sent
+  new_login_detected
+  password_changed
+  // Exchange
+  exchange_connected
+  exchange_connection_failed
+  // Subscription / Payment
+  plan_activated
+  payment_successful
+  payment_failed
+  // General
+  important_alert_news
 }
 
 // ── VC Pool Models ──
