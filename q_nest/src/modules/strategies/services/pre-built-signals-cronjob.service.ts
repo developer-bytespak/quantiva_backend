@@ -46,28 +46,9 @@ export class PreBuiltSignalsCronjobService {
         return;
       }
 
-      // Step 3: Get first available connection for OHLCV data (or use provided override)
-      let connectionInfo = null;
-      if (options?.connectionId) {
-        try {
-          const conn = await this.prisma.user_exchange_connections.findUnique({
-            where: { connection_id: options.connectionId },
-            include: { exchange: true },
-          });
-          if (conn && conn.exchange) {
-            connectionInfo = {
-              connectionId: conn.connection_id,
-              exchange: conn.exchange.name.toLowerCase() || 'binance',
-            };
-          } else {
-            connectionInfo = await this.getFirstAvailableConnection();
-          }
-        } catch (err: any) {
-          connectionInfo = await this.getFirstAvailableConnection();
-        }
-      } else {
-        connectionInfo = await this.getFirstAvailableConnection();
-      }
+      // Step 3: For pre-built (system) signals, never pass user connection_id so Python
+      // uses the system candles endpoint (Binance/Alpaca from env) for OHLCV and trend score.
+      const connectionInfo = { connectionId: null as string | null, exchange: 'binance' as string };
 
       // Step 4: Process each asset through sentiment analysis and signal generation
       let processedCount = 0;
