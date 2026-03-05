@@ -16,6 +16,8 @@ import { TwoFactorGuard } from './guards/two-factor.guard';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { StorageModule } from '../../storage/storage.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
+import { NotificationsService } from '../notifications/notifications.service';
+import { AppGateway } from 'src/gateways/app.gateway';
 
 @Module({
   imports: [
@@ -46,6 +48,8 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
     SessionService,
     TwoFactorService,
     RateLimitService,
+    NotificationsService,
+    AppGateway,
     JwtStrategy,
     JwtAuthGuard,
     RefreshTokenGuard,

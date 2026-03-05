@@ -22,6 +22,8 @@ import { AiInsightsService } from '../../ai-insights/ai-insights.service';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { FeatureAccessService, FeatureType } from 'src/common/feature-access.service';
+import { AppGateway } from 'src/gateways/app.gateway';
+import { NotificationsService } from '../notifications/notifications.service';
 
 @Controller('strategies')
 export class StrategiesController {
@@ -43,6 +45,8 @@ export class StrategiesController {
     private readonly aiInsightsService: AiInsightsService,
     private readonly configService: ConfigService,
     private readonly featureAccessService: FeatureAccessService,
+    private readonly appGateway: AppGateway,
+    private readonly notificationsService: NotificationsService,
 
   ) {
     this.pythonApiUrl = this.configService.get<string>('PYTHON_API_URL') || 'http://localhost:8000/api/v1';
@@ -826,6 +830,9 @@ export class StrategiesController {
       );
     }
 
+    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "new_signal",title:"New Strategy Created",message:"Your new strategy has been created",read:false,metadata:null});
+    this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
+
     return {
       success: true,
       message: 'Stock strategy created successfully',
@@ -886,6 +893,8 @@ export class StrategiesController {
         FeatureType.CUSTOM_STRATEGIES,
       );
     }
+    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "new_signal",title:"New Strategy Created",message:"Your new strategy has been created",read:false,metadata:null});
+    this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
 
     return {
       success: true,
@@ -1104,6 +1113,9 @@ export class StrategiesController {
         FeatureType.CUSTOM_STRATEGIES,
       );
     }
+
+    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "new_signal",title:"Strategy Deleted",message:"Your strategy has been deleted",read:false,metadata:null});
+    this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
 
     return {
       success: true,

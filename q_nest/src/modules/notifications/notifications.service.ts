@@ -18,8 +18,49 @@ export class NotificationsService {
   }
 
   async getUserNotifications(userId: string) {
-    // TODO: Implement fetching user notifications
-    return [];
+    const notifications = await this.prisma.notifications.findMany({
+      where: {
+        user_id: userId,
+      },
+    });
+
+    await this.prisma.notifications.updateMany({
+      where: {
+        user_id: userId,
+        read: false,
+      },
+      data: { read: true, read_at: new Date() },
+    });
+    return notifications;
+  }
+
+  async createNotification(data: any) {
+    const notification = await this.prisma.notifications.create({
+      data: data,
+    });
+    return notification;
+  }
+
+  async markNotificationRead(notificationId: string) {
+    try {
+      await this.prisma.notifications.update({
+        where: { id: notificationId },
+        data: { read: true, read_at: new Date() },
+      });
+      return { success: true, message: 'Notification marked as read' };
+    } catch (error) {
+      return { success: false, message: 'Failed to mark notification as read' };
+    }
+  }
+
+  async getUnreadNotificationsCount(userId: string) {
+    const count = await this.prisma.notifications.count({
+      where: {
+        user_id: userId,
+        read: false,
+      },
+    });
+    return count;
   }
 }
 
