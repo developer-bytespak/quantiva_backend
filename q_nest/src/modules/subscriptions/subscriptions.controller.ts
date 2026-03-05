@@ -42,6 +42,8 @@ export class SubscriptionsController {
     const id =  req.subscriptionUser?.subscription_id;
     const tier = req.subscriptionUser?.tier;
 
+    console.log("id and tier",id, tier)
+
     if(!id) {
       throw new BadRequestException('Subscription ID is required to update subscription');
     }

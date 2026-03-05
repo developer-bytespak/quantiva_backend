@@ -1,13 +1,19 @@
-import { Controller, Get, Post, Body, Param } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Req } from '@nestjs/common';
 import { NotificationsService } from './notifications.service';
 
 @Controller('notifications')
 export class NotificationsController {
   constructor(private readonly notificationsService: NotificationsService) {}
 
-  @Get(':userId')
-  getUserNotifications(@Param('userId') userId: string) {
+  @Get()
+  getUserNotifications(@Req() req: any) {
+    const userId = req.subscriptionUser?.user_id;
     return this.notificationsService.getUserNotifications(userId);
+  }
+  @Get("unread")  
+  async getUnreadNotifications(@Req() req: any) {
+    const userId = req.subscriptionUser?.user_id;
+    return this.notificationsService.getUnreadNotificationsCount(userId);
   }
 
   @Post('send')
