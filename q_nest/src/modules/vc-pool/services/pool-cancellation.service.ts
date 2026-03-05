@@ -166,7 +166,7 @@ export class PoolCancellationService {
 
   async getMyPools(userId: string) {
     const memberships = await this.prisma.vc_pool_members.findMany({
-      where: { user_id: userId },
+      where: { user_id: userId, is_active: true },
       include: {
         pool: {
           select: {

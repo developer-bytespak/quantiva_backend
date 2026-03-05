@@ -814,7 +814,6 @@ export class ExchangesService {
     // Get the appropriate exchange service
     const exchangeService = this.getExchangeService(connection.exchange.name);
 
-    // Place order (Alpaca: paper vs live is determined by the user's key prefix PK vs AK)
     if (exchangeService instanceof BinanceService) {
       return this.binanceService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
     } else if (exchangeService instanceof BybitService) {

@@ -43,6 +43,12 @@ model users {
   pool_memberships         vc_pool_members[]
   pool_seat_reservations   vc_pool_seat_reservations[]
   pool_payment_submissions vc_pool_payment_submissions[]
+  notifications            notifications[]
+
+  // PHASE 1-5: Binance payment flow
+  binance_deposit_address String?                @db.VarChar(255)
+  user_credits            user_credits[]
+  vc_pool_transactions    vc_pool_transactions[]
 
   @@index([current_tier])
   @@map("users")
@@ -86,6 +92,26 @@ model user_settings {
   user                users         @relation(fields: [user_id], references: [user_id])
 
   @@map("user_settings")
+}
+
+model notifications {
+  id         String           @id @default(uuid()) @db.Uuid
+  user_id    String           @db.Uuid
+  type       NotificationType
+  title      String           @db.VarChar(255)
+  message    String           @db.Text
+  read       Boolean          @default(false)
+  read_at    DateTime?        @db.Timestamp(6)
+  metadata   Json?
+  created_at DateTime         @default(now()) @db.Timestamp(6)
+
+  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([user_id, read])
+  @@index([user_id, created_at])
+  @@index([type])
+  @@map("notifications")
 }
 
 model kyc_verifications {
@@ -986,6 +1012,47 @@ enum PayoutType {
   pool_cancelled
 }
 
+enum BinancePaymentStatus {
+  pending
+  verified
+  rejected
+  refunded
+}
+
+enum NotificationType {
+  // KYC
+  kyc_approved
+  kyc_rejected
+  kyc_under_review
+  // VC Pool
+  seat_reserved
+  payment_verified
+  payment_rejected
+  seat_released_timeout
+  pool_full
+  payout_processed
+  share_credited
+  // Orders / Trading
+  order_filled
+  order_cancelled
+  order_failed
+  // Signals
+  new_signal
+  // Auth / Security
+  two_fa_code_sent
+  new_login_detected
+  password_changed
+  // Exchange
+  exchange_connected
+  exchange_connection_failed
+  // Subscription / Payment
+  plan_activated
+  payment_successful
+  payment_failed
+  // General
+  important_alert_news
+}
+
 // ── VC Pool Models ──
 
 model admins {
@@ -1013,6 +1080,7 @@ model admins {
   sessions               admin_sessions[]
   pools                  vc_pools[]
   pool_trades            vc_pool_trades[]
+  pool_exchange_orders   vc_pool_exchange_orders[]
   reviewed_payments      vc_pool_payment_submissions[] @relation("PaymentReviewer")
   reviewed_cancellations vc_pool_cancellations[]
 
@@ -1083,8 +1151,10 @@ model vc_pools {
   seat_reservations   vc_pool_seat_reservations[]
   payment_submissions vc_pool_payment_submissions[]
   trades              vc_pool_trades[]
+  exchange_orders     vc_pool_exchange_orders[]
   payouts             vc_pool_payouts[]
   cancellations       vc_pool_cancellations[]
+  vcPoolTransactions  vc_pool_transactions[]
 
   @@index([admin_id])
   @@index([status])
@@ -1139,15 +1209,31 @@ model vc_pool_payment_submissions {
   verified_at          DateTime? @db.Timestamp(6)
   submitted_at         DateTime  @default(now()) @db.Timestamp(6)
 
-  pool            vc_pools                  @relation(fields: [pool_id], references: [pool_id])
-  user            users                     @relation(fields: [user_id], references: [user_id])
-  reservation     vc_pool_seat_reservations @relation(fields: [reservation_id], references: [reservation_id])
-  reviewing_admin admins?                   @relation("PaymentReviewer", fields: [reviewed_by_admin_id], references: [admin_id])
+  // Binance P2P TX Details (USD only)
+  binance_tx_id                String?   @unique @db.VarChar(255)
+  binance_tx_timestamp         DateTime? @db.Timestamp(6)
+  binance_amount_received_usdt Decimal?  @db.Decimal(20, 8)
+
+  // Exact Amount Validation
+  exact_amount_expected Decimal? @db.Decimal(20, 8)
+  exact_amount_received Decimal? @db.Decimal(20, 8)
+
+  // Payment Verification Status
+  binance_payment_status BinancePaymentStatus @default(pending)
+  refund_initiated_at    DateTime?            @db.Timestamp(6)
+  refund_reason          String?              @db.VarChar(500)
+
+  pool               vc_pools                  @relation(fields: [pool_id], references: [pool_id])
+  user               users                     @relation(fields: [user_id], references: [user_id])
+  reservation        vc_pool_seat_reservations @relation(fields: [reservation_id], references: [reservation_id])
+  reviewing_admin    admins?                   @relation("PaymentReviewer", fields: [reviewed_by_admin_id], references: [admin_id])
+  transaction_record vc_pool_transactions?     @relation("PaymentTransaction")
 
   @@index([pool_id])
   @@index([user_id])
   @@index([status])
   @@index([stripe_payment_intent_id])
+  @@index([binance_payment_status])
   @@map("vc_pool_payment_submissions")
 }
 
@@ -1165,10 +1251,11 @@ model vc_pool_members {
   joined_at DateTime  @default(now()) @db.Timestamp(6)
   exited_at DateTime? @db.Timestamp(6)
 
-  pool         vc_pools               @relation(fields: [pool_id], references: [pool_id])
-  user         users                  @relation(fields: [user_id], references: [user_id])
-  payouts      vc_pool_payouts[]
-  cancellation vc_pool_cancellations?
+  pool               vc_pools               @relation(fields: [pool_id], references: [pool_id])
+  user               users                  @relation(fields: [user_id], references: [user_id])
+  payouts            vc_pool_payouts[]
+  cancellation       vc_pool_cancellations?
+  vcPoolTransactions vc_pool_transactions[]
 
   @@unique([pool_id, user_id])
   @@index([pool_id])
@@ -1206,6 +1293,32 @@ model vc_pool_trades {
   @@index([is_open])
   @@index([pool_id, strategy_id])
   @@map("vc_pool_trades")
+}
+
+model vc_pool_exchange_orders {
+  order_id          String    @id @default(uuid()) @db.Uuid
+  pool_id           String    @db.Uuid
+  admin_id          String    @db.Uuid
+  symbol            String    @db.VarChar(20)
+  side              String    @db.VarChar(10)
+  order_type        String    @db.VarChar(20)
+  quantity          Decimal   @db.Decimal(30, 10)
+  entry_price_usdt  Decimal   @db.Decimal(20, 8)
+  exchange_order_id String?   @db.VarChar(100)
+  is_open           Boolean   @default(true)
+  exit_price_usdt   Decimal?  @db.Decimal(20, 8)
+  realized_pnl_usdt Decimal?  @db.Decimal(20, 8)
+  opened_at         DateTime  @default(now()) @db.Timestamp(6)
+  closed_at         DateTime? @db.Timestamp(6)
+  created_at        DateTime  @default(now()) @db.Timestamp(6)
+
+  pool  vc_pools @relation(fields: [pool_id], references: [pool_id])
+  admin admins   @relation(fields: [admin_id], references: [admin_id])
+
+  @@index([pool_id])
+  @@index([pool_id, is_open])
+  @@index([admin_id])
+  @@map("vc_pool_exchange_orders")
 }
 
 model vc_pool_cancellations {
@@ -1275,4 +1388,64 @@ model vc_pool_payouts {
   @@index([member_id])
   @@index([status])
   @@map("vc_pool_payouts")
+}
+
+// ── PHASE 1-5: Binance Payment Flow Models ──
+
+model vc_pool_transactions {
+  transaction_id        String  @id @default(uuid()) @db.Uuid
+  pool_id               String  @db.Uuid
+  user_id               String  @db.Uuid
+  payment_submission_id String? @unique @db.Uuid
+  member_id             String? @db.Uuid
+
+  // Transaction Type and Details
+  transaction_type String  @db.VarChar(50) // payment_submitted, payment_verified, payment_rejected, refund_initiated, member_created
+  amount_usdt      Decimal @db.Decimal(20, 8)
+  description      String? @db.Text
+
+  // Binance TX Details
+  binance_tx_id          String?   @unique @db.VarChar(255)
+  binance_tx_timestamp   DateTime? @db.Timestamp(6)
+  expected_amount        Decimal?  @db.Decimal(20, 8)
+  actual_amount_received Decimal?  @db.Decimal(20, 8)
+
+  // Status & Timestamps
+  status      String    @db.VarChar(50) // pending, verified, rejected, failed
+  created_at  DateTime  @default(now()) @db.Timestamp(6)
+  resolved_at DateTime? @db.Timestamp(6)
+
+  // Relations
+  pool               vc_pools                     @relation(fields: [pool_id], references: [pool_id])
+  user               users                        @relation(fields: [user_id], references: [user_id])
+  payment_submission vc_pool_payment_submissions? @relation("PaymentTransaction", fields: [payment_submission_id], references: [submission_id])
+  member             vc_pool_members?             @relation(fields: [member_id], references: [member_id])
+
+  @@index([pool_id])
+  @@index([user_id])
+  @@index([status])
+  @@index([created_at])
+  @@index([binance_tx_id])
+  @@map("vc_pool_transactions")
+}
+
+model user_credits {
+  credit_id String @id @default(uuid()) @db.Uuid
+  user_id   String @db.Uuid
+
+  credit_amount_usdt Decimal @db.Decimal(20, 8)
+  source             String  @db.VarChar(50) // admin_transfer, refund, other
+
+  is_spent         Boolean  @default(false)
+  spent_on_pool_id String?  @db.Uuid
+  spent_amount     Decimal? @db.Decimal(20, 8)
+
+  created_at DateTime  @default(now()) @db.Timestamp(6)
+  spent_at   DateTime? @db.Timestamp(6)
+
+  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([is_spent])
+  @@map("user_credits")
 }

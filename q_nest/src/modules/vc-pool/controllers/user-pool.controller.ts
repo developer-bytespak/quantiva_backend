@@ -17,12 +17,14 @@ import { PoolManagementService } from '../services/pool-management.service';
 import { SeatReservationService } from '../services/seat-reservation.service';
 import { ScreenshotUploadService } from '../services/screenshot-upload.service';
 import { PoolCancellationService } from '../services/pool-cancellation.service';
+import { PaymentSubmissionService } from '../services/payment-submission.service';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { TierAccessGuard } from '../../../common/guards/tier-access.guard';
 import { AllowTier } from '../../../common/decorators/allow-tier.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../../auth/services/token.service';
 import { JoinPoolDto } from '../dto/join-pool.dto';
+import { SubmitBinanceTxDto } from '../dto/submit-binance-tx.dto';
 
 const screenshotUploadOptions = {
   storage: memoryStorage(),
@@ -44,6 +46,7 @@ export class UserPoolController {
     private readonly seatService: SeatReservationService,
     private readonly screenshotService: ScreenshotUploadService,
     private readonly cancellationService: PoolCancellationService,
+    private readonly paymentSubmissionService: PaymentSubmissionService,
   ) {}
 
   @Get('available')
@@ -62,6 +65,29 @@ export class UserPoolController {
   @AllowTier('ELITE')
   async getMyPools(@CurrentUser() user: TokenPayload) {
     return this.cancellationService.getMyPools(user.sub);
+  }
+
+  // ── Binance P2P Payment Endpoints (non-parameterized, must be BEFORE :id) ──
+
+  @Get('payments/my-submissions')
+  @AllowTier('ELITE')
+  async getMyPaymentSubmissions(@CurrentUser() user: TokenPayload) {
+    return this.paymentSubmissionService.getUserSubmissions(user.sub);
+  }
+
+  @Get('payments/submissions/:submissionId')
+  @AllowTier('ELITE')
+  async getPaymentSubmissionDetail(
+    @CurrentUser() user: TokenPayload,
+    @Param('submissionId', ParseUUIDPipe) submissionId: string,
+  ) {
+    return this.paymentSubmissionService.getSubmissionDetail(user.sub, submissionId);
+  }
+
+  @Get('payments/my-transactions')
+  @AllowTier('ELITE')
+  async getMyTransactions(@CurrentUser() user: TokenPayload) {
+    return this.paymentSubmissionService.getUserTransactions(user.sub);
   }
 
   @Get(':id')
@@ -119,5 +145,22 @@ export class UserPoolController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.cancellationService.getMyCancellation(user.sub, id);
+  }
+
+  // ── Binance P2P TX Submission (parameterized, after :id routes) ──
+
+  @Post(':id/submit-binance-tx')
+  @AllowTier('ELITE')
+  async submitBinanceTx(
+    @CurrentUser() user: TokenPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SubmitBinanceTxDto,
+  ) {
+    return this.paymentSubmissionService.submitBinanceTxId(
+      user.sub,
+      id,
+      dto.binance_tx_id,
+      new Date(dto.binance_tx_timestamp),
+    );
   }
 }
