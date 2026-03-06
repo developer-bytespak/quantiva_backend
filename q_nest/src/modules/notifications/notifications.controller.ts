@@ -27,5 +27,11 @@ export class NotificationsController {
       body.body
     );
   }
+
+  @Post('FCM')
+  async fcmNotification(@Body() body: { token:string}, @Req() req: any) {
+    const userId = req.subscriptionUser?.user_id;
+    return this.notificationsService.fcmNotification(body.token, userId);
+  }
 }
 

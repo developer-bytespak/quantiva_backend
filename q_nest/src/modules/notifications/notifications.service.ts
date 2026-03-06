@@ -4,15 +4,20 @@ import { FirebaseService } from 'src/firebase/firebase.service';
 
 @Injectable()
 export class NotificationsService {
-  constructor(private prisma: PrismaService, private firebaseService: FirebaseService) {}
+  constructor(private prisma: PrismaService, private firebaseService: FirebaseService,
+    private PrismaService: PrismaService,
+  ) {}
 
   // Note: This is a placeholder service as there's no notifications table in the schema
   // You may need to add a notifications model to your Prisma schema
-  async sendNotification(token: string, title: string, body: string) {
+  async sendNotification(fcm_token: string="eQuLh1jv1PEdrgbSdQMWHQ:APA91bGGyVPKfUGWl4YHW7e6xAea-vfUtTl-60iOHHUjjir_o_SpBmjQ0aHEPMJQPQXQLnDKV5MFFp-kOMsQ8VIMtK3jZZenKdHz3dysib1RN7cUf8e_2r0",title: string, body: string) {
     try {
       const messaging = this.firebaseService.getMessaging();
+      if(!fcm_token) {
+        return { success: false, message: 'FCM token is required' };
+      }
       const message = {
-        token,
+        token: fcm_token,
         notification: { title, body },
       };
       return await messaging.send(message);
@@ -66,6 +71,19 @@ export class NotificationsService {
       },
     });
     return count;
+  }
+
+  async fcmNotification(token: string, userId: string) {
+    try {
+      const user = await this.PrismaService.users.update({
+        where: { user_id: userId },
+        data: { fcm_token: token },
+      }) ;
+      return { success: true, message: 'FCM token updated', user: user };
+    } catch (err) {
+      console.warn('[NotificationsService] FCM send failed:', err?.message || err);
+      return { success: false, message: 'Failed to send notification' };
+    }
   }
 }
 

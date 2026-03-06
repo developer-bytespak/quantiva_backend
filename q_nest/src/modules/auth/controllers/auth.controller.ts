@@ -28,6 +28,7 @@ import { TokenPayload, TokenService } from '../services/token.service';
 import { isNegative } from 'class-validator';
 import { NotificationsService } from 'src/modules/notifications/notifications.service';
 import { AppGateway } from 'src/gateways/app.gateway';
+import { FirebaseService } from 'src/firebase/firebase.service';
 
 @Controller('auth')
 export class AuthController {
@@ -38,6 +39,7 @@ export class AuthController {
     private tokenService: TokenService,
     private notificationsService: NotificationsService,
     private appGateway: AppGateway,
+    private firebaseService: FirebaseService,
   ) {}
 
   private setCookie(
@@ -111,6 +113,7 @@ export class AuthController {
       this.setCookie(res, 'refresh_token', tokenResult.refreshToken, 7 * 24 * 60 * 60);
 
       const notification = await this.notificationsService.createNotification({user_id: tokenResult.user.user_id, type: "new_login_detected",title:"New Login",message:"New login detected from a new device",read:false,metadata:null});
+      await this.notificationsService.sendNotification(tokenResult.user.fcm_token, "New Login", "New login detected from a new device");
       this.appGateway.emitNotificationCount(tokenResult.user.user_id, 1, notification); // notification count increment by 1
 
       // Return tokens in response body as fallback for cross-origin cookie issues
