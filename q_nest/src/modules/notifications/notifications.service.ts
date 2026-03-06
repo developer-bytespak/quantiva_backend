@@ -21,16 +21,26 @@ export class NotificationsService {
         where: { user_id: userId },
         select: { fcm_token: true },
       });
-      if(!fcm_token) {
-        return { success: false, message: 'FCM token not found' };
+      console.log("fcm_token",fcm_token)
+      if (!fcm_token?.fcm_token) {
+        return { success: false, message: 'FCM token not found for user' };
       }
       const message = {
-        token: fcm_token?.fcm_token,
+        token: fcm_token.fcm_token,
         notification: { title, body },
       };
-      return await messaging.send(message);
-    } catch (err) {
-      console.warn('[NotificationsService] FCM send failed:', err?.message || err);
+      console.log('message-->', message);
+      const messageId = await messaging.send(message);
+      console.log('[NotificationsService] FCM sent successfully, messageId:', messageId);
+      return messageId;
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      const errCode = err?.code;
+      console.warn('[NotificationsService] FCM send failed:', errCode, errMsg);
+      // Unregistered/invalid token = client needs to re-register FCM token
+      if (errCode === 'messaging/invalid-registration-token' || errCode === 'messaging/registration-token-not-registered') {
+        return { success: false, message: 'FCM token invalid or expired – re-register from device' };
+      }
       throw err;
     }
   }

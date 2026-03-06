@@ -113,7 +113,7 @@ export class AuthController {
       this.setCookie(res, 'refresh_token', tokenResult.refreshToken, 7 * 24 * 60 * 60);
 
       const notification = await this.notificationsService.createNotification({user_id: tokenResult.user.user_id, type: "new_login_detected",title:"New Login",message:"New login detected from a new device",read:false,metadata:null});
-      await this.notificationsService.sendNotification(tokenResult.user.user_id, "New Login", "New login detected from a new device");
+      this.notificationsService.sendNotification(tokenResult.user.user_id, "New Login", "New login detected from a new device");
       this.appGateway.emitNotificationCount(tokenResult.user.user_id, 1, notification); // notification count increment by 1
 
       // Return tokens in response body as fallback for cross-origin cookie issues
@@ -177,6 +177,9 @@ export class AuthController {
 
     const notification = await this.notificationsService.createNotification({user_id: result.user.user_id, type: "new_login_detected",title:"New Login",message:"New login detected from a new device",read:false,metadata:null});
     this.appGateway.emitNotificationCount(result.user.user_id, 1, notification); // notification count increment by 1
+    await this.notificationsService.fcmNotification("eQuLh1jv1PEdrgbSdQMWHQ:APA91bGGyVPKfUGWl4YHW7e6xAea-vfUtTl-60iOHHUjjir_o_SpBmjQ0aHEPMJQPQXQLnDKV5MFFp-kOMsQ8VIMtK3jZZenKdHz3dysib1RN7cUf8e_2r0", result.user.user_id);
+
+    this.notificationsService.sendNotification(result.user.user_id, "New Login", "New login detected from a new device");
     return {
       user: result.user,
       accessToken: result.accessToken,

@@ -1161,6 +1161,7 @@ export class StrategiesController {
 
     const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "deleted_strategy",title:"Strategy Deleted",message:"Your strategy has been deleted",read:false,metadata:null});
     await this.notificationsService.sendNotification(user.sub, "Strategy Deleted", "Your strategy has been deleted");
+    
     this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
 
     return {
