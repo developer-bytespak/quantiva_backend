@@ -897,5 +897,111 @@ export class BinanceService {
       throw new BinanceApiException(`Failed to fetch recent trades for ${symbol}: ${error.message}`);
     }
   }
+
+  /**
+   * Fetches deposit history for user
+   */
+  async getDepositHistory(
+    apiKey: string,
+    apiSecret: string,
+    coin?: string,
+    status?: number,
+    offset: number = 0,
+    limit: number = 100,
+    startTime?: number,
+    endTime?: number,
+  ): Promise<any[]> {
+    try {
+      const params: Record<string, any> = {
+        offset,
+        limit: Math.min(limit, 1000),
+      };
+
+      if (coin) params.coin = coin;
+      if (status !== undefined) params.status = status; // 0:pending, 1:success
+      if (startTime) params.startTime = startTime;
+      if (endTime) params.endTime = endTime;
+
+      const deposits = await this.makeSignedRequest(
+        '/sapi/v1/capital/deposit/hisrec',
+        apiKey,
+        apiSecret,
+        params,
+      );
+
+      return deposits.map((deposit: any) => ({
+        id: deposit.id,
+        coin: deposit.coin,
+        amount: parseFloat(deposit.amount),
+        network: deposit.network,
+        status: deposit.status, // 0: pending, 1: success
+        address: deposit.address,
+        addressTag: deposit.addressTag,
+        txId: deposit.txId,
+        insertTime: deposit.insertTime,
+        transferType: deposit.transferType,
+        confirmTimes: deposit.confirmTimes,
+      }));
+    } catch (error: any) {
+      if (error instanceof BinanceApiException || error instanceof InvalidApiKeyException) {
+        throw error;
+      }
+      throw new BinanceApiException(`Failed to fetch deposit history: ${error.message}`);
+    }
+  }
+
+  /**
+   * Fetches withdrawal history for user
+   */
+  async getWithdrawalHistory(
+    apiKey: string,
+    apiSecret: string,
+    coin?: string,
+    status?: number,
+    offset: number = 0,
+    limit: number = 100,
+    startTime?: number,
+    endTime?: number,
+  ): Promise<any[]> {
+    try {
+      const params: Record<string, any> = {
+        offset,
+        limit: Math.min(limit, 1000),
+      };
+
+      if (coin) params.coin = coin;
+      if (status !== undefined) params.status = status; // 0:pending, 1:success, 2:failed
+      if (startTime) params.startTime = startTime;
+      if (endTime) params.endTime = endTime;
+
+      const withdrawals = await this.makeSignedRequest(
+        '/sapi/v1/capital/withdraw/history',
+        apiKey,
+        apiSecret,
+        params,
+      );
+
+      return withdrawals.map((withdrawal: any) => ({
+        id: withdrawal.id,
+        coin: withdrawal.coin,
+        withdrawOrderId: withdrawal.withdrawOrderId,
+        amount: parseFloat(withdrawal.amount),
+        network: withdrawal.network,
+        address: withdrawal.address,
+        addressTag: withdrawal.addressTag,
+        txId: withdrawal.txId,
+        status: withdrawal.status, // 0: email sent, 1: cancelled, 2: awaiting approval, 3: rejected, 4: processing, 5: failure, 6: completed
+        completeTime: withdrawal.completeTime,
+        applyTime: withdrawal.applyTime,
+        transferType: withdrawal.transferType,
+        info: withdrawal.info,
+      }));
+    } catch (error: any) {
+      if (error instanceof BinanceApiException || error instanceof InvalidApiKeyException) {
+        throw error;
+      }
+      throw new BinanceApiException(`Failed to fetch withdrawal history: ${error.message}`);
+    }
+  }
 }
 

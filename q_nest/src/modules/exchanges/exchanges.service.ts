@@ -888,6 +888,88 @@ export class ExchangesService {
   }
 
   /**
+   * Gets deposit history for a connection
+   */
+  async getDepositHistory(
+    connectionId: string,
+    coin?: string,
+    status?: number,
+    offset: number = 0,
+    limit: number = 100,
+    startTime?: number,
+    endTime?: number,
+  ): Promise<any[]> {
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection || !connection.exchange) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+
+    if (exchangeName === 'binance') {
+      // Decrypt the API credentials
+      const credentials = await this.getDecryptedCredentials(connectionId);
+      return this.binanceService.getDepositHistory(
+        credentials.apiKey,
+        credentials.apiSecret,
+        coin,
+        status,
+        offset,
+        limit,
+        startTime,
+        endTime,
+      );
+    } else {
+      throw new Error(`Deposit history not supported for ${connection.exchange.name}`);
+    }
+  }
+
+  /**
+   * Gets withdrawal history for a connection
+   */
+  async getWithdrawalHistory(
+    connectionId: string,
+    coin?: string,
+    status?: number,
+    offset: number = 0,
+    limit: number = 100,
+    startTime?: number,
+    endTime?: number,
+  ): Promise<any[]> {
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection || !connection.exchange) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+
+    if (exchangeName === 'binance') {
+      // Decrypt the API credentials
+      const credentials = await this.getDecryptedCredentials(connectionId);
+      return this.binanceService.getWithdrawalHistory(
+        credentials.apiKey,
+        credentials.apiSecret,
+        coin,
+        status,
+        offset,
+        limit,
+        startTime,
+        endTime,
+      );
+    } else {
+      throw new Error(`Withdrawal history not supported for ${connection.exchange.name}`);
+    }
+  }
+
+  /**
    * Verifies that the user owns a valid exchange account with the provided credentials
    * This method tests the API credentials against the actual exchange before updating
    * 
