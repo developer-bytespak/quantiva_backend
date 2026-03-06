@@ -10,14 +10,22 @@ export class NotificationsService {
 
   // Note: This is a placeholder service as there's no notifications table in the schema
   // You may need to add a notifications model to your Prisma schema
-  async sendNotification(fcm_token: string="eQuLh1jv1PEdrgbSdQMWHQ:APA91bGGyVPKfUGWl4YHW7e6xAea-vfUtTl-60iOHHUjjir_o_SpBmjQ0aHEPMJQPQXQLnDKV5MFFp-kOMsQ8VIMtK3jZZenKdHz3dysib1RN7cUf8e_2r0",title: string, body: string) {
+  async sendNotification(userId: string,title: string, body: string) {
     try {
       const messaging = this.firebaseService.getMessaging();
-      if(!fcm_token) {
+      if(!userId) {
         return { success: false, message: 'FCM token is required' };
       }
+
+      const fcm_token = await this.PrismaService.users.findUnique({
+        where: { user_id: userId },
+        select: { fcm_token: true },
+      });
+      if(!fcm_token) {
+        return { success: false, message: 'FCM token not found' };
+      }
       const message = {
-        token: fcm_token,
+        token: fcm_token?.fcm_token,
         notification: { title, body },
       };
       return await messaging.send(message);

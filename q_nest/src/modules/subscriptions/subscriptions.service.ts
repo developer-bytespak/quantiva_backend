@@ -657,7 +657,7 @@ export class SubscriptionsService {
 
 
       const notification = await this.notificationsService.createNotification({user_id: currentSubscription.user_id, type: "subscription_updated",title:"Subscription Updated",message:"Your subscription has been updated",read:false,metadata:null});
-
+      await this.notificationsService.sendNotification(currentSubscription.user_id, "Subscription Updated", "Your subscription has been updated");
       this.appGateway.emitNotificationCount(currentSubscription.user_id, 1, notification); // notification count increment by 1
 
       return updated;
