@@ -13,6 +13,7 @@ import {
 import { PoolManagementService } from '../services/pool-management.service';
 import { PoolCancellationService } from '../services/pool-cancellation.service';
 import { PoolPayoutService } from '../services/pool-payout.service';
+import { VcPoolTransactionsAdminService } from '../services/vc-pool-transactions-admin.service';
 import { AdminJwtAuthGuard } from '../../admin-auth/guards/admin-jwt-auth.guard';
 import { CurrentAdmin } from '../../admin-auth/decorators/current-admin.decorator';
 import { AdminTokenPayload } from '../../admin-auth/services/admin-token.service';
@@ -28,6 +29,7 @@ export class AdminPoolController {
     private readonly poolService: PoolManagementService,
     private readonly cancellationService: PoolCancellationService,
     private readonly payoutService: PoolPayoutService,
+    private readonly transactionsService: VcPoolTransactionsAdminService,
   ) {}
 
   @Post()
@@ -187,5 +189,55 @@ export class AdminPoolController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.payoutService.cancelPool(admin.sub, id);
+  }
+
+  // ── Transaction Tracking & Auditing ──
+
+  @Get(':poolId/transactions')
+  async listTransactions(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+    @Query('status') status?: string,
+    @Query('transactionType') transactionType?: string,
+    @Query('userId') userId?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.transactionsService.listTransactions(admin.sub, poolId, {
+      status,
+      transactionType,
+      userId,
+      dateFrom: dateFrom ? new Date(dateFrom) : undefined,
+      dateTo: dateTo ? new Date(dateTo) : undefined,
+      page: page ? parseInt(page, 10) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+  }
+
+  @Get(':poolId/transactions/:txId')
+  async getTransactionDetail(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+    @Param('txId', ParseUUIDPipe) txId: string,
+  ) {
+    return this.transactionsService.getTransactionDetail(admin.sub, poolId, txId);
+  }
+
+  @Get(':poolId/transactions-by-user')
+  async listTransactionsByUser(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+  ) {
+    return this.transactionsService.listTransactionsByUser(admin.sub, poolId);
+  }
+
+  @Get(':poolId/pending-actions')
+  async getPendingActions(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+  ) {
+    return this.transactionsService.getPendingActions(admin.sub, poolId);
   }
 }

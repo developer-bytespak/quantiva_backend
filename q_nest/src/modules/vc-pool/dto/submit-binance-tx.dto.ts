@@ -1,10 +1,6 @@
 import { IsNotEmpty, IsString, IsDateString, MaxLength } from 'class-validator';
 
 export class SubmitBinanceTxDto {
-  @IsNotEmpty({ message: 'pool_id is required' })
-  @IsString()
-  pool_id: string;
-
   @IsNotEmpty({ message: 'binance_tx_id is required' })
   @IsString()
   @MaxLength(255)

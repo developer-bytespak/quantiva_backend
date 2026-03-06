@@ -7,6 +7,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { Decimal } from '@prisma/client/runtime/library';
 import * as crypto from 'crypto';
 import axios from 'axios';
+import { EncryptionUtil } from '../../../common/utils/encryption.util';
 
 interface BinanceP2POrderDetail {
   orderNumber: string;
@@ -54,7 +55,7 @@ export class BinanceVerificationService {
         this.logger.warn(
           `Admin ${admin.admin_id} has no Binance API keys configured. Skipping auto-verify.`,
         );
-        return { verified: false, reason: 'Admin Binance API keys not configured' };
+        return { verified: false, reason: 'Admin Binance API keys not configured - manual review required' };
       }
 
       // Decrypt keys
@@ -69,13 +70,13 @@ export class BinanceVerificationService {
       );
 
       if (!orderDetail) {
-        return { verified: false, reason: 'TX ID not found on Binance' };
+        return { verified: false, reason: `TX ID '${submission.binance_tx_id}' not found on Binance - user may have submitted incorrect TX ID or payment not yet confirmed by Binance` };
       }
 
       if (orderDetail.orderStatus !== 'COMPLETED') {
         return {
           verified: false,
-          reason: `Binance order status is ${orderDetail.orderStatus}, not COMPLETED`,
+          reason: `Binance order status is ${orderDetail.orderStatus}, not COMPLETED - payment may still be processing`,
         };
       }
 
@@ -88,7 +89,8 @@ export class BinanceVerificationService {
       if (!actualAmount.equals(expectedAmount)) {
         const variance = actualAmount.minus(expectedAmount);
         const direction = variance.greaterThan(0) ? 'Overpayment' : 'Shortfall';
-        const reason = `${direction}: received ${actualAmount} instead of ${expectedAmount}`;
+        const variancePercent = ((Math.abs(Number(variance)) / Number(expectedAmount)) * 100).toFixed(2);
+        const reason = `${direction}: received ${actualAmount} USDT instead of ${expectedAmount} USDT (variance: ${variancePercent}%)`;
         return { verified: false, reason, amount: actualAmount };
       }
 
@@ -274,7 +276,7 @@ export class BinanceVerificationService {
           exact_amount_received: actualAmount || null,
           rejection_reason: reason,
           refund_initiated_at: actualAmount ? new Date() : null,
-          refund_reason: reason,
+          refund_reason: actualAmount ? reason : null,
         },
       });
 
@@ -290,7 +292,7 @@ export class BinanceVerificationService {
         data: { reserved_seats_count: { decrement: 1 } },
       });
 
-      // 4. Log audit transaction
+      // 4. Log audit transaction with detailed error information
       await tx.vc_pool_transactions.create({
         data: {
           pool_id: payment.pool_id,
@@ -302,13 +304,15 @@ export class BinanceVerificationService {
           actual_amount_received: actualAmount || null,
           status: 'rejected',
           resolved_at: new Date(),
-          description: `Payment rejected: ${reason}`,
+          description: actualAmount
+            ? `Payment verification FAILED. Reason: ${reason}. User sent ${actualAmount} USDT but expected amount was ${payment.exact_amount_expected || payment.total_amount} USDT. Refund of ${actualAmount} USDT has been initiated.`
+            : `Payment verification FAILED. Reason: ${reason}. No funds were received or TX not found on Binance. No refund needed.`,
         },
       });
     });
 
     this.logger.log(
-      `✗ Payment REJECTED: ${payment.submission_id} | Reason: ${reason}`,
+      `✗ Payment REJECTED: ${payment.submission_id} | User: ${payment.user_id} | Reason: ${reason}`,
     );
   }
 
@@ -372,12 +376,13 @@ export class BinanceVerificationService {
   }
 
   /**
-   * Decrypt Binance API key
-   * TODO: Use proper encryption (AES-256-GCM) based on your app's encryption service
+   * Decrypt Binance API key using AES-256-GCM
    */
   private decryptKey(encryptedKey: string): string {
-    // For now, return as-is (keys stored in plain text)
-    // Replace with actual decryption when encryption service is implemented
-    return encryptedKey;
+    const encryptionKey = process.env.ENCRYPTION_KEY;
+    if (!encryptionKey) {
+      throw new Error('ENCRYPTION_KEY not found in environment variables');
+    }
+    return EncryptionUtil.decrypt(encryptedKey, encryptionKey);
   }
 }
