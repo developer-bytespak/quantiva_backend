@@ -112,8 +112,8 @@ export class StripeController {
       new Date(),
     );
 
-    const notification = await this.notificationsService.createNotification({user_id: userId, type: "payment_failed",title:"Subscription Cancelled",message:"Your subscription has been cancelled",read:false,metadata:null});
-
+    const notification = await this.notificationsService.createNotification({user_id: userId, type: "subscription_cancelled",title:"Subscription Cancelled",message:"Your subscription has been cancelled",read:false,metadata:null});
+    this.notificationsService.sendNotification(userId, "Subscription Cancelled", "Your subscription has been cancelled");
     this.appGateway.emitNotificationCount(userId, 1, notification); // notification count increment by 1
 
 

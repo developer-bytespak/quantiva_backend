@@ -20,12 +20,22 @@ export class NotificationsController {
   }
 
   @Post('send')
-  async send(@Body() body: { token: string; title: string; body: string }) {
+  async send(@Body() body: { token: string; title: string; body: string }, @Req() req: any) {
+    const userId = "f96b2562-ff2b-4f22-a5c7-fc3fe56491f1"
+    if (!userId) {
+      return { success: false, message: 'User not authenticated' };
+    }
     return this.notificationsService.sendNotification(
-      body.token,
+      userId,
       body.title,
       body.body
     );
+  }
+
+  @Post('FCM')
+  async fcmNotification(@Body() body: { token:string}, @Req() req: any) {
+    const userId = req.subscriptionUser?.user_id;
+    return this.notificationsService.fcmNotification(body.token, userId);
   }
 }
 

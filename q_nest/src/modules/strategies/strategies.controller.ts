@@ -873,7 +873,8 @@ export class StrategiesController {
       );
     }
 
-    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "new_signal",title:"New Strategy Created",message:"Your new strategy has been created",read:false,metadata:null});
+    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "stock_strategy_created",title:"Stock Strategy Created",message:"Your new stock strategy has been created",read:false,metadata:null});
+    await this.notificationsService.sendNotification(user.sub, "Stock Strategy Created", "Your new stock strategy has been created");
     this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
 
     return {
@@ -936,7 +937,8 @@ export class StrategiesController {
         FeatureType.CUSTOM_STRATEGIES,
       );
     }
-    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "new_signal",title:"New Strategy Created",message:"Your new strategy has been created",read:false,metadata:null});
+    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "crypto_strategy_created",title:"Crypto Strategy Created",message:"Your new crypto strategy has been created",read:false,metadata:null});
+    await this.notificationsService.sendNotification(user.sub, "Crypto Strategy Created", "Your new crypto strategy has been created");
     this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
 
     return {
@@ -1157,7 +1159,9 @@ export class StrategiesController {
       );
     }
 
-    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "new_signal",title:"Strategy Deleted",message:"Your strategy has been deleted",read:false,metadata:null});
+    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "deleted_strategy",title:"Strategy Deleted",message:"Your strategy has been deleted",read:false,metadata:null});
+    await this.notificationsService.sendNotification(user.sub, "Strategy Deleted", "Your strategy has been deleted");
+    
     this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
 
     return {
