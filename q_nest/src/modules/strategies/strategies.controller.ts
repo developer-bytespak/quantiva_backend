@@ -22,6 +22,8 @@ import { AiInsightsService } from '../../ai-insights/ai-insights.service';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { FeatureAccessService, FeatureType } from 'src/common/feature-access.service';
+import { AppGateway } from 'src/gateways/app.gateway';
+import { NotificationsService } from '../notifications/notifications.service';
 
 @Controller('strategies')
 export class StrategiesController {
@@ -43,6 +45,8 @@ export class StrategiesController {
     private readonly aiInsightsService: AiInsightsService,
     private readonly configService: ConfigService,
     private readonly featureAccessService: FeatureAccessService,
+    private readonly appGateway: AppGateway,
+    private readonly notificationsService: NotificationsService,
 
   ) {
     this.pythonApiUrl = this.configService.get<string>('PYTHON_API_URL') || 'http://localhost:8000/api/v1';
@@ -652,6 +656,49 @@ export class StrategiesController {
   }
 
   /**
+   * Get available crypto symbols for strategy creation
+   * Must be placed BEFORE generic :id route to avoid route conflict
+   * Endpoint: GET /strategies/available-crypto
+   */
+  @Get('available-crypto')
+  async getAvailableCrypto(@Query('search') search?: string, @Query('limit') limit?: string) {
+    const limitNum = limit ? parseInt(limit, 10) : 50;
+
+    try {
+      const whereClause: any = {
+        asset_type: 'crypto',
+      };
+
+      if (search) {
+        whereClause.OR = [
+          { symbol: { contains: search.toUpperCase() } },
+          { name: { contains: search } },
+        ];
+      }
+
+      const cryptos = await this.prisma.assets.findMany({
+        where: whereClause,
+        select: {
+          asset_id: true,
+          symbol: true,
+          name: true,
+          display_name: true,
+        },
+        take: limitNum,
+        orderBy: { symbol: 'asc' },
+      });
+
+      return cryptos.map((s) => ({
+        symbol: s.symbol,
+        name: s.name || s.display_name || s.symbol,
+      }));
+    } catch (error) {
+      this.logger.error('Error fetching available crypto:', error);
+      throw new BadRequestException('Failed to fetch available crypto');
+    }
+  }
+
+  /**
    * ============================================
    * USER CUSTOM STRATEGY ENDPOINTS (STOCKS & CRYPTO)
    * Must be declared BEFORE @Get(':id') so /my-strategies is not matched as :id
@@ -826,6 +873,9 @@ export class StrategiesController {
       );
     }
 
+    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "new_signal",title:"New Strategy Created",message:"Your new strategy has been created",read:false,metadata:null});
+    this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
+
     return {
       success: true,
       message: 'Stock strategy created successfully',
@@ -886,6 +936,8 @@ export class StrategiesController {
         FeatureType.CUSTOM_STRATEGIES,
       );
     }
+    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "new_signal",title:"New Strategy Created",message:"Your new strategy has been created",read:false,metadata:null});
+    this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
 
     return {
       success: true,
@@ -1104,6 +1156,9 @@ export class StrategiesController {
         FeatureType.CUSTOM_STRATEGIES,
       );
     }
+
+    const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "new_signal",title:"Strategy Deleted",message:"Your strategy has been deleted",read:false,metadata:null});
+    this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
 
     return {
       success: true,

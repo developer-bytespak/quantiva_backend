@@ -14,6 +14,9 @@ import { Request } from 'express';
 import { StripeService } from './stripe.service';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import Stripe from 'stripe';
+import { AppGateway } from 'src/gateways/app.gateway';
+import { NotificationsService } from '../notifications/notifications.service';
+// import { NotificationType } from '@prisma/client';
 
 interface RawBodyRequest extends Request {
   rawBody?: Buffer;
@@ -25,6 +28,8 @@ export class StripeController {
 
   constructor(
     private readonly stripeService: StripeService,
+    private readonly appGateway: AppGateway,
+    private readonly notificationsService: NotificationsService,
     private readonly subscriptionsService: SubscriptionsService,
   ) {}
 
@@ -107,6 +112,12 @@ export class StripeController {
       new Date(),
     );
 
+    const notification = await this.notificationsService.createNotification({user_id: userId, type: "payment_failed",title:"Subscription Cancelled",message:"Your subscription has been cancelled",read:false,metadata:null});
+
+    this.appGateway.emitNotificationCount(userId, 1, notification); // notification count increment by 1
+
+
+
     return {
       subscription_id: updated.subscription_id,
       status: updated.status,
@@ -150,12 +161,9 @@ export class StripeController {
     if (event.type === 'checkout.session.completed') {
       console.log("CHECKOUT.SESSION.COMPLETED");
       const session = event.data.object as Stripe.Checkout.Session;
-      console.log("SESSION--s", session.client_reference_id);
-      console.log("SESSION--m", session.metadata);
 
       const userId = session.client_reference_id;
       const planId = session.metadata?.plan_id;
-      console.log("Plan ID", planId);
 
       const externalId =
         typeof session.subscription === 'string'
@@ -199,6 +207,8 @@ export class StripeController {
         this.logger.warn(`Failed to fetch invoice/receipt URLs from Stripe: ${(metaErr as any)?.message}`);
       }
 
+      console.log("userId and planId",userId, planId)
+
       if (userId && planId) {
         try {
           const existing = await this.subscriptionsService.getActiveSubscriptionWithFeatures(
@@ -206,6 +216,7 @@ export class StripeController {
           );
 
           if (existing) {
+            console.log("existing-subscription",existing)
             const updated = await this.subscriptionsService.updateSubscription(
               existing.subscription_id,
               {

@@ -16,12 +16,15 @@ import { TwoFactorGuard } from './guards/two-factor.guard';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { StorageModule } from '../../storage/storage.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { AppGateway } from 'src/gateways/app.gateway';
 
 @Module({
   imports: [
     PrismaModule,
     StorageModule,
     SubscriptionsModule,
+    NotificationsModule,
     PassportModule,
     ConfigModule,
     ScheduleModule,
@@ -46,6 +49,7 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
     SessionService,
     TwoFactorService,
     RateLimitService,
+    AppGateway,
     JwtStrategy,
     JwtAuthGuard,
     RefreshTokenGuard,

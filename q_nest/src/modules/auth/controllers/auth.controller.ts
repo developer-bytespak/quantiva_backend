@@ -26,6 +26,8 @@ import { VerifyPasswordDto } from '../dto/verify-password.dto';
 import { ConfigService } from '@nestjs/config';
 import { TokenPayload, TokenService } from '../services/token.service';
 import { isNegative } from 'class-validator';
+import { NotificationsService } from 'src/modules/notifications/notifications.service';
+import { AppGateway } from 'src/gateways/app.gateway';
 
 @Controller('auth')
 export class AuthController {
@@ -34,6 +36,8 @@ export class AuthController {
     private sessionService: SessionService,
     private configService: ConfigService,
     private tokenService: TokenService,
+    private notificationsService: NotificationsService,
+    private appGateway: AppGateway,
   ) {}
 
   private setCookie(
@@ -106,6 +110,9 @@ export class AuthController {
       // Refresh token: 7 days
       this.setCookie(res, 'refresh_token', tokenResult.refreshToken, 7 * 24 * 60 * 60);
 
+      const notification = await this.notificationsService.createNotification({user_id: tokenResult.user.user_id, type: "new_login_detected",title:"New Login",message:"New login detected from a new device",read:false,metadata:null});
+      this.appGateway.emitNotificationCount(tokenResult.user.user_id, 1, notification); // notification count increment by 1
+
       // Return tokens in response body as fallback for cross-origin cookie issues
       return {
         user: tokenResult.user,
@@ -164,6 +171,9 @@ export class AuthController {
     const ipAddress = req.ip || req.socket.remoteAddress;
     const deviceId = req.headers['x-device-id'] as string;
     const result = await this.authService.loginWithGoogle(body.idToken, ipAddress, deviceId);
+
+    const notification = await this.notificationsService.createNotification({user_id: result.user.user_id, type: "new_login_detected",title:"New Login",message:"New login detected from a new device",read:false,metadata:null});
+    this.appGateway.emitNotificationCount(result.user.user_id, 1, notification); // notification count increment by 1
     return {
       user: result.user,
       accessToken: result.accessToken,

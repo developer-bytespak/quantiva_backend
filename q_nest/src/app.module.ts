@@ -25,11 +25,13 @@ import { PortfolioModule } from './modules/portfolio/portfolio.module';
 import { VcPoolModule } from './modules/vc-pool/vc-pool.module';
 import { PaperTradingGateway } from './gateways/paper-trading.gateway';
 import { MarketDetailGateway } from './gateways/market-detail.gateway';
+import { GatewaysModule } from './gateways/gateways.module';
 
 @Module({
   imports: [
     ConfigModule,
     PrismaModule,
+    GatewaysModule,
     ScheduleModule.forRoot(),
     AuthModule,
     AdminAuthModule,

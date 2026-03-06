@@ -1,21 +1,30 @@
-import { Controller, Get, Post, Body, Param } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Req } from '@nestjs/common';
 import { NotificationsService } from './notifications.service';
+import { FirebaseService } from 'src/firebase/firebase.service';
 
 @Controller('notifications')
 export class NotificationsController {
-  constructor(private readonly notificationsService: NotificationsService) {}
+  constructor(private readonly notificationsService: NotificationsService,
+    private readonly firebaseService: FirebaseService,
+  ) {}
 
-  @Get(':userId')
-  getUserNotifications(@Param('userId') userId: string) {
+  @Get()
+  getUserNotifications(@Req() req: any) {
+    const userId = req.subscriptionUser?.user_id;
     return this.notificationsService.getUserNotifications(userId);
+  }
+  @Get("unread")  
+  async getUnreadNotifications(@Req() req: any) {
+    const userId = req.subscriptionUser?.user_id;
+    return this.notificationsService.getUnreadNotificationsCount(userId);
   }
 
   @Post('send')
-  sendNotification(@Body() notificationDto: { userId: string; message: string; type?: string }) {
+  async send(@Body() body: { token: string; title: string; body: string }) {
     return this.notificationsService.sendNotification(
-      notificationDto.userId,
-      notificationDto.message,
-      notificationDto.type,
+      body.token,
+      body.title,
+      body.body
     );
   }
 }

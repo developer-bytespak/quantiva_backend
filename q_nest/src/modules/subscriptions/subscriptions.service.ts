@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SubscriptionStatus } from '@prisma/client';
 import { cursorTo } from 'readline';
+import { NotificationsService } from '../notifications/notifications.service';
+import { AppGateway } from 'src/gateways/app.gateway';
 
 export enum PlanTier {
   FREE = 'FREE',
@@ -24,7 +26,10 @@ export enum FeatureType {
 
 @Injectable()
 export class SubscriptionsService {
-  constructor(private prisma: PrismaService) { }
+  constructor(private prisma: PrismaService,
+    private readonly notificationsService: NotificationsService,
+    private readonly appGateway: AppGateway,
+  ) { }
 
   private getMonthlyPeriods(startDate: Date, endDate: Date): { start: Date; end: Date }[] {
     const periods: { start: Date; end: Date }[] = [];
@@ -647,6 +652,14 @@ export class SubscriptionsService {
         },
       });
 
+
+      console.log("updated",updated)
+
+
+      const notification = await this.notificationsService.createNotification({user_id: currentSubscription.user_id, type: "payment_successful",title:"Subscription Updated",message:"Your subscription has been updated",read:false,metadata:null});
+
+      this.appGateway.emitNotificationCount(currentSubscription.user_id, 1, notification); // notification count increment by 1
+
       return updated;
     }, { timeout: 30000 });
   }
@@ -725,6 +738,7 @@ export class SubscriptionsService {
     receipt_url?: string | null;
     failure_reason?: string | null;
   }) {
+    console.log("data recordPayment",data)
     return this.prisma.payment_history.create({
       data: {
         ...data,
