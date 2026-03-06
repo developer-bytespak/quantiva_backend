@@ -1,20 +1,22 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { FirebaseService } from 'src/firebase/firebase.service';
 
 @Injectable()
 export class NotificationsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService, private firebaseService: FirebaseService) {}
 
   // Note: This is a placeholder service as there's no notifications table in the schema
   // You may need to add a notifications model to your Prisma schema
-  async sendNotification(userId: string, message: string, type?: string) {
-    // TODO: Implement notification logic
-    // This could involve:
-    // - Creating a notification record in the database
-    // - Sending email notifications
-    // - Sending push notifications
-    // - etc.
-    return { success: true, message: 'Notification sent' };
+  async sendNotification(token: string, title: string, body: string) {
+    const message = {
+      token,
+      notification: {
+        title,
+        body
+      }
+    };
+    return this.firebaseService.getMessaging().send(message);
   }
 
   async getUserNotifications(userId: string) {

@@ -2,6 +2,9 @@
 node_modules/
 q_nest/node_modules/
 
+# Firebase credentials
+q_nest/src/firebase/quantiva-77c3a-firebase-adminsdk-fbsvc-b6fded99b7.json
+
 # Environment files
 q_nest/.env
 q_python/.env
