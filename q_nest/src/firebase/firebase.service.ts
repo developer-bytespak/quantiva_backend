@@ -1,40 +1,48 @@
 import { Injectable } from '@nestjs/common';
 import * as admin from 'firebase-admin';
-import * as path from 'path';
-import * as fs from 'fs';
 
 @Injectable()
 export class FirebaseService {
+  private initialized = false;
 
- private readonly credFileName = 'quantiva-77c3a-firebase-adminsdk-fbsvc-b6fded99b7.json';
+  constructor() {
+    if (admin.apps.length) {
+      this.initialized = true;
+      return;
+    }
 
- constructor() {
-   // Try next to this file (dist/src/firebase) then project src (for dev when assets aren't copied)
-   const nextToFile = path.join(__dirname, this.credFileName);
-   const inSrc = path.join(process.cwd(), 'src', 'firebase', this.credFileName);
-   const resolved = fs.existsSync(nextToFile) ? nextToFile : inSrc;
-   if (!fs.existsSync(resolved)) {
-     throw new Error(
-       `Firebase credentials file not found. Tried: ${nextToFile} and ${inSrc}`,
-     );
-   }
-   const serviceAccount = JSON.parse(fs.readFileSync(resolved, 'utf8'));
+    const projectId = process.env.FIREBASE_PROJECT_ID;
+    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+    const privateKey = process.env.FIREBASE_PRIVATE_KEY;
 
-   if (!admin.apps.length) {
-     admin.initializeApp(
-      {
+    if (!projectId || !clientEmail || !privateKey) {
+      return;
+    }
+
+    try {
+      admin.initializeApp({
         credential: admin.credential.cert({
-          projectId: process.env.FIREBASE_PROJECT_ID,
-          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-          privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+          projectId,
+          clientEmail,
+          privateKey: privateKey.replace(/\\n/g, '\n'),
         }),
-      }
-     );
-   }
- }
+      });
+      this.initialized = true;
+    } catch (err) {
+      console.warn(
+        '[FirebaseService] Initialization failed (push notifications will be disabled):',
+        err?.message || err,
+      );
+    }
+  }
 
- getMessaging() {
-   return admin.messaging();
- }
+  getMessaging() {
+    if (!this.initialized || !admin.apps.length) {
+      throw new Error(
+        'Firebase is not initialized. Check FIREBASE_* env vars and that the service account key is valid in Firebase Console.',
+      );
+    }
+    return admin.messaging();
+  }
 
 }

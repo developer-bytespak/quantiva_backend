@@ -9,14 +9,17 @@ export class NotificationsService {
   // Note: This is a placeholder service as there's no notifications table in the schema
   // You may need to add a notifications model to your Prisma schema
   async sendNotification(token: string, title: string, body: string) {
-    const message = {
-      token,
-      notification: {
-        title,
-        body
-      }
-    };
-    return this.firebaseService.getMessaging().send(message);
+    try {
+      const messaging = this.firebaseService.getMessaging();
+      const message = {
+        token,
+        notification: { title, body },
+      };
+      return await messaging.send(message);
+    } catch (err) {
+      console.warn('[NotificationsService] FCM send failed:', err?.message || err);
+      throw err;
+    }
   }
 
   async getUserNotifications(userId: string) {
