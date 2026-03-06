@@ -28,13 +28,14 @@ import { AiInsightsModule } from '../../ai-insights/ai-insights.module';
 import { StocksMarketModule } from '../stocks-market/stocks-market.module';
 import { FeatureAccessService } from '../../common/feature-access.service';
 import { TierAccessGuard } from '../../common/guards/tier-access.guard';
-import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { AppGateway } from 'src/gateways/app.gateway';
 
 @Module({
   imports: [
     PrismaModule,
     AdminAuthModule,
+    NotificationsModule,
     KycModule,
     forwardRef(() => SignalsModule),
     NewsModule,
@@ -62,7 +63,6 @@ import { AppGateway } from 'src/gateways/app.gateway';
     StrategiesService,
     StrategyValidationService,
     AppGateway,
-    NotificationsService,
     PreBuiltStrategiesService,
     StrategyPreviewService,
     StrategyExecutionService,
