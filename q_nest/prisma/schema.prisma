@@ -51,6 +51,10 @@ model users {
   user_credits            user_credits[]
   vc_pool_transactions    vc_pool_transactions[]
 
+  // Options trading
+  options_orders    options_orders[]
+  options_positions options_positions[]
+
   @@index([current_tier])
   @@map("users")
 }
@@ -475,6 +479,10 @@ model strategy_signals {
   strategy             strategies?              @relation(fields: [strategy_id], references: [strategy_id])
   user                 users?                   @relation(fields: [user_id], references: [user_id])
 
+  // Options trading
+  options_orders  options_orders[]
+  options_signals options_signals[]
+
   @@index([strategy_id])
   @@index([user_id])
   @@index([asset_id])
@@ -890,6 +898,7 @@ enum PortfolioType {
   spot
   futures
   margin
+  options
 }
 
 enum PositionSide {
@@ -953,6 +962,7 @@ enum FeatureType {
   CUSTOM_STRATEGIES
   VC_POOL_ACCESS
   EARLY_ACCESS
+  OPTIONS_TRADING
 }
 
 enum PaymentStatus {
@@ -1415,4 +1425,129 @@ model user_credits {
   @@index([user_id])
   @@index([is_spent])
   @@map("user_credits")
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// OPTIONS TRADING MODULE
+// ──────────────────────────────────────────────────────────────────────
+
+enum OptionType {
+  CALL
+  PUT
+}
+
+enum OptionOrderStatus {
+  pending
+  filled
+  partially_filled
+  cancelled
+  rejected
+  expired
+}
+
+model options_orders {
+  order_id  String  @id @default(uuid()) @db.Uuid
+  user_id   String  @db.Uuid
+  signal_id String? @db.Uuid
+
+  contract_symbol String     @db.VarChar(50) // e.g. BTC-260327-100000-C
+  underlying      String     @db.VarChar(20) // e.g. BTC
+  strike          Decimal    @db.Decimal(20, 8)
+  expiry          DateTime   @db.Timestamp(6)
+  option_type     OptionType
+
+  side            String   @db.VarChar(10) // BUY or SELL
+  quantity        Decimal  @db.Decimal(30, 10)
+  price           Decimal? @db.Decimal(20, 8) // limit price (premium)
+  filled_quantity Decimal? @db.Decimal(30, 10)
+  avg_fill_price  Decimal? @db.Decimal(20, 8)
+  fee             Decimal? @db.Decimal(20, 8)
+
+  binance_order_id String?           @db.VarChar(100)
+  status           OptionOrderStatus @default(pending)
+  order_type       String            @default("LIMIT") @db.VarChar(20)
+
+  max_loss        Decimal? @db.Decimal(20, 8) // premium × qty × contract_size
+  greeks_at_entry Json?    @db.Json // snapshot of greeks when order placed
+
+  created_at DateTime  @default(now()) @db.Timestamp(6)
+  updated_at DateTime? @updatedAt @db.Timestamp(6)
+
+  user     users              @relation(fields: [user_id], references: [user_id])
+  signal   strategy_signals?  @relation(fields: [signal_id], references: [signal_id])
+  position options_positions? @relation("OrderToPosition")
+
+  @@index([user_id])
+  @@index([signal_id])
+  @@index([status])
+  @@index([underlying])
+  @@index([user_id, status])
+  @@map("options_orders")
+}
+
+model options_positions {
+  position_id String  @id @default(uuid()) @db.Uuid
+  user_id     String  @db.Uuid
+  order_id    String? @unique @db.Uuid // originating order
+
+  contract_symbol String     @db.VarChar(50)
+  underlying      String     @db.VarChar(20)
+  strike          Decimal    @db.Decimal(20, 8)
+  expiry          DateTime   @db.Timestamp(6)
+  option_type     OptionType
+
+  quantity        Decimal  @db.Decimal(30, 10)
+  avg_premium     Decimal  @db.Decimal(20, 8)
+  current_premium Decimal? @db.Decimal(20, 8)
+  unrealized_pnl  Decimal? @db.Decimal(20, 8)
+  realized_pnl    Decimal? @db.Decimal(20, 8)
+
+  delta Decimal? @db.Decimal(10, 6)
+  gamma Decimal? @db.Decimal(10, 6)
+  theta Decimal? @db.Decimal(10, 6)
+  vega  Decimal? @db.Decimal(10, 6)
+
+  is_open    Boolean   @default(true)
+  opened_at  DateTime  @default(now()) @db.Timestamp(6)
+  closed_at  DateTime? @db.Timestamp(6)
+  updated_at DateTime? @updatedAt @db.Timestamp(6)
+
+  user              users           @relation(fields: [user_id], references: [user_id])
+  originating_order options_orders? @relation("OrderToPosition", fields: [order_id], references: [order_id])
+
+  @@index([user_id])
+  @@index([is_open])
+  @@index([user_id, is_open])
+  @@index([underlying])
+  @@index([expiry])
+  @@map("options_positions")
+}
+
+model options_signals {
+  options_signal_id String @id @default(uuid()) @db.Uuid
+  signal_id         String @db.Uuid // FK to strategy_signals
+
+  recommended_type   OptionType
+  recommended_strike Decimal    @db.Decimal(20, 8)
+  recommended_expiry DateTime   @db.Timestamp(6)
+
+  iv_rank  Decimal? @db.Decimal(6, 4) // 0-1 percentile
+  iv_value Decimal? @db.Decimal(10, 6)
+
+  estimated_premium Decimal? @db.Decimal(20, 8)
+  max_loss          Decimal? @db.Decimal(20, 8)
+  recommended_qty   Decimal? @db.Decimal(30, 10)
+
+  greeks_snapshot Json?   @db.Json // { delta, gamma, theta, vega }
+  liquidity_ok    Boolean @default(true)
+  reasoning       String? @db.Text
+
+  confidence_adjustment Decimal? @db.Decimal(5, 4) // adjustment to base signal confidence
+
+  created_at DateTime @default(now()) @db.Timestamp(6)
+
+  signal strategy_signals @relation(fields: [signal_id], references: [signal_id])
+
+  @@index([signal_id])
+  @@map("options_signals")
 }
