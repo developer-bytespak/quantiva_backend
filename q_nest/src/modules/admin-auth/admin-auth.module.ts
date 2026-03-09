@@ -12,10 +12,14 @@ import { AdminJwtStrategy } from './strategies/admin-jwt.strategy';
 import { AdminJwtAuthGuard } from './guards/admin-jwt-auth.guard';
 import { AdminOrUserJwtGuard } from './guards/admin-or-user-jwt.guard';
 import { PrismaModule } from '../../prisma/prisma.module';
+import { AdminBinanceService } from './services/admin-binance.service';
+import { AdminBinanceController } from './controllers/admin-binance.controller';
+import { ExchangesModule } from '../exchanges/exchanges.module';
 
 @Module({
   imports: [
     PrismaModule,
+    ExchangesModule,
     PassportModule,
     ConfigModule,
     ScheduleModule,
@@ -31,7 +35,7 @@ import { PrismaModule } from '../../prisma/prisma.module';
       inject: [ConfigService],
     }),
   ],
-  controllers: [AdminAuthController],
+  controllers: [AdminAuthController, AdminBinanceController],
   providers: [
     AdminAuthService,
     AdminTokenService,
@@ -40,6 +44,7 @@ import { PrismaModule } from '../../prisma/prisma.module';
     AdminJwtStrategy,
     AdminJwtAuthGuard,
     AdminOrUserJwtGuard,
+    AdminBinanceService,
   ],
   exports: [
     AdminAuthService,
@@ -47,6 +52,7 @@ import { PrismaModule } from '../../prisma/prisma.module';
     AdminSessionService,
     AdminJwtAuthGuard,
     AdminOrUserJwtGuard,
+    AdminBinanceService,
   ],
 })
 export class AdminAuthModule {}

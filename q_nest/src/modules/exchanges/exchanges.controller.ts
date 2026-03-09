@@ -1289,5 +1289,71 @@ export class ExchangesController {
       last_updated: new Date().toISOString(),
     };
   }
+
+  /**
+   * Get deposit history for a connection
+   * @route GET /api/exchanges/connections/:connectionId/deposits
+   */
+  @Get('connections/:connectionId/deposits')
+  @UseGuards(ConnectionOwnerGuard)
+  async getDepositHistory(
+    @Param('connectionId') connectionId: string,
+    @Query('coin') coin?: string,
+    @Query('status') status?: string,
+    @Query('offset') offset: string = '0',
+    @Query('limit') limit: string = '100',
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+  ) {
+    const deposits = await this.exchangesService.getDepositHistory(
+      connectionId,
+      coin,
+      status ? parseInt(status, 10) : undefined,
+      parseInt(offset, 10),
+      Math.min(parseInt(limit, 10), 1000),
+      startTime ? parseInt(startTime, 10) : undefined,
+      endTime ? parseInt(endTime, 10) : undefined,
+    );
+
+    return {
+      success: true,
+      data: deposits,
+      count: deposits.length,
+      last_updated: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Get withdrawal history for a connection
+   * @route GET /api/exchanges/connections/:connectionId/withdrawals
+   */
+  @Get('connections/:connectionId/withdrawals')
+  @UseGuards(ConnectionOwnerGuard)
+  async getWithdrawalHistory(
+    @Param('connectionId') connectionId: string,
+    @Query('coin') coin?: string,
+    @Query('status') status?: string,
+    @Query('offset') offset: string = '0',
+    @Query('limit') limit: string = '100',
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+  ) {
+    const withdrawals = await this.exchangesService.getWithdrawalHistory(
+      connectionId,
+      coin,
+      status ? parseInt(status, 10) : undefined,
+      parseInt(offset, 10),
+      Math.min(parseInt(limit, 10), 1000),
+      startTime ? parseInt(startTime, 10) : undefined,
+      endTime ? parseInt(endTime, 10) : undefined,
+    );
+
+    return {
+      success: true,
+      data: withdrawals,
+      count: withdrawals.length,
+      last_updated: new Date().toISOString(),
+    };
+  }
 }
 

@@ -1043,6 +1043,8 @@ model admins {
   stripe_webhook_secret_encrypted String?
 
   binance_uid                  String? @db.VarChar(100)
+  wallet_address               String? @db.VarChar(255)
+  payment_network              String? @default("BSC") @db.VarChar(50)
   binance_api_key_encrypted    String?
   binance_api_secret_encrypted String?
 
@@ -1191,6 +1193,10 @@ model vc_pool_payment_submissions {
   binance_tx_timestamp         DateTime? @db.Timestamp(6)
   binance_amount_received_usdt Decimal?  @db.Decimal(20, 8)
 
+  // On-Chain TX Details
+  tx_hash                      String?   @unique @db.VarChar(255)
+  user_wallet_address          String?   @db.VarChar(255)
+
   // Exact Amount Validation
   exact_amount_expected Decimal? @db.Decimal(20, 8)
   exact_amount_received Decimal? @db.Decimal(20, 8)
@@ -1223,6 +1229,7 @@ model vc_pool_members {
   invested_amount_usdt Decimal         @db.Decimal(20, 8)
   share_percent        Decimal         @db.Decimal(8, 5)
   user_binance_uid     String?         @db.VarChar(100)
+  user_wallet_address  String?         @db.VarChar(255)
 
   is_active Boolean   @default(true)
   joined_at DateTime  @default(now()) @db.Timestamp(6)
