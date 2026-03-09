@@ -211,7 +211,8 @@ export class UserPoolController {
       user.sub,
       id,
       dto.binance_tx_id,
-      new Date(dto.binance_tx_timestamp),
+      dto.binance_tx_timestamp ? new Date(dto.binance_tx_timestamp) : undefined,
+      dto.tx_hash,
     );
   }
 }

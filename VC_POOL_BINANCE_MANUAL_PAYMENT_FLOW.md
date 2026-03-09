@@ -1,8 +1,12 @@
-# VC Pool — Binance Manual Payment Flow with Transaction Tracking
+# VC Pool — Binance Network Deposit Payment Flow with Automatic Verification
 
-**Current, active implementation (as of 2026-03-03)**
+**Current, active implementation (as of 2026-03-07)**
 
-**Core concept:** Users manually transfer funds to admin's Binance address. Backend verifies transactions via admin's Binance API. All transactions stored in DB for complete audit trail, automatic verification, and edge case handling.
+**Core concept:** Users send USDT to admin's mainnet (network) deposit address. Backend automatically verifies deposits every 5 minutes using admin's Binance API keys. Exact match only — no tolerance for network fees. All transactions stored in DB for complete audit trail and automatic verification.
+
+**Key change from previous P2P flow:** 
+- ❌ OLD: P2P transfer + TX ID submission + manual admin review
+- ✅ NEW: Mainnet network deposit + automatic verification via admin's Binance API keys
 
 ---
 
@@ -10,16 +14,16 @@
 
 | Stage | User Action | Backend Action | Admin Action | Status |
 |-------|---|---|---|---|
-| **Join** | Transfer + submit TX ID | Fetch admin's deposit history, verify TX exists & matches | None (automated) | Auto-confirmed |
+| **Join** | Transfer to address | Cron checks every 5 min, auto-verifies | None (fully automated) | Auto-confirmed |
 | **Pool Complete** | None | Batch fetch pending payouts | Click "Pay All" button | Backend auto-verifies via cron |
 | **User Cancel** | Request exit | Calculate refund | Approve + system auto-transfers | Backend auto-verifies via cron |
 | **Admin Cancel** | N/A | Calculate full refunds | Click "Cancel Pool" | Backend auto-verifies via cron |
 
-**Key principle:** "Trust but verify with blockchain"
-- User tells us the TX ID
-- We verify it exists in admin's actual Binance deposit history
-- We store it permanently for audit
-- We auto-confirm when Binance confirms
+**Key principle:** "Automatic verification via blockchain"
+- User sends USDT to admin's mainnet address
+- Cron job checks admin's Binance deposit history every 5 minutes
+- Exact amount match → Instantly approved
+- No manual steps, no TX ID submission, no admin approval needed
 
 ---
 

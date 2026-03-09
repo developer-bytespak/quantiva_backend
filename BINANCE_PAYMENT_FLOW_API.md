@@ -1,54 +1,72 @@
-# Binance P2P Payment Flow — API Documentation
+# Binance Network Deposit Payment Flow — API Documentation
 
-> **What's New:** Binance P2P exact-match payment verification for VC Pools
+> **What's New:** Binance mainnet network deposit exact-match payment verification for VC Pools
 > 
-> This document covers ONLY the new endpoints and features added for the Binance payment flow. It does not cover previously existing VC Pool APIs (join, screenshot upload, admin approve/reject, etc.)
+> **Updated:** 2026-03-07 — Changed from P2P to network deposits for improved security and automation
+> 
+> This document covers the new endpoints and features added for the Binance network deposit verification flow. It does not cover previously existing VC Pool APIs (join, screenshot upload, admin approve/reject, etc.)
 
 ---
 
 ## Frontend Developer Guide — What This Feature Does
 
-### The Problem We're Solving
+### The Problem We Solved
 
-Previously, when a user joined a VC Pool via Binance, they had to:
-1. Send money on Binance
+Previously, when a user joined a VC Pool via Binance P2P, they had to:
+1. Send money via P2P transfer
 2. Take a screenshot
 3. Upload the screenshot
 4. Wait for an admin to manually review and approve/reject
 
-**Now with this update:** The user sends money on Binance P2P, submits the TX ID in our app, and the backend **automatically verifies** the payment with Binance's API. No admin involvement needed.
+**Now with this update:** The user sends USDT to the admin's mainnet (network) deposit address, and the backend **automatically verifies** the deposit using the admin's Binance API keys. No admin involvement needed, no screenshots required.
+
+### Why Network Deposits Instead of P2P?
+
+- **More Secure:** Direct blockchain network transfers, no intermediaries
+- **More Transparent:** Transaction recorded on blockchain + verified via Binance API
+- **Fully Automated:** Admin's API keys allow backend to check deposits every 5 minutes
+- **Audit Trail:** Complete transaction history stored in database
+- **Faster Verification:** Binance confirms deposits within 30 seconds
 
 ### How It Works (User Journey)
 
 ```
 User already joined a pool (existing flow)
           ↓
-User pays on Binance P2P (sends EXACT amount to admin UID)
+User receives admin's deposit address + EXACT amount (e.g., 1000 USDT)
           ↓
-Binance gives user a TX ID
+User goes to Binance → Wallet → Send → Selects:
+  ├─ Asset: USDT
+  ├─ Amount: 1000 (EXACT)
+  ├─ Network: Mainnet
+  └─ Recipient Address: admin's deposit address
           ↓
-User enters TX ID in our app          ← NEW API
+Binance confirms deposit (~30 seconds)
           ↓
-Backend auto-verifies every 5 min     ← NEW CRON JOB
+Backend cron runs every 5 minutes       ← AUTOMATIC
+  ├─ Fetches admin's deposit history via Binance API
+  ├─ Searches for deposit matching 1000 USDT exactly
+  ├─ If found: APPROVES payment, creates member, grants access
+  └─ If not found: Keeps checking (up to 24 hours)
           ↓
-   ┌── Amount matches exactly → APPROVED (member created)
-   └── Any variance at all   → REJECTED (refund initiated)
-          ↓
-User polls status to see result        ← NEW APIs
+User polls status or receives notification
+  ├─ IF amount matched exactly → ✅ APPROVED (member created)
+  └─ IF no exact match found after 24h → ⏳ PENDING (manual review needed)
 ```
 
 ### Exact Match Rule (Critical for Frontend)
 
 ```
 Expected = Contribution + (Contribution × Pool Fee %)
-Example:  100 + (100 × 5%) = 105 USDT
+Example:  100 USDT contribution + 5% fee = 105 USDT
 
-105.00 USDT sent → ✓ APPROVED
-104.99 USDT sent → ✗ REJECTED + refund
-105.01 USDT sent → ✗ REJECTED + refund
+User sends 1000 USDT → ✓ EXACTLY 1000 USDT REQUIRED
+                       ✓ 1000.00 USDT → APPROVED (instant)
+                       ✗ 999.99 USDT → NOT APPROVED (no tolerance)
+                       ✗ 1000.01 USDT → NOT APPROVED (no tolerance)
 ```
 
-**There is zero tolerance.** Frontend must display the exact amount prominently with a warning.
+**There is ZERO tolerance.** Frontend must display the exact amount prominently with a clear warning. Users must send the EXACT amount or payment will not be automatically approved.
 
 ### What Frontend Needs to Build
 

@@ -139,6 +139,7 @@ export class PaymentReviewService {
             submission.payment_method === 'binance'
               ? (submission.reservation as any)?.user_binance_uid || null
               : null,
+          user_wallet_address: (submission as any)?.user_wallet_address || null,
           is_active: true,
         },
       });

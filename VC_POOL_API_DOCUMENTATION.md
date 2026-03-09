@@ -36,25 +36,31 @@ Think of it like a **mini fund** — one expert trader, multiple investors, shar
 
 #### Screen 3: User Pays on Binance (Outside Our App)
 - User opens the Binance app separately
-- Goes to P2P → Internal Transfer
-- Enters the admin's Binance UID (shown on our screen)
-- Sends **exactly** the amount shown (e.g., 105 USDT — not 104.99, not 105.01)
-- Binance completes the transfer and shows a **TX ID** (transaction/order number)
-- User copies this TX ID
+- Goes to Wallet → Send
+- Enters the admin's **deposit address** (shown on our screen)
+- **Selects Network: MAINNET** (not P2P, direct network transfer)
+- Sends **exactly** the amount shown (e.g., 1000 USDT — not 999.99, not 1000.01)
+- Binance completes the transfer and shows confirmation
+- User can see it on the blockchain
 
-> **IMPORTANT FOR FRONTEND:** Display the exact amount prominently with a warning that it must be exact. Any variance = automatic rejection + refund. Show admin Binance UID clearly with a copy button.
+> **IMPORTANT FOR FRONTEND:** Display:
+> - The exact amount prominently with a warning: "Amount must be EXACTLY {amount} USDT"
+> - Admin's deposit address with a copy button
+> - Network: "Mainnet (direct transfer)"
+> - Step-by-step instructions: Wallet → Send → Paste Address → Enter Exact Amount → Select Mainnet → Confirm
 
-#### Screen 4: Submit TX ID (Back in Our App)
-- User comes back to our app
-- Enters the Binance TX ID and the timestamp of the transaction
-- Frontend validates: TX ID is not empty, timestamp is valid ISO date
-- Submits to backend
-- Backend moves payment to `processing` status
-- Frontend shows "Verifying with Binance..." message
-- **API:** `POST /api/vc-pools/:id/submit-binance-tx`
+#### Screen 4: Automatic Verification (No User Action Needed)
+- User comes back to our app after sending the transfer
+- Backend **automatically checks every 5 minutes** via cron job
+- Cron job:
+  - Fetches admin's deposit history from Binance API
+  - Searches for a deposit matching the exact expected amount
+  - If found → Payment is APPROVED (user is now a member)
+  - If not found → Keeps checking for up to 24 hours
+- Frontend shows "Verifying with Binance..." message during verification
+- **API:** `GET /api/vc-pools/:id/payment-status` (polling, call every 5-10 seconds)
 
-> **ALTERNATIVE PATH (Screenshot):** If the admin hasn't set up Binance API keys for auto-verification, the user can instead upload a screenshot of the completed transfer. The admin then manually approves/rejects it.
-> - **API:** `POST /api/vc-pools/:id/upload-screenshot`
+> **IMPORTANT FOR FRONTEND:** The user doesn't need to submit a TX ID. The system detects deposits automatically. Just poll the status endpoint and show the current state.
 
 #### Screen 5: Payment Status Page (Polling)
 - After submitting TX ID, frontend should **poll every 5-10 seconds** to check verification status
@@ -72,9 +78,9 @@ Think of it like a **mini fund** — one expert trader, multiple investors, shar
 - They can request cancellation if pool hasn't started trading yet
 - **APIs:** `GET /api/vc-pools/my-pools`, `POST /api/vc-pools/:id/cancel-membership`
 
-### Payment Validation Logic (Exact Match Only)
+### Payment Validation Logic (Exact Match Only — Network Deposits)
 
-This is the core rule frontend developers need to understand:
+This is the core rule for automatic payment verification:
 
 ```
 Expected Amount = Contribution Amount + (Contribution Amount × Pool Fee %)
@@ -82,13 +88,27 @@ Expected Amount = Contribution Amount + (Contribution Amount × Pool Fee %)
 Example: Pool with 100 USDT contribution and 5% fee
 Expected = 100 + (100 × 0.05) = 105 USDT
 
-User sends 105.00 → ✓ APPROVED (member created instantly)
-User sends 104.99 → ✗ REJECTED (refund initiated)
-User sends 105.01 → ✗ REJECTED (refund initiated)
-User sends 100.00 → ✗ REJECTED (refund initiated)
+User sends exactly 105.00 USDT on mainnet → ✓ APPROVED (member created instantly, next cron cycle)
+User sends 104.99 USDT → ✗ NOT APPROVED (no tolerance, stays pending)
+User sends 105.01 USDT → ✗ NOT APPROVED (no tolerance, stays pending)
+User sends 100.00 USDT → ✗ NOT APPROVED (no tolerance, stays pending)
 ```
 
-**There is NO tolerance.** The amount must be exactly equal. This is intentional to prevent fraud and simplify accounting.
+**There is NO tolerance.** The amount must be exactly equal. This is intentional to:
+- Prevent fraud and accounting mismatches
+- Ensure clean payment records
+- Simplify refund logic (only exact matches are approved)
+- Avoid edge cases with network fees
+
+**How the Automatic Verification Works:**
+1. User sends USDT to admin's mainnet deposit address
+2. Binance confirms deposit (~30 seconds)
+3. Cron job runs every 5 minutes and:
+   - Fetches admin's deposit history via Binance API (using admin's encrypted credentials)
+   - Searches for a matching deposit with EXACT amount
+   - If found: Marks payment as APPROVED, creates user as pool member
+   - If not found: Keeps checking (next cron cycle in 5 minutes)
+4. Payment stays PENDING until exact match is found, or 24 hours pass
 
 ### What the Frontend Should Display at Each Payment State
 
