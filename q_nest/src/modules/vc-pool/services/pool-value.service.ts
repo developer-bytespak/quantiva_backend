@@ -47,13 +47,30 @@ export class PoolValueService {
       select: { trade_id: true, asset_pair: true, action: true, quantity: true, entry_price_usdt: true },
     });
 
+    // Fetch open exchange orders once (reused for both symbol collection and PnL calc)
+    const openExchangeOrders = await this.prisma.vc_pool_exchange_orders.findMany({
+      where: { pool_id: poolId, is_open: true },
+      select: { symbol: true, side: true, quantity: true, entry_price_usdt: true },
+    });
+
+    // Collect all symbols and batch-fetch prices in ONE API call (weight 4 total instead of N×2)
+    const tradeSymbols = openTrades.map((t) => t.asset_pair);
+    const orderSymbols = openExchangeOrders.map((o) =>
+      o.symbol.includes('USDT') ? o.symbol : `${o.symbol}USDT`,
+    );
+    const allSymbols = [...new Set([...tradeSymbols, ...orderSymbols])];
+    const priceMap = await this.binance.getPrices(allSymbols);
+
+    // Helper: normalize symbol to the same format used by getPrices map keys
+    const normalizeSymbol = (s: string) => this.binance.formatSymbol(s);
+
     let unrealizedPnl = 0;
     for (const trade of openTrades) {
       try {
-        const currentPrice = await this.binance.getPrice(trade.asset_pair);
+        const currentPrice = priceMap.get(normalizeSymbol(trade.asset_pair));
+        if (currentPrice === undefined) continue;
         const entry = Number(trade.entry_price_usdt);
         const qty = Number(trade.quantity);
-
         if (trade.action === 'BUY') {
           unrealizedPnl += (currentPrice - entry) * qty;
         } else {
@@ -61,20 +78,15 @@ export class PoolValueService {
         }
       } catch (err) {
         this.logger.warn(
-          `Could not fetch price for ${trade.asset_pair}: ${err.message}. Skipping unrealized PnL.`,
+          `Could not calculate PnL for ${trade.asset_pair}: ${err.message}. Skipping.`,
         );
       }
     }
 
-    // Unrealized PnL from open pool-tagged exchange orders
-    const openExchangeOrders = await this.prisma.vc_pool_exchange_orders.findMany({
-      where: { pool_id: poolId, is_open: true },
-      select: { symbol: true, side: true, quantity: true, entry_price_usdt: true },
-    });
     for (const ord of openExchangeOrders) {
       try {
-        const symbol = ord.symbol.includes('USDT') ? ord.symbol : `${ord.symbol}USDT`;
-        const currentPrice = await this.binance.getPrice(symbol);
+        const currentPrice = priceMap.get(normalizeSymbol(ord.symbol));
+        if (currentPrice === undefined) continue;
         const entry = Number(ord.entry_price_usdt);
         const qty = Number(ord.quantity);
         const side = (ord.side || '').toUpperCase();
@@ -85,7 +97,7 @@ export class PoolValueService {
         }
       } catch (err) {
         this.logger.warn(
-          `Could not fetch price for ${ord.symbol}: ${err?.message}. Skipping unrealized PnL.`,
+          `Could not calculate PnL for ${ord.symbol}: ${err?.message}. Skipping.`,
         );
       }
     }

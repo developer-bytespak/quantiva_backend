@@ -63,12 +63,22 @@ export class BinanceService {
   /**
    * Gets Binance server time to sync with local time
    */
+  // Cache server time to avoid fetching it on every single signed request (weight 1 each)
+  private cachedServerTimeDelta: number | null = null; // offset = serverTime - localTime
+  private serverTimeFetchedAt = 0;
+  private readonly SERVER_TIME_CACHE_MS = 60_000; // 1 minute
+
   private async getBinanceServerTime(): Promise<number> {
+    const now = Date.now();
+    if (this.cachedServerTimeDelta !== null && now - this.serverTimeFetchedAt < this.SERVER_TIME_CACHE_MS) {
+      return now + this.cachedServerTimeDelta;
+    }
     try {
       const response = await this.makePublicRequest('/api/v3/time');
+      this.cachedServerTimeDelta = response.serverTime - Date.now();
+      this.serverTimeFetchedAt = Date.now();
       return response.serverTime;
     } catch (error) {
-      // Fallback to local time if server time fetch fails
       this.logger.warn('Failed to fetch Binance server time, using local time');
       return Date.now();
     }
