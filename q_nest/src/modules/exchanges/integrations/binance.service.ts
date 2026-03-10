@@ -216,7 +216,11 @@ export class BinanceService {
         accountType: accountInfo.accountType || 'SPOT',
       };
     } catch (error: any) {
-      if (error instanceof InvalidApiKeyException || error instanceof BinanceApiException) {
+      if (
+        error instanceof InvalidApiKeyException ||
+        error instanceof BinanceApiException ||
+        error instanceof BinanceRateLimitException
+      ) {
         throw error;
       }
       throw new InvalidApiKeyException('Failed to verify API key');
@@ -299,25 +303,29 @@ export class BinanceService {
     accountInfo: BinanceAccountInfo,
   ): Promise<PositionDto[]> {
     try {
-      // Get prices for all assets with balances
-      const symbols = accountInfo.balances
-        .filter((b) => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0)
+      // Stablecoins priced at $1 — no Binance ticker exists for USDTUSDT etc.
+      const STABLECOINS = new Set(['USDT', 'BUSD', 'USDC', 'TUSD', 'USDP', 'DAI', 'FDUSD']);
+
+      const nonZeroBalances = accountInfo.balances.filter((b) => {
+        const total = parseFloat(b.free) + parseFloat(b.locked);
+        return total > 0;
+      });
+
+      // Only fetch prices for non-stablecoin assets
+      const symbols = nonZeroBalances
+        .filter((b) => !STABLECOINS.has(b.asset))
         .map((b) => `${b.asset}USDT`);
 
-      if (symbols.length === 0) {
-        return [];
+      // Build price map — stablecoins are always $1
+      const priceMap = new Map<string, number>();
+      for (const stable of STABLECOINS) priceMap.set(stable, 1);
+
+      if (symbols.length > 0) {
+        const prices = await this.getTickerPrices(symbols);
+        for (const p of prices) priceMap.set(p.symbol.replace('USDT', ''), p.price);
       }
 
-      // Fetch prices for all symbols
-      const prices = await this.getTickerPrices(symbols);
-      const priceMap = new Map(prices.map((p) => [p.symbol.replace('USDT', ''), p.price]));
-
-      const positions: PositionDto[] = accountInfo.balances
-        .filter((balance) => {
-          const total = parseFloat(balance.free) + parseFloat(balance.locked);
-          return total > 0;
-        })
-        .map((balance) => {
+      const positions: PositionDto[] = nonZeroBalances.map((balance) => {
           const quantity = parseFloat(balance.free) + parseFloat(balance.locked);
           const currentPrice = priceMap.get(balance.asset) || 0;
           const entryPrice = currentPrice; // Simplified - would need trade history for accurate entry price

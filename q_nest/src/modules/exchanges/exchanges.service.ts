@@ -6,6 +6,7 @@ import { BinanceService } from './integrations/binance.service';
 import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
+import { BinanceUserWsService } from './services/binance-user-ws.service';
 import { ConnectionNotFoundException } from './exceptions/binance.exceptions';
 import {
   AccountBalanceDto,
@@ -31,6 +32,7 @@ export class ExchangesService {
     private bybitService: BybitService,
     private alpacaService: AlpacaService,
     private cacheService: CacheService,
+    private binanceUserWsService: BinanceUserWsService,
   ) {}
 
   /**
@@ -665,6 +667,26 @@ export class ExchangesService {
     const cached = this.cacheService.getCached(cacheKey);
     if (cached) {
       return cached;
+    }
+
+    // Try User Data Stream cache for Binance balance (zero REST weight)
+    if (dataType === 'balance' && exchangeName === 'binance' && connection.user_id) {
+      const wsBalance = this.binanceUserWsService.getLastBalance(connection.user_id);
+      if (wsBalance && Object.keys(wsBalance).length > 0) {
+        this.logger.debug(`Serving balance from WS cache for connection ${connectionId}`);
+        this.cacheService.setCached(cacheKey, wsBalance);
+        return wsBalance as any;
+      }
+    }
+
+    // Try User Data Stream cache for Binance orders (zero REST weight)
+    if (dataType === 'orders' && exchangeName === 'binance' && connection.user_id) {
+      const wsOrders = this.binanceUserWsService.getLastOrders(connection.user_id);
+      if (wsOrders.length > 0) {
+        this.logger.debug(`Serving orders from WS cache for connection ${connectionId}`);
+        this.cacheService.setCached(cacheKey, wsOrders);
+        return wsOrders as any;
+      }
     }
 
     // Special-case: if caller only asked for balance, fetch account snapshot only
