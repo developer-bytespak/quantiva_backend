@@ -15,11 +15,13 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { AdminBinanceService } from './services/admin-binance.service';
 import { AdminBinanceController } from './controllers/admin-binance.controller';
 import { ExchangesModule } from '../exchanges/exchanges.module';
+import { BinanceModule } from '../binance/binance.module';
 
 @Module({
   imports: [
     PrismaModule,
     ExchangesModule,
+    BinanceModule,
     PassportModule,
     ConfigModule,
     ScheduleModule,

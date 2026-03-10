@@ -10,11 +10,74 @@ import { AdminBinanceService } from '../services/admin-binance.service';
 import { AdminJwtAuthGuard } from '../guards/admin-jwt-auth.guard';
 import { CurrentAdmin } from '../decorators/current-admin.decorator';
 import { AdminTokenPayload } from '../services/admin-token.service';
+import { BinanceMarketStreamService } from '../../binance/binance-market-stream.service';
+import { BinanceUserWsService } from '../../exchanges/services/binance-user-ws.service';
 
 @Controller('admin/binance')
-@UseGuards(AdminJwtAuthGuard)
 export class AdminBinanceController {
-  constructor(private readonly adminBinanceService: AdminBinanceService) {}
+  constructor(
+    private readonly adminBinanceService: AdminBinanceService,
+    private readonly marketStream: BinanceMarketStreamService,
+    private readonly userWsService: BinanceUserWsService,
+  ) {}
+
+  /**
+   * Public stream health check — no auth required.
+   * Returns only non-sensitive status (connected yes/no, symbol count, 3 sample prices).
+   * @route GET /admin/binance/health
+   */
+  @Get('health')
+  getStreamHealth() {
+    const allPrices = this.marketStream.getAllPrices();
+    const userWsStats = this.userWsService.getStats();
+
+    return {
+      marketStream: {
+        connected: this.marketStream.isConnected(),
+        symbolsTracked: allPrices.size,
+        samplePrices: {
+          BTCUSDT: allPrices.get('BTCUSDT') ?? null,
+          ETHUSDT: allPrices.get('ETHUSDT') ?? null,
+          BNBUSDT: allPrices.get('BNBUSDT') ?? null,
+        },
+      },
+      userDataStream: {
+        activeConnections: userWsStats.totalConnections,
+      },
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Get Binance WebSocket stream health status (full detail, admin only)
+   * @route GET /admin/binance/stream-status
+   */
+  @Get('stream-status')
+  @UseGuards(AdminJwtAuthGuard)
+  getStreamStatus() {
+    const allPrices = this.marketStream.getAllPrices();
+    const userWsStats = this.userWsService.getStats();
+
+    return {
+      success: true,
+      data: {
+        marketStream: {
+          connected: this.marketStream.isConnected(),
+          symbolsTracked: allPrices.size,
+          samplePrices: {
+            BTCUSDT: allPrices.get('BTCUSDT') ?? null,
+            ETHUSDT: allPrices.get('ETHUSDT') ?? null,
+            BNBUSDT: allPrices.get('BNBUSDT') ?? null,
+          },
+        },
+        userDataStream: {
+          activeConnections: userWsStats.totalConnections,
+          connections: userWsStats.connections,
+        },
+        timestamp: new Date().toISOString(),
+      },
+    };
+  }
 
   /**
    * Get admin's account balance and info

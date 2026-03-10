@@ -29,19 +29,12 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
   private readonly KEEPALIVE_INTERVAL = 30 * 60 * 1000; // 30 minutes
   private readonly baseUrl: string;
   private readonly wsEndpoint: string;
-  private readonly apiKey: string;
-  private readonly apiSecret: string;
 
   constructor(private readonly configService: ConfigService) {
     super();
-    this.baseUrl = configService.get('TESTNET_BASE_URL', 'https://testnet.binance.vision');
-    this.wsEndpoint = configService.get('TESTNET_WS_ENDPOINT', 'wss://stream.testnet.binance.vision:9443');
-    this.apiKey = configService.get('TESTNET_API_KEY', '');
-    this.apiSecret = configService.get('TESTNET_API_SECRET', '');
-
-    if (!this.apiKey || !this.apiSecret) {
-      this.logger.warn('TESTNET_API_KEY or TESTNET_API_SECRET not configured');
-    }
+    // Production by default; override with BINANCE_USER_STREAM_URL / BINANCE_USER_WS_ENDPOINT for testnet
+    this.baseUrl = configService.get('BINANCE_USER_STREAM_URL', 'https://api.binance.com');
+    this.wsEndpoint = configService.get('BINANCE_USER_WS_ENDPOINT', 'wss://stream.binance.com:9443');
   }
 
   async onModuleDestroy() {
@@ -51,10 +44,23 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
     }
   }
 
+  // Per-user API keys stored when connect() is called
+  private readonly userApiKeys = new Map<string, { apiKey: string; apiSecret: string }>();
+
   /**
-   * Connect a user to their data stream
+   * Connect a user to their data stream using their own API key
    */
-  async connect(userId: string): Promise<void> {
+  async connect(userId: string, apiKey?: string, apiSecret?: string): Promise<void> {
+    // Store per-user credentials if provided (required for production)
+    if (apiKey && apiSecret) {
+      this.userApiKeys.set(userId, { apiKey, apiSecret });
+    }
+
+    const creds = this.userApiKeys.get(userId);
+    if (!creds) {
+      this.logger.error(`No API keys available for user ${userId}`);
+      throw new Error('API keys required for User Data Stream');
+    }
     // Check if already connected
     const existing = this.connections.get(userId);
     if (existing?.ws?.readyState === WebSocket.OPEN) {
@@ -190,12 +196,13 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
 
     // Delete listenKey
     try {
-      await this.deleteListenKey(connection.listenKey);
+      await this.deleteListenKey(connection.listenKey, userId);
     } catch (error) {
       this.logger.error(`Failed to delete listenKey: ${error.message}`);
     }
 
     this.connections.delete(userId);
+    this.userApiKeys.delete(userId);
     this.userRateLimitUntil.delete(userId);
     this.emitBinanceStatus(userId, 'DISCONNECTED');
   }
@@ -204,6 +211,9 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
    * Create a new listenKey from Binance
    */
   private async createListenKey(userId: string): Promise<string> {
+    const creds = this.userApiKeys.get(userId);
+    if (!creds) throw new Error('No API keys for user');
+
     try {
       this.logger.log(`Requesting listenKey from Binance for user ${userId}...`);
       const response = await axios.post(
@@ -211,7 +221,7 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
         {},
         {
           headers: {
-            'X-MBX-APIKEY': this.apiKey,
+            'X-MBX-APIKEY': creds.apiKey,
           },
           timeout: 10000,
         }
@@ -248,14 +258,17 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
   /**
    * Keepalive for listenKey (extend validity)
    */
-  private async keepAlive(listenKey: string): Promise<void> {
+  private async keepAlive(listenKey: string, userId: string): Promise<void> {
+    const creds = this.userApiKeys.get(userId);
+    if (!creds) throw new Error('No API keys for user');
+
     try {
       await axios.put(
         `${this.baseUrl}/api/v3/userDataStream`,
         {},
         {
           headers: {
-            'X-MBX-APIKEY': this.apiKey,
+            'X-MBX-APIKEY': creds.apiKey,
           },
           params: { listenKey },
         }
@@ -271,13 +284,16 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
   /**
    * Delete listenKey when done
    */
-  private async deleteListenKey(listenKey: string): Promise<void> {
+  private async deleteListenKey(listenKey: string, userId: string): Promise<void> {
+    const creds = this.userApiKeys.get(userId);
+    if (!creds) return; // Keys may already be cleaned up
+
     try {
       await axios.delete(
         `${this.baseUrl}/api/v3/userDataStream`,
         {
           headers: {
-            'X-MBX-APIKEY': this.apiKey,
+            'X-MBX-APIKEY': creds.apiKey,
           },
           params: { listenKey },
         }
@@ -298,7 +314,7 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
 
     connection.keepaliveTimer = setInterval(async () => {
       try {
-        await this.keepAlive(connection.listenKey);
+        await this.keepAlive(connection.listenKey, userId);
         connection.lastKeepalive = Date.now();
       } catch (error) {
         this.logger.error(`Keepalive failed for user ${userId}, will reconnect`);

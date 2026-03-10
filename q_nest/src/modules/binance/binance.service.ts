@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
+import { BinanceMarketStreamService } from './binance-market-stream.service';
 
 interface Ticker24h {
   symbol: string;
@@ -43,7 +44,21 @@ export class BinanceService {
   private readonly priceCache = new Map<string, { price: number; fetchedAt: number }>();
   private readonly PRICE_CACHE_TTL_MS = 30_000; // 30 seconds
 
-  constructor() {
+  // Stats cache: symbol → { data, fetchedAt } — 1-minute TTL to cap weight from crons
+  private readonly statsCache = new Map<string, {
+    data: { price: number; priceChangePercent: number; high24h: number; low24h: number; volume24h: number; quoteVolume24h: number };
+    fetchedAt: number;
+  }>();
+  private readonly STATS_CACHE_TTL_MS = 60_000; // 1 minute
+
+  // Negative cache: symbols that returned 400 from Binance (delisted / not on spot).
+  // Prevents repeated REST calls for symbols that will never succeed.
+  private readonly invalidSymbols = new Map<string, number>(); // symbol → expiry ms
+  private readonly INVALID_SYMBOL_TTL_MS = 5 * 60_000; // re-check after 5 min
+
+  constructor(
+    @Optional() private readonly marketStream?: BinanceMarketStreamService,
+  ) {
     this.apiClient = axios.create({
       baseURL: this.baseUrl,
       timeout: 10000,
@@ -56,11 +71,19 @@ export class BinanceService {
    */
   async getPrice(symbol: string): Promise<number> {
     const formattedSymbol = this.formatSymbol(symbol);
+
+    // Stream-first: zero REST weight
+    if (this.marketStream?.isConnected()) {
+      const streamPrice = this.marketStream.getPrice(formattedSymbol);
+      if (streamPrice !== undefined) return streamPrice;
+    }
+
     const cached = this.priceCache.get(formattedSymbol);
     if (cached && Date.now() - cached.fetchedAt < this.PRICE_CACHE_TTL_MS) {
       return cached.price;
     }
     try {
+      this.logger.warn(`[REST-FALLBACK] getPrice(${formattedSymbol}) — stream miss, hitting REST`);
       const response = await this.apiClient.get<TickerPrice>('/api/v3/ticker/price', {
         params: { symbol: formattedSymbol },
       });
@@ -87,6 +110,22 @@ export class BinanceService {
     if (symbols.length === 0) return result;
 
     const formatted = symbols.map((s) => this.formatSymbol(s));
+
+    // Stream-first: resolve as many as possible with zero REST weight
+    if (this.marketStream?.isConnected()) {
+      const remaining: string[] = [];
+      for (const sym of formatted) {
+        const streamPrice = this.marketStream.getPrice(sym);
+        if (streamPrice !== undefined) {
+          result.set(sym, streamPrice);
+        } else {
+          remaining.push(sym);
+        }
+      }
+      if (remaining.length === 0) return result;
+      // Only REST-fetch symbols not in stream (shouldn't happen for valid pairs)
+    }
+
     const now = Date.now();
 
     // Serve all from cache if fresh
@@ -102,6 +141,7 @@ export class BinanceService {
     if (stale.length === 0) return result;
 
     try {
+      this.logger.warn(`[REST-FALLBACK] getPrices batch — ${stale.length} symbols not in stream, hitting REST`);
       // Single batch request — weight 4 regardless of symbol count
       const response = await this.apiClient.get<TickerPrice[]>('/api/v3/ticker/price');
       const allPrices: TickerPrice[] = response.data;
@@ -130,7 +170,8 @@ export class BinanceService {
   }
 
   /**
-   * Get 24h ticker statistics for a symbol
+   * Get 24h ticker statistics for a symbol — served from cache within 1-minute TTL.
+   * Prevents burst weight from parallel cron calls (e.g. 50 assets × weight 2 = 100/run).
    */
   async get24hStats(symbol: string): Promise<{
     price: number;
@@ -140,14 +181,35 @@ export class BinanceService {
     volume24h: number;
     quoteVolume24h: number;
   }> {
+    const formattedSymbol = this.formatSymbol(symbol);
+
+    // Stream-first: zero REST weight
+    if (this.marketStream?.isConnected()) {
+      const stream = this.marketStream.get24hStats(formattedSymbol);
+      if (stream) {
+        return {
+          price: stream.price,
+          priceChangePercent: stream.priceChangePercent,
+          high24h: stream.high,
+          low24h: stream.low,
+          volume24h: stream.volume,
+          quoteVolume24h: stream.quoteVolume,
+        };
+      }
+    }
+
+    const cached = this.statsCache.get(formattedSymbol);
+    if (cached && Date.now() - cached.fetchedAt < this.STATS_CACHE_TTL_MS) {
+      return cached.data;
+    }
     try {
-      const formattedSymbol = this.formatSymbol(symbol);
+      this.logger.warn(`[REST-FALLBACK] get24hStats(${formattedSymbol}) — stream miss, hitting REST`);
       const response = await this.apiClient.get<Ticker24h>('/api/v3/ticker/24hr', {
         params: { symbol: formattedSymbol },
       });
 
       const data = response.data;
-      return {
+      const stats = {
         price: parseFloat(data.lastPrice),
         priceChangePercent: parseFloat(data.priceChangePercent),
         high24h: parseFloat(data.highPrice),
@@ -155,7 +217,14 @@ export class BinanceService {
         volume24h: parseFloat(data.volume),
         quoteVolume24h: parseFloat(data.quoteVolume),
       };
+      this.statsCache.set(formattedSymbol, { data: stats, fetchedAt: Date.now() });
+      return stats;
     } catch (error: any) {
+      // Return stale cache if available rather than failing all callers
+      if (cached) {
+        this.logger.warn(`Using stale stats cache for ${symbol}: ${error.message}`);
+        return cached.data;
+      }
       this.logger.error(`Failed to get 24h stats for ${symbol}: ${error.message}`);
       throw new Error(`Failed to fetch 24h stats for ${symbol}`);
     }

@@ -14,17 +14,17 @@ import { ExchangesService } from '../modules/exchanges/exchanges.service';
 import { EncryptionService } from '../modules/exchanges/services/encryption.service';
 
 @WebSocketGateway({
-  namespace: 'paper-trading',
+  namespace: 'account-stream',
   cors: {
     origin: '*', // In production, restrict this to your frontend domain
     credentials: true,
   },
 })
-export class PaperTradingGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class AccountStreamGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
-  private readonly logger = new Logger(PaperTradingGateway.name);
+  private readonly logger = new Logger(AccountStreamGateway.name);
   private readonly userSockets = new Map<string, Set<string>>(); // userId -> Set of socket IDs
 
   constructor(
@@ -85,7 +85,7 @@ export class PaperTradingGateway implements OnGatewayConnection, OnGatewayDiscon
       // Send connection confirmation
       client.emit('connection:status', { 
         connected: true, 
-        message: 'Connected to paper trading WebSocket' 
+        message: 'Connected to account stream WebSocket' 
       });
 
     } catch (error) {
