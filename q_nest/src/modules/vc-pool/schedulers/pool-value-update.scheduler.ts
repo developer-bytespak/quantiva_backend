@@ -9,7 +9,7 @@ export class PoolValueUpdateScheduler {
 
   constructor(private readonly poolValueService: PoolValueService) {}
 
-  @Cron('0 * * * * *') // Every 60 seconds (at second 0)
+  @Cron('0 */5 * * *') // Every 5 minutes
   async handlePoolValueUpdate() {
     if (this.isRunning) return;
     this.isRunning = true;

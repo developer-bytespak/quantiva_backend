@@ -39,6 +39,10 @@ export class BinanceService {
   private readonly baseUrl = 'https://api.binance.com';
   private readonly apiClient: AxiosInstance;
 
+  // Price cache: symbol → { price, fetchedAt }
+  private readonly priceCache = new Map<string, { price: number; fetchedAt: number }>();
+  private readonly PRICE_CACHE_TTL_MS = 30_000; // 30 seconds
+
   constructor() {
     this.apiClient = axios.create({
       baseURL: this.baseUrl,
@@ -47,19 +51,82 @@ export class BinanceService {
   }
 
   /**
-   * Get current price for a symbol
+   * Get current price for a symbol — served from cache within 30s TTL
+   * to avoid hammering Binance REST with per-trade polling.
    */
   async getPrice(symbol: string): Promise<number> {
+    const formattedSymbol = this.formatSymbol(symbol);
+    const cached = this.priceCache.get(formattedSymbol);
+    if (cached && Date.now() - cached.fetchedAt < this.PRICE_CACHE_TTL_MS) {
+      return cached.price;
+    }
     try {
-      const formattedSymbol = this.formatSymbol(symbol);
       const response = await this.apiClient.get<TickerPrice>('/api/v3/ticker/price', {
         params: { symbol: formattedSymbol },
       });
-      return parseFloat(response.data.price);
+      const price = parseFloat(response.data.price);
+      this.priceCache.set(formattedSymbol, { price, fetchedAt: Date.now() });
+      return price;
     } catch (error: any) {
+      // Return stale cache if available rather than throwing (avoids cascade failures)
+      if (cached) {
+        this.logger.warn(`Using stale cache for ${symbol}: ${error.message}`);
+        return cached.price;
+      }
       this.logger.error(`Failed to get price for ${symbol}: ${error.message}`);
       throw new Error(`Failed to fetch price for ${symbol}`);
     }
+  }
+
+  /**
+   * Batch-fetch prices for multiple symbols in ONE API call (weight 4 total).
+   * Falls back to cache for symbols that fail.
+   */
+  async getPrices(symbols: string[]): Promise<Map<string, number>> {
+    const result = new Map<string, number>();
+    if (symbols.length === 0) return result;
+
+    const formatted = symbols.map((s) => this.formatSymbol(s));
+    const now = Date.now();
+
+    // Serve all from cache if fresh
+    const stale = formatted.filter((s) => {
+      const c = this.priceCache.get(s);
+      if (c && now - c.fetchedAt < this.PRICE_CACHE_TTL_MS) {
+        result.set(s, c.price);
+        return false;
+      }
+      return true;
+    });
+
+    if (stale.length === 0) return result;
+
+    try {
+      // Single batch request — weight 4 regardless of symbol count
+      const response = await this.apiClient.get<TickerPrice[]>('/api/v3/ticker/price');
+      const allPrices: TickerPrice[] = response.data;
+      const priceMap = new Map(allPrices.map((t) => [t.symbol, parseFloat(t.price)]));
+
+      for (const sym of formatted) {
+        const price = priceMap.get(sym);
+        if (price !== undefined) {
+          this.priceCache.set(sym, { price, fetchedAt: now });
+          result.set(sym, price);
+        } else {
+          const c = this.priceCache.get(sym);
+          if (c) result.set(sym, c.price);
+        }
+      }
+    } catch (error: any) {
+      this.logger.error(`Batch price fetch failed: ${error.message}`);
+      // Fall back to stale cache
+      for (const sym of stale) {
+        const c = this.priceCache.get(sym);
+        if (c) result.set(sym, c.price);
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -211,7 +278,7 @@ export class BinanceService {
   /**
    * Format symbol to Binance format (e.g., BTC -> BTCUSDT)
    */
-  private formatSymbol(symbol: string): string {
+  formatSymbol(symbol: string): string {
     // Remove any existing USDT suffix to avoid duplication
     const cleanSymbol = symbol.replace(/USDT$/i, '').replace(/\//g, '');
     
