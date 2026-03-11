@@ -1194,8 +1194,8 @@ model vc_pool_payment_submissions {
   binance_amount_received_usdt Decimal?  @db.Decimal(20, 8)
 
   // On-Chain TX Details
-  tx_hash                      String?   @unique @db.VarChar(255)
-  user_wallet_address          String?   @db.VarChar(255)
+  tx_hash             String? @unique @db.VarChar(255)
+  user_wallet_address String? @db.VarChar(255)
 
   // Exact Amount Validation
   exact_amount_expected Decimal? @db.Decimal(20, 8)

@@ -13,4 +13,9 @@ export class JoinPoolDto {
   @IsString()
   @MaxLength(100)
   user_binance_uid?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  user_wallet_address?: string;
 }

@@ -1,12 +1,17 @@
-import { IsNotEmpty, IsString, IsDateString, MaxLength } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, IsDateString, MaxLength } from 'class-validator';
 
 export class SubmitBinanceTxDto {
-  @IsNotEmpty({ message: 'binance_tx_id is required' })
+  @IsOptional()
   @IsString()
   @MaxLength(255)
-  binance_tx_id: string;
+  binance_tx_id?: string;
 
-  @IsNotEmpty({ message: 'binance_tx_timestamp is required' })
+  @IsOptional()
   @IsDateString({}, { message: 'binance_tx_timestamp must be a valid ISO date string' })
-  binance_tx_timestamp: string;
+  binance_tx_timestamp?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  tx_hash?: string;
 }

@@ -130,12 +130,12 @@ export class PoolManagementService {
 
     const admin = await this.prisma.admins.findUnique({
       where: { admin_id: adminId },
-      select: { binance_uid: true },
+      select: { binance_uid: true, wallet_address: true },
     });
 
-    if (!admin?.binance_uid) {
+    if (!admin?.wallet_address && !admin?.binance_uid) {
       throw new BadRequestException(
-        'You must configure your Binance UID in admin settings before publishing a pool',
+        'You must configure your wallet address (or Binance UID) in admin settings before publishing a pool',
       );
     }
 
@@ -323,7 +323,7 @@ export class PoolManagementService {
           payment_window_minutes: true,
           created_at: true,
           admin: {
-            select: { binance_uid: true },
+            select: { binance_uid: true, wallet_address: true, payment_network: true },
           },
         },
       }),
@@ -343,6 +343,10 @@ export class PoolManagementService {
       pool_fee_percent: p.pool_fee_percent,
       payment_window_minutes: p.payment_window_minutes,
       admin_binance_uid: p.admin?.binance_uid || null,
+      admin_wallet_address: p.admin?.wallet_address || null,
+      payment_network: p.admin?.payment_network || 'BSC',
+      deposit_coin: 'USDT',
+      deposit_method: 'on_chain',
       created_at: p.created_at,
     }));
 
@@ -379,7 +383,7 @@ export class PoolManagementService {
         end_date: true,
         created_at: true,
         admin: {
-          select: { binance_uid: true },
+          select: { binance_uid: true, wallet_address: true, payment_network: true },
         },
       },
     });
@@ -397,6 +401,10 @@ export class PoolManagementService {
       available_seats:
         pool.max_members - pool.reserved_seats_count - pool.verified_members_count,
       admin_binance_uid: pool.admin?.binance_uid || null,
+      admin_wallet_address: pool.admin?.wallet_address || null,
+      payment_network: pool.admin?.payment_network || 'BSC',
+      deposit_coin: 'USDT',
+      deposit_method: 'on_chain',
       admin: undefined,
     };
   }

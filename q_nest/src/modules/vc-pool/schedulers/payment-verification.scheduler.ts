@@ -12,7 +12,9 @@ export class PaymentVerificationScheduler {
   ) {}
 
   /**
-   * Run every 5 minutes to verify pending Binance P2P payments
+   * Run every 5 minutes to verify pending payments via Binance deposit history
+   * Payments are made via direct crypto transfers on the network (not P2P)
+   * The transfers appear as deposits in the admin's Binance account
    */
   @Cron(CronExpression.EVERY_5_MINUTES)
   async handlePaymentVerification() {
@@ -24,12 +26,20 @@ export class PaymentVerificationScheduler {
     this.isRunning = true;
 
     try {
-      const result = await this.verificationService.verifyPendingPayments();
+      // Check: Verify payment by checking Binance deposit history
+      // Users send crypto directly to admin's address via blockchain network
+      const depositResult = await this.verificationService.verifyPaymentsByDepositHistory();
 
-      if (result.processed > 0) {
+      if (depositResult.approved > 0 || depositResult.rejected > 0) {
         this.logger.log(
-          `Payment verification complete: ` +
-            `${result.approved} approved, ${result.rejected} rejected, ${result.errors} errors`,
+          `[NETWORK DEPOSIT VERIFICATION] Complete: ` +
+            `${depositResult.approved} approved, ${depositResult.errors} errors`,
+        );
+      }
+
+      if (depositResult.approved > 0) {
+        this.logger.log(
+          `✓ Total payments approved this cycle: ${depositResult.approved} (verified via network deposits)`,
         );
       }
     } catch (error: any) {
