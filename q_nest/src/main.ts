@@ -10,8 +10,11 @@ import { AppGateway } from './gateways/app.gateway';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
-    logger: ['error', 'warn'], // Suppress RouterExplorer "Mapped ... route" logs
+    logger: ['error', 'warn', 'log'], // 'log' = INFO, needed to see stream connection messages
   });
+
+  // Enable shutdown hooks so NestJS calls onModuleDestroy() on SIGTERM (Render sends this on deploy/restart)
+  app.enableShutdownHooks();
 
   // Increase body size limit to 10MB for file uploads (default is 100kb)
   // This applies to JSON and URL-encoded bodies. For multipart/form-data (file uploads),
@@ -121,7 +124,12 @@ async function bootstrap() {
   gateway.init(io);
   httpServer.timeout = 300000; // 5 minutes in milliseconds
   
-  console.log(`Application is running on: http://0.0.0.0:${port}`);
+  console.log(`══════════════════════════════════════════════`);
+  console.log(`  Quantiva NestJS server started`);
+  console.log(`  Port: ${port}`);
+  console.log(`  ENV: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`  Shutdown hooks: enabled`);
+  console.log(`══════════════════════════════════════════════`);
 
   // Trigger an initial run of the pre-built signals generation on startup
   // This seeds the DB with initial signals so the cronjob has data thereafter.

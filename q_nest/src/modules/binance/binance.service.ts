@@ -198,6 +198,12 @@ export class BinanceService {
       }
     }
 
+    // Skip REST for known-invalid symbols (delisted / non-existent)
+    const invalidUntil = this.invalidSymbols.get(formattedSymbol);
+    if (invalidUntil && Date.now() < invalidUntil) {
+      throw new Error(`Symbol ${formattedSymbol} is cached as invalid (delisted/unknown)`);
+    }
+
     const cached = this.statsCache.get(formattedSymbol);
     if (cached && Date.now() - cached.fetchedAt < this.STATS_CACHE_TTL_MS) {
       return cached.data;
@@ -220,6 +226,11 @@ export class BinanceService {
       this.statsCache.set(formattedSymbol, { data: stats, fetchedAt: Date.now() });
       return stats;
     } catch (error: any) {
+      // Cache 400 errors (delisted symbols) to stop repeated REST attempts
+      if (error?.response?.status === 400) {
+        this.invalidSymbols.set(formattedSymbol, Date.now() + this.INVALID_SYMBOL_TTL_MS);
+        this.logger.warn(`[INVALID-SYMBOL] ${formattedSymbol} cached as invalid for 5 min`);
+      }
       // Return stale cache if available rather than failing all callers
       if (cached) {
         this.logger.warn(`Using stale stats cache for ${symbol}: ${error.message}`);

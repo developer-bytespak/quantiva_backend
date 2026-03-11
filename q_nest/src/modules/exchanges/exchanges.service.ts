@@ -605,6 +605,17 @@ export class ExchangesService {
       this.cacheService.setCached(`${exchangeName}:${connectionId}:orders`, orders);
       this.cacheService.setCached(`${exchangeName}:${connectionId}:portfolio`, portfolio);
 
+      // Start the Binance user data stream after first successful REST sync.
+      // Subsequent balance/order requests will be served from the WS cache (zero REST weight).
+      // Fire-and-forget — never block the sync response.
+      if (isBinance && connection.user_id) {
+        this.binanceUserWsService
+          .connect(connection.user_id, apiKey, apiSecret)
+          .catch((err) =>
+            this.logger.warn(`User data stream connect failed for ${connection.user_id}: ${err?.message}`),
+          );
+      }
+
       // Update last_synced_at
       await this.prisma.user_exchange_connections.update({
         where: { connection_id: connectionId },
@@ -703,6 +714,16 @@ export class ExchangesService {
 
           // Cache and return balance only (avoid fetching orders by default)
           this.cacheService.setCached(cacheKey, balance);
+
+          // Kick off user data stream so future balance/order requests are served from WS cache
+          if (exchangeName === 'binance' && connection.user_id) {
+            this.binanceUserWsService
+              .connect(connection.user_id, apiKey, apiSecret)
+              .catch((err) =>
+                this.logger.warn(`User data stream connect failed for ${connection.user_id}: ${err?.message}`),
+              );
+          }
+
           return balance;
         }
       } catch (error) {

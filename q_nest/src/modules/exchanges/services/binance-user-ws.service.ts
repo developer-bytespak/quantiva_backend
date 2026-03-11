@@ -125,7 +125,7 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
 
       // Setup WebSocket event handlers
       ws.on('open', () => {
-        this.logger.log(`[UserDataStream] Connected for user ${userId}`);
+        this.logger.log(`══ USER STREAM CONNECTED ══ userId=${userId} | total active=${this.connections.size}`);
         connection.reconnectAttempts = 0;
         connection.state = 'CONNECTED';
         this.emitBinanceStatus(userId, 'CONNECTED');
@@ -150,7 +150,7 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
       });
 
       ws.on('close', (code, reason) => {
-        this.logger.warn(`[UserDataStream] Connection closed for user ${userId}: ${code} - ${reason}`);
+        this.logger.warn(`══ USER STREAM CLOSED ══ userId=${userId} code=${code} reason=${reason} | remaining=${this.connections.size - 1}`);
         connection.state = 'DISCONNECTED';
         this.emitBinanceStatus(userId, 'DISCONNECTED');
         this.stopKeepalive(userId);
@@ -175,7 +175,7 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
       return;
     }
 
-    this.logger.log(`[UserDataStream] Disconnecting user ${userId}`);
+    this.logger.log(`══ USER STREAM DISCONNECT ══ userId=${userId} | remaining after=${this.connections.size - 1}`);
 
     // Stop all timers
     this.stopKeepalive(userId);

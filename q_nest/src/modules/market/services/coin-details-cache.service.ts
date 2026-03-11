@@ -45,6 +45,9 @@ export class CoinDetailsCacheService {
   private readonly apiClient: AxiosInstance;
   private readonly apiKey: string | null;
   private readonly STALE_THRESHOLD = 6 * 60 * 60 * 1000; // 6 hours
+  /** Coins that returned 404 from CoinGecko — skip for 1 hour to stop log spam */
+  private readonly notFoundCache = new Map<string, number>(); // coinId → expiry ms
+  private readonly NOT_FOUND_TTL_MS = 60 * 60 * 1000; // 1 hour
 
   constructor(
     private prisma: PrismaService,
@@ -122,6 +125,12 @@ export class CoinDetailsCacheService {
    */
   async syncCoinDetails(coinId: string): Promise<any> {
     try {
+      // Skip coins known to be missing from CoinGecko
+      const notFoundUntil = this.notFoundCache.get(coinId);
+      if (notFoundUntil && Date.now() < notFoundUntil) {
+        throw Object.assign(new Error(`Coin "${coinId}" is not on CoinGecko (cached 404)`), { response: { status: 404 } });
+      }
+
       this.logger.log(`Fetching coin details from CoinGecko API: ${coinId}`);
       
       // Fetch detailed coin info
@@ -184,11 +193,17 @@ export class CoinDetailsCacheService {
       
       return data;
     } catch (error: any) {
-      this.logger.error('Failed to sync coin details from CoinGecko', {
-        coinId,
-        error: error.message,
-        status: error?.response?.status,
-      });
+      // Cache 404s to prevent repeated failed requests until the coin appears on CoinGecko
+      if (error?.response?.status === 404) {
+        this.notFoundCache.set(coinId, Date.now() + this.NOT_FOUND_TTL_MS);
+        this.logger.warn(`Coin "${coinId}" not found on CoinGecko — suppressing for 1 hour`);
+      } else {
+        this.logger.error('Failed to sync coin details from CoinGecko', {
+          coinId,
+          error: error.message,
+          status: error?.response?.status,
+        });
+      }
       throw error;
     }
   }

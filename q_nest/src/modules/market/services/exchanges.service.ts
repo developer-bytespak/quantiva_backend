@@ -6,7 +6,8 @@ import axios from 'axios';
 export class ExchangesService {
   private readonly logger = new Logger(ExchangesService.name);
   private readonly apiKey: string | null;
-  private readonly baseUrl = 'https://pro-api.coingecko.com/api/v3';
+  private readonly baseUrl: string;
+  private readonly isProApiKey: boolean;
 
   // Cache for Binance coins list
   private binanceCoinCache: string[] | null = null;
@@ -27,6 +28,13 @@ export class ExchangesService {
 
   constructor(private configService: ConfigService) {
     this.apiKey = this.configService.get<string>('COINGECKO_API_KEY') || null;
+    this.isProApiKey = !!(this.apiKey && this.apiKey.startsWith('CG-'));
+    this.baseUrl = this.isProApiKey
+      ? 'https://pro-api.coingecko.com/api/v3'
+      : 'https://api.coingecko.com/api/v3';
+    this.logger.log(
+      `CoinGecko API initialized: ${this.isProApiKey ? 'Pro API' : 'Free API'}`,
+    );
   }
 
   /**
@@ -79,7 +87,9 @@ export class ExchangesService {
           `${this.baseUrl}/exchanges/binance/tickers`,
           {
             headers: {
-              'x-cg-pro-api-key': this.apiKey,
+              ...(this.isProApiKey && this.apiKey
+                ? { 'x-cg-pro-api-key': this.apiKey }
+                : {}),
             },
             params: {
               page,
@@ -176,7 +186,9 @@ export class ExchangesService {
           `${this.baseUrl}/exchanges/binance/tickers`,
           {
             headers: {
-              'x-cg-pro-api-key': this.apiKey,
+              ...(this.isProApiKey && this.apiKey
+                ? { 'x-cg-pro-api-key': this.apiKey }
+                : {}),
             },
             params: {
               page,
@@ -272,7 +284,9 @@ export class ExchangesService {
           `${this.baseUrl}/exchanges/bybit/tickers`,
           {
             headers: {
-              'x-cg-pro-api-key': this.apiKey,
+              ...(this.isProApiKey && this.apiKey
+                ? { 'x-cg-pro-api-key': this.apiKey }
+                : {}),
             },
             params: {
               page,
@@ -369,7 +383,9 @@ export class ExchangesService {
           `${this.baseUrl}/exchanges/bybit/tickers`,
           {
             headers: {
-              'x-cg-pro-api-key': this.apiKey,
+              ...(this.isProApiKey && this.apiKey
+                ? { 'x-cg-pro-api-key': this.apiKey }
+                : {}),
             },
             params: {
               page,
