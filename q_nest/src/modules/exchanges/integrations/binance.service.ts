@@ -46,6 +46,9 @@ export class BinanceService {
   private readonly maxRetries = 3;
   private readonly retryDelay = 1000; // 1 second base delay
 
+  // IP ban guard: when Binance returns HTTP 418 (IP ban), stop all REST until TTL expires
+  private ipBannedUntil = 0;
+
   constructor(
     @Optional() private readonly marketStream?: BinanceMarketStreamService,
   ) {
@@ -97,6 +100,12 @@ export class BinanceService {
     params: Record<string, any> = {},
     retryTimestampError: boolean = true,
   ): Promise<any> {
+    // Respect active IP ban — fail fast instead of wasting weight on banned IP
+    if (Date.now() < this.ipBannedUntil) {
+      const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+      throw new BinanceApiException(`Binance IP ban active for ${remainingSec}s more. Requests blocked.`);
+    }
+
     // Use Binance server time for better synchronization
     const serverTime = await this.getBinanceServerTime();
     const recvWindow = 60000; // 60 seconds window (increased from default 5 seconds)
@@ -122,7 +131,16 @@ export class BinanceService {
       } catch (error: any) {
         lastError = error;
 
-        // Handle rate limiting
+        // Handle IP ban (418) — do NOT retry, record ban expiry and abort
+        if (error.response?.status === 418) {
+          const bannedUntil = error.response.data?.bannedUntil as number | undefined;
+          this.ipBannedUntil = bannedUntil ?? (Date.now() + 60 * 60 * 1000); // default 1h
+          const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+          this.logger.error(`══ BINANCE IP BAN ══ Blocked for ${remainingSec}s | All REST requests will fail fast until ban lifts`);
+          throw new BinanceApiException(`Binance IP banned for ${remainingSec}s. Use WebSocket streams for live data.`);
+        }
+
+        // Handle rate limiting (429) — back off, then retry
         if (error.response?.status === 429) {
           const retryAfter = error.response.headers['retry-after'] || 60;
           this.logger.warn(`Rate limit exceeded, retrying after ${retryAfter} seconds`);
@@ -184,6 +202,12 @@ export class BinanceService {
    * Makes a public request (no authentication required)
    */
   private async makePublicRequest(endpoint: string, params: Record<string, any> = {}): Promise<any> {
+    // Respect active IP ban — fail fast instead of wasting weight on banned IP
+    if (Date.now() < this.ipBannedUntil) {
+      const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+      throw new BinanceApiException(`Binance IP ban active for ${remainingSec}s more. Requests blocked.`);
+    }
+
     const queryString = new URLSearchParams(params).toString();
     const url = queryString ? `${endpoint}?${queryString}` : endpoint;
 
@@ -191,6 +215,14 @@ export class BinanceService {
       const response = await this.apiClient.get(url);
       return response.data;
     } catch (error: any) {
+      // Handle IP ban (418)
+      if (error.response?.status === 418) {
+        const bannedUntil = error.response.data?.bannedUntil as number | undefined;
+        this.ipBannedUntil = bannedUntil ?? (Date.now() + 60 * 60 * 1000);
+        const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+        this.logger.error(`══ BINANCE IP BAN ══ Blocked for ${remainingSec}s | All REST requests will fail fast until ban lifts`);
+        throw new BinanceApiException(`Binance IP banned for ${remainingSec}s.`);
+      }
       if (error.response?.status === 429) {
         throw new BinanceRateLimitException();
       }
