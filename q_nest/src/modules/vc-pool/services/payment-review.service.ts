@@ -115,6 +115,7 @@ export class PaymentReviewService {
         where: { submission_id: submissionId },
         data: {
           status: 'verified' as any,
+          binance_payment_status: 'verified' as any,
           verified_at: new Date(),
           reviewed_by_admin_id: adminId,
           admin_notes: adminNotes || null,
@@ -206,6 +207,7 @@ export class PaymentReviewService {
         where: { submission_id: submissionId },
         data: {
           status: 'rejected' as any,
+          binance_payment_status: 'rejected' as any,
           rejection_reason: rejectionReason,
           reviewed_by_admin_id: adminId,
         },
