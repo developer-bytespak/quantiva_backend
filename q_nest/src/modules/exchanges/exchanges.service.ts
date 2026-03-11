@@ -25,6 +25,10 @@ type ExchangeService = BinanceService | BybitService | AlpacaService;
 export class ExchangesService {
   private readonly logger = new Logger(ExchangesService.name);
 
+  // Deduplication: if a sync is already in progress for a connectionId,
+  // subsequent callers wait for the same Promise instead of firing another REST burst.
+  private readonly syncInFlight = new Map<string, Promise<void>>();
+
   constructor(
     private prisma: PrismaService,
     private encryptionService: EncryptionService,
@@ -445,10 +449,24 @@ export class ExchangesService {
   }
 
   /**
-   * Syncs connection data from the exchange and caches it
-   * Optimized to reduce redundant API calls
+   * Syncs connection data from the exchange and caches it.
+   * Deduplicates concurrent calls: if a sync is already in progress for this
+   * connection, all callers share the same Promise (no thundering herd).
    */
   async syncConnectionData(connectionId: string): Promise<void> {
+    const existing = this.syncInFlight.get(connectionId);
+    if (existing) {
+      this.logger.debug(`[SYNC] Deduplicating concurrent sync for ${connectionId}`);
+      return existing;
+    }
+    const promise = this._doSyncConnectionData(connectionId).finally(() => {
+      this.syncInFlight.delete(connectionId);
+    });
+    this.syncInFlight.set(connectionId, promise);
+    return promise;
+  }
+
+  private async _doSyncConnectionData(connectionId: string): Promise<void> {
     const connection = await this.prisma.user_exchange_connections.findUnique({
       where: { connection_id: connectionId },
       include: { exchange: true },
