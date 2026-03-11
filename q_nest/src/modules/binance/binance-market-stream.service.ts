@@ -68,6 +68,7 @@ export class BinanceMarketStreamService extends EventEmitter implements OnModule
   private tickerReconnectTimer: NodeJS.Timeout | null = null;
   private ticker24hTimer: NodeJS.Timeout | null = null;
   private readonly tickers = new Map<string, StreamTickerData>();
+  private tickerFirstDataLogged = false;
 
   // ── Kline stream state ───────────────────────────────────
   private klineWs: WebSocket | null = null;
@@ -163,8 +164,9 @@ export class BinanceMarketStreamService extends EventEmitter implements OnModule
     this.tickerWs = ws;
 
     ws.on('open', () => {
-      this.logger.log('Ticker stream connected ✓');
+      this.logger.log('══ TICKER STREAM CONNECTED ══');
       this.tickerReconnectAttempts = 0;
+      this.tickerFirstDataLogged = false;
 
       // Schedule proactive reconnect before Binance's 24 h limit
       this.ticker24hTimer = setTimeout(() => {
@@ -195,6 +197,17 @@ export class BinanceMarketStreamService extends EventEmitter implements OnModule
           };
           this.tickers.set(symbol, data);
         }
+        // Log summary on first batch so Render logs confirm data is flowing
+        if (!this.tickerFirstDataLogged) {
+          this.tickerFirstDataLogged = true;
+          const btc = this.tickers.get('BTCUSDT')?.price;
+          const eth = this.tickers.get('ETHUSDT')?.price;
+          const bnb = this.tickers.get('BNBUSDT')?.price;
+          this.logger.log(
+            `══ STREAM DATA FLOWING ══ ${this.tickers.size} symbols cached | ` +
+            `BTC=$${btc?.toFixed(2) ?? '?'} ETH=$${eth?.toFixed(2) ?? '?'} BNB=$${bnb?.toFixed(2) ?? '?'}`,
+          );
+        }
         // Emit a batch event so listeners can push selectively
         this.emit('ticker-batch', now);
       } catch (e: any) {
@@ -209,7 +222,7 @@ export class BinanceMarketStreamService extends EventEmitter implements OnModule
     });
 
     ws.on('close', (code, reason) => {
-      this.logger.warn(`Ticker stream closed: ${code} ${reason}`);
+      this.logger.warn(`══ TICKER STREAM CLOSED ══ code=${code} reason=${reason} | had ${this.tickers.size} symbols cached`);
       this.scheduleTickerReconnect();
     });
   }
@@ -229,7 +242,7 @@ export class BinanceMarketStreamService extends EventEmitter implements OnModule
   private scheduleTickerReconnect(): void {
     const delay = Math.min(1000 * Math.pow(2, this.tickerReconnectAttempts), this.MAX_RECONNECT_DELAY_MS);
     this.tickerReconnectAttempts++;
-    this.logger.log(`Reconnecting ticker stream in ${delay}ms (attempt ${this.tickerReconnectAttempts})`);
+    this.logger.log(`══ TICKER RECONNECT ══ in ${delay}ms (attempt ${this.tickerReconnectAttempts})`);
     this.tickerReconnectTimer = setTimeout(() => this.connectTickerStream(), delay);
   }
 
@@ -248,7 +261,7 @@ export class BinanceMarketStreamService extends EventEmitter implements OnModule
     this.klineWs = ws;
 
     ws.on('open', () => {
-      this.logger.log('Kline stream connected ✓');
+      this.logger.log('══ KLINE STREAM CONNECTED ══');
       this.klineReconnectAttempts = 0;
 
       // Re-subscribe to all active kline streams
@@ -293,7 +306,7 @@ export class BinanceMarketStreamService extends EventEmitter implements OnModule
     });
 
     ws.on('close', (code, reason) => {
-      this.logger.warn(`Kline stream closed: ${code} ${reason}`);
+      this.logger.warn(`══ KLINE STREAM CLOSED ══ code=${code} reason=${reason} | ${this.klineSubscriptions.size} active subscriptions`);
       this.scheduleKlineReconnect();
     });
   }

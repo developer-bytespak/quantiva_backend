@@ -63,6 +63,7 @@ export class AppGateway {
     }
   }
   emitNotificationCount(userId: string, count: number , payload: any): void {
+    if (!this.server) return; // server not initialised yet (e.g. called during bootstrap)
     try {
      this.server.to(`user:${userId}`).emit('notification:count', { count, payload });
     } catch (error) {

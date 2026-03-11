@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import {
   AccountBalanceDto,
@@ -15,6 +15,7 @@ import {
   BinanceRateLimitException,
   InvalidApiKeyException,
 } from '../exceptions/binance.exceptions';
+import { BinanceMarketStreamService } from '../../binance/binance-market-stream.service';
 
 interface BinanceAccountInfo {
   accountType: string;
@@ -45,7 +46,9 @@ export class BinanceService {
   private readonly maxRetries = 3;
   private readonly retryDelay = 1000; // 1 second base delay
 
-  constructor() {
+  constructor(
+    @Optional() private readonly marketStream?: BinanceMarketStreamService,
+  ) {
     this.apiClient = axios.create({
       baseURL: this.baseUrl,
       timeout: 10000,
@@ -311,17 +314,30 @@ export class BinanceService {
         return total > 0;
       });
 
-      // Only fetch prices for non-stablecoin assets
-      const symbols = nonZeroBalances
-        .filter((b) => !STABLECOINS.has(b.asset))
-        .map((b) => `${b.asset}USDT`);
-
       // Build price map — stablecoins are always $1
       const priceMap = new Map<string, number>();
       for (const stable of STABLECOINS) priceMap.set(stable, 1);
 
-      if (symbols.length > 0) {
-        const prices = await this.getTickerPrices(symbols);
+      // Stream-first: serve prices from WS cache — zero REST weight
+      const nonStableBalances = nonZeroBalances.filter((b) => !STABLECOINS.has(b.asset));
+      const symbolsNeedingRest: string[] = [];
+
+      if (this.marketStream?.isConnected()) {
+        for (const b of nonStableBalances) {
+          const streamPrice = this.marketStream.getPrice(`${b.asset}USDT`);
+          if (streamPrice !== undefined) {
+            priceMap.set(b.asset, streamPrice);
+          } else {
+            symbolsNeedingRest.push(`${b.asset}USDT`);
+          }
+        }
+      } else {
+        symbolsNeedingRest.push(...nonStableBalances.map((b) => `${b.asset}USDT`));
+      }
+
+      // Only hit REST for symbols the stream doesn't know about
+      if (symbolsNeedingRest.length > 0) {
+        const prices = await this.getTickerPrices(symbolsNeedingRest);
         for (const p of prices) priceMap.set(p.symbol.replace('USDT', ''), p.price);
       }
 
@@ -439,43 +455,58 @@ export class BinanceService {
   }
 
   /**
-   * Fetches real-time ticker prices
+   * Fetches real-time ticker prices — stream-first, REST fallback.
    */
   async getTickerPrices(symbols: string[]): Promise<TickerPriceDto[]> {
-    try {
-      // Binance API allows fetching multiple tickers
-      const symbolParam = symbols.map((s) => `"${s}"`).join(',');
-      const tickers = await this.makePublicRequest('/api/v3/ticker/24hr', {
-        symbols: `[${symbolParam}]`,
-      });
+    const result: TickerPriceDto[] = [];
+    const symbolsNeedingRest: string[] = [];
 
-      if (!Array.isArray(tickers)) {
-        // If single symbol, wrap in array
-        return [this.mapTickerToDto(tickers)];
+    // Stream-first: serve from WS cache — zero REST weight
+    if (this.marketStream?.isConnected()) {
+      for (const symbol of symbols) {
+        const stats = this.marketStream.get24hStats(symbol);
+        if (stats) {
+          result.push({
+            symbol: stats.symbol,
+            price: stats.price,
+            change24h: stats.price - stats.open,
+            changePercent24h: stats.priceChangePercent,
+          });
+        } else {
+          symbolsNeedingRest.push(symbol);
+        }
       }
-
-      return tickers.map((ticker: any) => this.mapTickerToDto(ticker));
-    } catch (error: any) {
-      // Fallback: fetch prices one by one if batch fails
-      if (symbols.length === 1) {
-        const ticker = await this.makePublicRequest('/api/v3/ticker/24hr', { symbol: symbols[0] });
-        return [this.mapTickerToDto(ticker)];
-      }
-
-      // For multiple symbols, try individual requests
-      const prices = await Promise.all(
-        symbols.map(async (symbol) => {
-          try {
-            const ticker = await this.makePublicRequest('/api/v3/ticker/24hr', { symbol });
-            return this.mapTickerToDto(ticker);
-          } catch {
-            return null;
-          }
-        }),
-      );
-
-      return prices.filter((p): p is TickerPriceDto => p !== null);
+    } else {
+      symbolsNeedingRest.push(...symbols);
     }
+
+    // Only hit REST for symbols the stream doesn't know about
+    if (symbolsNeedingRest.length > 0) {
+      try {
+        const symbolParam = symbolsNeedingRest.map((s) => `"${s}"`).join(',');
+        const tickers = await this.makePublicRequest('/api/v3/ticker/24hr', {
+          symbols: `[${symbolParam}]`,
+        });
+
+        const arr = Array.isArray(tickers) ? tickers : [tickers];
+        result.push(...arr.map((ticker: any) => this.mapTickerToDto(ticker)));
+      } catch (error: any) {
+        // Fallback: fetch prices one by one if batch fails
+        const prices = await Promise.all(
+          symbolsNeedingRest.map(async (symbol) => {
+            try {
+              const ticker = await this.makePublicRequest('/api/v3/ticker/24hr', { symbol });
+              return this.mapTickerToDto(ticker);
+            } catch {
+              return null;
+            }
+          }),
+        );
+        result.push(...prices.filter((p): p is TickerPriceDto => p !== null));
+      }
+    }
+
+    return result;
   }
 
   private mapTickerToDto(ticker: any): TickerPriceDto {
