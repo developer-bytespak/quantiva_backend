@@ -12,6 +12,7 @@ import {
   HttpCode,
   HttpStatus,
   HttpException,
+  Logger,
 } from '@nestjs/common';
 import { ExchangesService } from './exchanges.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -54,6 +55,8 @@ import { FmpService } from '../stocks-market/services/fmp.service';
 @UseGuards(JwtAuthGuard)
 @UseInterceptors(CacheHeadersInterceptor)
 export class ExchangesController {
+  private readonly logger = new Logger(ExchangesController.name);
+
   constructor(
     private readonly exchangesService: ExchangesService,
     private readonly binanceService: BinanceService,
@@ -662,9 +665,38 @@ export class ExchangesController {
       placeOrderDto.price,
     );
 
+    // Auto-place OCO (take-profit + stop-loss) for filled BUY orders on Binance
+    let ocoInfo: { orderListId: number; takeProfitPrice: number; stopLossPrice: number } | null = null;
+    if (
+      placeOrderDto.side === 'BUY' &&
+      order.status === 'FILLED' &&
+      order.quantity > 0 &&
+      order.price > 0
+    ) {
+      try {
+        const slPct = placeOrderDto.stopLoss ?? 0.05;
+        const tpPct = placeOrderDto.takeProfit ?? 0.10;
+        const stopLossPrice = parseFloat((order.price * (1 - slPct)).toPrecision(8));
+        const takeProfitPrice = parseFloat((order.price * (1 + tpPct)).toPrecision(8));
+
+        ocoInfo = await this.exchangesService.placeOcoOrder(
+          connectionId,
+          order.symbol,
+          'SELL',
+          order.quantity,
+          takeProfitPrice,
+          stopLossPrice,
+        );
+      } catch (ocoError: any) {
+        // OCO failure must not roll back the main order
+        this.logger.warn(`OCO order failed after BUY ${order.orderId}: ${ocoError?.message}`);
+      }
+    }
+
     return {
       success: true,
       data: order,
+      ...(ocoInfo && { oco: ocoInfo }),
       message: 'Order placed successfully',
       last_updated: new Date().toISOString(),
     };
