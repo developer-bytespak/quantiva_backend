@@ -50,6 +50,7 @@ export class BinanceService {
 
   // IP ban guard: when Binance returns HTTP 418 (IP ban), stop all REST until TTL expires
   private ipBannedUntil = 0;
+  private proxyEnabled = false;
 
   constructor(
     private readonly configService: ConfigService,
@@ -62,6 +63,7 @@ export class BinanceService {
       ...(proxyUrl ? { httpsAgent: new HttpsProxyAgent(proxyUrl), proxy: false } : {}),
     });
     if (proxyUrl) {
+      this.proxyEnabled = true;
       this.logger.log(`Binance REST proxy enabled: ${proxyUrl.replace(/\/\/.*@/, '//<redacted>@')}`);
     }
   }
@@ -109,7 +111,8 @@ export class BinanceService {
     retryTimestampError: boolean = true,
   ): Promise<any> {
     // Respect active IP ban — fail fast instead of wasting weight on banned IP
-    if (Date.now() < this.ipBannedUntil) {
+    // Skip guard when proxy is active: proxy uses a different IP that isn't banned
+    if (!this.proxyEnabled && Date.now() < this.ipBannedUntil) {
       const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
       throw new BinanceApiException(`Binance IP ban active for ${remainingSec}s more. Requests blocked.`);
     }
@@ -211,7 +214,8 @@ export class BinanceService {
    */
   private async makePublicRequest(endpoint: string, params: Record<string, any> = {}): Promise<any> {
     // Respect active IP ban — fail fast instead of wasting weight on banned IP
-    if (Date.now() < this.ipBannedUntil) {
+    // Skip guard when proxy is active: proxy uses a different IP that isn't banned
+    if (!this.proxyEnabled && Date.now() < this.ipBannedUntil) {
       const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
       throw new BinanceApiException(`Binance IP ban active for ${remainingSec}s more. Requests blocked.`);
     }
