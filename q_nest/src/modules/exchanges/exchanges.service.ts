@@ -894,6 +894,52 @@ export class ExchangesService {
     }
   }
 
+  async placeOcoOrder(
+    connectionId: string,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    quantity: number,
+    takeProfitPrice: number,
+    stopLossPrice: number,
+  ): Promise<{ orderListId: number; takeProfitPrice: number; stopLossPrice: number }> {
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection || !connection.exchange) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    if (!connection.api_key_encrypted || !connection.api_secret_encrypted) {
+      throw new ConnectionNotFoundException('Connection missing API credentials');
+    }
+
+    const apiKey = this.encryptionService.decryptApiKey(connection.api_key_encrypted);
+    const apiSecret = this.encryptionService.decryptApiKey(connection.api_secret_encrypted);
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+    if (exchangeName !== 'binance') {
+      throw new Error(`OCO orders are only supported on Binance, not ${connection.exchange.name}`);
+    }
+
+    const result = await this.binanceService.placeOcoOrder(
+      apiKey,
+      apiSecret,
+      symbol,
+      side,
+      quantity,
+      takeProfitPrice,
+      stopLossPrice,
+    );
+
+    return {
+      orderListId: result.orderListId,
+      takeProfitPrice,
+      stopLossPrice,
+    };
+  }
+
   async deleteConnection(id: string) {
     return this.prisma.user_exchange_connections.delete({
       where: { connection_id: id },
