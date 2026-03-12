@@ -1049,6 +1049,7 @@ export class SubscriptionsService {
         created_at: p.created_at,
       })),
       allSubscriptions,
+      hasPlan: hasPlan,
     };
   }
 
