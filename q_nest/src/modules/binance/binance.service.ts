@@ -1,5 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { BinanceMarketStreamService } from './binance-market-stream.service';
 
 interface Ticker24h {
@@ -57,12 +59,18 @@ export class BinanceService {
   private readonly INVALID_SYMBOL_TTL_MS = 5 * 60_000; // re-check after 5 min
 
   constructor(
+    private readonly configService: ConfigService,
     @Optional() private readonly marketStream?: BinanceMarketStreamService,
   ) {
+    const proxyUrl = this.configService.get<string>('BINANCE_PROXY_URL');
     this.apiClient = axios.create({
       baseURL: this.baseUrl,
       timeout: 10000,
+      ...(proxyUrl ? { httpsAgent: new HttpsProxyAgent(proxyUrl), proxy: false } : {}),
     });
+    if (proxyUrl) {
+      this.logger.log(`Binance REST proxy enabled: ${proxyUrl.replace(/\/\/.*@/, '//<redacted>@')}`);
+    }
   }
 
   /**

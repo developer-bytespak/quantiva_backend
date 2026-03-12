@@ -1,5 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import {
   AccountBalanceDto,
   AssetBalanceDto,
@@ -50,12 +52,18 @@ export class BinanceService {
   private ipBannedUntil = 0;
 
   constructor(
+    private readonly configService: ConfigService,
     @Optional() private readonly marketStream?: BinanceMarketStreamService,
   ) {
+    const proxyUrl = this.configService.get<string>('BINANCE_PROXY_URL');
     this.apiClient = axios.create({
       baseURL: this.baseUrl,
       timeout: 10000,
+      ...(proxyUrl ? { httpsAgent: new HttpsProxyAgent(proxyUrl), proxy: false } : {}),
     });
+    if (proxyUrl) {
+      this.logger.log(`Binance REST proxy enabled: ${proxyUrl.replace(/\/\/.*@/, '//<redacted>@')}`);
+    }
   }
 
   /**
