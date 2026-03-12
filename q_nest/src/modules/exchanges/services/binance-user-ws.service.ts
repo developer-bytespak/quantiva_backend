@@ -38,7 +38,7 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
     this.baseUrl = configService.get('BINANCE_USER_STREAM_URL', 'https://api.binance.com');
     this.wsEndpoint = configService.get('BINANCE_USER_WS_ENDPOINT', 'wss://stream.binance.com:9443');
 
-    const proxyUrl = configService.get<string>('BINANCE_PROXY_URL');
+    const proxyUrl = configService.get<string>('BINANCE_PROXY_URL') || process.env.BINANCE_PROXY_URL;
     this.restClient = axios.create({
       baseURL: this.baseUrl,
       timeout: 10000,

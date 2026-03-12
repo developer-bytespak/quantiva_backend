@@ -56,7 +56,8 @@ export class BinanceService {
     private readonly configService: ConfigService,
     @Optional() private readonly marketStream?: BinanceMarketStreamService,
   ) {
-    const proxyUrl = this.configService.get<string>('BINANCE_PROXY_URL');
+    const proxyUrl = this.configService.get<string>('BINANCE_PROXY_URL') || process.env.BINANCE_PROXY_URL;
+    this.logger.log(`[PROXY-DEBUG] BINANCE_PROXY_URL present: ${!!proxyUrl}`);
     this.apiClient = axios.create({
       baseURL: this.baseUrl,
       timeout: 10000,
