@@ -50,6 +50,7 @@ export class NotificationsService {
       where: {
         user_id: userId,
       },
+      orderBy: { created_at: 'desc' },
     });
 
     await this.prisma.notifications.updateMany({
@@ -103,5 +104,37 @@ export class NotificationsService {
       return { success: false, message: 'Failed to send notification' };
     }
   }
+
+  async deleteNotification(id: string) {
+    if(!id) {
+      return { success: false, message: 'Notification ID is required' };
+    }
+    const notification = await this.prisma.notifications.findUnique({
+      where: { id: id },
+    });
+    if(!notification) {
+      return { success: false, message: 'Notification not found' };
+    }
+    return this.prisma.notifications.delete({
+      where: { id: id },
+    });
+    return { success: true, message: 'Notification deleted' };
+  }
+
+  async deleteAllNotifications(userId: string) {
+    console.log("userId-->",userId)
+    if(!userId) {
+      return { success: false, message: 'User ID is required' };
+    }
+    try {
+      await this.prisma.notifications.deleteMany({
+        where: { user_id: userId },
+      });
+      return { success: true, message: 'All notifications deleted' };
+    } catch (err) {
+      console.warn('[NotificationsService] Failed to delete all notifications:', err?.message || err);
+      return { success: false, message: 'Failed to delete all notifications' };
+    }
+    }
 }
 

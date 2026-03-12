@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, Query, Req, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, Req, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { SubscriptionsService } from './subscriptions.service';
 import { BadRequest } from 'ccxt';
 
@@ -105,8 +105,14 @@ export class SubscriptionsController {
   }
 
   @Post("subscribe")
-  createSubscription(@Body() createSubscriptionDto: any) {
-    return this.subscriptionsService.createSubscription(createSubscriptionDto);
+  createSubscription(@Body() createSubscriptionDto: any, @Req() req: any) {
+    console.log("createSubscriptionDto",createSubscriptionDto)
+    const userId = req.subscriptionUser?.user_id;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+    createSubscriptionDto.user_id = userId;
+    return this.subscriptionsService.createSubscriptionUser(createSubscriptionDto);
   }
 
  

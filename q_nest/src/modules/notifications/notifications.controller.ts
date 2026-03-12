@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, Req } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Req, Delete } from '@nestjs/common';
 import { NotificationsService } from './notifications.service';
 import { FirebaseService } from 'src/firebase/firebase.service';
 
@@ -30,6 +30,18 @@ export class NotificationsController {
       body.title,
       body.body
     );
+  }
+
+  @Delete('delete/:id')
+  async deleteNotification(@Param('id') id: string) {
+    return this.notificationsService.deleteNotification(id);
+  }
+
+  @Delete('delete')
+  async deleteAllNotifications(@Req() req: any) {
+    console.log("req-->",req)
+    const userId = req.subscriptionUser?.user_id;
+    return this.notificationsService.deleteAllNotifications(userId);
   }
 
   @Post('FCM')
