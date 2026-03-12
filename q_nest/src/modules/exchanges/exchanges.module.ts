@@ -26,7 +26,8 @@ import { BinanceModule } from '../binance/binance.module';
     forwardRef(() => AdminAuthModule),
     forwardRef(() => MarketModule),
     StocksMarketModule,
-  , BinanceModule],
+    BinanceModule,
+  ],
   controllers: [ExchangesController, /* Health endpoint for paper trading */ PaperTradingController],
   providers: [
     ExchangesService,
