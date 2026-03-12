@@ -38,6 +38,8 @@ export class StripeController {
     @Req() req: any,
   ) {
 
+    console.log("checkout request-->",req)
+
 
     const tier = req.subscriptionUser?.tier;
 
@@ -48,6 +50,7 @@ export class StripeController {
     } 
     
     const { price_id, success_url, cancel_url, plan_id } = req.body;
+    console.log("boddy",price_id, success_url, cancel_url, plan_id)
 
     // console.log("BODY:", req.body);  
     if (!price_id) {
@@ -248,7 +251,35 @@ export class StripeController {
               `Subscription updated for user ${userId}, plan ${planId} and payment recorded`,
             );
           } else {
-            throw new BadRequestException('Subscription not found');
+            console.log("NO EXISTING SUBSCRIPTION FOUND - CREATING NEW SUBSCRIPTION");
+            // User has no current subscription — create new subscription and update all related tables
+            const newSubscription = await this.subscriptionsService.createSubscription({
+              user_id: userId,
+              plan_id: planId,
+              status: 'active',
+              billing_provider: 'stripe',
+              external_id: externalId,
+              auto_renew: true,
+            });
+
+            // Payment history entry for new subscription
+            await this.subscriptionsService.recordPayment({
+              subscription_id: newSubscription.subscription_id,
+              user_id: newSubscription.user_id,
+              amount,
+              currency,
+              status: 'succeeded',
+              payment_provider: 'stripe',
+              external_payment_id: externalId || session.id,
+              payment_method: paymentMethod,
+              invoice_url: invoiceUrl || null,
+              receipt_url: receiptUrl || null,
+              failure_reason: null,
+            });
+
+            this.logger.log(
+              `New subscription created for user ${userId}, plan ${planId}; user_subscriptions, users, subscription_usage, and payment_history updated`,
+            );
           }
         } catch (err: any) {
           this.logger.error(

@@ -4,6 +4,7 @@ import { SubscriptionStatus } from '@prisma/client';
 import { cursorTo } from 'readline';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AppGateway } from 'src/gateways/app.gateway';
+import { tryCatch } from 'bullmq';
 
 export enum PlanTier {
   FREE = 'FREE',
@@ -30,6 +31,11 @@ export class SubscriptionsService {
     private readonly notificationsService: NotificationsService,
     private readonly appGateway: AppGateway,
   ) { }
+
+  /** True if string is a valid UUID format (so safe to use in plan_id lookup). */
+  private isUuid(s: string): boolean {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+  }
 
   private getMonthlyPeriods(startDate: Date, endDate: Date): { start: Date; end: Date }[] {
     const periods: { start: Date; end: Date }[] = [];
@@ -348,11 +354,11 @@ export class SubscriptionsService {
 
       next_billing_date = new Date(current_period_end);
 
-      // 3️⃣ Subscription create karo
+      // 3️⃣ Subscription create karo (use resolved plan.plan_id for DB)
       const subscription = await tx.user_subscriptions.create({
         data: {
           user_id: data.user_id,
-          plan_id: data.plan_id,
+          plan_id: plan.plan_id,
           tier: plan.tier,
           billing_period: plan.billing_period,
           status: data.status || 'active',
@@ -491,11 +497,22 @@ export class SubscriptionsService {
       };
 
       if (data.plan_id && data.plan_id !== currentSubscription.plan_id) {
-        newPlan = await tx.subscription_plans.findUnique({
-          where: { plan_id: data.plan_id },
-          include: { plan_features: true },
-        });
-
+        if (this.isUuid(data.plan_id)) {
+          newPlan = await tx.subscription_plans.findUnique({
+            where: { plan_id: data.plan_id },
+            include: { plan_features: true },
+          });
+        } else {
+          const parts = String(data.plan_id).split('_');
+          const tier = parts[0] as PlanTier;
+          const billingPeriod = parts[1] as BillingPeriod;
+          if (tier && billingPeriod && Object.values(PlanTier).includes(tier) && Object.values(BillingPeriod).includes(billingPeriod)) {
+            newPlan = await tx.subscription_plans.findFirst({
+              where: { tier, billing_period: billingPeriod },
+              include: { plan_features: true },
+            });
+          }
+        }
         if (!newPlan) {
           throw new Error('New plan not found');
         }
@@ -530,7 +547,7 @@ export class SubscriptionsService {
 
         updateData = {
           ...updateData,
-          plan_id: data.plan_id,
+          plan_id: newPlan.plan_id,
           tier: newPlan.tier,
           billing_period: newPlan.billing_period,
           current_period_start: now,
@@ -882,6 +899,19 @@ export class SubscriptionsService {
       },
       orderBy: { created_at: 'desc' },
     });
+    // Check if user has *any* paid subscription (excluding free). If not, add hasPlan: true, otherwise false.
+    const anyPlan = await this.prisma.user_subscriptions.findFirst({
+      where: {
+        user_id: userId,
+      },
+    });
+    console.log("anyPlan",anyPlan)
+
+    let hasPlan: boolean = false;
+    if (anyPlan) {
+      hasPlan = true;
+    }
+
 
     if(!currentSubscription) {
       const currentTier = await this.prisma.users.findUnique({
@@ -909,6 +939,7 @@ export class SubscriptionsService {
           usage: null,
           payments: null,
           allSubscriptions: allSubscriptions,
+          hasPlan: hasPlan,
         };
       }
 
@@ -1148,6 +1179,50 @@ export class SubscriptionsService {
         },
       },
     });
+  }
+
+  async createSubscriptionUser(data: {
+    user_id: string;
+    plan_id: string;
+    status?: SubscriptionStatus;
+    external_id?: string;
+    billing_provider?: string;
+    auto_renew?: boolean;
+  }) {
+   try {
+    console.log("edit",data)
+    return this.prisma.$transaction(async (tx) => {
+      const plan = await tx.subscription_plans.findFirst({
+        where: { tier: data.plan_id as PlanTier },
+      });
+
+      console.log("planed",plan)
+      if (!plan) {
+        throw new Error('Plan not found');
+      }
+
+      const subscription = await tx.user_subscriptions.create({
+        data: {
+          user_id: data.user_id,
+          plan_id: plan.plan_id,
+          tier: plan.tier,
+          billing_period: plan.billing_period,
+        },
+        include: {
+          user: true,
+          plan: true,
+        },
+      });
+      await tx.users.update({
+        where: { user_id: data.user_id },
+        data: { current_tier: plan.tier },
+      });
+      return subscription;
+    }, { timeout: 30000 });
+   } catch (error) {
+    console.log("error--->",error)
+    throw new Error('Failed to create subscription');
+   }
   }
 
 }
