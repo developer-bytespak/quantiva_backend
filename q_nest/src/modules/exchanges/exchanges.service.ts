@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ExchangeType, ConnectionStatus } from '@prisma/client';
 import { EncryptionService } from './services/encryption.service';
@@ -34,6 +34,37 @@ export class ExchangesService {
     private cacheService: CacheService,
     private binanceUserWsService: BinanceUserWsService,
   ) {}
+
+  /**
+   * Resolve the effective user_id for exchange connections.
+   * - If caller is a normal user, return their sub directly.
+   * - If caller is an admin, map admin -> user via matching email.
+   */
+  async getEffectiveUserId(sub: string, role?: string): Promise<string> {
+    if (!sub) {
+      throw new ForbiddenException('Missing subject in token');
+    }
+
+    if (role === 'admin') {
+      const admin = await this.prisma.admins.findUnique({
+        where: { admin_id: sub },
+      });
+      if (!admin || !admin.email) {
+        throw new ForbiddenException('Admin email not found for exchange mapping');
+      }
+
+      const user = await this.prisma.users.findUnique({
+        where: { email: admin.email },
+      });
+      if (!user) {
+        throw new ForbiddenException('No user account linked to this admin email');
+      }
+
+      return user.user_id;
+    }
+
+    return sub;
+  }
 
   /**
    * Gets the appropriate exchange service based on exchange name

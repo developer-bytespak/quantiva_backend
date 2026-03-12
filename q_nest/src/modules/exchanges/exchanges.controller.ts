@@ -14,7 +14,7 @@ import {
   HttpException,
 } from '@nestjs/common';
 import { ExchangesService } from './exchanges.service';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { AdminOrUserJwtGuard } from '../admin-auth/guards/admin-or-user-jwt.guard';
 import { KycVerifiedGuard } from '../../common/guards/kyc-verified.guard';
 import { ConnectionOwnerGuard } from './guards/connection-owner.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -51,7 +51,7 @@ import { FmpService } from '../stocks-market/services/fmp.service';
  * @api {get} /exchanges/connections/:connectionId/dashboard Get Dashboard Data (Combined)
  */
 @Controller('exchanges')
-@UseGuards(JwtAuthGuard)
+@UseGuards(AdminOrUserJwtGuard)
 @UseInterceptors(CacheHeadersInterceptor)
 export class ExchangesController {
   constructor(
@@ -73,7 +73,7 @@ export class ExchangesController {
 
   @Get('connections/active')
   async getActiveConnection(
-    @CurrentUser() user: TokenPayload,
+    @CurrentUser() user: TokenPayload & { role?: string },
     @Query('type') type?: 'crypto' | 'stocks',
   ) {
     try {
@@ -86,10 +86,11 @@ export class ExchangesController {
           HttpStatus.UNAUTHORIZED,
         );
       }
+      const userId = await this.exchangesService.getEffectiveUserId(user.sub, user.role);
 
       const connection = type
-        ? await this.exchangesService.getActiveConnectionByType(user.sub, type)
-        : await this.exchangesService.getActiveConnection(user.sub);
+        ? await this.exchangesService.getActiveConnectionByType(userId, type)
+        : await this.exchangesService.getActiveConnection(userId);
 
       if (!connection) {
         throw new HttpException(
@@ -129,7 +130,7 @@ export class ExchangesController {
    * MUST be before @Get('connections/:userId') to avoid route collision
    */
   @Get('my-connections')
-  async getUserConnectionsForCurrentUser(@CurrentUser() user: TokenPayload) {
+  async getUserConnectionsForCurrentUser(@CurrentUser() user: TokenPayload & { role?: string }) {
     if (!user || !user.sub) {
       throw new HttpException(
         {
@@ -140,7 +141,8 @@ export class ExchangesController {
       );
     }
 
-    const connections = await this.exchangesService.getUserConnections(user.sub);
+    const userId = await this.exchangesService.getEffectiveUserId(user.sub, user.role);
+    const connections = await this.exchangesService.getUserConnections(userId);
 
     return {
       success: true,
@@ -182,7 +184,7 @@ export class ExchangesController {
   @HttpCode(HttpStatus.CREATED)
   async createConnection(
     @Body() createConnectionDto: CreateConnectionDto,
-    @CurrentUser() user: TokenPayload,
+    @CurrentUser() user: TokenPayload & { role?: string },
   ) {
     try {
       // First, get the exchange to get its name for verification
@@ -235,10 +237,12 @@ export class ExchangesController {
           HttpStatus.UNAUTHORIZED,
         );
       }
+      const userId = await this.exchangesService.getEffectiveUserId(user.sub, user.role);
+
       // Replace any existing active connection for the SAME exchange type (crypto or stocks),
       // but keep connections of other types so "Both" accounts can have crypto + stocks.
       const existingConnection = await this.exchangesService.getActiveConnectionByType(
-        user.sub,
+        userId,
         exchange.type as 'crypto' | 'stocks',
       );
       if (existingConnection) {
@@ -247,7 +251,7 @@ export class ExchangesController {
 
       // If verification passes, create the connection
       const connection = await this.exchangesService.createConnection({
-        user_id: user.sub,
+        user_id: userId,
         exchange_id: createConnectionDto.exchange_id,
         auth_type: 'api_key',
         api_key: createConnectionDto.api_key,
@@ -305,12 +309,13 @@ export class ExchangesController {
   async updateConnection(
     @Param('connectionId') connectionId: string,
     @Body() updateConnectionDto: UpdateConnectionDto,
-    @CurrentUser() user: TokenPayload,
+    @CurrentUser() user: TokenPayload & { role?: string },
   ) {
     try {
+      const userId = await this.exchangesService.getEffectiveUserId(user.sub, user.role);
       const result = await this.exchangesService.updateConnection(
         connectionId,
-        user.sub,
+        userId,
         updateConnectionDto.api_key,
         updateConnectionDto.api_secret,
         updateConnectionDto.password,

@@ -9,7 +9,7 @@ export class ConnectionOwnerGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
-    const user = request.user as TokenPayload;
+    const user = request.user as TokenPayload & { role?: string };
     const connectionId = request.params.connectionId;
 
     if (!user || !user.sub) {
@@ -20,13 +20,14 @@ export class ConnectionOwnerGuard implements CanActivate {
       throw new ForbiddenException('Connection ID is required');
     }
 
+    const effectiveUserId = await this.exchangesService.getEffectiveUserId(user.sub, user.role);
     const connection = await this.exchangesService.getConnectionById(connectionId);
 
     if (!connection) {
       throw new ConnectionNotFoundException();
     }
 
-    if (connection.user_id !== user.sub) {
+    if (connection.user_id !== effectiveUserId) {
       throw new ForbiddenException('You do not have access to this connection');
     }
 

@@ -49,6 +49,7 @@ import { BinanceModule } from '../binance/binance.module';
     AdminBinanceService,
   ],
   exports: [
+    JwtModule,
     AdminAuthService,
     AdminTokenService,
     AdminSessionService,
