@@ -189,6 +189,15 @@ export class UserPoolController {
     return this.cancellationService.requestCancellation(user.sub, id);
   }
 
+  @Post(':poolId/request-exit')
+  @AllowTier('ELITE')
+  async requestExit(
+    @CurrentUser() user: TokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+  ) {
+    return this.cancellationService.requestCancellation(user.sub, poolId);
+  }
+
   @Get(':id/my-cancellation')
   @AllowTier('ELITE')
   async getMyCancellation(
@@ -196,6 +205,15 @@ export class UserPoolController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.cancellationService.getMyCancellation(user.sub, id);
+  }
+
+  @Get(':poolId/cancellation')
+  @AllowTier('ELITE')
+  async getCancellation(
+    @CurrentUser() user: TokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+  ) {
+    return this.cancellationService.getMyCancellation(user.sub, poolId);
   }
 
   // ── Binance P2P TX Submission (parameterized, after :id routes) ──

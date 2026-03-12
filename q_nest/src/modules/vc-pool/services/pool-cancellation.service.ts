@@ -47,45 +47,30 @@ export class PoolCancellationService {
       throw new BadRequestException('You are not an active member of this pool');
     }
 
-    // Check for existing pending cancellation
-    const existingCancellation = await this.prisma.vc_pool_cancellations.findFirst({
-      where: {
-        member_id: member.member_id,
-        status: EXIT_REQUEST_STATUS.pending,
-      },
-    });
-
-    if (existingCancellation) {
-      throw new ConflictException('You already have a pending cancellation request');
-    }
-
     // Calculate refund based on pool status
     const poolStatus = pool.status as string;
     const investedAmount = Number(member.invested_amount_usdt);
     const cancellationFeePercent = Number(pool.cancellation_fee_percent);
 
-    let memberValueAtExit: number;
-    let sharePercentAtExit: number | null = null;
-    let poolValueAtExit: number | null = null;
-
-    if (poolStatus === POOL_STATUS.open || poolStatus === POOL_STATUS.full) {
-      // Pool not started - refund based on invested amount
-      memberValueAtExit = investedAmount;
-    } else if (poolStatus === POOL_STATUS.active) {
-      // Pool active - calculate based on current pool value and share
-      sharePercentAtExit = Number(member.share_percent);
-      poolValueAtExit = Number(pool.current_pool_value_usdt || pool.total_invested_usdt);
-      memberValueAtExit = (sharePercentAtExit * poolValueAtExit) / 100;
-    } else {
-      throw new BadRequestException('Cannot cancel membership from a pool in this status');
+    // Only allow cancellation before pool starts
+    if (poolStatus !== POOL_STATUS.open && poolStatus !== POOL_STATUS.full) {
+      throw new BadRequestException(
+        'Cancellation is only allowed before the pool starts trading. Once trading begins, you cannot cancel your membership.',
+      );
     }
 
-    const feeAmount = (memberValueAtExit * cancellationFeePercent) / 100;
-    const refundAmount = memberValueAtExit - feeAmount;
+    // Pool not started - refund based on invested amount
+    const memberValueAtExit = investedAmount;
+    const sharePercentAtExit: number | null = null;
+    const poolValueAtExit: number | null = null;
 
-    // Create cancellation record
-    const cancellation = await this.prisma.vc_pool_cancellations.create({
-      data: {
+    const cancellationFeeAmount = (memberValueAtExit * cancellationFeePercent) / 100;
+    const refundAmount = memberValueAtExit - cancellationFeeAmount;
+
+    // Upsert cancellation record (update if exists, create if not)
+    const cancellation = await this.prisma.vc_pool_cancellations.upsert({
+      where: { member_id: member.member_id },
+      create: {
         pool_id: poolId,
         member_id: member.member_id,
         pool_status_at_request: poolStatus as any,
@@ -94,9 +79,22 @@ export class PoolCancellationService {
         pool_value_at_exit: poolValueAtExit,
         member_value_at_exit: memberValueAtExit,
         cancellation_fee_pct: cancellationFeePercent,
-        fee_amount: feeAmount,
+        fee_amount: cancellationFeeAmount,
         refund_amount: refundAmount,
         status: EXIT_REQUEST_STATUS.pending as any,
+      },
+      update: {
+        pool_status_at_request: poolStatus as any,
+        invested_amount: investedAmount,
+        member_value_at_exit: memberValueAtExit,
+        cancellation_fee_pct: cancellationFeePercent,
+        fee_amount: cancellationFeeAmount,
+        refund_amount: refundAmount,
+        status: EXIT_REQUEST_STATUS.pending as any,
+        requested_at: new Date(),
+        reviewed_by_admin_id: null,
+        reviewed_at: null,
+        rejection_reason: null,
       },
     });
 
@@ -107,9 +105,11 @@ export class PoolCancellationService {
     return {
       cancellation_id: cancellation.cancellation_id,
       pool_status_at_request: poolStatus,
-      member_value_at_exit: memberValueAtExit,
-      fee_amount: feeAmount,
+      contribution_amount: investedAmount,
+      pool_fee_amount: 0, // Can be calculated from join flow if needed
+      cancellation_fee_amount: cancellationFeeAmount,
       refund_amount: refundAmount,
+      user_wallet_address: member.user_wallet_address,
       status: EXIT_REQUEST_STATUS.pending,
       message: 'Cancellation request submitted. Awaiting admin approval.',
     };
@@ -146,10 +146,13 @@ export class PoolCancellationService {
         cancellation_id: cancellation.cancellation_id,
         status: cancellation.status,
         requested_at: cancellation.requested_at,
-        member_value_at_exit: Number(cancellation.member_value_at_exit),
-        fee_amount: Number(cancellation.fee_amount),
+        contribution_amount: Number(cancellation.invested_amount),
+        pool_fee_amount: 0, // Can be tracked separately if needed
+        cancellation_fee_amount: Number(cancellation.fee_amount),
         refund_amount: Number(cancellation.refund_amount),
-        reviewed_at: cancellation.reviewed_at,
+        user_wallet_address: member.user_wallet_address,
+        approved_at: cancellation.reviewed_at,
+        refund_completed_at: cancellation.refunded_at,
         reviewed_by: cancellation.reviewing_admin
           ? {
               name: cancellation.reviewing_admin.full_name,
@@ -157,7 +160,6 @@ export class PoolCancellationService {
             }
           : null,
         rejection_reason: cancellation.rejection_reason,
-        refunded_at: cancellation.refunded_at,
       },
     };
   }
@@ -243,11 +245,14 @@ export class PoolCancellationService {
 
   // ── Admin: List Cancellations ──
 
-  async listCancellations(adminId: string, poolId: string) {
+  async listCancellations(adminId: string, poolId: string, status?: string) {
     await this.validatePoolOwnership(adminId, poolId);
 
     const cancellations = await this.prisma.vc_pool_cancellations.findMany({
-      where: { pool_id: poolId },
+      where: {
+        pool_id: poolId,
+        ...(status && { status: status as any }),
+      },
       include: {
         member: {
           include: {
@@ -277,12 +282,15 @@ export class PoolCancellationService {
           share_percent: Number(c.member.share_percent || 0),
         },
         pool_status_at_request: c.pool_status_at_request,
-        member_value_at_exit: Number(c.member_value_at_exit),
-        fee_amount: Number(c.fee_amount),
+        contribution_amount: Number(c.invested_amount),
+        pool_fee_amount: 0,
+        cancellation_fee_amount: Number(c.fee_amount),
         refund_amount: Number(c.refund_amount),
+        user_wallet_address: c.member.user_wallet_address,
         status: c.status,
         requested_at: c.requested_at,
-        reviewed_at: c.reviewed_at,
+        approved_at: c.reviewed_at,
+        refund_completed_at: c.refunded_at,
         reviewed_by: c.reviewing_admin
           ? {
               name: c.reviewing_admin.full_name,
@@ -290,8 +298,7 @@ export class PoolCancellationService {
             }
           : null,
         rejection_reason: c.rejection_reason,
-        refunded_at: c.refunded_at,
-        binance_refund_tx_id: c.binance_refund_tx_id,
+        refund_tx_hash: c.binance_refund_tx_id,
       })),
     };
   }
@@ -365,8 +372,25 @@ export class PoolCancellationService {
 
     return {
       cancellation_id: updated.cancellation_id,
+      contribution_amount: Number(updated.invested_amount),
+      pool_fee_amount: 0,
+      cancellation_fee_amount: Number(updated.fee_amount),
       refund_amount: Number(updated.refund_amount),
+      user_wallet_address: cancellation.member.user_wallet_address,
+      status: EXIT_REQUEST_STATUS.approved,
+      approved_at: updated.reviewed_at,
       message: 'Cancellation approved. Transfer refund externally, then mark as refunded.',
+      next_step: `Transfer ${updated.refund_amount} USDT to ${cancellation.member.user_wallet_address} on BSC network`,
+      instructions: [
+        '1. Open Binance → Click "Send" or "Withdraw Crypto"',
+        '2. Select Token: USDT',
+        `3. Paste wallet address: ${cancellation.member.user_wallet_address}`,
+        '4. Select Network: BSC (BEP-20)',
+        `5. Set Amount: ${updated.refund_amount} USDT`,
+        '6. Click Withdraw and confirm',
+        '7. Copy the Transaction Hash',
+        '8. Come back to mark as refunded',
+      ],
     };
   }
 
@@ -447,7 +471,7 @@ export class PoolCancellationService {
     // Mark refunded and deactivate member, recalculate remaining shares
     const result = await this.prisma.$transaction(async (tx) => {
       // Update cancellation
-      await tx.vc_pool_cancellations.update({
+      const updatedCancellation = await tx.vc_pool_cancellations.update({
         where: { cancellation_id: cancellationId },
         data: {
           status: EXIT_REQUEST_STATUS.processed as any,
@@ -494,7 +518,7 @@ export class PoolCancellationService {
         data: { verified_members_count: { decrement: 1 } },
       });
 
-      return { success: true };
+      return updatedCancellation;
     });
 
     this.logger.log(
@@ -503,8 +527,18 @@ export class PoolCancellationService {
 
     return {
       cancellation_id: cancellationId,
+      contribution_amount: Number(result.invested_amount),
+      pool_fee_amount: 0,
+      cancellation_fee_amount: Number(result.fee_amount),
+      refund_amount: Number(result.refund_amount),
+      user_wallet_address: cancellation.member.user_wallet_address,
       status: EXIT_REQUEST_STATUS.processed,
+      refund_completed_at: result.refunded_at,
+      refund_tx_hash: result.binance_refund_tx_id,
       message: 'Refund marked as completed. Member deactivated and shares recalculated.',
+      blockchain_link: binanceTxId
+        ? `https://bscscan.com/tx/${binanceTxId}`
+        : 'Transaction hash provided',
       notes: notes || null,
     };
   }

@@ -69,8 +69,7 @@ export class SeatExpiryScheduler {
               await tx.vc_pool_payment_submissions.update({
                 where: { submission_id: submission.submission_id },
                 data: {
-                  status: 'expired' as any,
-                  binance_payment_status: 'expired' as any,
+                  status: 'rejected' as any,
                   refund_initiated_at: new Date(),
                   refund_reason: 'Seat reservation timer expired - payment not completed within allocated time',
                 },
