@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
+import axios, { AxiosInstance } from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 
@@ -29,12 +30,23 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
   private readonly KEEPALIVE_INTERVAL = 30 * 60 * 1000; // 30 minutes
   private readonly baseUrl: string;
   private readonly wsEndpoint: string;
+  private readonly restClient: AxiosInstance;
 
   constructor(private readonly configService: ConfigService) {
     super();
     // Production by default; override with BINANCE_USER_STREAM_URL / BINANCE_USER_WS_ENDPOINT for testnet
     this.baseUrl = configService.get('BINANCE_USER_STREAM_URL', 'https://api.binance.com');
     this.wsEndpoint = configService.get('BINANCE_USER_WS_ENDPOINT', 'wss://stream.binance.com:9443');
+
+    const proxyUrl = configService.get<string>('BINANCE_PROXY_URL') || process.env.BINANCE_PROXY_URL;
+    this.restClient = axios.create({
+      baseURL: this.baseUrl,
+      timeout: 10000,
+      ...(proxyUrl ? { httpsAgent: new HttpsProxyAgent(proxyUrl), proxy: false } : {}),
+    });
+    if (proxyUrl) {
+      this.logger.log(`UserDataStream REST proxy enabled`);
+    }
   }
 
   async onModuleDestroy() {
@@ -125,7 +137,7 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
 
       // Setup WebSocket event handlers
       ws.on('open', () => {
-        this.logger.log(`[UserDataStream] Connected for user ${userId}`);
+        this.logger.log(`══ USER STREAM CONNECTED ══ userId=${userId} | total active=${this.connections.size}`);
         connection.reconnectAttempts = 0;
         connection.state = 'CONNECTED';
         this.emitBinanceStatus(userId, 'CONNECTED');
@@ -150,7 +162,7 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
       });
 
       ws.on('close', (code, reason) => {
-        this.logger.warn(`[UserDataStream] Connection closed for user ${userId}: ${code} - ${reason}`);
+        this.logger.warn(`══ USER STREAM CLOSED ══ userId=${userId} code=${code} reason=${reason} | remaining=${this.connections.size - 1}`);
         connection.state = 'DISCONNECTED';
         this.emitBinanceStatus(userId, 'DISCONNECTED');
         this.stopKeepalive(userId);
@@ -175,7 +187,7 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
       return;
     }
 
-    this.logger.log(`[UserDataStream] Disconnecting user ${userId}`);
+    this.logger.log(`══ USER STREAM DISCONNECT ══ userId=${userId} | remaining after=${this.connections.size - 1}`);
 
     // Stop all timers
     this.stopKeepalive(userId);
@@ -216,8 +228,8 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
 
     try {
       this.logger.log(`Requesting listenKey from Binance for user ${userId}...`);
-      const response = await axios.post(
-        `${this.baseUrl}/api/v3/userDataStream`,
+      const response = await this.restClient.post(
+        '/api/v3/userDataStream',
         {},
         {
           headers: {
@@ -263,8 +275,8 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
     if (!creds) throw new Error('No API keys for user');
 
     try {
-      await axios.put(
-        `${this.baseUrl}/api/v3/userDataStream`,
+      await this.restClient.put(
+        '/api/v3/userDataStream',
         {},
         {
           headers: {
@@ -289,8 +301,8 @@ export class BinanceUserWsService extends EventEmitter implements OnModuleDestro
     if (!creds) return; // Keys may already be cleaned up
 
     try {
-      await axios.delete(
-        `${this.baseUrl}/api/v3/userDataStream`,
+      await this.restClient.delete(
+        '/api/v3/userDataStream',
         {
           headers: {
             'X-MBX-APIKEY': creds.apiKey,

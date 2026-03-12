@@ -1,5 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import {
   AccountBalanceDto,
   AssetBalanceDto,
@@ -15,6 +17,7 @@ import {
   BinanceRateLimitException,
   InvalidApiKeyException,
 } from '../exceptions/binance.exceptions';
+import { BinanceMarketStreamService } from '../../binance/binance-market-stream.service';
 
 interface BinanceAccountInfo {
   accountType: string;
@@ -45,11 +48,26 @@ export class BinanceService {
   private readonly maxRetries = 3;
   private readonly retryDelay = 1000; // 1 second base delay
 
-  constructor() {
+  // IP ban guard: when Binance returns HTTP 418 (IP ban), stop all REST until TTL expires
+  private ipBannedUntil = 0;
+  private proxyEnabled = false;
+
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly marketStream?: BinanceMarketStreamService,
+  ) {
+    const proxyUrl = this.configService.get<string>('BINANCE_PROXY_URL') || process.env.BINANCE_PROXY_URL;
+    const dbUrl = process.env.DATABASE_URL;
+    this.logger.log(`[PROXY-DEBUG] BINANCE_PROXY_URL present: ${!!proxyUrl} | DATABASE_URL present: ${!!dbUrl} | NODE_ENV: ${process.env.NODE_ENV}`);
     this.apiClient = axios.create({
       baseURL: this.baseUrl,
       timeout: 10000,
+      ...(proxyUrl ? { httpsAgent: new HttpsProxyAgent(proxyUrl), proxy: false } : {}),
     });
+    if (proxyUrl) {
+      this.proxyEnabled = true;
+      this.logger.log(`Binance REST proxy enabled: ${proxyUrl.replace(/\/\/.*@/, '//<redacted>@')}`);
+    }
   }
 
   /**
@@ -94,6 +112,13 @@ export class BinanceService {
     params: Record<string, any> = {},
     retryTimestampError: boolean = true,
   ): Promise<any> {
+    // Respect active IP ban — fail fast instead of wasting weight on banned IP
+    // Skip guard when proxy is active: proxy uses a different IP that isn't banned
+    if (!this.proxyEnabled && Date.now() < this.ipBannedUntil) {
+      const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+      throw new BinanceApiException(`Binance IP ban active for ${remainingSec}s more. Requests blocked.`);
+    }
+
     // Use Binance server time for better synchronization
     const serverTime = await this.getBinanceServerTime();
     const recvWindow = 60000; // 60 seconds window (increased from default 5 seconds)
@@ -119,7 +144,16 @@ export class BinanceService {
       } catch (error: any) {
         lastError = error;
 
-        // Handle rate limiting
+        // Handle IP ban (418) — do NOT retry, record ban expiry and abort
+        if (error.response?.status === 418) {
+          const bannedUntil = error.response.data?.bannedUntil as number | undefined;
+          this.ipBannedUntil = bannedUntil ?? (Date.now() + 60 * 60 * 1000); // default 1h
+          const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+          this.logger.error(`══ BINANCE IP BAN ══ Blocked for ${remainingSec}s | All REST requests will fail fast until ban lifts`);
+          throw new BinanceApiException(`Binance IP banned for ${remainingSec}s. Use WebSocket streams for live data.`);
+        }
+
+        // Handle rate limiting (429) — back off, then retry
         if (error.response?.status === 429) {
           const retryAfter = error.response.headers['retry-after'] || 60;
           this.logger.warn(`Rate limit exceeded, retrying after ${retryAfter} seconds`);
@@ -181,6 +215,13 @@ export class BinanceService {
    * Makes a public request (no authentication required)
    */
   private async makePublicRequest(endpoint: string, params: Record<string, any> = {}): Promise<any> {
+    // Respect active IP ban — fail fast instead of wasting weight on banned IP
+    // Skip guard when proxy is active: proxy uses a different IP that isn't banned
+    if (!this.proxyEnabled && Date.now() < this.ipBannedUntil) {
+      const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+      throw new BinanceApiException(`Binance IP ban active for ${remainingSec}s more. Requests blocked.`);
+    }
+
     const queryString = new URLSearchParams(params).toString();
     const url = queryString ? `${endpoint}?${queryString}` : endpoint;
 
@@ -188,6 +229,14 @@ export class BinanceService {
       const response = await this.apiClient.get(url);
       return response.data;
     } catch (error: any) {
+      // Handle IP ban (418)
+      if (error.response?.status === 418) {
+        const bannedUntil = error.response.data?.bannedUntil as number | undefined;
+        this.ipBannedUntil = bannedUntil ?? (Date.now() + 60 * 60 * 1000);
+        const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+        this.logger.error(`══ BINANCE IP BAN ══ Blocked for ${remainingSec}s | All REST requests will fail fast until ban lifts`);
+        throw new BinanceApiException(`Binance IP banned for ${remainingSec}s.`);
+      }
       if (error.response?.status === 429) {
         throw new BinanceRateLimitException();
       }
@@ -311,17 +360,30 @@ export class BinanceService {
         return total > 0;
       });
 
-      // Only fetch prices for non-stablecoin assets
-      const symbols = nonZeroBalances
-        .filter((b) => !STABLECOINS.has(b.asset))
-        .map((b) => `${b.asset}USDT`);
-
       // Build price map — stablecoins are always $1
       const priceMap = new Map<string, number>();
       for (const stable of STABLECOINS) priceMap.set(stable, 1);
 
-      if (symbols.length > 0) {
-        const prices = await this.getTickerPrices(symbols);
+      // Stream-first: serve prices from WS cache — zero REST weight
+      const nonStableBalances = nonZeroBalances.filter((b) => !STABLECOINS.has(b.asset));
+      const symbolsNeedingRest: string[] = [];
+
+      if (this.marketStream?.isConnected()) {
+        for (const b of nonStableBalances) {
+          const streamPrice = this.marketStream.getPrice(`${b.asset}USDT`);
+          if (streamPrice !== undefined) {
+            priceMap.set(b.asset, streamPrice);
+          } else {
+            symbolsNeedingRest.push(`${b.asset}USDT`);
+          }
+        }
+      } else {
+        symbolsNeedingRest.push(...nonStableBalances.map((b) => `${b.asset}USDT`));
+      }
+
+      // Only hit REST for symbols the stream doesn't know about
+      if (symbolsNeedingRest.length > 0) {
+        const prices = await this.getTickerPrices(symbolsNeedingRest);
         for (const p of prices) priceMap.set(p.symbol.replace('USDT', ''), p.price);
       }
 
@@ -439,43 +501,58 @@ export class BinanceService {
   }
 
   /**
-   * Fetches real-time ticker prices
+   * Fetches real-time ticker prices — stream-first, REST fallback.
    */
   async getTickerPrices(symbols: string[]): Promise<TickerPriceDto[]> {
-    try {
-      // Binance API allows fetching multiple tickers
-      const symbolParam = symbols.map((s) => `"${s}"`).join(',');
-      const tickers = await this.makePublicRequest('/api/v3/ticker/24hr', {
-        symbols: `[${symbolParam}]`,
-      });
+    const result: TickerPriceDto[] = [];
+    const symbolsNeedingRest: string[] = [];
 
-      if (!Array.isArray(tickers)) {
-        // If single symbol, wrap in array
-        return [this.mapTickerToDto(tickers)];
+    // Stream-first: serve from WS cache — zero REST weight
+    if (this.marketStream?.isConnected()) {
+      for (const symbol of symbols) {
+        const stats = this.marketStream.get24hStats(symbol);
+        if (stats) {
+          result.push({
+            symbol: stats.symbol,
+            price: stats.price,
+            change24h: stats.price - stats.open,
+            changePercent24h: stats.priceChangePercent,
+          });
+        } else {
+          symbolsNeedingRest.push(symbol);
+        }
       }
-
-      return tickers.map((ticker: any) => this.mapTickerToDto(ticker));
-    } catch (error: any) {
-      // Fallback: fetch prices one by one if batch fails
-      if (symbols.length === 1) {
-        const ticker = await this.makePublicRequest('/api/v3/ticker/24hr', { symbol: symbols[0] });
-        return [this.mapTickerToDto(ticker)];
-      }
-
-      // For multiple symbols, try individual requests
-      const prices = await Promise.all(
-        symbols.map(async (symbol) => {
-          try {
-            const ticker = await this.makePublicRequest('/api/v3/ticker/24hr', { symbol });
-            return this.mapTickerToDto(ticker);
-          } catch {
-            return null;
-          }
-        }),
-      );
-
-      return prices.filter((p): p is TickerPriceDto => p !== null);
+    } else {
+      symbolsNeedingRest.push(...symbols);
     }
+
+    // Only hit REST for symbols the stream doesn't know about
+    if (symbolsNeedingRest.length > 0) {
+      try {
+        const symbolParam = symbolsNeedingRest.map((s) => `"${s}"`).join(',');
+        const tickers = await this.makePublicRequest('/api/v3/ticker/24hr', {
+          symbols: `[${symbolParam}]`,
+        });
+
+        const arr = Array.isArray(tickers) ? tickers : [tickers];
+        result.push(...arr.map((ticker: any) => this.mapTickerToDto(ticker)));
+      } catch (error: any) {
+        // Fallback: fetch prices one by one if batch fails
+        const prices = await Promise.all(
+          symbolsNeedingRest.map(async (symbol) => {
+            try {
+              const ticker = await this.makePublicRequest('/api/v3/ticker/24hr', { symbol });
+              return this.mapTickerToDto(ticker);
+            } catch {
+              return null;
+            }
+          }),
+        );
+        result.push(...prices.filter((p): p is TickerPriceDto => p !== null));
+      }
+    }
+
+    return result;
   }
 
   private mapTickerToDto(ticker: any): TickerPriceDto {

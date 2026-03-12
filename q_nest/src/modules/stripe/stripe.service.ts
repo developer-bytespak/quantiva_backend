@@ -34,8 +34,8 @@ export class StripeService {
             quantity: 1,
           },
         ],
-        success_url: `${process.env.FRONTEND_URL}/dashboard/settings/subscription` || 'http://localhost:3001/success',
-        cancel_url: `${process.env.FRONTEND_URL}/dashboard/settings/subscription` || 'http://localhost:3001/cancel',
+        success_url: params.successUrl || 'http://localhost:3001/success',
+        cancel_url: params.cancelUrl || 'http://localhost:3001/cancel',
         ...(params.clientReferenceId && { client_reference_id: params.clientReferenceId }),
         metadata: params.metadata,
       });

@@ -77,23 +77,23 @@ export class AuthService {
     });
 
     // Register ke baad FREE plan subscription auto-create (user_subscriptions me inject)
-    let subscriptionCreated = false;
-    try {
-      const freePlan = await this.prisma.subscription_plans.findFirst({
-        where: { tier: 'FREE', billing_period: 'MONTHLY', is_active: true },
-      });
-      if (freePlan) {
-        await this.subscriptionsService.createSubscription({
-          user_id: user.user_id,
-          plan_id: freePlan.plan_id,
-          status: 'active',
-          auto_renew: false,
-        });
-        subscriptionCreated = true;
-      }
-    } catch {
-      // FREE plan na mile ya create fail ho to register ko fail mat karo
-    }
+    // let subscriptionCreated = false;
+    // try {
+    //   const freePlan = await this.prisma.subscription_plans.findFirst({
+    //     where: { tier: 'FREE', billing_period: 'MONTHLY', is_active: true },
+    //   });
+    //   if (freePlan) {
+    //     await this.subscriptionsService.createSubscription({
+    //       user_id: user.user_id,
+    //       plan_id: freePlan.plan_id,
+    //       status: 'active',
+    //       auto_renew: false,
+    //     });
+    //     subscriptionCreated = true;
+    //   }
+    // } catch {
+    //   // FREE plan na mile ya create fail ho to register ko fail mat karo
+    // }
 
     return {
       user: {
@@ -104,7 +104,7 @@ export class AuthService {
         kyc_status: user.kyc_status,
       },
       message: 'User registered successfully. 2FA is enabled.',
-      subscriptionCreated,
+      // subscriptionCreated,
     };
   }
 
@@ -441,21 +441,21 @@ export class AuthService {
         kyc_status: 'pending',
       },
     });
-    try {
-      const freePlan = await this.prisma.subscription_plans.findFirst({
-        where: { tier: 'FREE', billing_period: 'MONTHLY', is_active: true },
-      });
-      if (freePlan) {
-        await this.subscriptionsService.createSubscription({
-          user_id: user.user_id,
-          plan_id: freePlan.plan_id,
-          status: 'active',
-          auto_renew: false,
-        });
-      }
-    } catch {
-      // don't fail signup if subscription create fails
-    }
+    // try {
+    //   const freePlan = await this.prisma.subscription_plans.findFirst({
+    //     where: { tier: 'FREE', billing_period: 'MONTHLY', is_active: true },
+    //   });
+    //   if (freePlan) {
+    //     await this.subscriptionsService.createSubscription({
+    //       user_id: user.user_id,
+    //       plan_id: freePlan.plan_id,
+    //       status: 'active',
+    //       auto_renew: false,
+    //     });
+    //   }
+    // } catch {
+    //   // don't fail signup if subscription create fails
+    // }
     return this.createGoogleAuthResponse(user, ipAddress, deviceId, true);
   }
 
