@@ -50,6 +50,38 @@ export class SeatReservationService {
       throw new ConflictException('You are already a member of this pool');
     }
 
+    // If user has cancelled before (is_active: false), reactivate them (REJOIN)
+    let memberToUse = existingMember;
+    let isRejoin = false;
+    
+    if (existingMember && !existingMember.is_active) {
+      // User is rejoining after cancellation
+      isRejoin = true;
+      this.logger.log(`User ${userId} is rejoining pool ${poolId} after previous cancellation`);
+      
+      memberToUse = await this.prisma.vc_pool_members.update({
+        where: { member_id: existingMember.member_id },
+        data: {
+          is_active: false,  // ✅ REJOIN: Keep inactive until new TX is verified (same flow as initial join)
+          exited_at: null,  // Clear exit timestamp
+          joined_at: new Date(),  // Update join date
+        },
+      });
+    } else if (!existingMember) {
+      // NEW JOIN - Create member record immediately
+      memberToUse = await this.prisma.vc_pool_members.create({
+        data: {
+          pool_id: poolId,
+          user_id: userId,
+          payment_method: dto.payment_method as any,
+          invested_amount_usdt: Number(pool.contribution_amount),
+          share_percent: 0,  // Will be calculated after payment approval
+          is_active: false,  // Will be set to true after payment is verified
+        },
+      });
+      isRejoin = false;
+    }
+
     // Check for existing active reservation
     const existingReservation = await this.prisma.vc_pool_seat_reservations.findUnique({
       where: { pool_id_user_id: { pool_id: poolId, user_id: userId } },
@@ -143,8 +175,10 @@ export class SeatReservationService {
       const adminAddress = pool.admin?.wallet_address || pool.admin?.binance_uid;
       const network = pool.admin?.payment_network || 'BSC';
       return {
+        member_id: memberToUse.member_id,
         reservation_id: result.reservation.reservation_id,
         submission_id: result.submission.submission_id,
+        is_rejoin: isRejoin,
         total_amount: totalAmount,
         investment_amount: investmentAmount,
         pool_fee_amount: poolFeeAmount,
@@ -172,8 +206,10 @@ export class SeatReservationService {
 
     // Stripe (bypassed in Phase 1)
     return {
+      member_id: memberToUse.member_id,
       reservation_id: result.reservation.reservation_id,
       submission_id: result.submission.submission_id,
+      is_rejoin: isRejoin,
       total_amount: totalAmount,
       investment_amount: investmentAmount,
       pool_fee_amount: poolFeeAmount,
@@ -230,6 +266,38 @@ export class SeatReservationService {
       });
     }
 
+    // Check for cancellation if member exists
+    let cancellationInfo = null;
+    if (membership) {
+      const cancellation = await this.prisma.vc_pool_cancellations.findUnique({
+        where: { member_id: membership.member_id },
+        select: {
+          cancellation_id: true,
+          status: true,
+          requested_at: true,
+          invested_amount: true,
+          fee_amount: true,
+          refund_amount: true,
+          reviewed_at: true,
+          refunded_at: true,
+        },
+      });
+
+      if (cancellation) {
+        cancellationInfo = {
+          has_cancellation: true,
+          cancellation_id: cancellation.cancellation_id,
+          status: cancellation.status,
+          requested_at: cancellation.requested_at,
+          approved_at: cancellation.reviewed_at,
+          refunded_at: cancellation.refunded_at,
+          contribution_amount: Number(cancellation.invested_amount),
+          cancellation_fee_amount: Number(cancellation.fee_amount),
+          refund_amount: Number(cancellation.refund_amount),
+        };
+      }
+    }
+
     const minutesRemaining = reservation?.expires_at
       ? Math.max(0, Math.floor((reservation.expires_at.getTime() - Date.now()) / 60000))
       : null;
@@ -243,6 +311,7 @@ export class SeatReservationService {
         ? { ...reservation, minutes_remaining: minutesRemaining }
         : null,
       payment: submission,
+      cancellation: cancellationInfo,
     };
   }
 }

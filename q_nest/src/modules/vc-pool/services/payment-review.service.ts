@@ -115,6 +115,7 @@ export class PaymentReviewService {
         where: { submission_id: submissionId },
         data: {
           status: 'verified' as any,
+          binance_payment_status: 'verified' as any,
           verified_at: new Date(),
           reviewed_by_admin_id: adminId,
           admin_notes: adminNotes || null,
@@ -127,22 +128,41 @@ export class PaymentReviewService {
         data: { status: 'confirmed' as any },
       });
 
-      // Create pool member
-      const member = await tx.vc_pool_members.create({
-        data: {
-          pool_id: poolId,
-          user_id: submission.user_id,
-          payment_method: submission.payment_method,
-          invested_amount_usdt: submission.investment_amount,
-          share_percent: 0, // Recalculated when pool starts
-          user_binance_uid:
-            submission.payment_method === 'binance'
-              ? (submission.reservation as any)?.user_binance_uid || null
-              : null,
-          user_wallet_address: (submission as any)?.user_wallet_address || null,
-          is_active: true,
-        },
+      // Create or update pool member
+      const existingMember = await tx.vc_pool_members.findUnique({
+        where: { pool_id_user_id: { pool_id: poolId, user_id: submission.user_id } },
       });
+
+      let member;
+      if (existingMember) {
+        // Member already exists (created during join) - just activate it
+        member = await tx.vc_pool_members.update({
+          where: { member_id: existingMember.member_id },
+          data: {
+            is_active: true,
+            invested_amount_usdt: submission.investment_amount,
+            payment_method: submission.payment_method,
+            share_percent: 0, // Recalculated when pool starts
+          },
+        });
+      } else {
+        // Create new member (backward compatibility for old flow)
+        member = await tx.vc_pool_members.create({
+          data: {
+            pool_id: poolId,
+            user_id: submission.user_id,
+            payment_method: submission.payment_method,
+            invested_amount_usdt: submission.investment_amount,
+            share_percent: 0, // Recalculated when pool starts
+            user_binance_uid:
+              submission.payment_method === 'binance'
+                ? (submission.reservation as any)?.user_binance_uid || null
+                : null,
+            user_wallet_address: (submission as any)?.user_wallet_address || null,
+            is_active: true,
+          },
+        });
+      }
 
       // Update pool counters
       const updatedPool = await tx.vc_pools.update({
@@ -206,6 +226,7 @@ export class PaymentReviewService {
         where: { submission_id: submissionId },
         data: {
           status: 'rejected' as any,
+          binance_payment_status: 'rejected' as any,
           rejection_reason: rejectionReason,
           reviewed_by_admin_id: adminId,
         },
