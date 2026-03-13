@@ -15,23 +15,14 @@ export class SeatExpiryScheduler {
     this.isRunning = true;
 
     try {
+      const now = new Date();
+      this.logger.log(`[SCHEDULER] Checking for expired reservations at ${now.toISOString()}`);
+
+      // Find expired 'reserved' status reservations
       const expiredReservations = await this.prisma.vc_pool_seat_reservations.findMany({
         where: {
           status: 'reserved' as any,
-          expires_at: { lt: new Date() },
-        },
-        include: {
-          payment_submission: { 
-            select: { 
-              submission_id: true, 
-              status: true,
-              total_amount: true,
-              investment_amount: true,
-              pool_fee_amount: true,
-              user_id: true,
-              binance_payment_status: true,
-            } 
-          },
+          expires_at: { lt: now },
         },
       });
 
@@ -40,74 +31,59 @@ export class SeatExpiryScheduler {
         return;
       }
 
-      this.logger.log(`Found ${expiredReservations.length} expired seat reservation(s)`);
+      this.logger.log(`[SCHEDULER] Found ${expiredReservations.length} expired reservation(s). Deleting...`);
 
       for (const reservation of expiredReservations) {
         try {
-          await this.prisma.$transaction(async (tx) => {
-            // 1. Expire the reservation
-            await tx.vc_pool_seat_reservations.update({
-              where: { reservation_id: reservation.reservation_id },
-              data: { status: 'expired' as any },
-            });
+          this.logger.log(`[SCHEDULER] Processing reservation ${reservation.reservation_id}`);
 
-            // 2. Decrement reserved seats
+          // Delete in a transaction
+          await this.prisma.$transaction(async (tx) => {
+            // 1. Delete payment submissions
+            await tx.vc_pool_payment_submissions.deleteMany({
+              where: {
+                pool_id: reservation.pool_id,
+                user_id: reservation.user_id,
+              },
+            });
+            this.logger.log(`  ✓ Deleted payment record`);
+
+            // 2. Delete seat reservation
+            await tx.vc_pool_seat_reservations.deleteMany({
+              where: {
+                pool_id: reservation.pool_id,
+                user_id: reservation.user_id,
+              },
+            });
+            this.logger.log(`  ✓ Deleted seat reservation`);
+
+            // 3. Delete member
+            await tx.vc_pool_members.deleteMany({
+              where: {
+                pool_id: reservation.pool_id,
+                user_id: reservation.user_id,
+              },
+            });
+            this.logger.log(`  ✓ Deleted member record`);
+
+            // 4. Decrement reserved seats
             await tx.vc_pools.update({
               where: { pool_id: reservation.pool_id },
               data: { reserved_seats_count: { decrement: 1 } },
             });
-
-            // 3. Expire related payment submission if pending/processing
-            if (
-              reservation.payment_submission &&
-              (reservation.payment_submission.status === 'pending' ||
-                reservation.payment_submission.status === 'processing')
-            ) {
-              const submission = reservation.payment_submission;
-
-              // Update payment submission to expired
-              await tx.vc_pool_payment_submissions.update({
-                where: { submission_id: submission.submission_id },
-                data: {
-                  status: 'rejected' as any,
-                  refund_initiated_at: new Date(),
-                  refund_reason: 'Seat reservation timer expired - payment not completed within allocated time',
-                },
-              });
-
-              // 4. NEW: Create refund transaction record
-              await tx.vc_pool_transactions.create({
-                data: {
-                  pool_id: reservation.pool_id,
-                  user_id: submission.user_id,
-                  payment_submission_id: submission.submission_id,
-                  transaction_type: 'payment_expired_refund_initiated',
-                  amount_usdt: submission.total_amount,
-                  status: 'pending', // Waiting for admin or auto-refund processing
-                  description: `Payment reservation expired after ${reservation.expires_at}. Refund initiated. Amount: ${submission.total_amount} USDT (Investment: ${submission.investment_amount}, Fee: ${submission.pool_fee_amount})`,
-                  created_at: new Date(),
-                },
-              });
-
-              this.logger.log(
-                `Expired payment submission ${submission.submission_id} for user ${submission.user_id} - refund initiated`,
-              );
-            }
+            this.logger.log(`  ✓ Decremented reserved_seats_count`);
           });
 
-          this.logger.log(
-            `Expired reservation ${reservation.reservation_id} for pool ${reservation.pool_id}`,
-          );
+          this.logger.log(`[SCHEDULER] ✓ Successfully deleted expired reservation ${reservation.reservation_id}`);
         } catch (err) {
-          this.logger.error(
-            `Failed to expire reservation ${reservation.reservation_id}: ${err.message}`,
-          );
+          this.logger.error(`[SCHEDULER] Error processing reservation ${reservation.reservation_id}: ${err.message}`);
         }
       }
     } catch (err) {
-      this.logger.error(`Seat expiry job failed: ${err.message}`);
+      this.logger.error(`[SCHEDULER] Error: ${err.message}`);
     } finally {
       this.isRunning = false;
     }
   }
 }
+
