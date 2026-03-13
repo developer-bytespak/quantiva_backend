@@ -167,6 +167,7 @@ export class PoolCancellationService {
   // ── User: Get My Pools ──
 
   async getMyPools(userId: string) {
+    // Fetch all member records (active and inactive)
     const memberships = await this.prisma.vc_pool_members.findMany({
       where: { user_id: userId },
       include: {
@@ -179,6 +180,7 @@ export class PoolCancellationService {
             coin_type: true,
             started_at: true,
             end_date: true,
+            completed_at: true,
             current_pool_value_usdt: true,
             total_profit_usdt: true,
             total_invested_usdt: true,
@@ -190,10 +192,44 @@ export class PoolCancellationService {
             status: true,
             refund_amount: true,
             requested_at: true,
+            reviewed_at: true,
+            refunded_at: true,
           },
         },
       },
       orderBy: { joined_at: 'desc' },
+    });
+
+    // Fetch all payouts for this user (for completed pools)
+    const payouts = await this.prisma.vc_pool_payouts.findMany({
+      where: {
+        member: {
+          user_id: userId,
+        },
+      },
+      include: {
+        member: {
+          select: {
+            member_id: true,
+            pool_id: true,
+          },
+        },
+      },
+    });
+
+    // Create a map of member_id to payouts
+    const payoutsByMember = new Map();
+    payouts.forEach((p) => {
+      payoutsByMember.set(p.member_id, p);
+    });
+
+    // Group members by pool_id to detect rejoin
+    const membersByPool = new Map<string, typeof memberships>();
+    memberships.forEach((m) => {
+      if (!membersByPool.has(m.pool_id)) {
+        membersByPool.set(m.pool_id, []);
+      }
+      membersByPool.get(m.pool_id).push(m);
     });
 
     const result = memberships.map((m) => {
@@ -203,6 +239,82 @@ export class PoolCancellationService {
       const poolValue = Number(pool.current_pool_value_usdt || pool.total_invested_usdt || 0);
       const currentValue = (sharePercent * poolValue) / 100;
       const pnl = currentValue - investedAmount;
+
+      // Detect membership status
+      let membershipStatus = 'unknown';
+      let statusDetail = {};
+
+      // Get payout if exists
+      const payout = payoutsByMember.get(m.member_id);
+
+      // Count how many member records exist for this pool (rejoin detection)
+      const memberCountInPool = membersByPool.get(m.pool_id).length;
+      const isRejoin = memberCountInPool > 1 && m.is_active;
+
+      // Determine clear status
+      if (pool.status === 'completed' && payout) {
+        // Pool is completed and user has a payout
+        membershipStatus = 'completed_and_paid';
+        statusDetail = {
+          payout_id: payout.payout_id,
+          payout_amount: Number(payout.net_payout),
+          gross_payout: Number(payout.gross_payout),
+          admin_fee_deducted: Number(payout.admin_fee_deducted),
+          profit_loss: Number(payout.profit_loss),
+          payout_status: payout.status,
+          paid_at: payout.paid_at,
+          payout_type: payout.payout_type,
+        };
+      } else if (pool.status === 'cancelled' && payout) {
+        // Pool was cancelled, user has refund payout
+        membershipStatus = 'pool_cancelled_refund';
+        statusDetail = {
+          payout_id: payout.payout_id,
+          refund_amount: Number(payout.net_payout),
+          payout_status: payout.status,
+          paid_at: payout.paid_at,
+        };
+      } else if (!m.is_active && m.cancellation && m.cancellation.status === 'processed') {
+        // User exited and refund was processed
+        membershipStatus = 'exited_with_refund';
+        statusDetail = {
+          cancellation_id: m.cancellation.cancellation_id,
+          refund_amount: Number(m.cancellation.refund_amount),
+          requested_at: m.cancellation.requested_at,
+          reviewed_at: m.cancellation.reviewed_at,
+          refund_completed_at: m.cancellation.refunded_at,
+        };
+      } else if (!m.is_active && m.cancellation && m.cancellation.status === 'approved') {
+        // User exit approved, refund pending
+        membershipStatus = 'exit_approved_pending_refund';
+        statusDetail = {
+          cancellation_id: m.cancellation.cancellation_id,
+          refund_amount: Number(m.cancellation.refund_amount),
+          requested_at: m.cancellation.requested_at,
+          reviewed_at: m.cancellation.reviewed_at,
+        };
+      } else if (!m.is_active && m.cancellation && m.cancellation.status === 'pending') {
+        // User requested exit, awaiting admin approval
+        membershipStatus = 'exit_requested_pending_approval';
+        statusDetail = {
+          cancellation_id: m.cancellation.cancellation_id,
+          refund_amount: Number(m.cancellation.refund_amount),
+          requested_at: m.cancellation.requested_at,
+        };
+      } else if (m.is_active && isRejoin) {
+        // User is back in pool after previous exit
+        membershipStatus = 'rejoined_after_exit';
+        statusDetail = {
+          rejoined_at: m.joined_at,
+          previous_member_count: memberCountInPool,
+        };
+      } else if (m.is_active) {
+        // User is currently active in pool
+        membershipStatus = 'active_in_pool';
+        statusDetail = {
+          joined_at: m.joined_at,
+        };
+      }
 
       return {
         membership: {
@@ -214,8 +326,14 @@ export class PoolCancellationService {
           coin_type: pool.coin_type,
           started_at: pool.started_at,
           end_date: pool.end_date,
+          completed_at: pool.completed_at,
           payment_method: m.payment_method,
+          is_active: m.is_active,
+          joined_at: m.joined_at,
+          exited_at: m.exited_at,
         },
+        membership_status: membershipStatus,
+        status_detail: statusDetail,
         my_investment: {
           invested_amount: investedAmount,
           share_percent: sharePercent,
@@ -235,6 +353,8 @@ export class PoolCancellationService {
               status: m.cancellation.status,
               refund_amount: Number(m.cancellation.refund_amount),
               requested_at: m.cancellation.requested_at,
+              reviewed_at: m.cancellation.reviewed_at,
+              refund_completed_at: m.cancellation.refunded_at,
             }
           : null,
       };
