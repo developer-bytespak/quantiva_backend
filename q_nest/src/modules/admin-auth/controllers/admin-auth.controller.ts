@@ -24,6 +24,7 @@ import {
   UpdateBinanceSettingsDto,
   UpdateFeeSettingsDto,
 } from '../dto/update-admin-settings.dto';
+import { AdminChangePasswordDto } from '../dto/admin-change-password.dto';
 
 @Controller('admin')
 export class AdminAuthController {
@@ -104,8 +105,11 @@ export class AdminAuthController {
   async refresh(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
+    @Body('refreshToken') refreshTokenFromBody?: string,
   ) {
-    const refreshToken = req?.cookies?.admin_refresh_token;
+    // Cookie (same-origin) or body (cross-origin e.g. dev: frontend 3001 → backend 3000)
+    const refreshToken =
+      req?.cookies?.admin_refresh_token ?? refreshTokenFromBody;
     if (!refreshToken) {
       return res
         .status(HttpStatus.UNAUTHORIZED)
@@ -195,6 +199,16 @@ export class AdminAuthController {
     @Body() dto: UpdateFeeSettingsDto,
   ) {
     return this.adminSettingsService.updateFeeSettings(admin.sub, dto);
+  }
+
+  @UseGuards(AdminJwtAuthGuard)
+  @Put('settings/password')
+  @HttpCode(HttpStatus.OK)
+  async changePassword(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Body() dto: AdminChangePasswordDto,
+  ) {
+    return this.adminAuthService.changePassword(admin.sub, dto);
   }
 
   @UseGuards(AdminJwtAuthGuard)

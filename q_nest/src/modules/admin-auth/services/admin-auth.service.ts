@@ -3,6 +3,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { AdminTokenService, AdminTokenPayload } from './admin-token.service';
 import { AdminSessionService } from './admin-session.service';
 import { AdminLoginDto } from '../dto/admin-login.dto';
+import { AdminChangePasswordDto } from '../dto/admin-change-password.dto';
 import * as bcrypt from 'bcrypt';
 
 @Injectable()
@@ -134,5 +135,32 @@ export class AdminAuthService {
     }
 
     return admin;
+  }
+
+  async changePassword(adminId: string, dto: AdminChangePasswordDto) {
+    const admin = await this.prisma.admins.findUnique({
+      where: { admin_id: adminId },
+      select: { admin_id: true, password_hash: true },
+    });
+
+    if (!admin) {
+      throw new UnauthorizedException('Admin not found');
+    }
+
+    const isPasswordValid = await bcrypt.compare(
+      dto.oldPassword,
+      admin.password_hash,
+    );
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Invalid current password');
+    }
+
+    const newPasswordHash = await bcrypt.hash(dto.newPassword, 10);
+    await this.prisma.admins.update({
+      where: { admin_id: adminId },
+      data: { password_hash: newPasswordHash },
+    });
+
+    return { message: 'Password changed successfully' };
   }
 }
