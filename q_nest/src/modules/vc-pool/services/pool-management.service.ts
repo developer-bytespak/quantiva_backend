@@ -363,7 +363,7 @@ export class PoolManagementService {
 
   // ── User: Get Pool Details ──
 
-  async getPoolForUser(poolId: string) {
+  async getPoolForUser(poolId: string, userId: string) {
     const pool = await this.prisma.vc_pools.findUnique({
       where: { pool_id: poolId },
       select: {
@@ -377,11 +377,19 @@ export class PoolManagementService {
         reserved_seats_count: true,
         duration_days: true,
         pool_fee_percent: true,
+        admin_profit_fee_percent: true,
+        cancellation_fee_percent: true,
         payment_window_minutes: true,
         status: true,
         started_at: true,
         end_date: true,
+        completed_at: true,
         created_at: true,
+        current_pool_value_usdt: true,
+        total_invested_usdt: true,
+        total_profit_usdt: true,
+        total_pool_fees_usdt: true,
+        admin_id: true,
         admin: {
           select: { binance_uid: true, wallet_address: true, payment_network: true },
         },
@@ -396,16 +404,129 @@ export class PoolManagementService {
       throw new NotFoundException('Pool not found');
     }
 
+    // Fetch user's membership in this pool (if any)
+    const membership = await this.prisma.vc_pool_members.findUnique({
+      where: {
+        pool_id_user_id: { pool_id: poolId, user_id: userId },
+      },
+      select: {
+        member_id: true,
+        invested_amount_usdt: true,
+        share_percent: true,
+        joined_at: true,
+        exited_at: true,
+        is_active: true,
+        payment_method: true,
+      },
+    });
+
+    // Calculate user metrics if they're a member
+    let userMetrics: any = null;
+    if (membership) {
+      const sharePercent = Number(membership.share_percent || 0);
+      const investedAmount = Number(membership.invested_amount_usdt);
+      const poolValue = Number(pool.current_pool_value_usdt || pool.total_invested_usdt || 0);
+      const currentValue = (sharePercent * poolValue) / 100;
+      const profitLoss = currentValue - investedAmount;
+      const profitLossPct = investedAmount > 0 ? (profitLoss / investedAmount) * 100 : 0;
+
+      userMetrics = {
+        is_member: true,
+        member_id: membership.member_id,
+        invested_amount_usdt: investedAmount,
+        current_share_percent: sharePercent,
+        joined_at: membership.joined_at,
+        exited_at: membership.exited_at,
+        is_active: membership.is_active,
+        payment_method: membership.payment_method,
+        current_member_value_usdt: currentValue,
+        unrealized_pnl_usdt: profitLoss,
+        unrealized_pnl_pct: profitLossPct,
+      };
+    } else {
+      userMetrics = {
+        is_member: false,
+        member_id: null,
+        invested_amount_usdt: 0,
+        current_share_percent: 0,
+        joined_at: null,
+        exited_at: null,
+        is_active: false,
+        payment_method: null,
+        current_member_value_usdt: 0,
+        unrealized_pnl_usdt: 0,
+        unrealized_pnl_pct: 0,
+      };
+    }
+
+    // Calculate pool progress
+    const daysTotal = pool.duration_days;
+    const startDate = pool.started_at ? new Date(pool.started_at) : new Date(pool.created_at);
+    const endDate = pool.end_date ? new Date(pool.end_date) : new Date(startDate.getTime() + daysTotal * 24 * 60 * 60 * 1000);
+    const now = new Date();
+    const totalMs = endDate.getTime() - startDate.getTime();
+    const elapsedMs = now.getTime() - startDate.getTime();
+    const progressPct = Math.min(100, Math.max(0, (elapsedMs / totalMs) * 100));
+    const daysRemaining = Math.max(0, Math.ceil((endDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
+
+    // Calculate pool ROI
+    const totalInvested = Number(pool.total_invested_usdt || 0);
+    const poolROI = totalInvested > 0 ? ((Number(pool.current_pool_value_usdt || 0) - totalInvested) / totalInvested) * 100 : 0;
+
     return {
-      ...pool,
-      available_seats:
-        pool.max_members - pool.reserved_seats_count - pool.verified_members_count,
-      admin_binance_uid: pool.admin?.binance_uid || null,
-      admin_wallet_address: pool.admin?.wallet_address || null,
-      payment_network: pool.admin?.payment_network || 'BSC',
-      deposit_coin: 'USDT',
-      deposit_method: 'on_chain',
-      admin: undefined,
+      // Pool Metadata
+      pool_metadata: {
+        pool_id: pool.pool_id,
+        name: pool.name,
+        description: pool.description,
+        coin_type: pool.coin_type,
+        status: pool.status,
+        created_at: pool.created_at,
+      },
+
+      // Pool Details
+      pool_details: {
+        contribution_amount: Number(pool.contribution_amount),
+        max_members: pool.max_members,
+        verified_members_count: pool.verified_members_count,
+        reserved_seats_count: pool.reserved_seats_count,
+        available_seats: pool.max_members - pool.reserved_seats_count - pool.verified_members_count,
+        duration_days: pool.duration_days,
+        pool_fee_percent: Number(pool.pool_fee_percent || 0),
+        admin_profit_fee_percent: Number(pool.admin_profit_fee_percent || 0),
+        cancellation_fee_percent: Number(pool.cancellation_fee_percent || 0),
+        payment_window_minutes: pool.payment_window_minutes,
+      },
+
+      // Pool Financials
+      pool_financials: {
+        total_invested_usdt: Number(pool.total_invested_usdt || 0),
+        current_pool_value_usdt: Number(pool.current_pool_value_usdt || 0),
+        total_profit_usdt: Number(pool.total_profit_usdt || 0),
+        total_pool_fees_usdt: Number(pool.total_pool_fees_usdt || 0),
+        pool_roi_pct: poolROI,
+      },
+
+      // Admin Info
+      admin_info: {
+        binance_uid: pool.admin?.binance_uid || null,
+        wallet_address: pool.admin?.wallet_address || null,
+        payment_network: pool.admin?.payment_network || 'BSC',
+        deposit_coin: 'USDT',
+        deposit_method: 'on_chain',
+      },
+
+      // User's Membership & Performance
+      user_context: userMetrics,
+
+      // Pool Timeline
+      pool_timeline: {
+        started_at: pool.started_at,
+        end_date: pool.end_date,
+        completed_at: pool.completed_at,
+        days_remaining: daysRemaining,
+        progress_percent: Math.round(progressPct * 100) / 100,
+      },
     };
   }
 

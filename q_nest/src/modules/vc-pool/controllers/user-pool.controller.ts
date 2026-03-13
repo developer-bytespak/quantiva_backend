@@ -134,8 +134,11 @@ export class UserPoolController {
 
   @Get(':id')
   @AllowTier('ELITE')
-  async getPoolDetails(@Param('id', ParseUUIDPipe) id: string) {
-    return this.poolService.getPoolForUser(id);
+  async getPoolDetails(
+    @CurrentUser() user: TokenPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.poolService.getPoolForUser(id, user.sub);
   }
 
   @Get(':poolId/transactions')
