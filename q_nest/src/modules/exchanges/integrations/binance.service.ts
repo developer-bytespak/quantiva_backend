@@ -834,12 +834,28 @@ export class BinanceService {
           ? parseFloat(order.cummulativeQuoteQty || '0') / executedQty
           : rawPrice;
 
+      // Compute the actual received quantity after fees.
+      // When the user has no BNB discount, Binance deducts fees from the purchased
+      // (base) asset. Using executedQty for the OCO would exceed the available
+      // balance by the fee amount and Binance would reject the OCO order.
+      const knownQuotes = ['USDT', 'BUSD', 'BTC', 'ETH', 'BNB'];
+      const symUp = (symbol || '').toUpperCase();
+      const quote = knownQuotes.find(q => symUp.endsWith(q)) ?? '';
+      const baseAsset = quote ? symUp.slice(0, symUp.length - quote.length) : '';
+      const fills: Array<{ commission: string; commissionAsset: string }> = order.fills || [];
+      const baseAssetFees = fills.reduce((sum: number, fill: any) => {
+        return baseAsset && (fill.commissionAsset || '').toUpperCase() === baseAsset
+          ? sum + parseFloat(fill.commission || '0')
+          : sum;
+      }, 0);
+      const receivedQty = baseAssetFees > 0 ? executedQty - baseAssetFees : executedQty;
+
       return {
         orderId: order.orderId.toString(),
         symbol: order.symbol,
         side: order.side as 'BUY' | 'SELL',
         type: order.type,
-        quantity: executedQty,
+        quantity: receivedQty,
         price: executionPrice,
         status: order.status,
         time: order.transactTime || order.updateTime || Date.now(),
@@ -929,17 +945,19 @@ export class BinanceService {
           : stopLossPrice * 1.005  // 0.5% above stop price for buys
         );
 
-      // Round all prices to comply with PRICE_FILTER tickSize
-      const [roundedTpPrice, roundedSlPrice, roundedSlLimitPrice] = await Promise.all([
+      // Round all prices to comply with PRICE_FILTER tickSize, and floor quantity
+      // to comply with LOT_SIZE (same way placeOrder does for the buy leg)
+      const [roundedTpPrice, roundedSlPrice, roundedSlLimitPrice, adjustedQty] = await Promise.all([
         this.roundPriceToTickSize(symbol, takeProfitPrice),
         this.roundPriceToTickSize(symbol, stopLossPrice),
         this.roundPriceToTickSize(symbol, effectiveStopLimitPrice),
+        this.validateAndAdjustQuantity(symbol, quantity, 'LIMIT', takeProfitPrice),
       ]);
 
       const params: Record<string, any> = {
         symbol,
         side: side.toUpperCase(),
-        quantity: quantity.toString(),
+        quantity: adjustedQty,
         price: roundedTpPrice,        // Take profit limit price
         stopPrice: roundedSlPrice,    // Stop trigger price
         stopLimitPrice: roundedSlLimitPrice, // Stop limit price

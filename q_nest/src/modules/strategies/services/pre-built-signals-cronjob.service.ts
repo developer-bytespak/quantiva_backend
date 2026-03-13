@@ -536,6 +536,21 @@ export class PreBuiltSignalsCronjobService {
     };
 
     try {
+      // Dedup check: skip if a signal was already created for this strategy+asset within the last 10 minutes
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+      const recentSignal = await this.prisma.strategy_signals.findFirst({
+        where: {
+          strategy_id: strategy.strategy_id,
+          asset_id: asset.asset_id,
+          timestamp: { gte: tenMinutesAgo },
+        },
+        select: { signal_id: true },
+      });
+
+      if (recentSignal) {
+        return; // Signal already generated within last 10 minutes — skip
+      }
+
       // Call Python API to generate signal
       const assetSymbol = asset.symbol || asset.asset_id;
       const pythonSignal = await this.pythonApi.generateSignal(strategy.strategy_id, asset.asset_id, {

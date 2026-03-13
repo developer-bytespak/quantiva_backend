@@ -734,15 +734,6 @@ export class StrategiesController {
 
       let strategies = await this.prisma.strategies.findMany({
         where: whereClause,
-        include: {
-          signals: {
-            orderBy: { timestamp: 'desc' },
-            take: 5, // Last 5 signals per strategy
-          },
-          _count: {
-            select: { signals: true },
-          },
-        },
         orderBy: { created_at: 'desc' },
       });
 
@@ -770,35 +761,46 @@ export class StrategiesController {
       }
       // ELITE or other: strategies unchanged (all)
 
-      // Calculate performance metrics for each strategy
+      // Calculate performance metrics for each strategy based on latest signal per asset only
       const strategiesWithMetrics = await Promise.all(
         strategies.map(async (strategy) => {
-          // Get signal stats
-          const signalStats = await this.prisma.strategy_signals.groupBy({
-            by: ['action'],
+          // Fetch latest signal per asset (deduplicated)
+          const allSignals = await this.prisma.strategy_signals.findMany({
             where: { strategy_id: strategy.strategy_id },
-            _count: true,
+            orderBy: { timestamp: 'desc' },
+            select: { asset_id: true, action: true, confidence: true, final_score: true },
           });
 
-          const buySignals = signalStats.find(s => s.action === 'BUY')?._count || 0;
-          const sellSignals = signalStats.find(s => s.action === 'SELL')?._count || 0;
-          const holdSignals = signalStats.find(s => s.action === 'HOLD')?._count || 0;
+          // Keep only the latest signal per asset
+          const latestPerAsset = new Map<string, typeof allSignals[0]>();
+          for (const sig of allSignals) {
+            if (sig.asset_id && !latestPerAsset.has(sig.asset_id)) {
+              latestPerAsset.set(sig.asset_id, sig);
+            }
+          }
+          const latestSignals = Array.from(latestPerAsset.values());
 
-          // Get average confidence
-          const avgConfidence = await this.prisma.strategy_signals.aggregate({
-            where: { strategy_id: strategy.strategy_id },
-            _avg: { confidence: true, final_score: true },
-          });
+          const buySignals = latestSignals.filter(s => s.action === 'BUY').length;
+          const sellSignals = latestSignals.filter(s => s.action === 'SELL').length;
+          const holdSignals = latestSignals.filter(s => s.action === 'HOLD').length;
+          const totalSignals = latestSignals.length;
+
+          const avgConfidence = totalSignals > 0
+            ? latestSignals.reduce((sum, s) => sum + (s.confidence ? Number(s.confidence) : 0), 0) / totalSignals
+            : 0;
+          const avgScore = totalSignals > 0
+            ? latestSignals.reduce((sum, s) => sum + (s.final_score ? Number(s.final_score) : 0), 0) / totalSignals
+            : 0;
 
           return {
             ...strategy,
             metrics: {
-              total_signals: strategy._count.signals,
+              total_signals: totalSignals,
               buy_signals: buySignals,
               sell_signals: sellSignals,
               hold_signals: holdSignals,
-              avg_confidence: avgConfidence._avg.confidence ? Number(avgConfidence._avg.confidence) : 0,
-              avg_score: avgConfidence._avg.final_score ? Number(avgConfidence._avg.final_score) : 0,
+              avg_confidence: avgConfidence,
+              avg_score: avgScore,
             },
           };
         })
@@ -1370,10 +1372,10 @@ export class StrategiesController {
       // Get target assets from strategy to filter signals
       const targetAssets = (strategy.target_assets as string[]) || [];
       
-      // Build where clause - filter by target assets if specified. BUY only.
+      // Build where clause - filter by target assets if specified.
       let whereClause: any = {
         strategy_id: strategyId,
-        action: 'BUY',
+        action: { in: ['BUY', 'SELL'] }, // Only actionable signals for trading view
       };
       
       // If strategy has specific target assets, only return signals for those assets
@@ -1562,37 +1564,10 @@ export class StrategiesController {
       return results;
     }
 
-    // Get all signals with explanations (without deduping) - same format as pre-built. BUY only.
-    // Apply same target assets filtering as latest_only case
-    const targetAssets = (strategy.target_assets as string[]) || [];
-    
-    let whereClause: any = {
+    // Get all signals with explanations (without deduping) - for general signal viewing
+    const whereClause: any = {
       strategy_id: strategyId,
-      action: 'BUY',
     };
-    
-    // If strategy has specific target assets, only return signals for those assets
-    if (targetAssets.length > 0) {
-      // Get asset IDs for target symbols
-      const targetAssetRecords = await this.prisma.assets.findMany({
-        where: {
-          symbol: { in: targetAssets },
-          asset_type: strategy.asset_type || 'crypto',
-        },
-        select: { asset_id: true, symbol: true },
-      });
-      
-      const targetAssetIds = targetAssetRecords.map(a => a.asset_id);
-      
-      if (targetAssetIds.length > 0) {
-        whereClause.asset_id = { in: targetAssetIds };
-        this.logger.log(`Filtering all signals to target assets: ${targetAssets.join(', ')} (${targetAssetIds.length} asset IDs)`);
-      } else {
-        this.logger.warn(`No assets found for target symbols: ${targetAssets.join(', ')}`);
-        // Return empty array if target assets don't exist in database
-        return [];
-      }
-    }
     
     const signals = await this.prisma.strategy_signals.findMany({
       where: whereClause,
