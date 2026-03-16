@@ -9,6 +9,11 @@ export interface CleanupMetrics {
   durationMs: number;
   newsDeleted: number;
   trendingAssetsDeleted: number;
+  signalsDeleted: number;
+  signalDetailsDeleted: number;
+  signalExplanationsDeleted: number;
+  assetMetricsDeleted: number;
+  strategyJobsDeleted: number;
   errors: string[];
 }
 
@@ -20,6 +25,9 @@ export interface CleanupMetrics {
 export class TaskSchedulerService {
   private readonly logger = new Logger(TaskSchedulerService.name);
   private readonly DATA_RETENTION_DAYS: number;
+  private readonly SIGNAL_RETENTION_DAYS: number;
+  private readonly METRICS_RETENTION_DAYS: number;
+  private readonly JOBS_RETENTION_DAYS: number;
   private readonly CLEANUP_BATCH_SIZE: number;
   private isCleanupRunning = false;
 
@@ -31,13 +39,25 @@ export class TaskSchedulerService {
       this.configService.get<string>('DATA_RETENTION_DAYS') || '5',
       10,
     );
+    this.SIGNAL_RETENTION_DAYS = parseInt(
+      this.configService.get<string>('SIGNAL_RETENTION_DAYS') || '30',
+      10,
+    );
+    this.METRICS_RETENTION_DAYS = parseInt(
+      this.configService.get<string>('METRICS_RETENTION_DAYS') || '90',
+      10,
+    );
+    this.JOBS_RETENTION_DAYS = parseInt(
+      this.configService.get<string>('JOBS_RETENTION_DAYS') || '14',
+      10,
+    );
     this.CLEANUP_BATCH_SIZE = parseInt(
       this.configService.get<string>('CLEANUP_BATCH_SIZE') || '100',
       10,
     );
 
     this.logger.log(
-      `Task Scheduler initialized: retention=${this.DATA_RETENTION_DAYS} days, batch=${this.CLEANUP_BATCH_SIZE}`,
+      `Task Scheduler initialized: news/assets=${this.DATA_RETENTION_DAYS}d, signals=${this.SIGNAL_RETENTION_DAYS}d, metrics=${this.METRICS_RETENTION_DAYS}d, jobs=${this.JOBS_RETENTION_DAYS}d, batch=${this.CLEANUP_BATCH_SIZE}`,
     );
   }
 
@@ -78,16 +98,27 @@ export class TaskSchedulerService {
       durationMs: 0,
       newsDeleted: 0,
       trendingAssetsDeleted: 0,
+      signalsDeleted: 0,
+      signalDetailsDeleted: 0,
+      signalExplanationsDeleted: 0,
+      assetMetricsDeleted: 0,
+      strategyJobsDeleted: 0,
       errors: [],
     };
 
     try {
-      // Calculate cutoff date
+      // Cutoff for news/trending_assets
       const cutoffDate = new Date();
       cutoffDate.setDate(cutoffDate.getDate() - this.DATA_RETENTION_DAYS);
+      const signalCutoff = new Date();
+      signalCutoff.setDate(signalCutoff.getDate() - this.SIGNAL_RETENTION_DAYS);
+      const metricsCutoff = new Date();
+      metricsCutoff.setDate(metricsCutoff.getDate() - this.METRICS_RETENTION_DAYS);
+      const jobsCutoff = new Date();
+      jobsCutoff.setDate(jobsCutoff.getDate() - this.JOBS_RETENTION_DAYS);
 
       this.logger.log(
-        `Cleaning up data older than ${cutoffDate.toISOString()} (${this.DATA_RETENTION_DAYS} days ago)`,
+        `Cleaning up: news/assets < ${cutoffDate.toISOString()}, signals < ${signalCutoff.toISOString()}, metrics < ${metricsCutoff.toISOString()}, jobs < ${jobsCutoff.toISOString()}`,
       );
 
       // Cleanup trending_news in batches
@@ -108,12 +139,52 @@ export class TaskSchedulerService {
         metrics.errors.push(`trending_assets: ${error.message}`);
       }
 
+      // Cleanup signal_details (child of strategy_signals) - before strategy_signals
+      try {
+        metrics.signalDetailsDeleted = await this.cleanupSignalDetails(signalCutoff);
+      } catch (error: any) {
+        this.logger.error('Error cleaning up signal_details', error);
+        metrics.errors.push(`signal_details: ${error.message}`);
+      }
+
+      // Cleanup signal_explanations (child of strategy_signals)
+      try {
+        metrics.signalExplanationsDeleted = await this.cleanupSignalExplanations(signalCutoff);
+      } catch (error: any) {
+        this.logger.error('Error cleaning up signal_explanations', error);
+        metrics.errors.push(`signal_explanations: ${error.message}`);
+      }
+
+      // Cleanup strategy_signals (parent)
+      try {
+        metrics.signalsDeleted = await this.cleanupStrategySignals(signalCutoff);
+      } catch (error: any) {
+        this.logger.error('Error cleaning up strategy_signals', error);
+        metrics.errors.push(`strategy_signals: ${error.message}`);
+      }
+
+      // Cleanup asset_metrics
+      try {
+        metrics.assetMetricsDeleted = await this.cleanupAssetMetrics(metricsCutoff);
+      } catch (error: any) {
+        this.logger.error('Error cleaning up asset_metrics', error);
+        metrics.errors.push(`asset_metrics: ${error.message}`);
+      }
+
+      // Cleanup strategy_execution_jobs (completed/failed older than JOBS_RETENTION_DAYS)
+      try {
+        metrics.strategyJobsDeleted = await this.cleanupStrategyExecutionJobs(jobsCutoff);
+      } catch (error: any) {
+        this.logger.error('Error cleaning up strategy_execution_jobs', error);
+        metrics.errors.push(`strategy_execution_jobs: ${error.message}`);
+      }
+
       // Calculate final metrics
       metrics.endTime = new Date();
       metrics.durationMs = metrics.endTime.getTime() - startTime.getTime();
 
       this.logger.log(
-        `Cleanup completed: ${metrics.newsDeleted} news, ${metrics.trendingAssetsDeleted} assets deleted in ${metrics.durationMs}ms`,
+        `Cleanup completed: news=${metrics.newsDeleted}, assets=${metrics.trendingAssetsDeleted}, signals=${metrics.signalsDeleted}, details=${metrics.signalDetailsDeleted}, explanations=${metrics.signalExplanationsDeleted}, metrics=${metrics.assetMetricsDeleted}, jobs=${metrics.strategyJobsDeleted} in ${metrics.durationMs}ms`,
       );
 
       if (metrics.errors.length > 0) {
@@ -273,13 +344,116 @@ export class TaskSchedulerService {
   }
 
   /**
+   * Cleanup signal_details for signals older than cutoff (FK: must run before strategy_signals)
+   */
+  private async cleanupSignalDetails(cutoffDate: Date): Promise<number> {
+    const result = await this.prisma.signal_details.deleteMany({
+      where: {
+        signal: {
+          timestamp: { lt: cutoffDate },
+        },
+      },
+    });
+    this.logger.log(`Deleted ${result.count} signal_details (signals older than ${this.SIGNAL_RETENTION_DAYS} days)`);
+    return result.count;
+  }
+
+  /**
+   * Cleanup signal_explanations for signals older than cutoff (FK: must run before strategy_signals)
+   */
+  private async cleanupSignalExplanations(cutoffDate: Date): Promise<number> {
+    const result = await this.prisma.signal_explanations.deleteMany({
+      where: {
+        signal: {
+          timestamp: { lt: cutoffDate },
+        },
+      },
+    });
+    this.logger.log(`Deleted ${result.count} signal_explanations (signals older than ${this.SIGNAL_RETENTION_DAYS} days)`);
+    return result.count;
+  }
+
+  /**
+   * Cleanup strategy_signals older than cutoff (run after details & explanations)
+   */
+  private async cleanupStrategySignals(cutoffDate: Date): Promise<number> {
+    let totalDeleted = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const batch = await this.prisma.strategy_signals.findMany({
+        where: { timestamp: { lt: cutoffDate } },
+        select: { signal_id: true },
+        take: this.CLEANUP_BATCH_SIZE,
+      });
+      if (batch.length === 0) break;
+      const result = await this.prisma.strategy_signals.deleteMany({
+        where: { signal_id: { in: batch.map((s) => s.signal_id) } },
+      });
+      totalDeleted += result.count;
+      if (result.count < this.CLEANUP_BATCH_SIZE) hasMore = false;
+      await this.sleep(100);
+    }
+    this.logger.log(`Deleted ${totalDeleted} strategy_signals (older than ${this.SIGNAL_RETENTION_DAYS} days)`);
+    return totalDeleted;
+  }
+
+  /**
+   * Cleanup asset_metrics older than cutoff (metric_date)
+   */
+  private async cleanupAssetMetrics(cutoffDate: Date): Promise<number> {
+    let totalDeleted = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const batch = await this.prisma.asset_metrics.findMany({
+        where: { metric_date: { lt: cutoffDate } },
+        select: { metric_id: true },
+        take: this.CLEANUP_BATCH_SIZE,
+      });
+      if (batch.length === 0) break;
+      const del = await this.prisma.asset_metrics.deleteMany({
+        where: { metric_id: { in: batch.map((m) => m.metric_id) } },
+      });
+      totalDeleted += del.count;
+      if (del.count < this.CLEANUP_BATCH_SIZE) hasMore = false;
+      await this.sleep(100);
+    }
+    this.logger.log(`Deleted ${totalDeleted} asset_metrics (older than ${this.METRICS_RETENTION_DAYS} days)`);
+    return totalDeleted;
+  }
+
+  /**
+   * Cleanup completed/failed strategy_execution_jobs older than cutoff
+   */
+  private async cleanupStrategyExecutionJobs(cutoffDate: Date): Promise<number> {
+    const result = await this.prisma.strategy_execution_jobs.deleteMany({
+      where: {
+        status: { in: ['completed', 'failed'] },
+        OR: [
+          { completed_at: { lt: cutoffDate } },
+          {
+            AND: [
+              { completed_at: { equals: null } },
+              { scheduled_at: { lt: cutoffDate } },
+            ],
+          },
+        ],
+      },
+    });
+    this.logger.log(`Deleted ${result.count} strategy_execution_jobs (completed/failed older than ${this.JOBS_RETENTION_DAYS} days)`);
+    return result.count;
+  }
+
+  /**
    * Get cleanup status
    */
   getStatus() {
     return {
       isRunning: this.isCleanupRunning,
       configuration: {
-        retentionDays: this.DATA_RETENTION_DAYS,
+        dataRetentionDays: this.DATA_RETENTION_DAYS,
+        signalRetentionDays: this.SIGNAL_RETENTION_DAYS,
+        metricsRetentionDays: this.METRICS_RETENTION_DAYS,
+        jobsRetentionDays: this.JOBS_RETENTION_DAYS,
         batchSize: this.CLEANUP_BATCH_SIZE,
       },
     };

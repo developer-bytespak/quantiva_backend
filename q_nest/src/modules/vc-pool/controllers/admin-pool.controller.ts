@@ -111,11 +111,29 @@ export class AdminPoolController {
     return this.cancellationService.listCancellations(admin.sub, id);
   }
 
+  @Get(':poolId/cancellation-requests')
+  async listCancellationRequests(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+    @Query('status') status?: string,
+  ) {
+    return this.cancellationService.listCancellations(admin.sub, poolId, status);
+  }
+
   @Put(':id/cancellations/:cid/approve')
   async approveCancellation(
     @CurrentAdmin() admin: AdminTokenPayload,
     @Param('id', ParseUUIDPipe) poolId: string,
     @Param('cid', ParseUUIDPipe) cancellationId: string,
+  ) {
+    return this.cancellationService.approveCancellation(admin.sub, poolId, cancellationId);
+  }
+
+  @Put(':poolId/cancellation-requests/:cancellationId/approve')
+  async approveCancellationRequest(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+    @Param('cancellationId', ParseUUIDPipe) cancellationId: string,
   ) {
     return this.cancellationService.approveCancellation(admin.sub, poolId, cancellationId);
   }
@@ -135,11 +153,42 @@ export class AdminPoolController {
     );
   }
 
+  @Put(':poolId/cancellation-requests/:cancellationId/reject')
+  async rejectCancellationRequest(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+    @Param('cancellationId', ParseUUIDPipe) cancellationId: string,
+    @Body() dto: RejectCancellationDto,
+  ) {
+    return this.cancellationService.rejectCancellation(
+      admin.sub,
+      poolId,
+      cancellationId,
+      dto.rejection_reason,
+    );
+  }
+
   @Put(':id/cancellations/:cid/mark-refunded')
   async markRefunded(
     @CurrentAdmin() admin: AdminTokenPayload,
     @Param('id', ParseUUIDPipe) poolId: string,
     @Param('cid', ParseUUIDPipe) cancellationId: string,
+    @Body() dto: MarkRefundedDto,
+  ) {
+    return this.cancellationService.markRefunded(
+      admin.sub,
+      poolId,
+      cancellationId,
+      dto.binance_tx_id,
+      dto.notes,
+    );
+  }
+
+  @Put(':poolId/cancellation-requests/:cancellationId/mark-refunded')
+  async markCancellationRefunded(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+    @Param('cancellationId', ParseUUIDPipe) cancellationId: string,
     @Body() dto: MarkRefundedDto,
   ) {
     return this.cancellationService.markRefunded(
