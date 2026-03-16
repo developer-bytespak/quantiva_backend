@@ -84,6 +84,7 @@ export class AdminBinanceController {
    * @route GET /admin/binance/account
    */
   @Get('account')
+  @UseGuards(AdminJwtAuthGuard)
   async getAccountInfo(@CurrentAdmin() admin: AdminTokenPayload) {
     try {
       const accountInfo = await this.adminBinanceService.getAdminAccountInfo(admin.sub);
@@ -103,6 +104,7 @@ export class AdminBinanceController {
    * @route GET /admin/binance/deposits
    */
   @Get('deposits')
+  @UseGuards(AdminJwtAuthGuard)
   async getDepositHistory(
     @CurrentAdmin() admin: AdminTokenPayload,
     @Query('coin') coin?: string,
@@ -139,6 +141,7 @@ export class AdminBinanceController {
    * @route GET /admin/binance/withdrawals
    */
   @Get('withdrawals')
+  @UseGuards(AdminJwtAuthGuard)
   async getWithdrawalHistory(
     @CurrentAdmin() admin: AdminTokenPayload,
     @Query('coin') coin?: string,
@@ -175,6 +178,7 @@ export class AdminBinanceController {
    * @route GET /admin/binance/trades/:symbol
    */
   @Get('trades/:symbol')
+  @UseGuards(AdminJwtAuthGuard)
   async getTradeHistory(
     @CurrentAdmin() admin: AdminTokenPayload,
     @Param('symbol') symbol: string,
@@ -209,6 +213,7 @@ export class AdminBinanceController {
    * @route GET /admin/binance/summary
    */
   @Get('summary')
+  @UseGuards(AdminJwtAuthGuard)
   async getBinanceSummary(
     @CurrentAdmin() admin: AdminTokenPayload,
     @Query('coin') coin?: string,
