@@ -14,6 +14,7 @@ import { BybitService } from '../modules/exchanges/integrations/bybit.service';
 import { ExchangesService } from '../modules/exchanges/exchanges.service';
 import { CacheService } from '../modules/exchanges/services/cache.service';
 import { CacheKeyManager } from '../modules/exchanges/services/cache-key-manager';
+import { BinanceMarketStreamService } from '../modules/binance/binance-market-stream.service';
 
 interface Subscription {
   connectionId: string;
@@ -69,6 +70,7 @@ export class MarketDetailGateway
     private readonly bybitService: BybitService,
     private readonly exchangesService: ExchangesService,
     private readonly cacheService: CacheService,
+    private readonly marketStream: BinanceMarketStreamService,
   ) {}
 
   // ── Lifecycle ────────────────────────────────────────────
@@ -119,6 +121,11 @@ export class MarketDetailGateway
       // Join a socket.io room for this symbol
       const room = `market:${symbol}`;
       client.join(room);
+
+      // Subscribe to kline stream for Binance (zero weight candle updates)
+      if (exchangeName === 'binance') {
+        this.marketStream.subscribeKline(symbol, '1m');
+      }
 
       // Setup shared ticker push for this symbol
       this.setupSharedTicker(symbol, exchangeName, client.id);
@@ -197,10 +204,24 @@ export class MarketDetailGateway
   ): Promise<void> {
     try {
       let ticker;
+
       if (exchangeName === 'bybit') {
         const tickers = await this.bybitService.getTickerPrices([symbol]);
         ticker = tickers[0] || null;
-      } else {
+      } else if (this.marketStream.isConnected()) {
+        // Stream-first for Binance — zero REST weight
+        const stream = this.marketStream.get24hStats(symbol.toUpperCase().replace(/USDT$/i, '') + 'USDT');
+        if (stream) {
+          ticker = {
+            price: stream.price,
+            change24h: stream.price - stream.open,
+            changePercent24h: stream.priceChangePercent,
+          };
+        }
+      }
+
+      // Fallback to REST if stream didn't provide data
+      if (!ticker && exchangeName !== 'bybit') {
         const tickers = await this.binanceService.getTickerPrices([symbol]);
         ticker = tickers[0] || null;
       }
@@ -227,13 +248,42 @@ export class MarketDetailGateway
     exchangeName: string,
   ): Promise<void> {
     try {
-      let candles;
       if (exchangeName === 'bybit') {
-        candles = await this.bybitService.getCandlestickData(symbol, '1m', 5);
-      } else {
-        candles = await this.binanceService.getCandlestickData(symbol, '1m', 5);
+        const candles = await this.bybitService.getCandlestickData(symbol, '1m', 5);
+        if (candles && candles.length > 0) {
+          this.server.to(`market:${symbol}`).emit('candle-update', {
+            symbol,
+            interval: '1m',
+            candles: candles.slice(-5),
+            timestamp: Date.now(),
+          });
+        }
+        return;
       }
 
+      // Binance: try stream cache first (zero weight)
+      const formatted = symbol.toUpperCase().replace(/USDT$/i, '') + 'USDT';
+      const streamKline = this.marketStream.getKline(formatted, '1m');
+      if (streamKline) {
+        this.server.to(`market:${symbol}`).emit('candle-update', {
+          symbol,
+          interval: '1m',
+          candles: [{
+            openTime: streamKline.openTime,
+            open: streamKline.open,
+            high: streamKline.high,
+            low: streamKline.low,
+            close: streamKline.close,
+            volume: streamKline.volume,
+            closeTime: streamKline.closeTime,
+          }],
+          timestamp: Date.now(),
+        });
+        return;
+      }
+
+      // Fallback to REST
+      const candles = await this.binanceService.getCandlestickData(symbol, '1m', 5);
       if (candles && candles.length > 0) {
         this.server.to(`market:${symbol}`).emit('candle-update', {
           symbol,
@@ -269,6 +319,12 @@ export class MarketDetailGateway
           clearInterval((shared as any)._candleInterval);
         }
         this.sharedTickerIntervals.delete(key);
+
+        // Unsubscribe kline stream for Binance when no subscribers left
+        if (sub.exchangeName === 'binance') {
+          this.marketStream.unsubscribeKline(sub.symbol, '1m');
+        }
+
         this.logger.debug(`Cleaned up shared interval for ${key}`);
       }
     }

@@ -30,9 +30,11 @@ export class CacheService {
   private misses = 0;
 
   constructor(private configService: ConfigService) {
-    // Default TTL: 30 seconds (configurable via environment)
+    // Default TTL: 2 minutes (configurable via environment).
+    // 30s was too short — cache expired between frontend polls (also every 30s),
+    // causing thundering-herd REST bursts that triggered Binance IP bans.
     this.defaultTtl = parseInt(
-      this.configService.get<string>('BINANCE_CACHE_TTL', '30000'),
+      this.configService.get<string>('BINANCE_CACHE_TTL', '120000'),
       10,
     );
 

@@ -9,7 +9,16 @@ import {
 
 export class UpdateBinanceSettingsDto {
   @IsString()
-  binance_uid: string;
+  @IsOptional()
+  binance_uid?: string;
+
+  @IsString()
+  @IsOptional()
+  wallet_address?: string;
+
+  @IsString()
+  @IsOptional()
+  payment_network?: string;
 }
 
 export class UpdateFeeSettingsDto {

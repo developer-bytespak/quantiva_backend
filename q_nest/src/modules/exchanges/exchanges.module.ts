@@ -15,9 +15,10 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
 import { MarketModule } from '../market/market.module';
 import { StocksMarketModule } from '../stocks-market/stocks-market.module';
+import { BinanceModule } from '../binance/binance.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, AuthModule, forwardRef(() => MarketModule), StocksMarketModule],
+  imports: [ConfigModule, PrismaModule, AuthModule, forwardRef(() => MarketModule), StocksMarketModule, BinanceModule],
   controllers: [ExchangesController, /* Health endpoint for paper trading */ PaperTradingController],
   providers: [
     ExchangesService,

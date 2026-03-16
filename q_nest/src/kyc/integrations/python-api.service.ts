@@ -80,11 +80,11 @@ export class PythonApiService {
       });
       return response.data;
     } catch (error: any) {
-      this.logger.error('Signal generation request failed', {
-        message: error?.message,
-        response: error?.response?.data,
-        status: error?.response?.status,
-      });
+      const msg = error?.message || error?.response?.data?.message || 'Unknown error';
+      const status = error?.response?.status;
+      this.logger.error(
+        `Signal generation request failed: ${msg}${status != null ? ` (HTTP ${status})` : ''}`,
+      );
       throw error;
     }
   }

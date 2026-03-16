@@ -14,14 +14,15 @@ export class PaymentSubmissionService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * User submits Binance P2P TX ID for an existing pending payment.
+   * User submits on-chain TX hash (or Binance P2P TX ID) for an existing pending payment.
    * Called AFTER the user already joined the pool (seat reserved + payment record created).
    */
   async submitBinanceTxId(
     userId: string,
     poolId: string,
-    binanceTxId: string,
-    binanceTxTimestamp: Date,
+    binanceTxId: string | undefined,
+    binanceTxTimestamp: Date | undefined,
+    txHash?: string,
   ) {
     // 1. Validate reservation exists and is active
     const reservation = await this.prisma.vc_pool_seat_reservations.findUnique({
@@ -62,13 +63,28 @@ export class PaymentSubmissionService {
       );
     }
 
-    // 3. Check if TX ID is already used by another submission
-    const existingTx = await this.prisma.vc_pool_payment_submissions.findUnique({
-      where: { binance_tx_id: binanceTxId },
-    });
+    // Resolve the effective TX identifier (prefer tx_hash for on-chain)
+    const effectiveTxId = txHash || binanceTxId;
+    if (!effectiveTxId) {
+      throw new BadRequestException('Either tx_hash or binance_tx_id is required');
+    }
 
-    if (existingTx && existingTx.submission_id !== submission.submission_id) {
-      throw new ConflictException('This Binance TX ID has already been used');
+    // 3. Check if TX ID/Hash is already used by another submission
+    if (txHash) {
+      const existingHash = await this.prisma.vc_pool_payment_submissions.findUnique({
+        where: { tx_hash: txHash },
+      });
+      if (existingHash && existingHash.submission_id !== submission.submission_id) {
+        throw new ConflictException('This TX Hash has already been used');
+      }
+    }
+    if (binanceTxId) {
+      const existingTx = await this.prisma.vc_pool_payment_submissions.findUnique({
+        where: { binance_tx_id: binanceTxId },
+      });
+      if (existingTx && existingTx.submission_id !== submission.submission_id) {
+        throw new ConflictException('This Binance TX ID has already been used');
+      }
     }
 
     // 4. Calculate exact expected amount
@@ -86,8 +102,9 @@ export class PaymentSubmissionService {
     const updated = await this.prisma.vc_pool_payment_submissions.update({
       where: { submission_id: submission.submission_id },
       data: {
-        binance_tx_id: binanceTxId,
-        binance_tx_timestamp: binanceTxTimestamp,
+        binance_tx_id: binanceTxId || null,
+        binance_tx_timestamp: binanceTxTimestamp || null,
+        tx_hash: txHash || null,
         exact_amount_expected: exactExpected,
         binance_payment_status: 'pending',
         status: 'processing' as any,
@@ -102,25 +119,30 @@ export class PaymentSubmissionService {
         payment_submission_id: submission.submission_id,
         transaction_type: 'payment_submitted',
         amount_usdt: exactExpected,
-        binance_tx_id: binanceTxId,
-        binance_tx_timestamp: binanceTxTimestamp,
+        binance_tx_id: effectiveTxId,
+        binance_tx_timestamp: binanceTxTimestamp || null,
         expected_amount: exactExpected,
         status: 'pending',
-        description: `User submitted Binance P2P TX ID: ${binanceTxId}`,
+        description: txHash
+          ? `User submitted on-chain TX Hash: ${txHash}`
+          : `User submitted Binance P2P TX ID: ${binanceTxId}`,
       },
     });
 
     this.logger.log(
-      `User ${userId} submitted Binance TX ${binanceTxId} for pool ${poolId}`,
+      `User ${userId} submitted TX ${effectiveTxId} for pool ${poolId}`,
     );
 
     return {
-      message: 'Binance TX ID submitted. Verification in progress...',
+      message: txHash
+        ? 'TX Hash submitted. Waiting for admin approval...'
+        : 'Binance TX ID submitted. Verification in progress...',
       submission_id: updated.submission_id,
-      binance_tx_id: binanceTxId,
+      binance_tx_id: binanceTxId || null,
+      tx_hash: txHash || null,
       exact_amount_expected: exactExpected,
       status: 'processing',
-      binance_payment_status: 'pending',
+      payment_status: 'pending',
     };
   }
 
@@ -153,8 +175,10 @@ export class PaymentSubmissionService {
       investment_amount: sub.investment_amount,
       pool_fee_amount: sub.pool_fee_amount,
       binance_tx_id: sub.binance_tx_id,
+      tx_hash: sub.tx_hash,
       status: sub.status,
       binance_payment_status: sub.binance_payment_status,
+      payment_status: sub.binance_payment_status, // alias
       exact_amount_expected: sub.exact_amount_expected,
       exact_amount_received: sub.exact_amount_received,
       refund_reason: sub.refund_reason,
@@ -178,7 +202,7 @@ export class PaymentSubmissionService {
             name: true,
             contribution_amount: true,
             coin_type: true,
-            admin: { select: { binance_uid: true } },
+            admin: { select: { binance_uid: true, wallet_address: true, payment_network: true } },
           },
         },
         reservation: {
@@ -204,8 +228,10 @@ export class PaymentSubmissionService {
       investment_amount: submission.investment_amount,
       pool_fee_amount: submission.pool_fee_amount,
       binance_tx_id: submission.binance_tx_id,
+      tx_hash: submission.tx_hash,
       status: submission.status,
       binance_payment_status: submission.binance_payment_status,
+      payment_status: submission.binance_payment_status, // alias
       exact_amount_expected: submission.exact_amount_expected,
       exact_amount_received: submission.exact_amount_received,
       refund_reason: submission.refund_reason,
@@ -217,6 +243,10 @@ export class PaymentSubmissionService {
       reservation_status: submission.reservation?.status,
       reservation_expires_at: submission.reservation?.expires_at,
       admin_binance_uid: submission.pool.admin?.binance_uid,
+      admin_wallet_address: submission.pool.admin?.wallet_address || null,
+      payment_network: submission.pool.admin?.payment_network || 'BSC',
+      deposit_coin: 'USDT',
+      deposit_method: 'on_chain',
     };
   }
 

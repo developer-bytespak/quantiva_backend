@@ -119,6 +119,8 @@ export class AdminAuthService {
         email: true,
         full_name: true,
         binance_uid: true,
+        wallet_address: true,
+        payment_network: true,
         default_pool_fee_percent: true,
         default_admin_profit_fee_percent: true,
         default_cancellation_fee_percent: true,

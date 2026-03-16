@@ -6,6 +6,7 @@ import { BinanceService } from './integrations/binance.service';
 import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
+import { BinanceUserWsService } from './services/binance-user-ws.service';
 import { ConnectionNotFoundException } from './exceptions/binance.exceptions';
 import {
   AccountBalanceDto,
@@ -24,6 +25,10 @@ type ExchangeService = BinanceService | BybitService | AlpacaService;
 export class ExchangesService {
   private readonly logger = new Logger(ExchangesService.name);
 
+  // Deduplication: if a sync is already in progress for a connectionId,
+  // subsequent callers wait for the same Promise instead of firing another REST burst.
+  private readonly syncInFlight = new Map<string, Promise<void>>();
+
   constructor(
     private prisma: PrismaService,
     private encryptionService: EncryptionService,
@@ -31,6 +36,7 @@ export class ExchangesService {
     private bybitService: BybitService,
     private alpacaService: AlpacaService,
     private cacheService: CacheService,
+    private binanceUserWsService: BinanceUserWsService,
   ) {}
 
   /**
@@ -443,10 +449,24 @@ export class ExchangesService {
   }
 
   /**
-   * Syncs connection data from the exchange and caches it
-   * Optimized to reduce redundant API calls
+   * Syncs connection data from the exchange and caches it.
+   * Deduplicates concurrent calls: if a sync is already in progress for this
+   * connection, all callers share the same Promise (no thundering herd).
    */
   async syncConnectionData(connectionId: string): Promise<void> {
+    const existing = this.syncInFlight.get(connectionId);
+    if (existing) {
+      this.logger.debug(`[SYNC] Deduplicating concurrent sync for ${connectionId}`);
+      return existing;
+    }
+    const promise = this._doSyncConnectionData(connectionId).finally(() => {
+      this.syncInFlight.delete(connectionId);
+    });
+    this.syncInFlight.set(connectionId, promise);
+    return promise;
+  }
+
+  private async _doSyncConnectionData(connectionId: string): Promise<void> {
     const connection = await this.prisma.user_exchange_connections.findUnique({
       where: { connection_id: connectionId },
       include: { exchange: true },
@@ -603,6 +623,17 @@ export class ExchangesService {
       this.cacheService.setCached(`${exchangeName}:${connectionId}:orders`, orders);
       this.cacheService.setCached(`${exchangeName}:${connectionId}:portfolio`, portfolio);
 
+      // Start the Binance user data stream after first successful REST sync.
+      // Subsequent balance/order requests will be served from the WS cache (zero REST weight).
+      // Fire-and-forget — never block the sync response.
+      if (isBinance && connection.user_id) {
+        this.binanceUserWsService
+          .connect(connection.user_id, apiKey, apiSecret)
+          .catch((err) =>
+            this.logger.warn(`User data stream connect failed for ${connection.user_id}: ${err?.message}`),
+          );
+      }
+
       // Update last_synced_at
       await this.prisma.user_exchange_connections.update({
         where: { connection_id: connectionId },
@@ -667,6 +698,26 @@ export class ExchangesService {
       return cached;
     }
 
+    // Try User Data Stream cache for Binance balance (zero REST weight)
+    if (dataType === 'balance' && exchangeName === 'binance' && connection.user_id) {
+      const wsBalance = this.binanceUserWsService.getLastBalance(connection.user_id);
+      if (wsBalance && Object.keys(wsBalance).length > 0) {
+        this.logger.debug(`Serving balance from WS cache for connection ${connectionId}`);
+        this.cacheService.setCached(cacheKey, wsBalance);
+        return wsBalance as any;
+      }
+    }
+
+    // Try User Data Stream cache for Binance orders (zero REST weight)
+    if (dataType === 'orders' && exchangeName === 'binance' && connection.user_id) {
+      const wsOrders = this.binanceUserWsService.getLastOrders(connection.user_id);
+      if (wsOrders.length > 0) {
+        this.logger.debug(`Serving orders from WS cache for connection ${connectionId}`);
+        this.cacheService.setCached(cacheKey, wsOrders);
+        return wsOrders as any;
+      }
+    }
+
     // Special-case: if caller only asked for balance, fetch account snapshot only
     if (dataType === 'balance') {
       try {
@@ -681,6 +732,16 @@ export class ExchangesService {
 
           // Cache and return balance only (avoid fetching orders by default)
           this.cacheService.setCached(cacheKey, balance);
+
+          // Kick off user data stream so future balance/order requests are served from WS cache
+          if (exchangeName === 'binance' && connection.user_id) {
+            this.binanceUserWsService
+              .connect(connection.user_id, apiKey, apiSecret)
+              .catch((err) =>
+                this.logger.warn(`User data stream connect failed for ${connection.user_id}: ${err?.message}`),
+              );
+          }
+
           return balance;
         }
       } catch (error) {
@@ -833,6 +894,52 @@ export class ExchangesService {
     }
   }
 
+  async placeOcoOrder(
+    connectionId: string,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    quantity: number,
+    takeProfitPrice: number,
+    stopLossPrice: number,
+  ): Promise<{ orderListId: number; takeProfitPrice: number; stopLossPrice: number }> {
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection || !connection.exchange) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    if (!connection.api_key_encrypted || !connection.api_secret_encrypted) {
+      throw new ConnectionNotFoundException('Connection missing API credentials');
+    }
+
+    const apiKey = this.encryptionService.decryptApiKey(connection.api_key_encrypted);
+    const apiSecret = this.encryptionService.decryptApiKey(connection.api_secret_encrypted);
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+    if (exchangeName !== 'binance') {
+      throw new Error(`OCO orders are only supported on Binance, not ${connection.exchange.name}`);
+    }
+
+    const result = await this.binanceService.placeOcoOrder(
+      apiKey,
+      apiSecret,
+      symbol,
+      side,
+      quantity,
+      takeProfitPrice,
+      stopLossPrice,
+    );
+
+    return {
+      orderListId: result.orderListId,
+      takeProfitPrice,
+      stopLossPrice,
+    };
+  }
+
   async deleteConnection(id: string) {
     return this.prisma.user_exchange_connections.delete({
       where: { connection_id: id },
@@ -884,6 +991,88 @@ export class ExchangesService {
       return this.bybitService.getRecentTrades(symbol, limit);
     } else {
       throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
+    }
+  }
+
+  /**
+   * Gets deposit history for a connection
+   */
+  async getDepositHistory(
+    connectionId: string,
+    coin?: string,
+    status?: number,
+    offset: number = 0,
+    limit: number = 100,
+    startTime?: number,
+    endTime?: number,
+  ): Promise<any[]> {
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection || !connection.exchange) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+
+    if (exchangeName === 'binance') {
+      // Decrypt the API credentials
+      const credentials = await this.getDecryptedCredentials(connectionId);
+      return this.binanceService.getDepositHistory(
+        credentials.apiKey,
+        credentials.apiSecret,
+        coin,
+        status,
+        offset,
+        limit,
+        startTime,
+        endTime,
+      );
+    } else {
+      throw new Error(`Deposit history not supported for ${connection.exchange.name}`);
+    }
+  }
+
+  /**
+   * Gets withdrawal history for a connection
+   */
+  async getWithdrawalHistory(
+    connectionId: string,
+    coin?: string,
+    status?: number,
+    offset: number = 0,
+    limit: number = 100,
+    startTime?: number,
+    endTime?: number,
+  ): Promise<any[]> {
+    const connection = await this.prisma.user_exchange_connections.findUnique({
+      where: { connection_id: connectionId },
+      include: { exchange: true },
+    });
+
+    if (!connection || !connection.exchange) {
+      throw new ConnectionNotFoundException('Connection not found');
+    }
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+
+    if (exchangeName === 'binance') {
+      // Decrypt the API credentials
+      const credentials = await this.getDecryptedCredentials(connectionId);
+      return this.binanceService.getWithdrawalHistory(
+        credentials.apiKey,
+        credentials.apiSecret,
+        coin,
+        status,
+        offset,
+        limit,
+        startTime,
+        endTime,
+      );
+    } else {
+      throw new Error(`Withdrawal history not supported for ${connection.exchange.name}`);
     }
   }
 

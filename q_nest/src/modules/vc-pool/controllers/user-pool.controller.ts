@@ -18,6 +18,7 @@ import { SeatReservationService } from '../services/seat-reservation.service';
 import { ScreenshotUploadService } from '../services/screenshot-upload.service';
 import { PoolCancellationService } from '../services/pool-cancellation.service';
 import { PaymentSubmissionService } from '../services/payment-submission.service';
+import { UserPoolTransactionsService } from '../services/user-pool-transactions.service';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { TierAccessGuard } from '../../../common/guards/tier-access.guard';
 import { AllowTier } from '../../../common/decorators/allow-tier.decorator';
@@ -47,6 +48,7 @@ export class UserPoolController {
     private readonly screenshotService: ScreenshotUploadService,
     private readonly cancellationService: PoolCancellationService,
     private readonly paymentSubmissionService: PaymentSubmissionService,
+    private readonly transactionsService: UserPoolTransactionsService,
   ) {}
 
   @Get('available')
@@ -90,10 +92,62 @@ export class UserPoolController {
     return this.paymentSubmissionService.getUserTransactions(user.sub);
   }
 
+  // ── Complete Transaction History (NEW) ──
+
+  @Get('transactions/all')
+  @AllowTier('ELITE')
+  async getAllTransactions(
+    @CurrentUser() user: TokenPayload,
+    @Query('poolId') poolId?: string,
+    @Query('status') status?: string,
+    @Query('transactionType') transactionType?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.transactionsService.getUserTransactionHistory(user.sub, {
+      poolId,
+      status,
+      transactionType,
+      dateFrom: dateFrom ? new Date(dateFrom) : undefined,
+      dateTo: dateTo ? new Date(dateTo) : undefined,
+      page: page ? parseInt(page, 10) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+  }
+
+  @Get('transactions/summary')
+  @AllowTier('ELITE')
+  async getTransactionSummary(@CurrentUser() user: TokenPayload) {
+    return this.transactionsService.getUserTransactionSummary(user.sub);
+  }
+
+  @Get('transactions/:txId')
+  @AllowTier('ELITE')
+  async getTransactionDetail(
+    @CurrentUser() user: TokenPayload,
+    @Param('txId', ParseUUIDPipe) txId: string,
+  ) {
+    return this.transactionsService.getUserTransactionDetail(user.sub, txId);
+  }
+
   @Get(':id')
   @AllowTier('ELITE')
-  async getPoolDetails(@Param('id', ParseUUIDPipe) id: string) {
-    return this.poolService.getPoolForUser(id);
+  async getPoolDetails(
+    @CurrentUser() user: TokenPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.poolService.getPoolForUser(id, user.sub);
+  }
+
+  @Get(':poolId/transactions')
+  @AllowTier('ELITE')
+  async getPoolTransactions(
+    @CurrentUser() user: TokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+  ) {
+    return this.transactionsService.getUserPoolTransactions(user.sub, poolId);
   }
 
   @Post(':id/join')
@@ -138,6 +192,15 @@ export class UserPoolController {
     return this.cancellationService.requestCancellation(user.sub, id);
   }
 
+  @Post(':poolId/request-exit')
+  @AllowTier('ELITE')
+  async requestExit(
+    @CurrentUser() user: TokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+  ) {
+    return this.cancellationService.requestCancellation(user.sub, poolId);
+  }
+
   @Get(':id/my-cancellation')
   @AllowTier('ELITE')
   async getMyCancellation(
@@ -145,6 +208,15 @@ export class UserPoolController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.cancellationService.getMyCancellation(user.sub, id);
+  }
+
+  @Get(':poolId/cancellation')
+  @AllowTier('ELITE')
+  async getCancellation(
+    @CurrentUser() user: TokenPayload,
+    @Param('poolId', ParseUUIDPipe) poolId: string,
+  ) {
+    return this.cancellationService.getMyCancellation(user.sub, poolId);
   }
 
   // ── Binance P2P TX Submission (parameterized, after :id routes) ──
@@ -160,7 +232,8 @@ export class UserPoolController {
       user.sub,
       id,
       dto.binance_tx_id,
-      new Date(dto.binance_tx_timestamp),
+      dto.binance_tx_timestamp ? new Date(dto.binance_tx_timestamp) : undefined,
+      dto.tx_hash,
     );
   }
 }

@@ -4,20 +4,43 @@ import { FirebaseService } from 'src/firebase/firebase.service';
 
 @Injectable()
 export class NotificationsService {
-  constructor(private prisma: PrismaService, private firebaseService: FirebaseService) {}
+  constructor(private prisma: PrismaService, private firebaseService: FirebaseService,
+    private PrismaService: PrismaService,
+  ) {}
 
   // Note: This is a placeholder service as there's no notifications table in the schema
   // You may need to add a notifications model to your Prisma schema
-  async sendNotification(token: string, title: string, body: string) {
+  async sendNotification(userId: string,title: string, body: string) {
     try {
       const messaging = this.firebaseService.getMessaging();
+      if(!userId) {
+        return { success: false, message: 'FCM token is required' };
+      }
+
+      const fcm_token = await this.PrismaService.users.findUnique({
+        where: { user_id: userId },
+        select: { fcm_token: true },
+      });
+      console.log("fcm_token",fcm_token)
+      if (!fcm_token?.fcm_token) {
+        return { success: false, message: 'FCM token not found for user' };
+      }
       const message = {
-        token,
+        token: fcm_token.fcm_token,
         notification: { title, body },
       };
-      return await messaging.send(message);
-    } catch (err) {
-      console.warn('[NotificationsService] FCM send failed:', err?.message || err);
+      console.log('message-->', message);
+      const messageId = await messaging.send(message);
+      console.log('[NotificationsService] FCM sent successfully, messageId:', messageId);
+      return messageId;
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      const errCode = err?.code;
+      console.warn('[NotificationsService] FCM send failed:', errCode, errMsg);
+      // Unregistered/invalid token = client needs to re-register FCM token
+      if (errCode === 'messaging/invalid-registration-token' || errCode === 'messaging/registration-token-not-registered') {
+        return { success: false, message: 'FCM token invalid or expired – re-register from device' };
+      }
       throw err;
     }
   }
@@ -27,6 +50,7 @@ export class NotificationsService {
       where: {
         user_id: userId,
       },
+      orderBy: { created_at: 'desc' },
     });
 
     await this.prisma.notifications.updateMany({
@@ -67,5 +91,50 @@ export class NotificationsService {
     });
     return count;
   }
+
+  async fcmNotification(token: string, userId: string) {
+    try {
+      const user = await this.PrismaService.users.update({
+        where: { user_id: userId },
+        data: { fcm_token: token },
+      }) ;
+      return { success: true, message: 'FCM token updated', user: user };
+    } catch (err) {
+      console.warn('[NotificationsService] FCM send failed:', err?.message || err);
+      return { success: false, message: 'Failed to send notification' };
+    }
+  }
+
+  async deleteNotification(id: string) {
+    if(!id) {
+      return { success: false, message: 'Notification ID is required' };
+    }
+    const notification = await this.prisma.notifications.findUnique({
+      where: { id: id },
+    });
+    if(!notification) {
+      return { success: false, message: 'Notification not found' };
+    }
+    return this.prisma.notifications.delete({
+      where: { id: id },
+    });
+    return { success: true, message: 'Notification deleted' };
+  }
+
+  async deleteAllNotifications(userId: string) {
+    console.log("userId-->",userId)
+    if(!userId) {
+      return { success: false, message: 'User ID is required' };
+    }
+    try {
+      await this.prisma.notifications.deleteMany({
+        where: { user_id: userId },
+      });
+      return { success: true, message: 'All notifications deleted' };
+    } catch (err) {
+      console.warn('[NotificationsService] Failed to delete all notifications:', err?.message || err);
+      return { success: false, message: 'Failed to delete all notifications' };
+    }
+    }
 }
 

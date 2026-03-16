@@ -41,7 +41,9 @@ export class PreBuiltSignalsCronjobService {
         return;
       }
 
-      const trendingAssets = await this.preBuiltStrategiesService.getTopTrendingAssets(50);
+      // Pass false for enrichWithRealtime — the cron only needs asset IDs to process,
+      // not live Binance stats, which would fire 50 × weight-2 calls every 10 minutes.
+      const trendingAssets = await this.preBuiltStrategiesService.getTopTrendingAssets(50, false);
       if (trendingAssets.length === 0) {
         return;
       }

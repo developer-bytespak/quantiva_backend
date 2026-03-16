@@ -17,6 +17,8 @@ export class AdminSettingsService {
         email: true,
         full_name: true,
         binance_uid: true,
+        wallet_address: true,
+        payment_network: true,
         default_pool_fee_percent: true,
         default_admin_profit_fee_percent: true,
         default_cancellation_fee_percent: true,
@@ -33,18 +35,27 @@ export class AdminSettingsService {
     adminId: string,
     dto: UpdateBinanceSettingsDto,
   ) {
+    const updateData: any = {};
+    if (dto.binance_uid !== undefined) updateData.binance_uid = dto.binance_uid;
+    if (dto.wallet_address !== undefined) updateData.wallet_address = dto.wallet_address;
+    if (dto.payment_network !== undefined) updateData.payment_network = dto.payment_network;
+
     const admin = await this.prisma.admins.update({
       where: { admin_id: adminId },
-      data: { binance_uid: dto.binance_uid },
+      data: updateData,
       select: {
         admin_id: true,
         binance_uid: true,
+        wallet_address: true,
+        payment_network: true,
       },
     });
 
     return {
       message: 'Binance settings updated',
       binance_uid: admin.binance_uid,
+      wallet_address: admin.wallet_address,
+      payment_network: admin.payment_network,
     };
   }
 

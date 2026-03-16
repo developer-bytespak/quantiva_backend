@@ -1,5 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import {
   AccountBalanceDto,
   AssetBalanceDto,
@@ -15,6 +17,7 @@ import {
   BinanceRateLimitException,
   InvalidApiKeyException,
 } from '../exceptions/binance.exceptions';
+import { BinanceMarketStreamService } from '../../binance/binance-market-stream.service';
 
 interface BinanceAccountInfo {
   accountType: string;
@@ -45,11 +48,26 @@ export class BinanceService {
   private readonly maxRetries = 3;
   private readonly retryDelay = 1000; // 1 second base delay
 
-  constructor() {
+  // IP ban guard: when Binance returns HTTP 418 (IP ban), stop all REST until TTL expires
+  private ipBannedUntil = 0;
+  private proxyEnabled = false;
+
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly marketStream?: BinanceMarketStreamService,
+  ) {
+    const proxyUrl = this.configService.get<string>('BINANCE_PROXY_URL') || process.env.BINANCE_PROXY_URL;
+    const dbUrl = process.env.DATABASE_URL;
+    this.logger.log(`[PROXY-DEBUG] BINANCE_PROXY_URL present: ${!!proxyUrl} | DATABASE_URL present: ${!!dbUrl} | NODE_ENV: ${process.env.NODE_ENV}`);
     this.apiClient = axios.create({
       baseURL: this.baseUrl,
       timeout: 10000,
+      ...(proxyUrl ? { httpsAgent: new HttpsProxyAgent(proxyUrl), proxy: false } : {}),
     });
+    if (proxyUrl) {
+      this.proxyEnabled = true;
+      this.logger.log(`Binance REST proxy enabled: ${proxyUrl.replace(/\/\/.*@/, '//<redacted>@')}`);
+    }
   }
 
   /**
@@ -63,12 +81,22 @@ export class BinanceService {
   /**
    * Gets Binance server time to sync with local time
    */
+  // Cache server time to avoid fetching it on every single signed request (weight 1 each)
+  private cachedServerTimeDelta: number | null = null; // offset = serverTime - localTime
+  private serverTimeFetchedAt = 0;
+  private readonly SERVER_TIME_CACHE_MS = 60_000; // 1 minute
+
   private async getBinanceServerTime(): Promise<number> {
+    const now = Date.now();
+    if (this.cachedServerTimeDelta !== null && now - this.serverTimeFetchedAt < this.SERVER_TIME_CACHE_MS) {
+      return now + this.cachedServerTimeDelta;
+    }
     try {
       const response = await this.makePublicRequest('/api/v3/time');
+      this.cachedServerTimeDelta = response.serverTime - Date.now();
+      this.serverTimeFetchedAt = Date.now();
       return response.serverTime;
     } catch (error) {
-      // Fallback to local time if server time fetch fails
       this.logger.warn('Failed to fetch Binance server time, using local time');
       return Date.now();
     }
@@ -84,6 +112,13 @@ export class BinanceService {
     params: Record<string, any> = {},
     retryTimestampError: boolean = true,
   ): Promise<any> {
+    // Respect active IP ban — fail fast instead of wasting weight on banned IP
+    // Skip guard when proxy is active: proxy uses a different IP that isn't banned
+    if (!this.proxyEnabled && Date.now() < this.ipBannedUntil) {
+      const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+      throw new BinanceApiException(`Binance IP ban active for ${remainingSec}s more. Requests blocked.`);
+    }
+
     // Use Binance server time for better synchronization
     const serverTime = await this.getBinanceServerTime();
     const recvWindow = 60000; // 60 seconds window (increased from default 5 seconds)
@@ -109,7 +144,16 @@ export class BinanceService {
       } catch (error: any) {
         lastError = error;
 
-        // Handle rate limiting
+        // Handle IP ban (418) — do NOT retry, record ban expiry and abort
+        if (error.response?.status === 418) {
+          const bannedUntil = error.response.data?.bannedUntil as number | undefined;
+          this.ipBannedUntil = bannedUntil ?? (Date.now() + 60 * 60 * 1000); // default 1h
+          const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+          this.logger.error(`══ BINANCE IP BAN ══ Blocked for ${remainingSec}s | All REST requests will fail fast until ban lifts`);
+          throw new BinanceApiException(`Binance IP banned for ${remainingSec}s. Use WebSocket streams for live data.`);
+        }
+
+        // Handle rate limiting (429) — back off, then retry
         if (error.response?.status === 429) {
           const retryAfter = error.response.headers['retry-after'] || 60;
           this.logger.warn(`Rate limit exceeded, retrying after ${retryAfter} seconds`);
@@ -171,6 +215,13 @@ export class BinanceService {
    * Makes a public request (no authentication required)
    */
   private async makePublicRequest(endpoint: string, params: Record<string, any> = {}): Promise<any> {
+    // Respect active IP ban — fail fast instead of wasting weight on banned IP
+    // Skip guard when proxy is active: proxy uses a different IP that isn't banned
+    if (!this.proxyEnabled && Date.now() < this.ipBannedUntil) {
+      const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+      throw new BinanceApiException(`Binance IP ban active for ${remainingSec}s more. Requests blocked.`);
+    }
+
     const queryString = new URLSearchParams(params).toString();
     const url = queryString ? `${endpoint}?${queryString}` : endpoint;
 
@@ -178,6 +229,14 @@ export class BinanceService {
       const response = await this.apiClient.get(url);
       return response.data;
     } catch (error: any) {
+      // Handle IP ban (418)
+      if (error.response?.status === 418) {
+        const bannedUntil = error.response.data?.bannedUntil as number | undefined;
+        this.ipBannedUntil = bannedUntil ?? (Date.now() + 60 * 60 * 1000);
+        const remainingSec = Math.ceil((this.ipBannedUntil - Date.now()) / 1000);
+        this.logger.error(`══ BINANCE IP BAN ══ Blocked for ${remainingSec}s | All REST requests will fail fast until ban lifts`);
+        throw new BinanceApiException(`Binance IP banned for ${remainingSec}s.`);
+      }
       if (error.response?.status === 429) {
         throw new BinanceRateLimitException();
       }
@@ -206,7 +265,11 @@ export class BinanceService {
         accountType: accountInfo.accountType || 'SPOT',
       };
     } catch (error: any) {
-      if (error instanceof InvalidApiKeyException || error instanceof BinanceApiException) {
+      if (
+        error instanceof InvalidApiKeyException ||
+        error instanceof BinanceApiException ||
+        error instanceof BinanceRateLimitException
+      ) {
         throw error;
       }
       throw new InvalidApiKeyException('Failed to verify API key');
@@ -289,25 +352,42 @@ export class BinanceService {
     accountInfo: BinanceAccountInfo,
   ): Promise<PositionDto[]> {
     try {
-      // Get prices for all assets with balances
-      const symbols = accountInfo.balances
-        .filter((b) => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0)
-        .map((b) => `${b.asset}USDT`);
+      // Stablecoins priced at $1 — no Binance ticker exists for USDTUSDT etc.
+      const STABLECOINS = new Set(['USDT', 'BUSD', 'USDC', 'TUSD', 'USDP', 'DAI', 'FDUSD']);
 
-      if (symbols.length === 0) {
-        return [];
+      const nonZeroBalances = accountInfo.balances.filter((b) => {
+        const total = parseFloat(b.free) + parseFloat(b.locked);
+        return total > 0;
+      });
+
+      // Build price map — stablecoins are always $1
+      const priceMap = new Map<string, number>();
+      for (const stable of STABLECOINS) priceMap.set(stable, 1);
+
+      // Stream-first: serve prices from WS cache — zero REST weight
+      const nonStableBalances = nonZeroBalances.filter((b) => !STABLECOINS.has(b.asset));
+      const symbolsNeedingRest: string[] = [];
+
+      if (this.marketStream?.isConnected()) {
+        for (const b of nonStableBalances) {
+          const streamPrice = this.marketStream.getPrice(`${b.asset}USDT`);
+          if (streamPrice !== undefined) {
+            priceMap.set(b.asset, streamPrice);
+          } else {
+            symbolsNeedingRest.push(`${b.asset}USDT`);
+          }
+        }
+      } else {
+        symbolsNeedingRest.push(...nonStableBalances.map((b) => `${b.asset}USDT`));
       }
 
-      // Fetch prices for all symbols
-      const prices = await this.getTickerPrices(symbols);
-      const priceMap = new Map(prices.map((p) => [p.symbol.replace('USDT', ''), p.price]));
+      // Only hit REST for symbols the stream doesn't know about
+      if (symbolsNeedingRest.length > 0) {
+        const prices = await this.getTickerPrices(symbolsNeedingRest);
+        for (const p of prices) priceMap.set(p.symbol.replace('USDT', ''), p.price);
+      }
 
-      const positions: PositionDto[] = accountInfo.balances
-        .filter((balance) => {
-          const total = parseFloat(balance.free) + parseFloat(balance.locked);
-          return total > 0;
-        })
-        .map((balance) => {
+      const positions: PositionDto[] = nonZeroBalances.map((balance) => {
           const quantity = parseFloat(balance.free) + parseFloat(balance.locked);
           const currentPrice = priceMap.get(balance.asset) || 0;
           const entryPrice = currentPrice; // Simplified - would need trade history for accurate entry price
@@ -421,43 +501,58 @@ export class BinanceService {
   }
 
   /**
-   * Fetches real-time ticker prices
+   * Fetches real-time ticker prices — stream-first, REST fallback.
    */
   async getTickerPrices(symbols: string[]): Promise<TickerPriceDto[]> {
-    try {
-      // Binance API allows fetching multiple tickers
-      const symbolParam = symbols.map((s) => `"${s}"`).join(',');
-      const tickers = await this.makePublicRequest('/api/v3/ticker/24hr', {
-        symbols: `[${symbolParam}]`,
-      });
+    const result: TickerPriceDto[] = [];
+    const symbolsNeedingRest: string[] = [];
 
-      if (!Array.isArray(tickers)) {
-        // If single symbol, wrap in array
-        return [this.mapTickerToDto(tickers)];
+    // Stream-first: serve from WS cache — zero REST weight
+    if (this.marketStream?.isConnected()) {
+      for (const symbol of symbols) {
+        const stats = this.marketStream.get24hStats(symbol);
+        if (stats) {
+          result.push({
+            symbol: stats.symbol,
+            price: stats.price,
+            change24h: stats.price - stats.open,
+            changePercent24h: stats.priceChangePercent,
+          });
+        } else {
+          symbolsNeedingRest.push(symbol);
+        }
       }
-
-      return tickers.map((ticker: any) => this.mapTickerToDto(ticker));
-    } catch (error: any) {
-      // Fallback: fetch prices one by one if batch fails
-      if (symbols.length === 1) {
-        const ticker = await this.makePublicRequest('/api/v3/ticker/24hr', { symbol: symbols[0] });
-        return [this.mapTickerToDto(ticker)];
-      }
-
-      // For multiple symbols, try individual requests
-      const prices = await Promise.all(
-        symbols.map(async (symbol) => {
-          try {
-            const ticker = await this.makePublicRequest('/api/v3/ticker/24hr', { symbol });
-            return this.mapTickerToDto(ticker);
-          } catch {
-            return null;
-          }
-        }),
-      );
-
-      return prices.filter((p): p is TickerPriceDto => p !== null);
+    } else {
+      symbolsNeedingRest.push(...symbols);
     }
+
+    // Only hit REST for symbols the stream doesn't know about
+    if (symbolsNeedingRest.length > 0) {
+      try {
+        const symbolParam = symbolsNeedingRest.map((s) => `"${s}"`).join(',');
+        const tickers = await this.makePublicRequest('/api/v3/ticker/24hr', {
+          symbols: `[${symbolParam}]`,
+        });
+
+        const arr = Array.isArray(tickers) ? tickers : [tickers];
+        result.push(...arr.map((ticker: any) => this.mapTickerToDto(ticker)));
+      } catch (error: any) {
+        // Fallback: fetch prices one by one if batch fails
+        const prices = await Promise.all(
+          symbolsNeedingRest.map(async (symbol) => {
+            try {
+              const ticker = await this.makePublicRequest('/api/v3/ticker/24hr', { symbol });
+              return this.mapTickerToDto(ticker);
+            } catch {
+              return null;
+            }
+          }),
+        );
+        result.push(...prices.filter((p): p is TickerPriceDto => p !== null));
+      }
+    }
+
+    return result;
   }
 
   private mapTickerToDto(ticker: any): TickerPriceDto {
@@ -633,6 +728,74 @@ export class BinanceService {
   /**
    * Places an order on Binance
    */
+  /**
+   * Fetches exchangeInfo once and:
+   * 1. Adjusts quantity to comply with LOT_SIZE (step size)
+   * 2. Validates that the order notional value meets NOTIONAL / MIN_NOTIONAL filter
+   * Throws a clear BinanceApiException if the notional is too small.
+   */
+  private async validateAndAdjustQuantity(
+    symbol: string,
+    quantity: number,
+    orderType: 'MARKET' | 'LIMIT',
+    price?: number,
+  ): Promise<string> {
+    try {
+      const info = await this.makePublicRequest('/api/v3/exchangeInfo', { symbol });
+      const filters: any[] = info?.symbols?.[0]?.filters ?? [];
+
+      // --- LOT_SIZE: floor quantity to nearest valid step ---
+      let adjustedQuantity = quantity;
+      let decimalPlaces = 8;
+
+      const lotSizeFilter = filters.find((f) => f.filterType === 'LOT_SIZE');
+      if (lotSizeFilter) {
+        const stepSize: string = lotSizeFilter.stepSize; // e.g. "0.00100000"
+        const step = parseFloat(stepSize);
+        if (step > 0) {
+          decimalPlaces = (stepSize.replace(/0+$/, '').split('.')[1] ?? '').length;
+          adjustedQuantity = Math.floor(quantity / step) * step;
+        }
+      }
+
+      const adjustedQtyStr = adjustedQuantity.toFixed(decimalPlaces);
+
+      // --- NOTIONAL / MIN_NOTIONAL: order value must meet minimum ---
+      const notionalFilter =
+        filters.find((f) => f.filterType === 'NOTIONAL') ??
+        filters.find((f) => f.filterType === 'MIN_NOTIONAL');
+
+      if (notionalFilter) {
+        const minNotional = parseFloat(
+          notionalFilter.minNotional ?? notionalFilter.minNotionalValue ?? '0',
+        );
+
+        if (minNotional > 0) {
+          let effectivePrice = price;
+          if (!effectivePrice || orderType === 'MARKET') {
+            const ticker = await this.makePublicRequest('/api/v3/ticker/price', { symbol });
+            effectivePrice = parseFloat(ticker.price);
+          }
+
+          const notional = adjustedQuantity * effectivePrice;
+          if (notional < minNotional) {
+            throw new BinanceApiException(
+              `Order value $${notional.toFixed(4)} is below the minimum required $${minNotional} for ${symbol}. ` +
+                `Increase your quantity.`,
+              'BINANCE_-1013',
+            );
+          }
+        }
+      }
+
+      return adjustedQtyStr;
+    } catch (error) {
+      if (error instanceof BinanceApiException) throw error;
+      // If exchangeInfo fetch fails, fall back and let Binance validate
+      return quantity.toString();
+    }
+  }
+
   async placeOrder(
     apiKey: string,
     apiSecret: string,
@@ -647,11 +810,13 @@ export class BinanceService {
         throw new BinanceApiException('Price is required for LIMIT orders');
       }
 
+      const adjustedQuantity = await this.validateAndAdjustQuantity(symbol, quantity, type, price);
+
       const params: Record<string, any> = {
         symbol,
         side: side.toUpperCase(),
         type: type === 'MARKET' ? 'MARKET' : 'LIMIT',
-        quantity: quantity.toString(),
+        quantity: adjustedQuantity,
       };
 
       if (type === 'LIMIT') {
@@ -661,13 +826,21 @@ export class BinanceService {
 
       const order = await this.makeSignedPostRequest('/api/v3/order', apiKey, apiSecret, params);
 
+      const executedQty = parseFloat(order.executedQty || order.origQty || '0');
+      const rawPrice = parseFloat(order.price || '0');
+      // For MARKET orders Binance returns price=0; derive from quote spent instead
+      const executionPrice =
+        rawPrice === 0 && executedQty > 0
+          ? parseFloat(order.cummulativeQuoteQty || '0') / executedQty
+          : rawPrice;
+
       return {
         orderId: order.orderId.toString(),
         symbol: order.symbol,
         side: order.side as 'BUY' | 'SELL',
         type: order.type,
-        quantity: parseFloat(order.executedQty || order.origQty || '0'),
-        price: parseFloat(order.price || '0'),
+        quantity: executedQty,
+        price: executionPrice,
         status: order.status,
         time: order.transactTime || order.updateTime || Date.now(),
       };
@@ -676,6 +849,29 @@ export class BinanceService {
         throw error;
       }
       throw new BinanceApiException('Failed to place order');
+    }
+  }
+
+  /**
+   * Rounds a price to comply with the PRICE_FILTER tickSize for the symbol.
+   * Fetches exchangeInfo internally. Falls back to toFixed(8) on error.
+   */
+  private async roundPriceToTickSize(symbol: string, price: number): Promise<string> {
+    try {
+      const info = await this.makePublicRequest('/api/v3/exchangeInfo', { symbol });
+      const filters: any[] = info?.symbols?.[0]?.filters ?? [];
+      const priceFilter = filters.find((f) => f.filterType === 'PRICE_FILTER');
+      if (!priceFilter) return price.toFixed(8);
+
+      const tickSize: string = priceFilter.tickSize; // e.g. "0.00010000"
+      const tick = parseFloat(tickSize);
+      if (tick <= 0) return price.toFixed(8);
+
+      const decimalPlaces = (tickSize.replace(/0+$/, '').split('.')[1] ?? '').length;
+      const rounded = Math.round(price / tick) * tick;
+      return rounded.toFixed(decimalPlaces);
+    } catch {
+      return price.toFixed(8);
     }
   }
 
@@ -733,13 +929,20 @@ export class BinanceService {
           : stopLossPrice * 1.005  // 0.5% above stop price for buys
         );
 
+      // Round all prices to comply with PRICE_FILTER tickSize
+      const [roundedTpPrice, roundedSlPrice, roundedSlLimitPrice] = await Promise.all([
+        this.roundPriceToTickSize(symbol, takeProfitPrice),
+        this.roundPriceToTickSize(symbol, stopLossPrice),
+        this.roundPriceToTickSize(symbol, effectiveStopLimitPrice),
+      ]);
+
       const params: Record<string, any> = {
         symbol,
         side: side.toUpperCase(),
         quantity: quantity.toString(),
-        price: takeProfitPrice.toFixed(8),        // Take profit limit price
-        stopPrice: stopLossPrice.toFixed(8),      // Stop trigger price
-        stopLimitPrice: effectiveStopLimitPrice.toFixed(8), // Stop limit price
+        price: roundedTpPrice,        // Take profit limit price
+        stopPrice: roundedSlPrice,    // Stop trigger price
+        stopLimitPrice: roundedSlLimitPrice, // Stop limit price
         stopLimitTimeInForce: 'GTC',
       };
 
@@ -895,6 +1098,112 @@ export class BinanceService {
       }));
     } catch (error: any) {
       throw new BinanceApiException(`Failed to fetch recent trades for ${symbol}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Fetches deposit history for user
+   */
+  async getDepositHistory(
+    apiKey: string,
+    apiSecret: string,
+    coin?: string,
+    status?: number,
+    offset: number = 0,
+    limit: number = 100,
+    startTime?: number,
+    endTime?: number,
+  ): Promise<any[]> {
+    try {
+      const params: Record<string, any> = {
+        offset,
+        limit: Math.min(limit, 1000),
+      };
+
+      if (coin) params.coin = coin;
+      if (status !== undefined) params.status = status; // 0:pending, 1:success
+      if (startTime) params.startTime = startTime;
+      if (endTime) params.endTime = endTime;
+
+      const deposits = await this.makeSignedRequest(
+        '/sapi/v1/capital/deposit/hisrec',
+        apiKey,
+        apiSecret,
+        params,
+      );
+
+      return deposits.map((deposit: any) => ({
+        id: deposit.id,
+        coin: deposit.coin,
+        amount: parseFloat(deposit.amount),
+        network: deposit.network,
+        status: deposit.status, // 0: pending, 1: success
+        address: deposit.address,
+        addressTag: deposit.addressTag,
+        txId: deposit.txId,
+        insertTime: deposit.insertTime,
+        transferType: deposit.transferType,
+        confirmTimes: deposit.confirmTimes,
+      }));
+    } catch (error: any) {
+      if (error instanceof BinanceApiException || error instanceof InvalidApiKeyException) {
+        throw error;
+      }
+      throw new BinanceApiException(`Failed to fetch deposit history: ${error.message}`);
+    }
+  }
+
+  /**
+   * Fetches withdrawal history for user
+   */
+  async getWithdrawalHistory(
+    apiKey: string,
+    apiSecret: string,
+    coin?: string,
+    status?: number,
+    offset: number = 0,
+    limit: number = 100,
+    startTime?: number,
+    endTime?: number,
+  ): Promise<any[]> {
+    try {
+      const params: Record<string, any> = {
+        offset,
+        limit: Math.min(limit, 1000),
+      };
+
+      if (coin) params.coin = coin;
+      if (status !== undefined) params.status = status; // 0:pending, 1:success, 2:failed
+      if (startTime) params.startTime = startTime;
+      if (endTime) params.endTime = endTime;
+
+      const withdrawals = await this.makeSignedRequest(
+        '/sapi/v1/capital/withdraw/history',
+        apiKey,
+        apiSecret,
+        params,
+      );
+
+      return withdrawals.map((withdrawal: any) => ({
+        id: withdrawal.id,
+        coin: withdrawal.coin,
+        withdrawOrderId: withdrawal.withdrawOrderId,
+        amount: parseFloat(withdrawal.amount),
+        network: withdrawal.network,
+        address: withdrawal.address,
+        addressTag: withdrawal.addressTag,
+        txId: withdrawal.txId,
+        status: withdrawal.status, // 0: email sent, 1: cancelled, 2: awaiting approval, 3: rejected, 4: processing, 5: failure, 6: completed
+        completeTime: withdrawal.completeTime,
+        applyTime: withdrawal.applyTime,
+        transferType: withdrawal.transferType,
+        info: withdrawal.info,
+      }));
+    } catch (error: any) {
+      if (error instanceof BinanceApiException || error instanceof InvalidApiKeyException) {
+        throw error;
+      }
+      throw new BinanceApiException(`Failed to fetch withdrawal history: ${error.message}`);
     }
   }
 }

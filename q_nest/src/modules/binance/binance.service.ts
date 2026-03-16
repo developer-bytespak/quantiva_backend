@@ -1,5 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { BinanceMarketStreamService } from './binance-market-stream.service';
 
 interface Ticker24h {
   symbol: string;
@@ -39,31 +41,144 @@ export class BinanceService {
   private readonly baseUrl = 'https://api.binance.com';
   private readonly apiClient: AxiosInstance;
 
-  constructor() {
+  // Price cache: symbol → { price, fetchedAt }
+  private readonly priceCache = new Map<string, { price: number; fetchedAt: number }>();
+  private readonly PRICE_CACHE_TTL_MS = 30_000; // 30 seconds
+
+  // Stats cache: symbol → { data, fetchedAt } — 1-minute TTL to cap weight from crons
+  private readonly statsCache = new Map<string, {
+    data: { price: number; priceChangePercent: number; high24h: number; low24h: number; volume24h: number; quoteVolume24h: number };
+    fetchedAt: number;
+  }>();
+  private readonly STATS_CACHE_TTL_MS = 60_000; // 1 minute
+
+  // Negative cache: symbols that returned 400 from Binance (delisted / not on spot).
+  // Prevents repeated REST calls for symbols that will never succeed.
+  private readonly invalidSymbols = new Map<string, number>(); // symbol → expiry ms
+  private readonly INVALID_SYMBOL_TTL_MS = 5 * 60_000; // re-check after 5 min
+
+  constructor(
+    @Optional() private readonly marketStream?: BinanceMarketStreamService,
+  ) {
+    const proxyUrl = process.env.BINANCE_PROXY_URL;
+    this.logger.log(`[PROXY-DEBUG] BINANCE_PROXY_URL present: ${!!proxyUrl}`);
     this.apiClient = axios.create({
       baseURL: this.baseUrl,
       timeout: 10000,
+      ...(proxyUrl ? { httpsAgent: new HttpsProxyAgent(proxyUrl), proxy: false } : {}),
     });
+    if (proxyUrl) {
+      this.logger.log(`Binance REST proxy enabled: ${proxyUrl.replace(/\/\/.*@/, '//<redacted>@')}`);
+    }
   }
 
   /**
-   * Get current price for a symbol
+   * Get current price for a symbol — served from cache within 30s TTL
+   * to avoid hammering Binance REST with per-trade polling.
    */
   async getPrice(symbol: string): Promise<number> {
+    const formattedSymbol = this.formatSymbol(symbol);
+
+    // Stream-first: zero REST weight
+    if (this.marketStream?.isConnected()) {
+      const streamPrice = this.marketStream.getPrice(formattedSymbol);
+      if (streamPrice !== undefined) return streamPrice;
+    }
+
+    const cached = this.priceCache.get(formattedSymbol);
+    if (cached && Date.now() - cached.fetchedAt < this.PRICE_CACHE_TTL_MS) {
+      return cached.price;
+    }
     try {
-      const formattedSymbol = this.formatSymbol(symbol);
+      this.logger.warn(`[REST-FALLBACK] getPrice(${formattedSymbol}) — stream miss, hitting REST`);
       const response = await this.apiClient.get<TickerPrice>('/api/v3/ticker/price', {
         params: { symbol: formattedSymbol },
       });
-      return parseFloat(response.data.price);
+      const price = parseFloat(response.data.price);
+      this.priceCache.set(formattedSymbol, { price, fetchedAt: Date.now() });
+      return price;
     } catch (error: any) {
+      // Return stale cache if available rather than throwing (avoids cascade failures)
+      if (cached) {
+        this.logger.warn(`Using stale cache for ${symbol}: ${error.message}`);
+        return cached.price;
+      }
       this.logger.error(`Failed to get price for ${symbol}: ${error.message}`);
       throw new Error(`Failed to fetch price for ${symbol}`);
     }
   }
 
   /**
-   * Get 24h ticker statistics for a symbol
+   * Batch-fetch prices for multiple symbols in ONE API call (weight 4 total).
+   * Falls back to cache for symbols that fail.
+   */
+  async getPrices(symbols: string[]): Promise<Map<string, number>> {
+    const result = new Map<string, number>();
+    if (symbols.length === 0) return result;
+
+    const formatted = symbols.map((s) => this.formatSymbol(s));
+
+    // Stream-first: resolve as many as possible with zero REST weight
+    if (this.marketStream?.isConnected()) {
+      const remaining: string[] = [];
+      for (const sym of formatted) {
+        const streamPrice = this.marketStream.getPrice(sym);
+        if (streamPrice !== undefined) {
+          result.set(sym, streamPrice);
+        } else {
+          remaining.push(sym);
+        }
+      }
+      if (remaining.length === 0) return result;
+      // Only REST-fetch symbols not in stream (shouldn't happen for valid pairs)
+    }
+
+    const now = Date.now();
+
+    // Serve all from cache if fresh
+    const stale = formatted.filter((s) => {
+      const c = this.priceCache.get(s);
+      if (c && now - c.fetchedAt < this.PRICE_CACHE_TTL_MS) {
+        result.set(s, c.price);
+        return false;
+      }
+      return true;
+    });
+
+    if (stale.length === 0) return result;
+
+    try {
+      this.logger.warn(`[REST-FALLBACK] getPrices batch — ${stale.length} symbols not in stream, hitting REST`);
+      // Single batch request — weight 4 regardless of symbol count
+      const response = await this.apiClient.get<TickerPrice[]>('/api/v3/ticker/price');
+      const allPrices: TickerPrice[] = response.data;
+      const priceMap = new Map(allPrices.map((t) => [t.symbol, parseFloat(t.price)]));
+
+      for (const sym of formatted) {
+        const price = priceMap.get(sym);
+        if (price !== undefined) {
+          this.priceCache.set(sym, { price, fetchedAt: now });
+          result.set(sym, price);
+        } else {
+          const c = this.priceCache.get(sym);
+          if (c) result.set(sym, c.price);
+        }
+      }
+    } catch (error: any) {
+      this.logger.error(`Batch price fetch failed: ${error.message}`);
+      // Fall back to stale cache
+      for (const sym of stale) {
+        const c = this.priceCache.get(sym);
+        if (c) result.set(sym, c.price);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Get 24h ticker statistics for a symbol — served from cache within 1-minute TTL.
+   * Prevents burst weight from parallel cron calls (e.g. 50 assets × weight 2 = 100/run).
    */
   async get24hStats(symbol: string): Promise<{
     price: number;
@@ -73,14 +188,41 @@ export class BinanceService {
     volume24h: number;
     quoteVolume24h: number;
   }> {
+    const formattedSymbol = this.formatSymbol(symbol);
+
+    // Stream-first: zero REST weight
+    if (this.marketStream?.isConnected()) {
+      const stream = this.marketStream.get24hStats(formattedSymbol);
+      if (stream) {
+        return {
+          price: stream.price,
+          priceChangePercent: stream.priceChangePercent,
+          high24h: stream.high,
+          low24h: stream.low,
+          volume24h: stream.volume,
+          quoteVolume24h: stream.quoteVolume,
+        };
+      }
+    }
+
+    // Skip REST for known-invalid symbols (delisted / non-existent)
+    const invalidUntil = this.invalidSymbols.get(formattedSymbol);
+    if (invalidUntil && Date.now() < invalidUntil) {
+      throw new Error(`Symbol ${formattedSymbol} is cached as invalid (delisted/unknown)`);
+    }
+
+    const cached = this.statsCache.get(formattedSymbol);
+    if (cached && Date.now() - cached.fetchedAt < this.STATS_CACHE_TTL_MS) {
+      return cached.data;
+    }
     try {
-      const formattedSymbol = this.formatSymbol(symbol);
+      this.logger.warn(`[REST-FALLBACK] get24hStats(${formattedSymbol}) — stream miss, hitting REST`);
       const response = await this.apiClient.get<Ticker24h>('/api/v3/ticker/24hr', {
         params: { symbol: formattedSymbol },
       });
 
       const data = response.data;
-      return {
+      const stats = {
         price: parseFloat(data.lastPrice),
         priceChangePercent: parseFloat(data.priceChangePercent),
         high24h: parseFloat(data.highPrice),
@@ -88,7 +230,19 @@ export class BinanceService {
         volume24h: parseFloat(data.volume),
         quoteVolume24h: parseFloat(data.quoteVolume),
       };
+      this.statsCache.set(formattedSymbol, { data: stats, fetchedAt: Date.now() });
+      return stats;
     } catch (error: any) {
+      // Cache 400 errors (delisted symbols) to stop repeated REST attempts
+      if (error?.response?.status === 400) {
+        this.invalidSymbols.set(formattedSymbol, Date.now() + this.INVALID_SYMBOL_TTL_MS);
+        this.logger.warn(`[INVALID-SYMBOL] ${formattedSymbol} cached as invalid for 5 min`);
+      }
+      // Return stale cache if available rather than failing all callers
+      if (cached) {
+        this.logger.warn(`Using stale stats cache for ${symbol}: ${error.message}`);
+        return cached.data;
+      }
       this.logger.error(`Failed to get 24h stats for ${symbol}: ${error.message}`);
       throw new Error(`Failed to fetch 24h stats for ${symbol}`);
     }
@@ -211,7 +365,7 @@ export class BinanceService {
   /**
    * Format symbol to Binance format (e.g., BTC -> BTCUSDT)
    */
-  private formatSymbol(symbol: string): string {
+  formatSymbol(symbol: string): string {
     // Remove any existing USDT suffix to avoid duplication
     const cleanSymbol = symbol.replace(/USDT$/i, '').replace(/\//g, '');
     

@@ -18,6 +18,7 @@ import { StorageModule } from '../../storage/storage.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AppGateway } from 'src/gateways/app.gateway';
+import { FirebaseService } from 'src/firebase/firebase.service';
 
 @Module({
   imports: [
@@ -54,6 +55,7 @@ import { AppGateway } from 'src/gateways/app.gateway';
     JwtAuthGuard,
     RefreshTokenGuard,
     TwoFactorGuard,
+    FirebaseService,
   ],
   exports: [
     AuthService,
