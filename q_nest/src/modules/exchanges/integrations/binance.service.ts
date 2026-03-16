@@ -728,6 +728,74 @@ export class BinanceService {
   /**
    * Places an order on Binance
    */
+  /**
+   * Fetches exchangeInfo once and:
+   * 1. Adjusts quantity to comply with LOT_SIZE (step size)
+   * 2. Validates that the order notional value meets NOTIONAL / MIN_NOTIONAL filter
+   * Throws a clear BinanceApiException if the notional is too small.
+   */
+  private async validateAndAdjustQuantity(
+    symbol: string,
+    quantity: number,
+    orderType: 'MARKET' | 'LIMIT',
+    price?: number,
+  ): Promise<string> {
+    try {
+      const info = await this.makePublicRequest('/api/v3/exchangeInfo', { symbol });
+      const filters: any[] = info?.symbols?.[0]?.filters ?? [];
+
+      // --- LOT_SIZE: floor quantity to nearest valid step ---
+      let adjustedQuantity = quantity;
+      let decimalPlaces = 8;
+
+      const lotSizeFilter = filters.find((f) => f.filterType === 'LOT_SIZE');
+      if (lotSizeFilter) {
+        const stepSize: string = lotSizeFilter.stepSize; // e.g. "0.00100000"
+        const step = parseFloat(stepSize);
+        if (step > 0) {
+          decimalPlaces = (stepSize.replace(/0+$/, '').split('.')[1] ?? '').length;
+          adjustedQuantity = Math.floor(quantity / step) * step;
+        }
+      }
+
+      const adjustedQtyStr = adjustedQuantity.toFixed(decimalPlaces);
+
+      // --- NOTIONAL / MIN_NOTIONAL: order value must meet minimum ---
+      const notionalFilter =
+        filters.find((f) => f.filterType === 'NOTIONAL') ??
+        filters.find((f) => f.filterType === 'MIN_NOTIONAL');
+
+      if (notionalFilter) {
+        const minNotional = parseFloat(
+          notionalFilter.minNotional ?? notionalFilter.minNotionalValue ?? '0',
+        );
+
+        if (minNotional > 0) {
+          let effectivePrice = price;
+          if (!effectivePrice || orderType === 'MARKET') {
+            const ticker = await this.makePublicRequest('/api/v3/ticker/price', { symbol });
+            effectivePrice = parseFloat(ticker.price);
+          }
+
+          const notional = adjustedQuantity * effectivePrice;
+          if (notional < minNotional) {
+            throw new BinanceApiException(
+              `Order value $${notional.toFixed(4)} is below the minimum required $${minNotional} for ${symbol}. ` +
+                `Increase your quantity.`,
+              'BINANCE_-1013',
+            );
+          }
+        }
+      }
+
+      return adjustedQtyStr;
+    } catch (error) {
+      if (error instanceof BinanceApiException) throw error;
+      // If exchangeInfo fetch fails, fall back and let Binance validate
+      return quantity.toString();
+    }
+  }
+
   async placeOrder(
     apiKey: string,
     apiSecret: string,
@@ -742,11 +810,13 @@ export class BinanceService {
         throw new BinanceApiException('Price is required for LIMIT orders');
       }
 
+      const adjustedQuantity = await this.validateAndAdjustQuantity(symbol, quantity, type, price);
+
       const params: Record<string, any> = {
         symbol,
         side: side.toUpperCase(),
         type: type === 'MARKET' ? 'MARKET' : 'LIMIT',
-        quantity: quantity.toString(),
+        quantity: adjustedQuantity,
       };
 
       if (type === 'LIMIT') {
@@ -756,13 +826,21 @@ export class BinanceService {
 
       const order = await this.makeSignedPostRequest('/api/v3/order', apiKey, apiSecret, params);
 
+      const executedQty = parseFloat(order.executedQty || order.origQty || '0');
+      const rawPrice = parseFloat(order.price || '0');
+      // For MARKET orders Binance returns price=0; derive from quote spent instead
+      const executionPrice =
+        rawPrice === 0 && executedQty > 0
+          ? parseFloat(order.cummulativeQuoteQty || '0') / executedQty
+          : rawPrice;
+
       return {
         orderId: order.orderId.toString(),
         symbol: order.symbol,
         side: order.side as 'BUY' | 'SELL',
         type: order.type,
-        quantity: parseFloat(order.executedQty || order.origQty || '0'),
-        price: parseFloat(order.price || '0'),
+        quantity: executedQty,
+        price: executionPrice,
         status: order.status,
         time: order.transactTime || order.updateTime || Date.now(),
       };
@@ -771,6 +849,29 @@ export class BinanceService {
         throw error;
       }
       throw new BinanceApiException('Failed to place order');
+    }
+  }
+
+  /**
+   * Rounds a price to comply with the PRICE_FILTER tickSize for the symbol.
+   * Fetches exchangeInfo internally. Falls back to toFixed(8) on error.
+   */
+  private async roundPriceToTickSize(symbol: string, price: number): Promise<string> {
+    try {
+      const info = await this.makePublicRequest('/api/v3/exchangeInfo', { symbol });
+      const filters: any[] = info?.symbols?.[0]?.filters ?? [];
+      const priceFilter = filters.find((f) => f.filterType === 'PRICE_FILTER');
+      if (!priceFilter) return price.toFixed(8);
+
+      const tickSize: string = priceFilter.tickSize; // e.g. "0.00010000"
+      const tick = parseFloat(tickSize);
+      if (tick <= 0) return price.toFixed(8);
+
+      const decimalPlaces = (tickSize.replace(/0+$/, '').split('.')[1] ?? '').length;
+      const rounded = Math.round(price / tick) * tick;
+      return rounded.toFixed(decimalPlaces);
+    } catch {
+      return price.toFixed(8);
     }
   }
 
@@ -828,13 +929,20 @@ export class BinanceService {
           : stopLossPrice * 1.005  // 0.5% above stop price for buys
         );
 
+      // Round all prices to comply with PRICE_FILTER tickSize
+      const [roundedTpPrice, roundedSlPrice, roundedSlLimitPrice] = await Promise.all([
+        this.roundPriceToTickSize(symbol, takeProfitPrice),
+        this.roundPriceToTickSize(symbol, stopLossPrice),
+        this.roundPriceToTickSize(symbol, effectiveStopLimitPrice),
+      ]);
+
       const params: Record<string, any> = {
         symbol,
         side: side.toUpperCase(),
         quantity: quantity.toString(),
-        price: takeProfitPrice.toFixed(8),        // Take profit limit price
-        stopPrice: stopLossPrice.toFixed(8),      // Stop trigger price
-        stopLimitPrice: effectiveStopLimitPrice.toFixed(8), // Stop limit price
+        price: roundedTpPrice,        // Take profit limit price
+        stopPrice: roundedSlPrice,    // Stop trigger price
+        stopLimitPrice: roundedSlLimitPrice, // Stop limit price
         stopLimitTimeInForce: 'GTC',
       };
 

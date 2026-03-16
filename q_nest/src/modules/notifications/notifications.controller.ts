@@ -1,22 +1,24 @@
-import { Controller, Get, Post, Body, Param, Req, Delete } from '@nestjs/common';
+import { Controller, Get, Post, Body, UseGuards, Param, Req, Delete } from '@nestjs/common';
 import { NotificationsService } from './notifications.service';
 import { FirebaseService } from 'src/firebase/firebase.service';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { TokenPayload } from '../auth/services/token.service';
 
 @Controller('notifications')
+@UseGuards(JwtAuthGuard)
 export class NotificationsController {
   constructor(private readonly notificationsService: NotificationsService,
     private readonly firebaseService: FirebaseService,
   ) {}
 
   @Get()
-  getUserNotifications(@Req() req: any) {
-    const userId = req.subscriptionUser?.user_id;
-    return this.notificationsService.getUserNotifications(userId);
+  getUserNotifications(@CurrentUser() user: TokenPayload) {
+    return this.notificationsService.getUserNotifications(user.sub);
   }
   @Get("unread")  
-  async getUnreadNotifications(@Req() req: any) {
-    const userId = req.subscriptionUser?.user_id;
-    return this.notificationsService.getUnreadNotificationsCount(userId);
+  async getUnreadNotifications(@CurrentUser() user: TokenPayload) {
+    return this.notificationsService.getUnreadNotificationsCount(user.sub);
   }
 
   @Post('send')
