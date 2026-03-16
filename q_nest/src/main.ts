@@ -5,8 +5,6 @@ import cookieParser from 'cookie-parser';
 import compression from 'compression';
 import { PreBuiltSignalsCronjobService } from './modules/strategies/services/pre-built-signals-cronjob.service';
 import { json, urlencoded } from 'express';
-import { Server } from 'socket.io';
-import { AppGateway } from './gateways/app.gateway';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -117,11 +115,6 @@ async function bootstrap() {
   // Increase server timeout for long-running preview requests (5 minutes)
   // Preview can take 2-3 minutes with 20 assets, so we set timeout to 5 minutes
   const httpServer = app.getHttpServer();
-  const io = new Server(httpServer, {
-    cors: { origin: '*' },
-  });
-  const gateway = app.get(AppGateway);
-  gateway.init(io);
   httpServer.timeout = 300000; // 5 minutes in milliseconds
   
   console.log(`══════════════════════════════════════════════`);

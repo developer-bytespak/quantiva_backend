@@ -12,6 +12,7 @@ from ..engines.event_risk_engine import EventRiskEngine
 from ..engines.sentiment_engine import SentimentEngine
 from ..engines.fusion_engine import FusionEngine
 from ..engines.confidence_engine import ConfidenceEngine
+from ..engines.options_engine import OptionsEngine
 from .custom_strategy_parser import CustomStrategyParser
 from .strategy_executor import StrategyExecutor
 
@@ -35,6 +36,7 @@ class SignalGenerator:
         self.sentiment_engine = SentimentEngine()
         self.fusion_engine = FusionEngine()
         self.confidence_engine = ConfidenceEngine()
+        self.options_engine = OptionsEngine()
         
         # Initialize strategy components
         self.parser = CustomStrategyParser()
@@ -275,6 +277,29 @@ class SignalGenerator:
                     'engine_details': engine_scores
                 }
             }
+            
+            # Optional: generate options recommendation if options_chain provided
+            options_chain = kwargs.get('options_chain')
+            if options_chain and final_action in ('BUY', 'SELL'):
+                try:
+                    options_result = self.options_engine.calculate(
+                        asset_id=asset_id,
+                        asset_type=asset_type,
+                        timeframe=strategy_data.get('timeframe', '1d'),
+                        signal={
+                            'action': final_action,
+                            'final_score': float(fusion_score) if fusion_score else 0.0,
+                            'confidence': float(fusion_confidence) if fusion_confidence else 0.0,
+                            'risk_level': strategy_data.get('risk_level', 'medium'),
+                            'timeframe': strategy_data.get('timeframe', '1d'),
+                        },
+                        options_chain=options_chain,
+                        portfolio_value=portfolio_value,
+                    )
+                    signal['options_recommendation'] = options_result.get('recommendation')
+                except Exception as opt_err:
+                    self.logger.warning(f"Options engine error (non-fatal): {opt_err}")
+                    signal['options_recommendation'] = None
             
             return signal
             
