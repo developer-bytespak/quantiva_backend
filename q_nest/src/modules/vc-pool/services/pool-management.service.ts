@@ -42,6 +42,19 @@ export class PoolManagementService {
       throw new NotFoundException('Admin not found');
     }
 
+    // Validate payment_window_minutes if provided
+    if (dto.payment_window_minutes !== undefined) {
+      if (dto.payment_window_minutes <= 0) {
+        throw new BadRequestException('Payment window must be greater than 0 minutes');
+      }
+      if (dto.payment_window_minutes > 525600) {
+        // Max 1 year
+        throw new BadRequestException(
+          'Payment window cannot exceed 525600 minutes (1 year)',
+        );
+      }
+    }
+
     const pool = await this.prisma.vc_pools.create({
       data: {
         admin_id: adminId,
@@ -78,6 +91,19 @@ export class PoolManagementService {
 
     if (pool.status !== POOL_STATUS.draft) {
       throw new BadRequestException('Only draft pools can be edited');
+    }
+
+    // Validate payment_window_minutes if provided
+    if (dto.payment_window_minutes !== undefined) {
+      if (dto.payment_window_minutes <= 0) {
+        throw new BadRequestException('Payment window must be greater than 0 minutes');
+      }
+      if (dto.payment_window_minutes > 525600) {
+        // Max 1 year
+        throw new BadRequestException(
+          'Payment window cannot exceed 525600 minutes (1 year)',
+        );
+      }
     }
 
     const data: Record<string, any> = {};

@@ -61,7 +61,7 @@ export class UpdatePoolDto {
 
   @IsOptional()
   @Type(() => Number)
-  @IsInt()
-  @Min(5)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01, { message: 'Payment window must be greater than 0 (minimum 0.01 minutes)' })
   payment_window_minutes?: number;
 }

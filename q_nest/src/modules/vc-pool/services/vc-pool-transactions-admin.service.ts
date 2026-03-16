@@ -380,49 +380,14 @@ export class VcPoolTransactionsAdminService {
       orderBy: { created_at: 'desc' },
     });
 
-    // Find expired reservations with pending payments
-    const expiredReservations = await this.prisma.vc_pool_seat_reservations.findMany({
-      where: {
-        pool_id: poolId,
-        status: 'expired' as any,
-      },
-      include: {
-        payment_submission: {
-          select: {
-            submission_id: true,
-            status: true,
-            binance_payment_status: true,
-            total_amount: true,
-            refund_initiated_at: true,
-          },
-        },
-        user: {
-          select: { user_id: true, email: true, username: true, full_name: true },
-        },
-      },
-    });
-
     return {
       pool_id: poolId,
       alerts: {
         rejected_payments: alertTransactions.filter((t) => t.status === 'rejected'),
         failed_payments: alertTransactions.filter((t) => t.status === 'failed'),
         pending_payments: alertTransactions.filter((t) => t.status === 'pending'),
-        expired_reservations: expiredReservations.filter(
-          (r) =>
-            r.payment_submission && !r.payment_submission.refund_initiated_at,
-        ),
       },
       action_items: {
-        refunds_to_process: expiredReservations
-          .filter((r) => r.payment_submission && !r.payment_submission.refund_initiated_at)
-          .map((r) => ({
-            type: 'manual_refund',
-            user: r.user,
-            amount: r.payment_submission?.total_amount,
-            reason: 'Seat reservation expired',
-            created_at: r.expires_at,
-          })),
         rejections_to_notify: alertTransactions
           .filter((t) => t.status === 'rejected' && t.payment_submission)
           .map((t) => ({
@@ -433,9 +398,9 @@ export class VcPoolTransactionsAdminService {
           })),
       },
       summary: {
-        total_alerts: alertTransactions.length + expiredReservations.length,
-        requires_immediate_action: expiredReservations.filter(
-          (r) => r.payment_submission && !r.payment_submission.refund_initiated_at,
+        total_alerts: alertTransactions.length,
+        requires_immediate_action: alertTransactions.filter(
+          (t) => t.status === 'rejected' || t.status === 'failed',
         ).length,
       },
     };
