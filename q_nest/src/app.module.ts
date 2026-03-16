@@ -23,6 +23,8 @@ import { AiInsightsModule } from './ai-insights/ai-insights.module';
 import { TaskSchedulerModule } from './task-scheduler/task-scheduler.module';
 import { PortfolioModule } from './modules/portfolio/portfolio.module';
 import { VcPoolModule } from './modules/vc-pool/vc-pool.module';
+import { OptionsModule } from './modules/options/options.module';
+import { PaperTradingGateway } from './gateways/paper-trading.gateway';
 import { BinanceModule } from './modules/binance/binance.module';
 import { AccountStreamGateway } from './gateways/account-stream.gateway';
 import { MarketDetailGateway } from './gateways/market-detail.gateway';
@@ -53,6 +55,7 @@ import { GatewaysModule } from './gateways/gateways.module';
     TaskSchedulerModule,
     PortfolioModule,
     VcPoolModule,
+    OptionsModule,
     SubscriptionsModule,
     StripeModule,
     BinanceModule,
