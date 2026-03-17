@@ -155,8 +155,16 @@ export class OptionsService {
     userId: string,
   ): Promise<OptionsAccountDto> {
     await this.verifyConnectionOwnership(connectionId, userId);
-    const credentials = await this.getCredentials(connectionId);
-    return this.optionsBinance.fetchBalance(credentials, userId);
+    // Use spot wallet (same source as exchanges service / top trades)
+    const balanceData = await this.exchangesService.getConnectionData(connectionId, 'balance') as any;
+    const assets: any[] = balanceData?.assets ?? [];
+    const usdtAsset = assets.find((a: any) => a.symbol === 'USDT');
+    return {
+      availableBalance: usdtAsset ? parseFloat(usdtAsset.free || '0') : 0,
+      totalBalance: usdtAsset ? parseFloat(usdtAsset.total || usdtAsset.free || '0') : 0,
+      unrealizedPnl: 0,
+      marginBalance: 0,
+    };
   }
 
   // ── Positions ────────────────────────────────────────────
@@ -568,14 +576,26 @@ export class OptionsService {
 
     // 2. Max premium per trade (only for buy side)
     if (dto.side === 'BUY') {
-      const balance = await this.optionsBinance.fetchBalance(credentials, userId);
-      const totalPremium = dto.price * dto.quantity;
-      const maxAllowed = balance.availableBalance * RISK_CONFIG.MAX_PREMIUM_PERCENT;
-
-      if (totalPremium > maxAllowed) {
-        throw new BadRequestException(
-          `Premium $${totalPremium.toFixed(2)} exceeds ${RISK_CONFIG.MAX_PREMIUM_PERCENT * 100}% of available balance ($${maxAllowed.toFixed(2)})`,
-        );
+      // Check the options margin wallet (eapi) — this is the wallet Binance debits for options orders.
+      // If it is empty, skip our pre-check and let Binance return the real error, which now surfaces
+      // as a 400 with a clear message (e.g. "insufficient balance in Options Account").
+      try {
+        const optionsBalance = await this.optionsBinance.fetchBalance(credentials, userId);
+        const availableBalance = optionsBalance.availableBalance;
+        if (availableBalance > 0) {
+          const totalPremium = dto.price * dto.quantity;
+          const maxAllowed = availableBalance * RISK_CONFIG.MAX_PREMIUM_PERCENT;
+          if (totalPremium > maxAllowed) {
+            throw new BadRequestException(
+              `Premium $${totalPremium.toFixed(2)} exceeds ${RISK_CONFIG.MAX_PREMIUM_PERCENT * 100}% of Options account balance ($${availableBalance.toFixed(2)})`,
+            );
+          }
+        } else {
+          this.logger.warn(`Options margin account balance is 0 for user ${userId} — skipping 5% pre-check. Binance will validate funds.`);
+        }
+      } catch (err: any) {
+        if (err instanceof BadRequestException) throw err;
+        this.logger.warn(`Could not check options balance for risk check: ${err.message}`);
       }
     }
 

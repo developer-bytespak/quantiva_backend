@@ -1558,3 +1558,44 @@ model options_signals {
   @@index([signal_id])
   @@map("options_signals")
 }
+
+// ── AI Options Signal Engine ─────────────────────────────────────────────────
+
+model options_iv_history {
+  id          String   @id @default(uuid()) @db.Uuid
+  underlying  String   @db.VarChar(20) // e.g. "BTC", "ETH"
+  iv_value    Decimal  @db.Decimal(10, 6)
+  iv_rank     Decimal? @db.Decimal(6, 4) // 0-1 percentile vs 1yr
+  recorded_at DateTime @default(now()) @db.Timestamp(6)
+
+  @@index([underlying, recorded_at])
+  @@map("options_iv_history")
+}
+
+model options_signals_ai {
+  id String @id @default(uuid()) @db.Uuid
+
+  underlying String  @db.VarChar(20) // "BTC", "ETH"
+  strategy   String  @db.VarChar(50) // "long_call", "bull_call_spread", etc.
+  direction  String  @db.VarChar(10) // "bullish", "bearish", "neutral"
+  score      Decimal @db.Decimal(5, 4) // -1 to +1
+  confidence Decimal @db.Decimal(5, 4) // 0 to 1
+
+  iv_rank    Decimal? @db.Decimal(6, 4)
+  iv_value   Decimal? @db.Decimal(10, 6)
+  spot_price Decimal? @db.Decimal(20, 8)
+
+  legs Json @db.Json // array of { type, strike, expiry, side, ratio }
+
+  reasoning   String? @db.Text
+  risk_reward String? @db.VarChar(20) // e.g. "3.2:1"
+  max_profit  String? @db.VarChar(50) // "unlimited" or "$1,200"
+  max_loss    String? @db.VarChar(50) // "$400"
+
+  expires_at DateTime @db.Timestamp(6)
+  created_at DateTime @default(now()) @db.Timestamp(6)
+
+  @@index([underlying, created_at])
+  @@index([strategy])
+  @@map("options_signals_ai")
+}

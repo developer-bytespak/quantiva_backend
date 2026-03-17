@@ -14,12 +14,18 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
 import { OptionsService } from './services/options.service';
+import { OptionsIvService } from './services/options-iv.service';
+import { OptionsSignalService } from './services/options-signal.service';
 import { PlaceOptionOrderDto, CancelOptionOrderDto } from './dto/options.dto';
 
 @Controller('options')
 @UseGuards(JwtAuthGuard)
 export class OptionsController {
-  constructor(private readonly optionsService: OptionsService) {}
+  constructor(
+    private readonly optionsService: OptionsService,
+    private readonly ivService: OptionsIvService,
+    private readonly signalService: OptionsSignalService,
+  ) {}
 
   // ── Market Data ──────────────────────────────────────────
 
@@ -213,5 +219,62 @@ export class OptionsController {
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
     return this.optionsService.getRecommendations(connectionId, user.sub, underlying);
+  }
+
+  // ── IV Data ──────────────────────────────────────────────
+
+  @Get('iv/rank/:underlying')
+  async getIvRank(
+    @CurrentUser() user: TokenPayload,
+    @Param('underlying') underlying: string,
+  ) {
+    await this.optionsService.verifyEliteAccess(user.sub);
+    return this.ivService.getIvRankData(underlying.toUpperCase());
+  }
+
+  @Get('iv/history/:underlying')
+  async getIvHistory(
+    @CurrentUser() user: TokenPayload,
+    @Param('underlying') underlying: string,
+    @Query('days') days?: string,
+  ) {
+    await this.optionsService.verifyEliteAccess(user.sub);
+    return this.ivService.getIvHistory(underlying.toUpperCase(), days ? parseInt(days, 10) : 90);
+  }
+
+  // ── AI Signals ──────────────────────────────────────────
+
+  @Get('ai-signals')
+  async getAiSignals(
+    @CurrentUser() user: TokenPayload,
+    @Query('underlying') underlying?: string,
+    @Query('limit') limit?: string,
+  ) {
+    await this.optionsService.verifyEliteAccess(user.sub);
+    return this.signalService.getActiveSignals(
+      underlying?.toUpperCase(),
+      limit ? parseInt(limit, 10) : 20,
+    );
+  }
+
+  @Get('ai-signals/:id')
+  async getAiSignalById(
+    @CurrentUser() user: TokenPayload,
+    @Param('id') id: string,
+  ) {
+    await this.optionsService.verifyEliteAccess(user.sub);
+    return this.signalService.getSignalById(id);
+  }
+
+  /**
+   * POST /options/ai-signals/trigger
+   * Manually fire the 6-hour signal generation cron (for testing).
+   */
+  @Post('ai-signals/trigger')
+  @HttpCode(HttpStatus.OK)
+  async triggerSignalGeneration(@CurrentUser() user: TokenPayload) {
+    await this.optionsService.verifyEliteAccess(user.sub);
+    await this.signalService.generateSignals();
+    return { triggered: true };
   }
 }
