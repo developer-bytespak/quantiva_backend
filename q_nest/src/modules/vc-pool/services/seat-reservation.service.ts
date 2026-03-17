@@ -284,8 +284,17 @@ export class SeatReservationService {
       });
 
       if (cancellation) {
+        // Detect rejoin: member is inactive (waiting for new payment), has a new reservation,
+        // but old cancellation is already 'processed' — this is a REJOIN in progress
+        const isRejoinInProgress =
+          !membership.is_active &&
+          reservation &&
+          reservation.status === 'reserved' &&
+          cancellation.status === 'processed';
+
         cancellationInfo = {
           has_cancellation: true,
+          is_historical: isRejoinInProgress, // frontend: if true, ignore cancellation steps — show join/payment flow instead
           cancellation_id: cancellation.cancellation_id,
           status: cancellation.status,
           requested_at: cancellation.requested_at,
@@ -297,6 +306,14 @@ export class SeatReservationService {
         };
       }
     }
+
+    // Detect if user has completed rejoin (active member with a processed old cancellation)
+    // In this case, user should be able to request exit again
+    const canRequestExit =
+      membership?.is_active === true &&
+      (cancellationInfo === null ||
+        cancellationInfo.status === 'processed' ||
+        cancellationInfo.status === 'rejected');
 
     const minutesRemaining = reservation?.expires_at
       ? Math.max(0, Math.floor((reservation.expires_at.getTime() - Date.now()) / 60000))
@@ -312,6 +329,7 @@ export class SeatReservationService {
         : null,
       payment: submission,
       cancellation: cancellationInfo,
+      can_request_exit: canRequestExit,
     };
   }
 }
