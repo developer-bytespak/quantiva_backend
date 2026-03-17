@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import * as ccxt from 'ccxt';
 import {
   OptionContractDto,
@@ -118,6 +118,80 @@ export class OptionsBinanceService {
     } catch (error: any) {
       this.logger.error(`Failed to fetch available underlyings: ${error.message}`);
       throw new Error(`Failed to fetch options underlyings: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get all unique underlying base symbols from Binance exchange info (public, no auth).
+   * e.g. ['BTC', 'ETH', 'SOL', ...]
+   */
+  async getAllUnderlyings(): Promise<string[]> {
+    const exchange = new ccxt.binance({
+      options: { defaultType: 'option' },
+      enableRateLimit: true,
+    });
+    const info = await this.getExchangeInfo(exchange);
+    const optionSymbols: any[] = info.optionSymbols || [];
+    const seen = new Set<string>();
+    for (const sym of optionSymbols) {
+      const base = sym.underlying?.replace(/USDT$/, '') || sym.baseAsset || '';
+      if (base) seen.add(base);
+    }
+    return Array.from(seen).sort();
+  }
+
+  /**
+   * Get the ATM implied volatility for an underlying (public endpoint, no credentials needed).
+   * Finds the nearest ATM option and returns its mark IV.
+   */
+  async getAtmIv(underlying: string): Promise<number | null> {
+    try {
+      // Use a temporary exchange for public calls (no credentials required)
+      const exchange = new ccxt.binance({
+        options: { defaultType: 'option' },
+        enableRateLimit: true,
+      });
+
+      // Get spot price
+      const indexData = await (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` });
+      const spotPrice = parseFloat(indexData?.indexPrice || '0');
+      if (!spotPrice) return null;
+
+      // Get exchange info to find ATM contracts
+      const exchangeInfo = await this.getExchangeInfo(exchange);
+      const optionSymbols: any[] = exchangeInfo.optionSymbols || [];
+
+      // Find nearest ATM call expiring in ~30 days
+      const now = Date.now();
+      const targetExpiry = now + 30 * 24 * 60 * 60 * 1000;
+      let bestSymbol: string | null = null;
+      let bestDistance = Infinity;
+
+      for (const sym of optionSymbols) {
+        if (!sym.symbol?.includes(underlying) || sym.side !== 'CALL') continue;
+        const expiry = parseInt(sym.expiryDate || '0', 10);
+        const strike = parseFloat(sym.strikePrice || '0');
+        if (!expiry || !strike) continue;
+
+        const expiryDist = Math.abs(expiry - targetExpiry);
+        const strikeDist = Math.abs(strike - spotPrice) / spotPrice;
+        const combinedDist = expiryDist / (30 * 24 * 60 * 60 * 1000) + strikeDist;
+
+        if (combinedDist < bestDistance) {
+          bestDistance = combinedDist;
+          bestSymbol = sym.symbol;
+        }
+      }
+
+      if (!bestSymbol) return null;
+
+      // Fetch mark data for the ATM contract
+      const markData: any[] = await (exchange as any).eapiPublicGetMark({ symbol: bestSymbol });
+      const mark = Array.isArray(markData) ? markData[0] : markData;
+      return mark?.markIV ? parseFloat(mark.markIV) : null;
+    } catch (error: any) {
+      this.logger.warn(`getAtmIv failed for ${underlying}: ${error.message}`);
+      return null;
     }
   }
 
@@ -360,7 +434,9 @@ export class OptionsBinanceService {
       return order;
     } catch (error: any) {
       this.logger.error(`placeOptionOrder failed: ${error.message}`);
-      throw error;
+      // Extract the real Binance error message so the frontend sees it (not a generic 500)
+      const msg = error?.info?.msg || error?.message || 'Order placement failed';
+      throw new BadRequestException(msg);
     }
   }
 

@@ -55,6 +55,7 @@ def register_routers(skip_ml_init: bool = False):
         ("src.api.v1.llm", "/api/v1", None),
         ("src.api.v1.admin", "/api/v1", None),
         ("src.api.v1.options", "/api/v1", None),
+        ("src.api.v1.options_signals", "/api/v1", None),
         ("src.api.v1.routes.stocks", "/api/v1/stocks", ["stocks"]),
     ]:
         router = _safe_import_router(path)
