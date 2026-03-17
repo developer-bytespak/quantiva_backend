@@ -5,7 +5,6 @@ import cookieParser from 'cookie-parser';
 import compression from 'compression';
 import { PreBuiltSignalsCronjobService } from './modules/strategies/services/pre-built-signals-cronjob.service';
 import { json, urlencoded } from 'express';
-import { AppGateway } from './gateways/app.gateway';
 import { CustomIoAdapter } from './adapters/custom-io.adapter';
 
 async function bootstrap() {
@@ -124,8 +123,6 @@ async function bootstrap() {
   // Increase server timeout for long-running preview requests (5 minutes)
   // Preview can take 2-3 minutes with 20 assets, so we set timeout to 5 minutes
   const httpServer = app.getHttpServer();
-  const gateway = app.get(AppGateway);
-  gateway.init(customAdapter.getIO());
   httpServer.timeout = 300000; // 5 minutes in milliseconds
   
   console.log(`══════════════════════════════════════════════`);
