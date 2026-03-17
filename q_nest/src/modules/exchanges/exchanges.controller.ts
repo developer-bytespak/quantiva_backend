@@ -672,6 +672,7 @@ export class ExchangesController {
 
     // Auto-place OCO (take-profit + stop-loss) for filled BUY orders on Binance
     let ocoInfo: { orderListId: number; takeProfitPrice: number; stopLossPrice: number } | null = null;
+    let ocoError: string | null = null;
     if (
       placeOrderDto.side === 'BUY' &&
       order.status === 'FILLED' &&
@@ -692,9 +693,10 @@ export class ExchangesController {
           takeProfitPrice,
           stopLossPrice,
         );
-      } catch (ocoError: any) {
-        // OCO failure must not roll back the main order
-        this.logger.warn(`OCO order failed after BUY ${order.orderId}: ${ocoError?.message}`);
+      } catch (err: any) {
+        // OCO failure must not roll back the main order, but surface it to the caller
+        ocoError = err?.message ?? 'OCO order failed';
+        this.logger.warn(`OCO order failed after BUY ${order.orderId}: ${ocoError}`);
       }
     }
 
@@ -702,7 +704,10 @@ export class ExchangesController {
       success: true,
       data: order,
       ...(ocoInfo && { oco: ocoInfo }),
-      message: 'Order placed successfully',
+      ...(ocoError && { ocoError }),
+      message: ocoError
+        ? `Order placed successfully, but OCO order failed: ${ocoError}`
+        : 'Order placed successfully',
       last_updated: new Date().toISOString(),
     };
   }

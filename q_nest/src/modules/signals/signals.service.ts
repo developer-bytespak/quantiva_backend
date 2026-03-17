@@ -169,7 +169,7 @@ export class SignalsService {
         if (recent) {
           const recentTs = recent.timestamp ? new Date(recent.timestamp).getTime() : 0;
           const nowTs = (data.timestamp ? new Date(data.timestamp).getTime() : Date.now());
-          const windowMs = 60 * 1000; // 60 seconds execution window
+          const windowMs = 10 * 60 * 1000; // 10 minutes — matches cron interval
           if (nowTs - recentTs < windowMs) {
             // Return existing recent signal to avoid duplicate insert
             return recent;
