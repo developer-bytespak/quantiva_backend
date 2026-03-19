@@ -1206,5 +1206,87 @@ export class BinanceService {
       throw new BinanceApiException(`Failed to fetch withdrawal history: ${error.message}`);
     }
   }
+
+  /**
+   * Get ALL orders for a symbol (open, filled, cancelled, expired)
+   * Binance API: GET /api/v3/allOrders - requires symbol
+   */
+  async getAllOrders(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    params?: { orderId?: number; startTime?: number; endTime?: number; limit?: number },
+  ): Promise<any[]> {
+    try {
+      const queryParams: Record<string, any> = {
+        symbol: symbol.toUpperCase(),
+        limit: Math.min(params?.limit || 500, 1000),
+      };
+      if (params?.orderId) queryParams.orderId = params.orderId;
+      if (params?.startTime) queryParams.startTime = params.startTime;
+      if (params?.endTime) queryParams.endTime = params.endTime;
+
+      const orders = await this.makeSignedRequest('/api/v3/allOrders', apiKey, apiSecret, queryParams);
+
+      return orders.map((o: any) => ({
+        orderId: o.orderId?.toString(),
+        symbol: o.symbol,
+        side: o.side,
+        type: o.type,
+        status: o.status,
+        quantity: parseFloat(o.origQty || '0'),
+        executedQty: parseFloat(o.executedQty || '0'),
+        price: parseFloat(o.price || '0'),
+        stopPrice: o.stopPrice ? parseFloat(o.stopPrice) : null,
+        timeInForce: o.timeInForce,
+        time: o.time,
+        updateTime: o.updateTime,
+        isWorking: o.isWorking,
+      }));
+    } catch (error: any) {
+      if (error instanceof BinanceApiException || error instanceof InvalidApiKeyException) throw error;
+      throw new BinanceApiException(`Failed to fetch all orders for ${symbol}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get filled trade executions for a symbol (with commission and buyer/seller side)
+   * Binance API: GET /api/v3/myTrades - requires symbol
+   */
+  async getMyTrades(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    params?: { orderId?: number; startTime?: number; endTime?: number; limit?: number },
+  ): Promise<any[]> {
+    try {
+      const queryParams: Record<string, any> = {
+        symbol: symbol.toUpperCase(),
+        limit: Math.min(params?.limit || 500, 1000),
+      };
+      if (params?.orderId) queryParams.orderId = params.orderId;
+      if (params?.startTime) queryParams.startTime = params.startTime;
+      if (params?.endTime) queryParams.endTime = params.endTime;
+
+      const trades = await this.makeSignedRequest('/api/v3/myTrades', apiKey, apiSecret, queryParams);
+
+      return trades.map((t: any) => ({
+        id: t.id,
+        orderId: t.orderId,
+        symbol: t.symbol,
+        price: parseFloat(t.price),
+        qty: parseFloat(t.qty),
+        quoteQty: parseFloat(t.quoteQty),
+        commission: parseFloat(t.commission),
+        commissionAsset: t.commissionAsset,
+        time: t.time,
+        isBuyer: t.isBuyer,
+        isMaker: t.isMaker,
+      }));
+    } catch (error: any) {
+      if (error instanceof BinanceApiException || error instanceof InvalidApiKeyException) throw error;
+      throw new BinanceApiException(`Failed to fetch trades for ${symbol}: ${error.message}`);
+    }
+  }
 }
 
