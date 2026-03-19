@@ -74,4 +74,51 @@ export class StripeService {
   async cancelSubscriptionImmediately(stripeSubscriptionId: string) {
     return this.stripe.subscriptions.cancel(stripeSubscriptionId);
   }
+
+  // ─── Trade-fee billing helpers ────────────────────────────────────
+
+  /** Create or retrieve a Stripe customer for fee billing. */
+  async createCustomer(email: string, userId: string) {
+    return this.stripe.customers.create({
+      email,
+      metadata: { quantiva_user_id: userId },
+    });
+  }
+
+  /** Create a one-off invoice item on a customer's next invoice. */
+  async createInvoiceItem(params: {
+    customerId: string;
+    amountCents: number;
+    description: string;
+    metadata?: Record<string, string>;
+  }) {
+    return this.stripe.invoiceItems.create({
+      customer: params.customerId,
+      amount: params.amountCents,
+      currency: 'usd',
+      description: params.description,
+      metadata: params.metadata,
+    });
+  }
+
+  /** Create a new invoice, finalize it, and optionally auto-collect. */
+  async createAndFinalizeInvoice(params: {
+    customerId: string;
+    autoAdvance?: boolean;
+    metadata?: Record<string, string>;
+  }) {
+    const invoice = await this.stripe.invoices.create({
+      customer: params.customerId,
+      auto_advance: params.autoAdvance ?? true,
+      collection_method: 'charge_automatically',
+      metadata: params.metadata,
+    });
+
+    return this.stripe.invoices.finalizeInvoice(invoice.id);
+  }
+
+  /** Attempt to pay an existing open/draft invoice. */
+  async payInvoice(invoiceId: string) {
+    return this.stripe.invoices.pay(invoiceId);
+  }
 }

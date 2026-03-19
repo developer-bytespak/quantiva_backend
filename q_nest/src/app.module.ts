@@ -29,6 +29,7 @@ import { BinanceModule } from './modules/binance/binance.module';
 import { AccountStreamGateway } from './gateways/account-stream.gateway';
 import { MarketDetailGateway } from './gateways/market-detail.gateway';
 import { GatewaysModule } from './gateways/gateways.module';
+import { TradeFeesModule } from './modules/trade-fees/trade-fees.module';
 
 @Module({
   imports: [

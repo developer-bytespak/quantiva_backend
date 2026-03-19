@@ -16,6 +16,7 @@ import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import Stripe from 'stripe';
 import { AppGateway } from 'src/gateways/app.gateway';
 import { NotificationsService } from '../notifications/notifications.service';
+import { TradeFeesService } from '../trade-fees/trade-fees.service';
 // import { NotificationType } from '@prisma/client';
 
 interface RawBodyRequest extends Request {
@@ -31,6 +32,7 @@ export class StripeController {
     private readonly appGateway: AppGateway,
     private readonly notificationsService: NotificationsService,
     private readonly subscriptionsService: SubscriptionsService,
+    private readonly tradeFeesService: TradeFeesService,
   ) {}
 
   @Post('create-checkout-session')
@@ -109,6 +111,11 @@ export class StripeController {
     }
 
     await this.stripeService.cancelSubscriptionImmediately(active.external_id);
+
+    // Bill any accumulated trade fees before cancellation completes
+    this.tradeFeesService.processCancellationFees(userId).catch((err) =>
+      this.logger.warn(`Trade-fee cancellation billing failed: ${err.message}`),
+    );
 
     const updated = await this.subscriptionsService.handleStripeSubscriptionCancelled(
       active.external_id,
