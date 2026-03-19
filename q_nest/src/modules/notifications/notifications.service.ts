@@ -94,14 +94,15 @@ export class NotificationsService {
 
   async fcmNotification(token: string, userId: string) {
     try {
-      const user = await this.PrismaService.users.update({
+      await this.PrismaService.users.update({
         where: { user_id: userId },
         data: { fcm_token: token },
-      }) ;
-      return { success: true, message: 'FCM token updated', user: user };
+        select: { user_id: true },
+      });
+      return { success: true, message: 'FCM token updated' };
     } catch (err) {
       console.warn('[NotificationsService] FCM send failed:', err?.message || err);
-      return { success: false, message: 'Failed to send notification' };
+      return { success: false, message: 'Failed to update FCM token' };
     }
   }
 
