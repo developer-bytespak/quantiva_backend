@@ -360,19 +360,24 @@ export class BinanceService {
         return total > 0;
       });
 
-      // Build price map — stablecoins are always $1
+      // Build price map and 24h change map — stablecoins are always $1, 0% change
       const priceMap = new Map<string, number>();
-      for (const stable of STABLECOINS) priceMap.set(stable, 1);
+      const changeMap = new Map<string, number>();
+      for (const stable of STABLECOINS) {
+        priceMap.set(stable, 1);
+        changeMap.set(stable, 0);
+      }
 
-      // Stream-first: serve prices from WS cache — zero REST weight
+      // Stream-first: serve prices + 24h change from WS cache — zero REST weight
       const nonStableBalances = nonZeroBalances.filter((b) => !STABLECOINS.has(b.asset));
       const symbolsNeedingRest: string[] = [];
 
       if (this.marketStream?.isConnected()) {
         for (const b of nonStableBalances) {
-          const streamPrice = this.marketStream.getPrice(`${b.asset}USDT`);
-          if (streamPrice !== undefined) {
-            priceMap.set(b.asset, streamPrice);
+          const stats = this.marketStream.get24hStats(`${b.asset}USDT`);
+          if (stats !== undefined) {
+            priceMap.set(b.asset, stats.price);
+            changeMap.set(b.asset, stats.priceChangePercent);
           } else {
             symbolsNeedingRest.push(`${b.asset}USDT`);
           }
@@ -383,21 +388,25 @@ export class BinanceService {
 
       // Only hit REST for symbols the stream doesn't know about
       if (symbolsNeedingRest.length > 0) {
-        const prices = await this.getTickerPrices(symbolsNeedingRest);
-        for (const p of prices) priceMap.set(p.symbol.replace('USDT', ''), p.price);
+        const tickers = await this.getTickerPrices(symbolsNeedingRest);
+        for (const t of tickers) {
+          const asset = t.symbol.replace(/USDT$/, '');
+          priceMap.set(asset, t.price);
+          changeMap.set(asset, t.changePercent24h);
+        }
       }
 
       const positions: PositionDto[] = nonZeroBalances.map((balance) => {
           const quantity = parseFloat(balance.free) + parseFloat(balance.locked);
           const currentPrice = priceMap.get(balance.asset) || 0;
-          const entryPrice = currentPrice; // Simplified - would need trade history for accurate entry price
-          const unrealizedPnl = (currentPrice - entryPrice) * quantity;
-          const pnlPercent = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
+          const pnlPercent = changeMap.get(balance.asset) ?? 0;
+          // 24h dollar change on this holding
+          const unrealizedPnl = (pnlPercent / 100) * currentPrice * quantity;
 
           return {
             symbol: balance.asset,
             quantity,
-            entryPrice,
+            entryPrice: currentPrice,
             currentPrice,
             unrealizedPnl,
             pnlPercent,
