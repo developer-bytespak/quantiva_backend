@@ -2,6 +2,7 @@ import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import sgMail from '@sendgrid/mail';
 import * as speakeasy from 'speakeasy';
+import { randomInt } from 'crypto';
 
 @Injectable()
 export class TwoFactorService {
@@ -28,8 +29,8 @@ export class TwoFactorService {
   }
 
   async generateCode(userId: string, purpose: string): Promise<string> {
-    // Generate 6-digit code
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    // Generate cryptographically secure 6-digit code
+    const code = randomInt(100000, 1000000).toString();
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + 10); // 10 minutes expiry
 

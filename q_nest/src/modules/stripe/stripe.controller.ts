@@ -37,10 +37,6 @@ export class StripeController {
   async createCheckout(
     @Req() req: any,
   ) {
-
-    console.log("checkout request-->",req)
-
-
     const tier = req.subscriptionUser?.tier;
 
     if (tier === 'PRO' || tier === 'ELITE') {
@@ -50,9 +46,6 @@ export class StripeController {
     } 
     
     const { price_id, success_url, cancel_url, plan_id } = req.body;
-    console.log("boddy",price_id, success_url, cancel_url, plan_id)
-
-    // console.log("BODY:", req.body);  
     if (!price_id) {
       throw new BadRequestException('price_id is required');
     }
@@ -72,7 +65,7 @@ export class StripeController {
     //   }
     // }
 
-    console.log('userId', userId + ' - ' + price_id + ' - ' + plan_id + ' - ' + success_url + ' - ' + cancel_url);
+    this.logger.log(`Creating checkout for user: ${userId}, plan: ${plan_id}`);
 
     const session = await this.stripeService.createCheckoutSession({
       priceId: price_id,
@@ -81,7 +74,6 @@ export class StripeController {
       clientReferenceId: userId,
       metadata: plan_id ? { plan_id: plan_id } : undefined,
     });
-    console.log("Sessions",session)
     return { url: session.url, sessionId: session.id };
   }
 
@@ -94,9 +86,7 @@ export class StripeController {
 
     const tier = req.subscriptionUser?.tier;
 
-    console.log("tier",tier)
-
-    if(tier == 'FREE'){
+    if(tier == 'FREE') {
       throw new BadRequestException('You are already on the FREE tier');
     }
 
@@ -145,7 +135,6 @@ export class StripeController {
     // console.log("RAW BODY", rawBody);
 
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-    console.log("WEBHOOK SECRET", webhookSecret);
     if (!webhookSecret) {
       this.logger.error('STRIPE_WEBHOOK_SECRET is not set');
       throw new UnauthorizedException('Webhook not configured');
@@ -155,14 +144,13 @@ export class StripeController {
     try {
       event = this.stripeService.constructWebhookEvent(rawBody, signature, webhookSecret);
     } catch (err: any) {
-      console.log("ERROR--s", err);
       this.logger.warn(`Stripe webhook signature verification failed: ${err?.message}`);
       throw new UnauthorizedException('Invalid webhook signature');
     }
 
 
     if (event.type === 'checkout.session.completed') {
-      console.log("CHECKOUT.SESSION.COMPLETED");
+      this.logger.log('checkout.session.completed received');
       const session = event.data.object as Stripe.Checkout.Session;
 
       const userId = session.client_reference_id;
@@ -210,8 +198,6 @@ export class StripeController {
         this.logger.warn(`Failed to fetch invoice/receipt URLs from Stripe: ${(metaErr as any)?.message}`);
       }
 
-      console.log("userId and planId",userId, planId)
-
       if (userId && planId) {
         try {
           const existing = await this.subscriptionsService.getActiveSubscriptionWithFeatures(
@@ -219,7 +205,6 @@ export class StripeController {
           );
 
           if (existing) {
-            console.log("existing-subscription",existing)
             const updated = await this.subscriptionsService.updateSubscription(
               existing.subscription_id,
               {
@@ -246,12 +231,11 @@ export class StripeController {
               failure_reason: null,
             });
 
-            console.log("EXISTING", existing);
             this.logger.log(
               `Subscription updated for user ${userId}, plan ${planId} and payment recorded`,
             );
           } else {
-            console.log("NO EXISTING SUBSCRIPTION FOUND - CREATING NEW SUBSCRIPTION");
+            this.logger.log(`No existing subscription found for user ${userId} — creating new`);
             // User has no current subscription — create new subscription and update all related tables
             const newSubscription = await this.subscriptionsService.createSubscription({
               user_id: userId,
@@ -313,14 +297,12 @@ export class StripeController {
         stripeStatus === 'canceled'
       ) {
         try {
-          console.log("CUSTOMER.SUBSCRIPTION.DELETED or CUSTOMER.SUBSCRIPTION.UPDATED", stripeSubscriptionId, stripeStatus, currentPeriodEnd);
+          this.logger.log(`Stripe event: ${event.type} | sub: ${stripeSubscriptionId} | status: ${stripeStatus}`);
           await this.subscriptionsService.handleStripeSubscriptionCancelled(
             stripeSubscriptionId,
             currentPeriodEnd,
           );
         } catch (err: any) {
-
-          console.log("ERR--s", err);
           this.logger.error(
             `Failed to handle Stripe subscription cancel for ${stripeSubscriptionId}: ${err?.message}`,
           );

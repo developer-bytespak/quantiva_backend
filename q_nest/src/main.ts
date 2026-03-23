@@ -54,14 +54,6 @@ async function bootstrap() {
     allowedOrigins.add('http://localhost:3001');
     allowedOrigins.add('http://127.0.0.1:3001');  
   }
-  // Allow localhost even in production when testing against Render backend.
-  // Set ALLOW_LOCALHOST_ORIGIN=true on Render env if needed.
-  if (process.env.ALLOW_LOCALHOST_ORIGIN === 'true') {
-    allowedOrigins.add('http://localhost:3000');
-    allowedOrigins.add('http://localhost:3001');
-    allowedOrigins.add('http://127.0.0.1:3001');
-  }
-
   app.enableCors({
     origin: (origin, callback) => {
       // Allow non-browser requests (no origin)
