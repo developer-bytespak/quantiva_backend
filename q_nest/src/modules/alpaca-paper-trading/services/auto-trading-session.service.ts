@@ -274,10 +274,10 @@ export class AutoTradingSessionService {
   }
 
   /**
-   * Update balance and check threshold
+   * Update available cash and stop trading if it falls below threshold
    */
   updateBalance(newBalance: number): boolean {
-    const threshold = 10000; // $10,000 minimum balance
+    const threshold = 1000;
     
     this.session.stats.currentBalance = newBalance;
     this.session.stats.profitLoss = newBalance - this.session.stats.startingBalance;
@@ -287,8 +287,8 @@ export class AutoTradingSessionService {
 
     if (newBalance < threshold) {
       this.session.status = 'stopped';
-      this.addAiMessage(`Balance fell below $${threshold.toLocaleString()} threshold. Trading stopped.`, 'warning');
-      this.logger.warn(`Auto trading stopped: Balance ${newBalance} below threshold ${threshold}`);
+      this.addAiMessage(`Cash fell below $${threshold.toLocaleString()} threshold. Trading stopped.`, 'warning');
+      this.logger.warn(`Auto trading stopped: Cash ${newBalance} below threshold ${threshold}`);
       return false;
     }
 
