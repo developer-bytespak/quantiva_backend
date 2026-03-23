@@ -18,6 +18,7 @@ import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 import { MarketModule } from '../market/market.module';
 import { StocksMarketModule } from '../stocks-market/stocks-market.module';
 import { BinanceModule } from '../binance/binance.module';
+import { TradeFeesModule } from '../trade-fees/trade-fees.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { BinanceModule } from '../binance/binance.module';
     forwardRef(() => MarketModule),
     StocksMarketModule,
     BinanceModule,
+    TradeFeesModule,
   ],
   controllers: [ExchangesController, /* Health endpoint for paper trading */ PaperTradingController],
   providers: [

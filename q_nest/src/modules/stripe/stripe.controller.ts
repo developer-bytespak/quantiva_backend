@@ -16,6 +16,8 @@ import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import Stripe from 'stripe';
 import { AppGateway } from 'src/gateways/app.gateway';
 import { NotificationsService } from '../notifications/notifications.service';
+import { TradeFeesService } from '../trade-fees/trade-fees.service';
+import { PrismaService } from '../../prisma/prisma.service';
 // import { NotificationType } from '@prisma/client';
 
 interface RawBodyRequest extends Request {
@@ -31,6 +33,8 @@ export class StripeController {
     private readonly appGateway: AppGateway,
     private readonly notificationsService: NotificationsService,
     private readonly subscriptionsService: SubscriptionsService,
+    private readonly tradeFeesService: TradeFeesService,
+    private readonly prisma: PrismaService,
   ) {}
 
   @Post('create-checkout-session')
@@ -110,6 +114,13 @@ export class StripeController {
 
     await this.stripeService.cancelSubscriptionImmediately(active.external_id);
 
+    // Bill any accumulated trade fees BEFORE completing cancellation
+    try {
+      await this.tradeFeesService.processCancellationFees(userId);
+    } catch (err: any) {
+      this.logger.warn(`Trade-fee cancellation billing failed (non-blocking): ${err.message}`);
+    }
+
     const updated = await this.subscriptionsService.handleStripeSubscriptionCancelled(
       active.external_id,
       new Date(),
@@ -167,6 +178,22 @@ export class StripeController {
 
       const userId = session.client_reference_id;
       const planId = session.metadata?.plan_id;
+
+      // ── Save Stripe Customer ID so trade-fee invoices reuse the same
+      //    customer (which already has the card on file) ──────────────
+      const stripeCustomerId =
+        typeof session.customer === 'string'
+          ? session.customer
+          : session.customer?.id ?? null;
+
+      if (userId && stripeCustomerId) {
+        await this.prisma.users.update({
+          where: { user_id: userId },
+          data: { stripe_customer_id: stripeCustomerId },
+        }).catch((err) =>
+          this.logger.warn(`Failed to save stripe_customer_id: ${err.message}`),
+        );
+      }
 
       const externalId =
         typeof session.subscription === 'string'

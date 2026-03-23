@@ -36,6 +36,7 @@ import { ForbiddenException } from '@nestjs/common';
 import { MarketService } from '../market/market.service';
 import { MarketStocksDbService } from '../stocks-market/services/market-stocks-db.service';
 import { FmpService } from '../stocks-market/services/fmp.service';
+import { TradeFeesService } from '../trade-fees/trade-fees.service';
 
 /**
  * Exchanges Controller
@@ -69,6 +70,7 @@ export class ExchangesController {
     private readonly marketDetailAggregator: MarketDetailAggregatorService,
     private readonly marketStocksDbService: MarketStocksDbService,
     private readonly fmpService: FmpService,
+    private readonly tradeFeesService: TradeFeesService,
   ) {}
 
   @Get()
@@ -661,6 +663,7 @@ export class ExchangesController {
   async placeOrder(
     @Param('connectionId') connectionId: string,
     @Body() placeOrderDto: PlaceOrderDto,
+    @CurrentUser() user: TokenPayload,
   ) {
     // Check trading permissions
     const permissionCheck = await this.exchangesService.checkTradingPermission(connectionId);
@@ -708,16 +711,48 @@ export class ExchangesController {
       }
     }
 
+    // Record trade fee (fire-and-forget)
+    this.recordTradeFeeForOrder(user.sub, order, placeOrderDto.symbol, placeOrderDto.side);
+
     return {
       success: true,
       data: order,
       ...(ocoInfo && { oco: ocoInfo }),
       ...(ocoError && { ocoError }),
+      fee_preview: {
+        fee_percent: 0.1,
+        fee_amount_usd: order.status === 'FILLED' && order.price > 0
+          ? (order.price * order.quantity * 0.001)
+          : 0,
+      },
       message: ocoError
         ? `Order placed successfully, but OCO order failed: ${ocoError}`
         : 'Order placed successfully',
       last_updated: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Fire-and-forget: record 0.1% trade fee after a filled order.
+   */
+  private recordTradeFeeForOrder(
+    userId: string,
+    order: any,
+    symbol: string,
+    side: string,
+  ): void {
+    if (order.status !== 'FILLED' || !order.price || !order.quantity) return;
+    const tradeValueUsd = order.price * order.quantity;
+    this.tradeFeesService
+      .recordTradeFee({
+        userId,
+        tradeReferenceId: order.orderId,
+        assetSymbol: symbol,
+        tradeSide: side,
+        tradeValueUsd,
+        source: symbol.includes('USDT') ? 'top_trade_crypto' : 'top_trade_stock',
+      })
+      .catch((err) => this.logger.warn(`Fee recording failed: ${err.message}`));
   }
 
   @Get('connections/:connectionId/coin/:symbol')
