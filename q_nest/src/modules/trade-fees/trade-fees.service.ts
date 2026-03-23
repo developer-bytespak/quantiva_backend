@@ -181,7 +181,7 @@ export class TradeFeesService {
       ]);
 
       this.logger.log(
-        `Invoice ${invoice.id} created for user ${userId}: $${totalFees.toFixed(2)} — ${isPaid ? 'paid' : 'invoiced'}`,
+        `Invoice ${invoice.id} created for user ${userId}: $${totalFees.toFixed(5)} — ${isPaid ? 'paid' : 'invoiced'}`,
       );
     } catch (err: any) {
       this.logger.error(`Failed to invoice user ${userId}: ${err.message}`);
@@ -301,6 +301,32 @@ export class TradeFeesService {
         status: s.status.toUpperCase(),
         paid_at: s.paid_at,
       })),
+    };
+  }
+
+  // ─── API: Outstanding fees (used before cancellation) ──────────────
+
+  async getOutstandingFees(userId: string) {
+    const billingMonth = this.currentBillingMonth();
+    const summary = await this.prisma.monthly_fee_summaries.findUnique({
+      where: { user_id_billing_month: { user_id: userId, billing_month: billingMonth } },
+    });
+
+    const totalFees = Number(summary?.total_fees_usd ?? 0);
+    const hasOutstanding = summary?.status === 'accumulating' && totalFees >= MIN_INVOICE_AMOUNT;
+
+    return {
+      has_outstanding: hasOutstanding,
+      billing_month: billingMonth,
+      total_trades: summary?.total_trades ?? 0,
+      total_fees_usd: totalFees,
+      min_invoice_amount: MIN_INVOICE_AMOUNT,
+      will_be_charged: hasOutstanding,
+      message: hasOutstanding
+        ? `You have $${totalFees.toFixed(4)} in accumulated trade fees for ${billingMonth} that will be charged to your card upon cancellation.`
+        : totalFees > 0 && totalFees < MIN_INVOICE_AMOUNT
+          ? `You have $${totalFees.toFixed(4)} in trade fees, but it's below the $${MIN_INVOICE_AMOUNT.toFixed(2)} minimum — it will be waived.`
+          : 'No outstanding trade fees.',
     };
   }
 

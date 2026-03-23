@@ -21,6 +21,13 @@ export class TradeFeesController {
     return this.tradeFeesService.getUserFeeHistory(userId, limit ? parseInt(limit, 10) : 6);
   }
 
+  /** Outstanding fees check (used before cancellation) */
+  @Get('outstanding')
+  async getOutstanding(@Req() req: any) {
+    const userId = req.user?.sub ?? req.subscriptionUser?.user_id;
+    return this.tradeFeesService.getOutstandingFees(userId);
+  }
+
   /** Fee preview calculator */
   @Get('preview')
   getPreview(@Query('trade_value') tradeValue: string) {
