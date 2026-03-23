@@ -643,15 +643,36 @@ export class AuthService {
       );
     }
 
-    // Step 5: Check VC Pool participation (memberships, reservations, payments)
+    // Step 5: Check VC Pool participation (only block for active/open/full pools)
+    // Completed and cancelled pools should not block account deletion
+    const activePoolStatuses = ['open', 'full', 'active'];
+
     const [
       vcPoolMembershipsCount,
       vcPoolSeatReservationsCount,
       vcPoolPaymentSubmissionsCount,
     ] = await Promise.all([
-      this.prisma.vc_pool_members.count({ where: { user_id: userId } }),
-      this.prisma.vc_pool_seat_reservations.count({ where: { user_id: userId } }),
-      this.prisma.vc_pool_payment_submissions.count({ where: { user_id: userId } }),
+      this.prisma.vc_pool_members.count({
+        where: {
+          user_id: userId,
+          is_active: true,
+          pool: { status: { in: activePoolStatuses } },
+        },
+      }),
+      this.prisma.vc_pool_seat_reservations.count({
+        where: {
+          user_id: userId,
+          status: { in: ['reserved', 'pending_payment'] },
+          pool: { status: { in: activePoolStatuses } },
+        },
+      }),
+      this.prisma.vc_pool_payment_submissions.count({
+        where: {
+          user_id: userId,
+          status: 'pending',
+          pool: { status: { in: activePoolStatuses } },
+        },
+      }),
     ]);
 
     if (
@@ -660,8 +681,8 @@ export class AuthService {
       vcPoolPaymentSubmissionsCount > 0
     ) {
       throw new BadRequestException(
-        'Cannot delete account: your profile is linked to one or more VC pools. ' +
-          'Please exit or cancel all VC pool participation before deleting your account.',
+        'Cannot delete account: your profile is linked to one or more active VC pools. ' +
+          'Please exit or cancel all active VC pool participation before deleting your account.',
       );
     }
 
