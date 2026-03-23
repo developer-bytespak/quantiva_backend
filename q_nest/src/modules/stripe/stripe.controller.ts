@@ -167,6 +167,7 @@ export class StripeController {
 
 
     if (event.type === 'checkout.session.completed') {
+      this.logger.log('checkout.session.completed received');
       const session = event.data.object as Stripe.Checkout.Session;
 
       const userId = session.client_reference_id;

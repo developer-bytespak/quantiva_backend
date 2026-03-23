@@ -9,6 +9,7 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
@@ -172,6 +173,9 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
+    if (!body.idToken || typeof body.idToken !== 'string') {
+      throw new BadRequestException('Google ID token is required');
+    }
     const ipAddress = req.ip || req.socket.remoteAddress;
     const deviceId = req.headers['x-device-id'] as string;
     const result = await this.authService.loginWithGoogle(body.idToken, ipAddress, deviceId);
@@ -199,6 +203,9 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
+    if (!body.idToken || typeof body.idToken !== 'string') {
+      throw new BadRequestException('Google ID token is required');
+    }
     const ipAddress = req.ip || req.socket.remoteAddress;
     const deviceId = req.headers['x-device-id'] as string;
     const result = await this.authService.signupWithGoogle(body.idToken, ipAddress, deviceId);
