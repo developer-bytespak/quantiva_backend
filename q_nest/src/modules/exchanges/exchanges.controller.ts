@@ -912,7 +912,7 @@ export class ExchangesController {
       const topPositions = Array.isArray(positions) ? (positions as any[]).slice(0, 10) : [];
       
       // For crypto exchanges, append USDT to symbols. For stocks (Alpaca), use symbol as-is
-      const isCryptoExchange = exchangeName === 'binance' || exchangeName === 'bybit';
+      const isCryptoExchange = exchangeName === 'binance' || exchangeName === 'bybit' || exchangeName === 'binance.us' || exchangeName === 'binanceus';
       const assetType = isCryptoExchange ? 'crypto' : 'stock';
       
       const positionSymbols = new Set(topPositions.map((p) => 

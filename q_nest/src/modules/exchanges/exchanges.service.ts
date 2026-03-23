@@ -451,6 +451,7 @@ export class ExchangesService {
     // Get the appropriate exchange service
     const exchangeName = connection.exchange.name.toLowerCase();
     const isBinance = exchangeName === 'binance';
+    const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus';
     const isBybit = exchangeName === 'bybit';
     const isAlpaca = exchangeName === 'alpaca';
 
@@ -473,6 +474,19 @@ export class ExchangesService {
 
         // Portfolio is calculated from positions
         portfolio = this.binanceService.calculatePortfolioFromPositions(positions);
+      } else if (isBinanceUS) {
+        // OPTIMIZATION: Fetch account info once and reuse it
+        const accountInfo = await this.binanceUSService.getAccountInfo(apiKey, apiSecret);
+
+        // Fetch balance, positions, and orders in parallel
+        [balance, positions, orders] = await Promise.all([
+          Promise.resolve(this.binanceUSService.mapAccountToBalance(accountInfo)),
+          this.binanceUSService.getPositionsFromAccount(apiKey, apiSecret, accountInfo),
+          this.binanceUSService.getOpenOrders(apiKey, apiSecret),
+        ]);
+
+        // Portfolio is calculated from positions
+        portfolio = this.binanceUSService.calculatePortfolioFromPositions(positions);
       } else if (isBybit) {
         // OPTIMIZATION: Fetch account info once and reuse it
         const accountInfo = await this.bybitService.getAccountInfo(apiKey, apiSecret);
