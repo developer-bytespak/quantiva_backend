@@ -5,6 +5,7 @@ import { PaperTradingController } from './paper-trading.controller';
 import { ExchangesService } from './exchanges.service';
 import { EncryptionService } from './services/encryption.service';
 import { BinanceService } from './integrations/binance.service';
+import { BinanceUSService } from './integrations/binance-us.service';
 import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
@@ -33,6 +34,7 @@ import { BinanceModule } from '../binance/binance.module';
     ExchangesService,
     EncryptionService,
     BinanceService,
+    BinanceUSService,
     BybitService,
     AlpacaService,
     CacheService,
@@ -43,7 +45,8 @@ import { BinanceModule } from '../binance/binance.module';
   exports: [
     ExchangesService, 
     EncryptionService, 
-    BinanceService, 
+    BinanceService,
+    BinanceUSService,
     BybitService, 
     AlpacaService,
     CacheService,
