@@ -71,10 +71,10 @@ export class AutoTradingExecutionService {
       // Add AI training messages for visual effect
       this.sessionService.addRandomTrainingMessages(3);
 
-      // Get current balance
+      // Get current available cash
       const balance = await this.getCurrentBalance();
       if (!this.sessionService.updateBalance(balance)) {
-        return { success: false, tradesExecuted: 0, errors: ['Balance below threshold'] };
+        return { success: false, tradesExecuted: 0, errors: ['Cash below threshold'] };
       }
 
       // Refresh caches if needed
@@ -118,7 +118,7 @@ export class AutoTradingExecutionService {
         }
       }
 
-      // Update balance after trades
+      // Update cash after trades
       const newBalance = await this.getCurrentBalance();
       this.sessionService.updateBalance(newBalance);
 
@@ -285,14 +285,14 @@ export class AutoTradingExecutionService {
   }
 
   /**
-   * Get current account balance
+   * Get current available cash
    */
   private async getCurrentBalance(): Promise<number> {
     try {
       const account = await this.alpacaService.getAccount();
-      return parseFloat(account.portfolio_value) || 0;
+      return parseFloat(account.cash) || 0;
     } catch (error) {
-      this.logger.error('Failed to get account balance');
+      this.logger.error('Failed to get account cash');
       return 0;
     }
   }

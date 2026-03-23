@@ -12,6 +12,7 @@ import { ExchangesModule } from './modules/exchanges/exchanges.module';
 import { BinanceTestnetModule } from './modules/binance-testnet/binance-testnet.module';
 import { AlpacaPaperTradingModule } from './modules/alpaca-paper-trading/alpaca-paper-trading.module';
 import { BinanceTradingModule } from './modules/binance-trading/binance-trading.module';
+import { AlpacaTradingModule } from './modules/alpaca-trading/alpaca-trading.module';
 import { UsersModule } from './modules/users/users.module';
 import { NewsModule } from './modules/news/news.module';
 import { MacroModule } from './modules/macro/macro.module';
@@ -45,6 +46,7 @@ import { GatewaysModule } from './gateways/gateways.module';
     BinanceTestnetModule,
     AlpacaPaperTradingModule,
     BinanceTradingModule,
+    AlpacaTradingModule,
     UsersModule,
     NewsModule,
     MacroModule,
