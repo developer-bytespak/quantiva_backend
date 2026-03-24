@@ -17,3 +17,5 @@ export default registerAs('jwt', () => ({
     process.env.NODE_ENV === 'production',
   };
 });
+  };
+});
