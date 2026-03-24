@@ -15,7 +15,4 @@ export default registerAs('jwt', () => ({
   useCrossOriginCookies:
     process.env.USE_CROSS_ORIGIN_COOKIES === 'true' ||
     process.env.NODE_ENV === 'production',
-  };
-});
-  };
-});
+}));
