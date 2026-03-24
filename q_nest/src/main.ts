@@ -3,6 +3,7 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import cookieParser from 'cookie-parser';
 import compression from 'compression';
+import helmet from 'helmet';
 import { PreBuiltSignalsCronjobService } from './modules/strategies/services/pre-built-signals-cronjob.service';
 import { json, urlencoded } from 'express';
 import { CustomIoAdapter } from './adapters/custom-io.adapter';
@@ -68,11 +69,11 @@ async function bootstrap() {
       if (!origin) return callback(null, true);
       // If origin exactly matches an allowed origin, allow it
       if (allowedOrigins.has(origin)) return callback(null, true);
-      // Allow Vercel preview/deploy domains (they vary per preview deployment).
-      // This accepts any origin that ends with .vercel.app (e.g. preview deploys).
+      // Allow Vercel preview/deploy domains — restricted to this project's pattern only.
+      // Accepting all *.vercel.app would let any Vercel-hosted site make authenticated requests.
       try {
         const lower = String(origin).toLowerCase();
-        if (lower.endsWith('.vercel.app')) return callback(null, true);
+        if (/^https:\/\/quantiva[\w-]*\.vercel\.app$/.test(lower)) return callback(null, true);
       } catch (err) {
         // ignore and continue to deny
       }
@@ -101,6 +102,12 @@ async function bootstrap() {
   // Cookie parser middleware
   app.use(cookieParser());
 
+  // Security headers via helmet (CSP disabled — frontend handles it)
+  app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  }));
+
   // Global validation pipe
   app.useGlobalPipes(
     new ValidationPipe({
@@ -120,8 +127,7 @@ async function bootstrap() {
   const port = process.env.PORT || 3000;
   await app.listen(port, '0.0.0.0');
 
-  // Increase server timeout for long-running preview requests (5 minutes)
-  // Preview can take 2-3 minutes with 20 assets, so we set timeout to 5 minutes
+  // Server timeout for long-running requests
   const httpServer = app.getHttpServer();
   httpServer.timeout = 300000; // 5 minutes in milliseconds
   

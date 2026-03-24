@@ -23,8 +23,6 @@ export class StripeService {
     metadata?: Record<string, string>;
   }) {
     try {
-      console.log('PARAMS', params);
-
       const session = await this.stripe.checkout.sessions.create({
         mode: 'subscription',
         payment_method_types: ['card'],
@@ -40,7 +38,6 @@ export class StripeService {
         metadata: params.metadata,
       });
 
-      console.log('DONE', session);
       return session;
     } catch (error) {
       console.error('STRIPE ERROR ❌', error);

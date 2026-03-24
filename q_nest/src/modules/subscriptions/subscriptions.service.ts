@@ -670,9 +670,6 @@ export class SubscriptionsService {
       });
 
 
-      console.log("updated",updated)
-
-
       const notification = await this.notificationsService.createNotification({user_id: currentSubscription.user_id, type: "subscription_updated",title:"Subscription Updated",message:"Your subscription has been updated",read:false,metadata:null});
       this.notificationsService.sendNotification(currentSubscription.user_id, "Subscription Updated", "Your subscription has been updated");
       this.appGateway.emitNotificationCount(currentSubscription.user_id, 1, notification); // notification count increment by 1
@@ -755,7 +752,6 @@ export class SubscriptionsService {
     receipt_url?: string | null;
     failure_reason?: string | null;
   }) {
-    console.log("data recordPayment",data)
     return this.prisma.payment_history.create({
       data: {
         ...data,
@@ -827,15 +823,12 @@ export class SubscriptionsService {
   }
 
   async handleStripeSubscriptionCancelled(stripeSubscriptionId: string, stripeCurrentPeriodEnd?: Date | null) {
-    console.log("stripeSubscriptionId",stripeSubscriptionId)
     const existing = await this.prisma.user_subscriptions.findFirst({
       where: {
         billing_provider: 'stripe',
         external_id:stripeSubscriptionId
       },
     });
-
-    console.log("existing--1",existing)
 
     if (!existing) {
       return null;
@@ -844,8 +837,6 @@ export class SubscriptionsService {
     if (existing.status === SubscriptionStatus.cancelled) {
       return existing;
     }
-
-    console.log("existing--",existing)
 
     const now = new Date();
     const finalPeriodEnd =
@@ -905,8 +896,6 @@ export class SubscriptionsService {
         user_id: userId,
       },
     });
-    console.log("anyPlan",anyPlan)
-
     let hasPlan: boolean = false;
     if (anyPlan) {
       hasPlan = true;
@@ -1191,13 +1180,10 @@ export class SubscriptionsService {
     auto_renew?: boolean;
   }) {
    try {
-    console.log("edit",data)
     return this.prisma.$transaction(async (tx) => {
       const plan = await tx.subscription_plans.findFirst({
         where: { tier: data.plan_id as PlanTier },
       });
-
-      console.log("planed",plan)
       if (!plan) {
         throw new Error('Plan not found');
       }
@@ -1221,7 +1207,6 @@ export class SubscriptionsService {
       return subscription;
     }, { timeout: 30000 });
    } catch (error) {
-    console.log("error--->",error)
     throw new Error('Failed to create subscription');
    }
   }

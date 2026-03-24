@@ -420,9 +420,7 @@ export class AuthService {
   async signupWithGoogle(idToken: string, ipAddress?: string, deviceId?: string) {
     const { email, picture } = await this.verifyGoogleIdToken(idToken);
     let user = await this.prisma.users.findUnique({ where: { email } });
-    console.log("user", user);
     if (user) {
-      console.log("user already exists");
       throw new ConflictException('Account already exists. Please login.');
     }
     const local = email.split('@')[0].replace(/[^a-zA-Z0-9_\-\.]/g, '');
@@ -974,19 +972,6 @@ export class AuthService {
       }
     }
 
-    // Log final deletion summary
-    console.log(`[ACCOUNT_DELETION] Account deleted successfully`, {
-      user_id: userId,
-      email: user.email,
-      username: user.username,
-      kyc_status: user.kyc_status,
-      reason: deleteAccountDto.reason || 'No reason provided',
-      database_entities_deleted: deletionSummary.entities_deleted,
-      cloud_files_deleted: cloudFilesDeleted,
-      cloud_files_failed: cloudFilesFailed,
-      deleted_at: deletionSummary.deleted_at,
-    });
-
     return {
       message: 'Account deleted successfully',
       summary: {
@@ -1021,39 +1006,41 @@ export class AuthService {
 
   async forgotPassword(email: string) {
     const user = await this.prisma.users.findUnique({ where: { email } });
-    if (!user) {
-      throw new UnauthorizedException('User not found');
-    }
-    if(user.password_hash === null) {
-      throw new UnauthorizedException('Password is not set. Please use Google login');
+    // Return same message regardless of whether user exists to prevent email enumeration
+    if (!user || user.password_hash === null) {
+      return { message: 'If an account with that email exists, a verification code has been sent' };
     }
 
     const code = await this.twoFactorService.generateCode(user.user_id, 'password_reset');
     await this.twoFactorService.sendCodeByEmail(user.email, code);
     return {
-      message: '2FA code sent to your email',
-      code,
+      message: 'If an account with that email exists, a verification code has been sent',
     }
   }
 
   async verifyOtp(email: string, code: string) {
     const user = await this.prisma.users.findUnique({ where: { email } });
     if (!user) {
-      throw new UnauthorizedException('User not found');
+      throw new UnauthorizedException('Invalid or expired OTP');
     }
     const isValid = await this.twoFactorService.validateCode(user.user_id, code, 'password_reset');
     if (!isValid) {
-      throw new UnauthorizedException('Invalid OTP');
+      throw new UnauthorizedException('Invalid or expired OTP');
     }
+    // Generate a short-lived reset token that must be presented to resetPassword
+    const resetToken = await this.tokenService.generatePasswordResetToken(user.user_id);
     return {
       message: 'OTP verified successfully',
+      resetToken,
     }
   }
 
-  async resetPassword(email: string, newPassword: string) {
-    const user = await this.prisma.users.findUnique({ where: { email } });
+  async resetPassword(resetToken: string, newPassword: string) {
+    // Verify the reset token — this ensures the caller went through OTP verification
+    const userId = await this.tokenService.verifyPasswordResetToken(resetToken);
+    const user = await this.prisma.users.findUnique({ where: { user_id: userId } });
     if (!user) {
-      throw new UnauthorizedException('User not found');
+      throw new UnauthorizedException('Invalid or expired reset token');
     }
     const passwordHash = await bcrypt.hash(newPassword, 10);
     await this.prisma.users.update({ where: { user_id: user.user_id }, data: { password_hash: passwordHash } });

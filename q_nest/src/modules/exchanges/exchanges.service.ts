@@ -565,7 +565,6 @@ export class ExchangesService {
         portfolio = this.bybitService.calculatePortfolioFromPositions(positions);
       } else if (isAlpaca) {
         // Alpaca: fetch account info, positions and orders
-        console.log(`[SYNC] Syncing Alpaca connection ${connectionId}, API Key starts with: ${apiKey.substring(0, 2)}...`);
         const accountInfo = await this.alpacaService.getAccountInfo(apiKey, apiSecret);
         const positionsRaw = await this.alpacaService.getPositions(apiKey, apiSecret);
         const ordersRaw = await this.alpacaService.getOrders(apiKey, apiSecret);

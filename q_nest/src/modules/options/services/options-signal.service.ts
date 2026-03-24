@@ -55,7 +55,10 @@ export class OptionsSignalService {
         spot_price: spotPrice ?? null,
         price_data: priceData ?? null,
       },
-      { timeout: 30_000 },
+      {
+        timeout: 30_000,
+        headers: { 'X-Internal-Api-Key': process.env.INTERNAL_API_KEY },
+      },
     );
 
     if (!data.signals || !Array.isArray(data.signals)) return;

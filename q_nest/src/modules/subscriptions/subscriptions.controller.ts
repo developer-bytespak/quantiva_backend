@@ -42,8 +42,6 @@ export class SubscriptionsController {
     const id =  req.subscriptionUser?.subscription_id;
     const tier = req.subscriptionUser?.tier;
 
-    console.log("id and tier",id, tier)
-
     if(!id) {
       throw new BadRequestException('Subscription ID is required to update subscription');
     }
@@ -54,8 +52,6 @@ export class SubscriptionsController {
         'Cancel your current subscription.',
       );
     }
-
-    console.log("updateSubscriptionDto", updateSubscriptionDto);
 
     return this.subscriptionsService.updateSubscription(id, updateSubscriptionDto);
   }
@@ -106,7 +102,6 @@ export class SubscriptionsController {
 
   @Post("subscribe")
   createSubscription(@Body() createSubscriptionDto: any, @Req() req: any) {
-    console.log("createSubscriptionDto",createSubscriptionDto)
     const userId = req.subscriptionUser?.user_id;
     if (!userId) {
       throw new UnauthorizedException('User not authenticated');

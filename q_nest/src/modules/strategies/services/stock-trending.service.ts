@@ -166,6 +166,7 @@ export class StockTrendingService {
         {
           params: { limit: 50 },
           timeout: 90000, // 90 seconds - Finnhub can be slow
+          headers: { 'X-Internal-Api-Key': process.env.INTERNAL_API_KEY },
         }
       );
 
