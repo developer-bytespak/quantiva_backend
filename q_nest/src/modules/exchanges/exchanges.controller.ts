@@ -24,6 +24,7 @@ import { CreateConnectionDto } from './dto/create-connection.dto';
 import { UpdateConnectionDto } from './dto/update-connection.dto';
 import { PlaceOrderDto } from './dto/place-order.dto';
 import { BinanceService } from './integrations/binance.service';
+import { BinanceUSService } from './integrations/binance-us.service';
 import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
@@ -35,6 +36,7 @@ import { ForbiddenException } from '@nestjs/common';
 import { MarketService } from '../market/market.service';
 import { MarketStocksDbService } from '../stocks-market/services/market-stocks-db.service';
 import { FmpService } from '../stocks-market/services/fmp.service';
+import { TradeFeesService } from '../trade-fees/trade-fees.service';
 
 /**
  * Exchanges Controller
@@ -60,6 +62,7 @@ export class ExchangesController {
   constructor(
     private readonly exchangesService: ExchangesService,
     private readonly binanceService: BinanceService,
+    private readonly binanceUSService: BinanceUSService,
     private readonly bybitService: BybitService,
     private readonly alpacaService: AlpacaService,
     private readonly cacheService: CacheService,
@@ -67,6 +70,7 @@ export class ExchangesController {
     private readonly marketDetailAggregator: MarketDetailAggregatorService,
     private readonly marketStocksDbService: MarketStocksDbService,
     private readonly fmpService: FmpService,
+    private readonly tradeFeesService: TradeFeesService,
   ) {}
 
   @Get()
@@ -205,8 +209,14 @@ export class ExchangesController {
       // Verify credentials with the exchange before creating connection
       let verification;
       const exchangeName = exchange.name.toLowerCase();
-      
-      if (exchangeName.includes('binance')) {
+      const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus';
+
+      if (isBinanceUS) {
+        verification = await this.binanceUSService.verifyApiKey(
+          createConnectionDto.api_key,
+          createConnectionDto.api_secret,
+        );
+      } else if (exchangeName.includes('binance')) {
         verification = await this.binanceService.verifyApiKey(
           createConnectionDto.api_key,
           createConnectionDto.api_secret,
@@ -653,6 +663,7 @@ export class ExchangesController {
   async placeOrder(
     @Param('connectionId') connectionId: string,
     @Body() placeOrderDto: PlaceOrderDto,
+    @CurrentUser() user: TokenPayload,
   ) {
     // Check trading permissions
     const permissionCheck = await this.exchangesService.checkTradingPermission(connectionId);
@@ -700,16 +711,48 @@ export class ExchangesController {
       }
     }
 
+    // Record trade fee (fire-and-forget)
+    this.recordTradeFeeForOrder(user.sub, order, placeOrderDto.symbol, placeOrderDto.side);
+
     return {
       success: true,
       data: order,
       ...(ocoInfo && { oco: ocoInfo }),
       ...(ocoError && { ocoError }),
+      fee_preview: {
+        fee_percent: 0.1,
+        fee_amount_usd: order.status === 'FILLED' && order.price > 0
+          ? (order.price * order.quantity * 0.001)
+          : 0,
+      },
       message: ocoError
         ? `Order placed successfully, but OCO order failed: ${ocoError}`
         : 'Order placed successfully',
       last_updated: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Fire-and-forget: record 0.1% trade fee after a filled order.
+   */
+  private recordTradeFeeForOrder(
+    userId: string,
+    order: any,
+    symbol: string,
+    side: string,
+  ): void {
+    if (order.status !== 'FILLED' || !order.price || !order.quantity) return;
+    const tradeValueUsd = order.price * order.quantity;
+    this.tradeFeesService
+      .recordTradeFee({
+        userId,
+        tradeReferenceId: order.orderId,
+        assetSymbol: symbol,
+        tradeSide: side,
+        tradeValueUsd,
+        source: symbol.includes('USDT') ? 'top_trade_crypto' : 'top_trade_stock',
+      })
+      .catch((err) => this.logger.warn(`Fee recording failed: ${err.message}`));
   }
 
   @Get('connections/:connectionId/coin/:symbol')
@@ -1186,7 +1229,7 @@ export class ExchangesController {
       const topPositions = Array.isArray(positions) ? (positions as any[]).slice(0, 10) : [];
       
       // For crypto exchanges, append USDT to symbols. For stocks (Alpaca), use symbol as-is
-      const isCryptoExchange = exchangeName === 'binance' || exchangeName === 'bybit';
+      const isCryptoExchange = exchangeName === 'binance' || exchangeName === 'bybit' || exchangeName === 'binance.us' || exchangeName === 'binanceus';
       const assetType = isCryptoExchange ? 'crypto' : 'stock';
       
       const positionSymbols = new Set(topPositions.map((p) => 

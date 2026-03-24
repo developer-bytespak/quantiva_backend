@@ -5,6 +5,7 @@ import { PaperTradingController } from './paper-trading.controller';
 import { ExchangesService } from './exchanges.service';
 import { EncryptionService } from './services/encryption.service';
 import { BinanceService } from './integrations/binance.service';
+import { BinanceUSService } from './integrations/binance-us.service';
 import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
@@ -17,6 +18,7 @@ import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 import { MarketModule } from '../market/market.module';
 import { StocksMarketModule } from '../stocks-market/stocks-market.module';
 import { BinanceModule } from '../binance/binance.module';
+import { TradeFeesModule } from '../trade-fees/trade-fees.module';
 
 @Module({
   imports: [
@@ -27,12 +29,14 @@ import { BinanceModule } from '../binance/binance.module';
     forwardRef(() => MarketModule),
     StocksMarketModule,
     BinanceModule,
+    TradeFeesModule,
   ],
   controllers: [ExchangesController, /* Health endpoint for paper trading */ PaperTradingController],
   providers: [
     ExchangesService,
     EncryptionService,
     BinanceService,
+    BinanceUSService,
     BybitService,
     AlpacaService,
     CacheService,
@@ -43,7 +47,8 @@ import { BinanceModule } from '../binance/binance.module';
   exports: [
     ExchangesService, 
     EncryptionService, 
-    BinanceService, 
+    BinanceService,
+    BinanceUSService,
     BybitService, 
     AlpacaService,
     CacheService,

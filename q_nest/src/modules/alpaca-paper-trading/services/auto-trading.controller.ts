@@ -230,13 +230,13 @@ export class AutoTradingController {
 
       // Get current balance from Alpaca
       const balance = await this.alpacaService.getAccountBalance();
-      const startingBalance = balance.equity;
+        const startingBalance = balance.cash;
 
-      // Check minimum balance
-      if (startingBalance < 10000) {
+        // Check minimum cash threshold
+        if (startingBalance < 1000) {
         return {
           success: false,
-          message: `Balance $${startingBalance.toFixed(2)} is below minimum $10,000 threshold`,
+            message: `Cash $${startingBalance.toFixed(2)} is below minimum $1,000 threshold`,
           data: { currentBalance: startingBalance },
         };
       }
@@ -244,7 +244,7 @@ export class AutoTradingController {
       // Start the session
       this.sessionService.startSession(startingBalance);
 
-      this.logger.log(`Auto trading started with balance: $${startingBalance}`);
+      this.logger.log(`Auto trading started with cash: $${startingBalance}`);
 
       return {
         success: true,
