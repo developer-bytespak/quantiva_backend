@@ -1,7 +1,11 @@
 import { registerAs } from '@nestjs/config';
 
 export default registerAs('jwt', () => ({
-  secret: process.env.JWT_SECRET || 'your-secret-key-change-in-production',
+  secret: (() => {
+    const secret = process.env.JWT_SECRET;
+    if (!secret) throw new Error('JWT_SECRET environment variable is required');
+    return secret;
+  })(),
   accessTokenExpiry: process.env.JWT_ACCESS_EXPIRY || '45m',
   refreshTokenExpiry: process.env.JWT_REFRESH_EXPIRY || '7d',
   cookieDomain: process.env.COOKIE_DOMAIN,
@@ -11,4 +15,7 @@ export default registerAs('jwt', () => ({
   useCrossOriginCookies:
     process.env.USE_CROSS_ORIGIN_COOKIES === 'true' ||
     process.env.NODE_ENV === 'production',
-}));
+  };
+});
+  };
+});

@@ -163,13 +163,10 @@ export class AlpacaService {
     const isPaperKey = keyToUse?.startsWith('PK');
     const client = isPaperKey ? this.paperApiClient : this.apiClient;
     
-    console.log(`[ALPACA] Fetching account info using ${isPaperKey ? 'paper' : 'live'} endpoint (key: ${keyToUse?.substring(0, 2)}...)`);
-    
     try {
       const res = await client.get('/v2/account', {
         headers: this.getAuthHeaders(apiKey, apiSecret),
       });
-      console.log(`[ALPACA] Account info fetched successfully`);
       return res.data;
     } catch (error: any) {
       console.error(`[ALPACA] getAccountInfo FAILED: Status ${error?.response?.status}, Data:`, error?.response?.data);

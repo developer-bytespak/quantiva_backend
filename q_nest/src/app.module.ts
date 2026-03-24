@@ -1,4 +1,6 @@
 import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from './prisma/prisma.module';
 import { ConfigModule } from './config/config.module';
@@ -39,6 +41,10 @@ import { TradeFeesModule } from './modules/trade-fees/trade-fees.module';
     PrismaModule,
     GatewaysModule,
     ScheduleModule.forRoot(),
+    ThrottlerModule.forRoot([{
+      ttl: 60000,  // 1-minute window
+      limit: 30,   // 30 requests per minute per IP (general)
+    }]),
     AuthModule,
     AdminAuthModule,
 
@@ -66,7 +72,11 @@ import { TradeFeesModule } from './modules/trade-fees/trade-fees.module';
     BinanceModule,
   ],
   controllers: [],
-  providers: [AccountStreamGateway, MarketDetailGateway],
+  providers: [
+    AccountStreamGateway,
+    MarketDetailGateway,
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+  ],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

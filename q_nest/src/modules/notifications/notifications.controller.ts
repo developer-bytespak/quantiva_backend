@@ -41,7 +41,6 @@ export class NotificationsController {
 
   @Delete('delete')
   async deleteAllNotifications(@Req() req: any) {
-    console.log("req-->",req)
     const userId = req.subscriptionUser?.user_id;
     return this.notificationsService.deleteAllNotifications(userId);
   }
