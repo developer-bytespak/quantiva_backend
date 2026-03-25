@@ -25,13 +25,13 @@ export class BinanceRateLimitException extends HttpException {
 }
 
 export class BinanceApiException extends HttpException {
-  constructor(message: string, code?: string) {
+  constructor(message: string, code?: string, status: HttpStatus = HttpStatus.BAD_GATEWAY) {
     super(
       {
         code: code || 'BINANCE_API_ERROR',
         message,
       },
-      HttpStatus.BAD_GATEWAY,
+      status,
     );
   }
 }
