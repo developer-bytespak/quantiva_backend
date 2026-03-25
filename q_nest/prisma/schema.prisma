@@ -56,7 +56,7 @@ model users {
   options_positions options_positions[]
 
   // Trade fees monetization
-  stripe_customer_id    String?                @db.VarChar(255)
+  stripe_customer_id    String?                 @db.VarChar(255)
   trade_fees            trade_fees[]
   monthly_fee_summaries monthly_fee_summaries[]
 
@@ -1630,21 +1630,21 @@ model options_signals_ai {
 // ─── Trade Fees Monetization ─────────────────────────────────────────
 
 model trade_fees {
-  fee_id               String         @id @default(uuid()) @db.Uuid
-  user_id              String         @db.Uuid
-  trade_reference_id   String?        @db.VarChar(255)
-  asset_symbol         String         @db.VarChar(50)
-  trade_side           String         @db.VarChar(10)
-  trade_value_usd      Decimal        @db.Decimal(18, 4)
-  fee_percent          Decimal        @default(0.001) @db.Decimal(8, 6)
-  fee_amount_usd       Decimal        @db.Decimal(18, 6)
-  status               TradeFeeStatus @default(pending)
-  source               TradeFeeSource @default(top_trade_crypto)
-  billing_month        String         @db.VarChar(7)
-  stripe_invoice_item_id String?      @db.VarChar(255)
-  created_at           DateTime       @default(now()) @db.Timestamp(6)
+  fee_id                 String         @id @default(uuid()) @db.Uuid
+  user_id                String         @db.Uuid
+  trade_reference_id     String?        @db.VarChar(255)
+  asset_symbol           String         @db.VarChar(50)
+  trade_side             String         @db.VarChar(10)
+  trade_value_usd        Decimal        @db.Decimal(18, 4)
+  fee_percent            Decimal        @default(0.001) @db.Decimal(8, 6)
+  fee_amount_usd         Decimal        @db.Decimal(18, 6)
+  status                 TradeFeeStatus @default(pending)
+  source                 TradeFeeSource @default(top_trade_crypto)
+  billing_month          String         @db.VarChar(7)
+  stripe_invoice_item_id String?        @db.VarChar(255)
+  created_at             DateTime       @default(now()) @db.Timestamp(6)
 
-  user                 users          @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
 
   @@index([user_id, billing_month])
   @@index([status])
@@ -1652,19 +1652,19 @@ model trade_fees {
 }
 
 model monthly_fee_summaries {
-  summary_id           String          @id @default(uuid()) @db.Uuid
-  user_id              String          @db.Uuid
-  billing_month        String          @db.VarChar(7)
-  total_trades         Int             @default(0)
-  total_trade_volume_usd Decimal       @default(0) @db.Decimal(18, 4)
-  total_fees_usd       Decimal         @default(0) @db.Decimal(18, 6)
-  status               MonthlyFeeStatus @default(accumulating)
-  stripe_invoice_id    String?         @db.VarChar(255)
-  paid_at              DateTime?       @db.Timestamp(6)
-  created_at           DateTime        @default(now()) @db.Timestamp(6)
-  updated_at           DateTime?       @updatedAt @db.Timestamp(6)
+  summary_id             String           @id @default(uuid()) @db.Uuid
+  user_id                String           @db.Uuid
+  billing_month          String           @db.VarChar(7)
+  total_trades           Int              @default(0)
+  total_trade_volume_usd Decimal          @default(0) @db.Decimal(18, 4)
+  total_fees_usd         Decimal          @default(0) @db.Decimal(18, 6)
+  status                 MonthlyFeeStatus @default(accumulating)
+  stripe_invoice_id      String?          @db.VarChar(255)
+  paid_at                DateTime?        @db.Timestamp(6)
+  created_at             DateTime         @default(now()) @db.Timestamp(6)
+  updated_at             DateTime?        @updatedAt @db.Timestamp(6)
 
-  user                 users           @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
 
   @@unique([user_id, billing_month])
   @@index([status])
