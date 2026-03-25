@@ -330,17 +330,22 @@ export class AuthController {
 
     // If user is authenticated via cookies/JWT, try to delete their session server-side.
     if (effectiveUser && effectiveUser.sub) {
+      console.log(`[LOGOUT] User ${effectiveUser.sub}, Session ID: ${effectiveUser.session_id}`);
       let sessionDeleted = false;
 
       // Delete the specific session directly using session_id from JWT payload
       // This is much more efficient than matching refresh tokens
       if (effectiveUser.session_id) {
         try {
+          console.log(`[LOGOUT] Deleting session: ${effectiveUser.session_id}`);
           sessionDeleted = await this.sessionService.deleteSession(effectiveUser.session_id);
+          console.log(`[LOGOUT] Session deleted: ${sessionDeleted}`);
         } catch (error) {
           // Log error but continue with logout to clear cookies
           console.error('Error deleting session during logout:', error);
         }
+      } else {
+        console.warn(`[LOGOUT] No session_id in token for user ${effectiveUser.sub}`);
       }
 
       // If session_id delete didn't work, try fallback with refresh token
