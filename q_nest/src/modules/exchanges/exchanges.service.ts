@@ -601,6 +601,28 @@ export class ExchangesService {
 
         if (ordersResult.status === 'fulfilled') {
           orders = ordersResult.value;
+
+          // Binance US often has no open orders when market buys are instantly filled.
+          // Fallback to recent order history so Action Center can still show activity.
+          if (orders.length === 0) {
+            try {
+              const recentOrders = await this.fetchBinanceUSRecentOrders(
+                apiKey,
+                apiSecret,
+                accountInfo,
+              );
+              if (recentOrders.length > 0) {
+                orders = recentOrders;
+                this.logger.debug(
+                  `Loaded ${recentOrders.length} recent Binance.US orders for ${connectionId} as fallback`,
+                );
+              }
+            } catch (historyError: any) {
+              this.logger.warn(
+                `Binance.US recent orders fallback failed for ${connectionId}: ${historyError?.message ?? historyError}`,
+              );
+            }
+          }
         } else {
           this.logger.warn(
             `Binance.US open orders fetch failed for ${connectionId}, continuing with empty orders: ${ordersResult.reason?.message ?? ordersResult.reason}`,
@@ -749,6 +771,103 @@ export class ExchangesService {
       
       throw error;
     }
+  }
+
+  /**
+   * Binance US fallback: fetch recent historical orders (FILLED/NEW/etc.)
+   * for held assets when open orders are empty.
+   */
+  private async fetchBinanceUSRecentOrders(
+    apiKey: string,
+    apiSecret: string,
+    accountInfo: any,
+  ): Promise<OrderDto[]> {
+    const STABLE_ASSETS = new Set(['USD', 'USDT', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'FDUSD']);
+
+    const heldAssets = Array.from(
+      new Set(
+        (accountInfo?.balances || [])
+          .filter((b: any) => (parseFloat(b?.free || '0') + parseFloat(b?.locked || '0')) > 0)
+          .map((b: any) => String(b?.asset || '').toUpperCase())
+          .filter((asset: string) => asset && !STABLE_ASSETS.has(asset)),
+      ),
+    );
+
+    if (heldAssets.length === 0) {
+      return [];
+    }
+
+    const candidateSymbols = Array.from(
+      new Set(heldAssets.flatMap((asset) => [`${asset}USD`, `${asset}USDT`])),
+    );
+
+    const ordersSettled = await Promise.allSettled(
+      candidateSymbols.map((symbol) =>
+        this.binanceUSService.getAllOrders(apiKey, apiSecret, symbol, { limit: 50 }),
+      ),
+    );
+
+    const tradesSettled = await Promise.allSettled(
+      candidateSymbols.map((symbol) =>
+        this.binanceUSService.getMyTrades(apiKey, apiSecret, symbol, { limit: 50 }),
+      ),
+    );
+
+    const rawOrders: any[] = [];
+    for (const result of ordersSettled) {
+      if (result.status === 'fulfilled' && Array.isArray(result.value)) {
+        rawOrders.push(...result.value);
+      }
+    }
+
+    // Derive FILLED order-like rows from trade history so instantly-filled market orders
+    // can still appear in dashboard activity when open orders are empty.
+    for (const result of tradesSettled) {
+      if (result.status !== 'fulfilled' || !Array.isArray(result.value)) {
+        continue;
+      }
+
+      for (const trade of result.value) {
+        rawOrders.push({
+          orderId: trade?.orderId,
+          symbol: trade?.symbol,
+          side: trade?.isBuyer ? 'BUY' : 'SELL',
+          type: 'MARKET',
+          status: 'FILLED',
+          quantity: trade?.qty,
+          price: trade?.price,
+          time: trade?.time,
+          updateTime: trade?.time,
+        });
+      }
+    }
+
+    if (rawOrders.length === 0) {
+      return [];
+    }
+
+    const unique = new Map<string, any>();
+    for (const order of rawOrders) {
+      const key = `${order?.orderId || ''}:${order?.symbol || ''}`;
+      if (!unique.has(key)) {
+        unique.set(key, order);
+      }
+    }
+
+    return Array.from(unique.values())
+      .map((order: any) => ({
+        orderId: String(order?.orderId || ''),
+        symbol: order?.symbol || '',
+        side: (order?.side === 'SELL' ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
+        type: order?.type || '',
+        quantity: Number(order?.quantity || 0),
+        price: Number(order?.price || 0),
+        status: order?.status || '',
+        time: Number(order?.updateTime || order?.time || Date.now()),
+      }))
+      .filter((order) => order.orderId && order.symbol)
+      .sort((a, b) => b.time - a.time)
+      .slice(0, 50);
   }
 
   /**
