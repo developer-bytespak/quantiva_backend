@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { ExchangeType, ConnectionStatus } from '@prisma/client';
 import { EncryptionService } from './services/encryption.service';
 import { BinanceService } from './integrations/binance.service';
+import { BinanceUSService } from './integrations/binance-us.service';
 import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
@@ -18,8 +19,7 @@ import {
 import { OrderBookDto, RecentTradeDto } from './dto/orderbook.dto';
 
 // Type for exchange services that implement common methods
-// Type for exchange services that implement common methods
-type ExchangeService = BinanceService | BybitService | AlpacaService;
+type ExchangeService = BinanceService | BinanceUSService | BybitService | AlpacaService;
 
 @Injectable()
 export class ExchangesService {
@@ -33,6 +33,7 @@ export class ExchangesService {
     private prisma: PrismaService,
     private encryptionService: EncryptionService,
     private binanceService: BinanceService,
+    private binanceUSService: BinanceUSService,
     private bybitService: BybitService,
     private alpacaService: AlpacaService,
     private cacheService: CacheService,
@@ -78,6 +79,8 @@ export class ExchangesService {
     
     if (normalizedName === 'binance') {
       return this.binanceService;
+    } else if (normalizedName === 'binance.us' || normalizedName === 'binanceus') {
+      return this.binanceUSService;
     } else if (normalizedName === 'bybit') {
       return this.bybitService;
     } else if (normalizedName === 'alpaca') {
@@ -528,6 +531,7 @@ export class ExchangesService {
     // Get the appropriate exchange service
     const exchangeName = connection.exchange.name.toLowerCase();
     const isBinance = exchangeName === 'binance';
+    const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus';
     const isBybit = exchangeName === 'bybit';
     const isAlpaca = exchangeName === 'alpaca';
 
@@ -550,6 +554,19 @@ export class ExchangesService {
 
         // Portfolio is calculated from positions
         portfolio = this.binanceService.calculatePortfolioFromPositions(positions);
+      } else if (isBinanceUS) {
+        // OPTIMIZATION: Fetch account info once and reuse it
+        const accountInfo = await this.binanceUSService.getAccountInfo(apiKey, apiSecret);
+
+        // Fetch balance, positions, and orders in parallel
+        [balance, positions, orders] = await Promise.all([
+          Promise.resolve(this.binanceUSService.mapAccountToBalance(accountInfo)),
+          this.binanceUSService.getPositionsFromAccount(apiKey, apiSecret, accountInfo),
+          this.binanceUSService.getOpenOrders(apiKey, apiSecret),
+        ]);
+
+        // Portfolio is calculated from positions
+        portfolio = this.binanceUSService.calculatePortfolioFromPositions(positions);
       } else if (isBybit) {
         // OPTIMIZATION: Fetch account info once and reuse it
         const accountInfo = await this.bybitService.getAccountInfo(apiKey, apiSecret);
@@ -565,7 +582,6 @@ export class ExchangesService {
         portfolio = this.bybitService.calculatePortfolioFromPositions(positions);
       } else if (isAlpaca) {
         // Alpaca: fetch account info, positions and orders
-        console.log(`[SYNC] Syncing Alpaca connection ${connectionId}, API Key starts with: ${apiKey.substring(0, 2)}...`);
         const accountInfo = await this.alpacaService.getAccountInfo(apiKey, apiSecret);
         const positionsRaw = await this.alpacaService.getPositions(apiKey, apiSecret);
         const ordersRaw = await this.alpacaService.getOrders(apiKey, apiSecret);

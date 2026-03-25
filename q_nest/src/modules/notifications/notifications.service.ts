@@ -21,7 +21,6 @@ export class NotificationsService {
         where: { user_id: userId },
         select: { fcm_token: true },
       });
-      console.log("fcm_token",fcm_token)
       if (!fcm_token?.fcm_token) {
         return { success: false, message: 'FCM token not found for user' };
       }
@@ -29,9 +28,7 @@ export class NotificationsService {
         token: fcm_token.fcm_token,
         notification: { title, body },
       };
-      console.log('message-->', message);
       const messageId = await messaging.send(message);
-      console.log('[NotificationsService] FCM sent successfully, messageId:', messageId);
       return messageId;
     } catch (err: any) {
       const errMsg = err?.message || String(err);
@@ -123,7 +120,6 @@ export class NotificationsService {
   }
 
   async deleteAllNotifications(userId: string) {
-    console.log("userId-->",userId)
     if(!userId) {
       return { success: false, message: 'User ID is required' };
     }

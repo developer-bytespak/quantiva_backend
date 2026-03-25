@@ -63,20 +63,20 @@ export class AutoTradingCronService implements OnModuleInit {
     this.logger.log('✓ Alpaca credentials configured');
     
     const balance = await this.alpacaService.getAccountBalance();
-    const startingBalance = balance.equity;
+    const startingBalance = balance.cash;
     
-    this.logger.log(`Current Alpaca balance: $${startingBalance.toFixed(2)}`);
+    this.logger.log(`Current Alpaca cash: $${startingBalance.toFixed(2)}`);
 
-    // Lower threshold to $1000 to allow more flexibility
+    // Require at least $1000 in available cash before auto trading starts
     const minBalance = 1000;
     if (startingBalance < minBalance) {
-      this.logger.warn(`⚠️  Balance $${startingBalance.toFixed(2)} below $${minBalance} threshold`);
-      this.logger.warn('   Auto trading will not start until balance is increased');
+      this.logger.warn(`⚠️  Cash $${startingBalance.toFixed(2)} below $${minBalance} threshold`);
+      this.logger.warn('   Auto trading will not start until available cash is increased');
       return;
     }
 
     this.sessionService.startSession(startingBalance);
-    this.logger.log(`✓ Auto trading STARTED with balance: $${startingBalance.toFixed(2)}`);
+    this.logger.log(`✓ Auto trading STARTED with cash: $${startingBalance.toFixed(2)}`);
     this.logger.log('✓ Next run scheduled in 6 hours');
   }
 

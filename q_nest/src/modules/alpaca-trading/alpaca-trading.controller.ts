@@ -7,44 +7,44 @@ import {
   HttpStatus,
   UseGuards,
 } from '@nestjs/common';
-import { BinanceTradingService } from './binance-trading.service';
+import { AlpacaTradingService } from './alpaca-trading.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
 
-@Controller('binance-trading')
+@Controller('alpaca-trading')
 @UseGuards(JwtAuthGuard)
-export class BinanceTradingController {
-  private readonly logger = new Logger(BinanceTradingController.name);
+export class AlpacaTradingController {
+  private readonly logger = new Logger(AlpacaTradingController.name);
 
-  constructor(private readonly binanceTradingService: BinanceTradingService) {}
+  constructor(private readonly alpacaTradingService: AlpacaTradingService) {}
 
   /**
-   * GET /binance-trading/dashboard
-   * Full dashboard: account info + balance + portfolio + positions + open orders
+   * GET /alpaca-trading/dashboard
+   * Full dashboard: account info + balance + portfolio + positions + open orders + market clock
    */
   @Get('dashboard')
   async getDashboard(@CurrentUser() user: TokenPayload) {
     try {
-      const data = await this.binanceTradingService.getDashboard(user.sub);
+      const data = await this.alpacaTradingService.getDashboard(user.sub);
       return { success: true, data };
     } catch (error: any) {
       this.logger.error(`getDashboard failed: ${error?.message}`);
       throw new HttpException(
-        error?.message || 'Failed to get Binance dashboard',
+        error?.message || 'Failed to get Alpaca dashboard',
         error?.status || HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
   }
 
   /**
-   * GET /binance-trading/balance
-   * All asset balances (free + locked) with total USDT value
+   * GET /alpaca-trading/balance
+   * Account balance: buying power, cash, portfolio value
    */
   @Get('balance')
   async getBalance(@CurrentUser() user: TokenPayload) {
     try {
-      const data = await this.binanceTradingService.getBalance(user.sub);
+      const data = await this.alpacaTradingService.getBalance(user.sub);
       return { success: true, data };
     } catch (error: any) {
       this.logger.error(`getBalance failed: ${error?.message}`);
@@ -56,13 +56,13 @@ export class BinanceTradingController {
   }
 
   /**
-   * GET /binance-trading/positions
+   * GET /alpaca-trading/positions
    * Current holdings with live prices and unrealized P&L
    */
   @Get('positions')
   async getPositions(@CurrentUser() user: TokenPayload) {
     try {
-      const data = await this.binanceTradingService.getPositions(user.sub);
+      const data = await this.alpacaTradingService.getPositions(user.sub);
       return { success: true, data };
     } catch (error: any) {
       this.logger.error(`getPositions failed: ${error?.message}`);
@@ -74,9 +74,9 @@ export class BinanceTradingController {
   }
 
   /**
-   * GET /binance-trading/orders/open
+   * GET /alpaca-trading/orders/open
    * Currently open / working orders
-   * ?symbol=BTCUSDT  (optional — filter by symbol)
+   * ?symbol=AAPL  (optional — filter by symbol)
    */
   @Get('orders/open')
   async getOpenOrders(
@@ -84,7 +84,7 @@ export class BinanceTradingController {
     @Query('symbol') symbol?: string,
   ) {
     try {
-      const data = await this.binanceTradingService.getOpenOrders(user.sub, symbol);
+      const data = await this.alpacaTradingService.getOpenOrders(user.sub, symbol);
       return { success: true, data };
     } catch (error: any) {
       this.logger.error(`getOpenOrders failed: ${error?.message}`);
@@ -96,27 +96,21 @@ export class BinanceTradingController {
   }
 
   /**
-   * GET /binance-trading/orders/all
-   * All orders for a symbol (NEW, FILLED, CANCELED, EXPIRED)
-   * ?symbol=BTCUSDT  (optional — if omitted, queries all held asset pairs)
+   * GET /alpaca-trading/orders/all
+   * All orders (open + closed)
+   * ?symbol=AAPL  (optional — filter by symbol)
    * ?limit=100
-   * ?startTime=<ms timestamp>
-   * ?endTime=<ms timestamp>
    */
   @Get('orders/all')
   async getAllOrders(
     @CurrentUser() user: TokenPayload,
     @Query('symbol') symbol?: string,
     @Query('limit') limit?: string,
-    @Query('startTime') startTime?: string,
-    @Query('endTime') endTime?: string,
   ) {
     try {
-      const data = await this.binanceTradingService.getAllOrders(user.sub, {
+      const data = await this.alpacaTradingService.getAllOrders(user.sub, {
         symbol,
         limit: limit ? parseInt(limit, 10) : 100,
-        startTime: startTime ? parseInt(startTime, 10) : undefined,
-        endTime: endTime ? parseInt(endTime, 10) : undefined,
       });
       return { success: true, data };
     } catch (error: any) {
@@ -129,42 +123,36 @@ export class BinanceTradingController {
   }
 
   /**
-   * GET /binance-trading/trade-history
-   * Closed trades with realized P&L (FIFO matched BUY/SELL fills)
-   * ?symbol=BTCUSDT  (optional — if omitted, queries all held asset pairs)
+   * GET /alpaca-trading/trade-history
+   * Filled orders as trade history
+   * ?symbol=AAPL  (optional — filter by symbol)
    * ?limit=100
-   * ?startTime=<ms timestamp>
-   * ?endTime=<ms timestamp>
    */
   @Get('trade-history')
   async getTradeHistory(
     @CurrentUser() user: TokenPayload,
     @Query('symbol') symbol?: string,
     @Query('limit') limit?: string,
-    @Query('startTime') startTime?: string,
-    @Query('endTime') endTime?: string,
   ) {
     try {
-      const trades = await this.binanceTradingService.getTradeHistory(user.sub, {
+      const trades = await this.alpacaTradingService.getTradeHistory(user.sub, {
         symbol,
         limit: limit ? parseInt(limit, 10) : 100,
-        startTime: startTime ? parseInt(startTime, 10) : undefined,
-        endTime: endTime ? parseInt(endTime, 10) : undefined,
       });
 
       const totalTrades = trades.length;
-      const profitableTrades = trades.filter((t: any) => t.profitLoss > 0).length;
-      const totalProfitLoss = trades.reduce((sum: number, t: any) => sum + (t.profitLoss || 0), 0);
+      const buyTrades   = trades.filter((t: any) => t.side === 'BUY').length;
+      const sellTrades  = trades.filter((t: any) => t.side === 'SELL').length;
+      const totalVolume = trades.reduce((sum: number, t: any) => sum + (t.notional || 0), 0);
 
       return {
         success: true,
         data: trades,
         summary: {
           totalTrades,
-          profitableTrades,
-          losingTrades: totalTrades - profitableTrades,
-          totalProfitLoss: Math.round(totalProfitLoss * 1000) / 1000,
-          winRate: totalTrades > 0 ? Math.round((profitableTrades / totalTrades) * 10000) / 100 : 0,
+          buyTrades,
+          sellTrades,
+          totalVolume: Math.round(totalVolume * 100) / 100,
         },
       };
     } catch (error: any) {

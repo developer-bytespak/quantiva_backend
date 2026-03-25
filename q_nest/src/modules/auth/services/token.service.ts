@@ -53,6 +53,29 @@ export class TokenService {
     }
   }
 
+  async generatePasswordResetToken(userId: string): Promise<string> {
+    const jwtConfig = this.configService.get('jwt');
+    return this.jwtService.signAsync(
+      { sub: userId, purpose: 'password_reset' },
+      { secret: jwtConfig.secret, expiresIn: '10m' },
+    );
+  }
+
+  async verifyPasswordResetToken(token: string): Promise<string> {
+    try {
+      const jwtConfig = this.configService.get('jwt');
+      const payload = await this.jwtService.verifyAsync<{ sub: string; purpose: string }>(token, {
+        secret: jwtConfig.secret,
+      });
+      if (payload.purpose !== 'password_reset') {
+        throw new UnauthorizedException('Invalid reset token');
+      }
+      return payload.sub;
+    } catch (error) {
+      throw new UnauthorizedException('Invalid or expired reset token');
+    }
+  }
+
   decodeToken(token: string): TokenPayload | null {
     try {
       const payload = this.jwtService.decode(token) as TokenPayload;

@@ -10,7 +10,7 @@ import { ManualTradeDto } from '../dto/manual-trade.dto';
 import { CloseTradeDto } from '../dto/close-trade.dto';
 import { PlacePoolOrderDto } from '../dto/place-pool-order.dto';
 import { BinanceService } from '../../exchanges/integrations/binance.service';
-import { EncryptionService } from '../../exchanges/services/encryption.service';
+import { EncryptionUtil } from '../../../common/utils/encryption.util';
 
 const POOL_STATUS = { active: 'active' } as const;
 
@@ -21,32 +21,51 @@ export class PoolTradingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly binanceService: BinanceService,
-    private readonly encryptionService: EncryptionService,
   ) {}
 
   async openTrade(adminId: string, poolId: string, dto: ManualTradeDto) {
-    const pool = await this.validateActivePool(adminId, poolId);
+    try {
+      const pool = await this.validateActivePool(adminId, poolId);
 
-    const trade = await this.prisma.vc_pool_trades.create({
-      data: {
-        pool_id: poolId,
-        admin_id: adminId,
-        asset_pair: dto.asset_pair.toUpperCase(),
-        action: dto.action as any,
-        quantity: dto.quantity,
-        entry_price_usdt: dto.entry_price_usdt,
-        strategy_id: dto.strategy_id || null,
-        notes: dto.notes || null,
-        is_open: true,
-        traded_at: new Date(),
-      },
-    });
+      await this.validateCapital(poolId, pool, dto.quantity * dto.entry_price_usdt);
 
-    this.logger.log(
-      `Trade ${trade.trade_id} opened: ${dto.action} ${dto.quantity} ${dto.asset_pair} @ ${dto.entry_price_usdt}`,
-    );
+      // Place real order on Binance
+      const { apiKey, apiSecret } = await this.getAdminBinanceKeys(adminId);
+      const symbol = dto.asset_pair.toUpperCase();
+      const side = dto.action.toUpperCase() as 'BUY' | 'SELL';
 
-    return trade;
+      const binanceOrder = await this.binanceService.placeOrder(
+        apiKey, apiSecret, symbol, side, 'MARKET', dto.quantity,
+      );
+
+      const actualPrice = binanceOrder.price || dto.entry_price_usdt;
+      const actualQty = binanceOrder.quantity || dto.quantity;
+
+      const trade = await this.prisma.vc_pool_trades.create({
+        data: {
+          pool_id: poolId,
+          admin_id: adminId,
+          asset_pair: symbol,
+          action: dto.action as any,
+          quantity: actualQty,
+          entry_price_usdt: actualPrice,
+          strategy_id: dto.strategy_id || null,
+          notes: dto.notes || null,
+          binance_order_id: binanceOrder.orderId || null,
+          is_open: true,
+          traded_at: new Date(),
+        },
+      });
+
+      this.logger.log(
+        `Trade ${trade.trade_id} opened on Binance: ${side} ${actualQty} ${symbol} @ ${actualPrice} (order: ${binanceOrder.orderId})`,
+      );
+
+      return trade;
+    } catch (error: any) {
+      this.logger.error(`openTrade failed: ${error?.message ?? error}`, error?.stack);
+      throw error;
+    }
   }
 
   /**
@@ -109,6 +128,20 @@ export class PoolTradingService {
     const quantity = Number(detail.position_size);
     const entryPrice = Number(detail.entry_price);
 
+    const pool = await this.prisma.vc_pools.findUnique({ where: { pool_id: poolId } });
+    await this.validateCapital(poolId, pool, quantity * entryPrice);
+
+    // Place real order on Binance
+    const { apiKey, apiSecret } = await this.getAdminBinanceKeys(adminId);
+    const side = signal.action.toUpperCase() as 'BUY' | 'SELL';
+
+    const binanceOrder = await this.binanceService.placeOrder(
+      apiKey, apiSecret, assetPair, side, 'MARKET', quantity,
+    );
+
+    const actualPrice = binanceOrder.price || entryPrice;
+    const actualQty = binanceOrder.quantity || quantity;
+
     const trade = await this.prisma.vc_pool_trades.create({
       data: {
         pool_id: poolId,
@@ -116,8 +149,9 @@ export class PoolTradingService {
         strategy_id: signal.strategy_id || null,
         asset_pair: assetPair,
         action: signal.action as any,
-        quantity,
-        entry_price_usdt: entryPrice,
+        quantity: actualQty,
+        entry_price_usdt: actualPrice,
+        binance_order_id: binanceOrder.orderId || null,
         notes: `Applied from signal ${signalId}`,
         is_open: true,
         traded_at: new Date(),
@@ -125,7 +159,7 @@ export class PoolTradingService {
     });
 
     this.logger.log(
-      `Trade ${trade.trade_id} opened from signal ${signalId}: ${signal.action} ${quantity} ${assetPair} @ ${entryPrice}`,
+      `Trade ${trade.trade_id} opened from signal ${signalId} on Binance: ${side} ${actualQty} ${assetPair} @ ${actualPrice} (order: ${binanceOrder.orderId})`,
     );
 
     return trade;
@@ -151,9 +185,19 @@ export class PoolTradingService {
       throw new BadRequestException('Trade is already closed');
     }
 
-    const entryPrice = Number(trade.entry_price_usdt);
-    const exitPrice = dto.exit_price_usdt;
     const quantity = Number(trade.quantity);
+    const symbol = trade.asset_pair;
+    // Close = opposite side (BUY→SELL, SELL→BUY)
+    const closeSide = trade.action === 'BUY' ? 'SELL' : 'BUY';
+
+    // Place closing order on Binance
+    const { apiKey, apiSecret } = await this.getAdminBinanceKeys(adminId);
+    const binanceOrder = await this.binanceService.placeOrder(
+      apiKey, apiSecret, symbol, closeSide as 'BUY' | 'SELL', 'MARKET', quantity,
+    );
+
+    const exitPrice = binanceOrder.price || dto.exit_price_usdt;
+    const entryPrice = Number(trade.entry_price_usdt);
 
     let pnl: number;
     if (trade.action === 'BUY') {
@@ -176,7 +220,7 @@ export class PoolTradingService {
     await this.recalculatePoolValue(poolId);
 
     this.logger.log(
-      `Trade ${tradeId} closed: exit=${exitPrice}, PnL=${pnl.toFixed(8)}`,
+      `Trade ${tradeId} closed on Binance: ${closeSide} ${quantity} ${symbol} @ ${exitPrice}, PnL=${pnl.toFixed(8)} (order: ${binanceOrder.orderId})`,
     );
 
     return updatedTrade;
@@ -213,7 +257,7 @@ export class PoolTradingService {
     // Calculate summary
     const allTrades = await this.prisma.vc_pool_trades.findMany({
       where: { pool_id: poolId },
-      select: { is_open: true, pnl_usdt: true },
+      select: { is_open: true, pnl_usdt: true, quantity: true, entry_price_usdt: true },
     });
 
     const openCount = allTrades.filter((t) => t.is_open).length;
@@ -222,9 +266,36 @@ export class PoolTradingService {
       .filter((t) => !t.is_open && t.pnl_usdt)
       .reduce((sum, t) => sum + Number(t.pnl_usdt), 0);
 
+    // Capital allocation from open trades
+    const totalAllocated = allTrades
+      .filter((t) => t.is_open)
+      .reduce((sum, t) => sum + Number(t.quantity) * Number(t.entry_price_usdt), 0);
+
+    const pool = await this.prisma.vc_pools.findUnique({
+      where: { pool_id: poolId },
+      select: { current_pool_value_usdt: true, total_invested_usdt: true },
+    });
+    const poolCapital = Number(pool?.current_pool_value_usdt ?? pool?.total_invested_usdt ?? 0);
+    const availableCapital = Math.max(poolCapital - totalAllocated, 0);
+    const utilizationPct = poolCapital > 0
+      ? Math.round((totalAllocated / poolCapital) * 10000) / 100
+      : 0;
+
     return {
       trades,
-      summary: { open_trades: openCount, closed_trades: closedCount, realized_pnl: realizedPnl },
+      summary: {
+        open_trades: openCount,
+        closed_trades: closedCount,
+        realized_pnl: realizedPnl,
+        total_allocated_usdt: totalAllocated,
+        available_capital_usdt: availableCapital,
+      },
+      pool_capital: {
+        total_usdt: poolCapital,
+        allocated_usdt: totalAllocated,
+        available_usdt: availableCapital,
+        utilization_pct: utilizationPct,
+      },
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     };
   }
@@ -326,19 +397,7 @@ export class PoolTradingService {
   async placePoolOrder(adminId: string, poolId: string, dto: PlacePoolOrderDto) {
     const pool = await this.validateActivePool(adminId, poolId);
 
-    const admin = await this.prisma.admins.findUnique({
-      where: { admin_id: adminId },
-      select: { binance_api_key_encrypted: true, binance_api_secret_encrypted: true },
-    });
-
-    if (!admin?.binance_api_key_encrypted || !admin?.binance_api_secret_encrypted) {
-      throw new BadRequestException(
-        'Admin Binance API credentials are not set. Configure them in admin settings to place pool orders.',
-      );
-    }
-
-    const apiKey = this.encryptionService.decryptApiKey(admin.binance_api_key_encrypted);
-    const apiSecret = this.encryptionService.decryptApiKey(admin.binance_api_secret_encrypted);
+    const { apiKey, apiSecret } = await this.getAdminBinanceKeys(adminId);
 
     const symbol = dto.symbol.toUpperCase();
     if (dto.type === 'LIMIT' && (dto.price == null || dto.price <= 0)) {
@@ -411,6 +470,58 @@ export class PoolTradingService {
   }
 
   // ── Helpers ──
+
+  private async getAdminBinanceKeys(adminId: string) {
+    // Use the admin's payment/trading Binance key stored directly on the admins table.
+    // This is the account that holds the VC pool trading capital.
+    const admin = await this.prisma.admins.findUnique({
+      where: { admin_id: adminId },
+      select: {
+        binance_api_key_encrypted: true,
+        binance_api_secret_encrypted: true,
+      },
+    });
+
+    if (!admin) throw new NotFoundException('Admin not found');
+
+    if (!admin.binance_api_key_encrypted || !admin.binance_api_secret_encrypted) {
+      throw new BadRequestException(
+        'Admin has no Binance API key configured. Set it via the admin Binance settings.',
+      );
+    }
+
+    const encryptionKey = process.env.ENCRYPTION_KEY!;
+    return {
+      apiKey: EncryptionUtil.decrypt(admin.binance_api_key_encrypted, encryptionKey),
+      apiSecret: EncryptionUtil.decrypt(admin.binance_api_secret_encrypted, encryptionKey),
+    };
+  }
+
+  private async validateCapital(
+    poolId: string,
+    pool: any,
+    tradeValue: number,
+  ) {
+    const poolCapital = Number(
+      pool?.current_pool_value_usdt ?? pool?.total_invested_usdt ?? 0,
+    );
+
+    const openTrades = await this.prisma.vc_pool_trades.findMany({
+      where: { pool_id: poolId, is_open: true },
+      select: { quantity: true, entry_price_usdt: true },
+    });
+    const allocated = openTrades.reduce(
+      (sum, t) => sum + Number(t.quantity) * Number(t.entry_price_usdt),
+      0,
+    );
+    const available = poolCapital - allocated;
+
+    if (tradeValue > available) {
+      throw new BadRequestException(
+        `Insufficient pool capital. Trade value $${tradeValue.toFixed(2)} exceeds available capital $${available.toFixed(2)}.`,
+      );
+    }
+  }
 
   private async validateActivePool(adminId: string, poolId: string) {
     const pool = await this.prisma.vc_pools.findUnique({

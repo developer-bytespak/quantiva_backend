@@ -9,7 +9,9 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
 import { AuthService } from '../services/auth.service';
 import { SessionService } from '../services/session.service';
@@ -171,6 +173,9 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
+    if (!body.idToken || typeof body.idToken !== 'string') {
+      throw new BadRequestException('Google ID token is required');
+    }
     const ipAddress = req.ip || req.socket.remoteAddress;
     const deviceId = req.headers['x-device-id'] as string;
     const result = await this.authService.loginWithGoogle(body.idToken, ipAddress, deviceId);
@@ -198,6 +203,9 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
+    if (!body.idToken || typeof body.idToken !== 'string') {
+      throw new BadRequestException('Google ID token is required');
+    }
     const ipAddress = req.ip || req.socket.remoteAddress;
     const deviceId = req.headers['x-device-id'] as string;
     const result = await this.authService.signupWithGoogle(body.idToken, ipAddress, deviceId);
@@ -278,7 +286,6 @@ export class AuthController {
       if (effectiveUser.session_id) {
         try {
           sessionDeleted = await this.sessionService.deleteSession(effectiveUser.session_id);
-          console.log(`Session ${effectiveUser.session_id} deleted successfully for user ${effectiveUser.sub}`);
         } catch (error) {
           // Log error but continue with logout to clear cookies
           console.error('Error deleting session during logout:', error);
@@ -297,7 +304,6 @@ export class AuthController {
             );
             if (session) {
               sessionDeleted = await this.sessionService.deleteSession(session.session_id);
-              console.log(`Session ${session.session_id} deleted via refresh token for user ${effectiveUser.sub}`);
             }
           } catch (error) {
             console.error('Error deleting session during logout (fallback):', error);
@@ -310,7 +316,6 @@ export class AuthController {
       if (!sessionDeleted) {
         try {
           await this.sessionService.revokeCurrentUserSession(effectiveUser.sub);
-          console.log(`Most recent session revoked for user ${effectiveUser.sub}`);
         } catch (error) {
           console.error('Error revoking session during logout (final fallback):', error);
         }
@@ -390,32 +395,28 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async verifyGoogleEmail(@CurrentUser() user: TokenPayload) {
     const result = await this.authService.verifyGoogleEmail(user.sub);
-    console.log("result", result);
     return result;
   }
 
   @Post('forgot-password/send-otp')
   @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 60000, limit: 3 } })
   async forgotPassword(@Body() body: { email: string }) {
-    const result = await this.authService.forgotPassword(body.email);
-    console.log("result", result);
-    return result;
+    return this.authService.forgotPassword(body.email);
   }
 
   @Post('forgot-password/verify-otp')
   @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 60000, limit: 5 } })
   async verifyOtp(@Body() body: { email: string, code: string }) {
-    const result = await this.authService.verifyOtp(body.email, body.code);
-    console.log("result", result);
-    return result;
+    return this.authService.verifyOtp(body.email, body.code);
   }
 
   @Post('forgot-password/reset')
   @HttpCode(HttpStatus.OK)
-  async resetPassword(@Body() body: { email: string, newPassword: string }) {
-    const result = await this.authService.resetPassword(body.email, body.newPassword);
-    console.log("result", result);
-    return result;
+  @Throttle({ default: { ttl: 60000, limit: 3 } })
+  async resetPassword(@Body() body: { resetToken: string, newPassword: string }) {
+    return this.authService.resetPassword(body.resetToken, body.newPassword);
   }
 }
 

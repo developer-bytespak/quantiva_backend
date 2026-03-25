@@ -41,13 +41,13 @@ export class NotificationsController {
 
   @Delete('delete')
   async deleteAllNotifications(@Req() req: any) {
-    console.log("req-->",req)
     const userId = req.subscriptionUser?.user_id;
     return this.notificationsService.deleteAllNotifications(userId);
   }
 
   @Post('FCM')
   async fcmNotification(@Body() body: { token:string}, @Req() req: any) {
+    
     const userId = req.subscriptionUser?.user_id;
     return this.notificationsService.fcmNotification(body.token, userId);
   }

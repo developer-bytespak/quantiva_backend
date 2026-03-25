@@ -49,12 +49,33 @@ export class UsersService {
   }
 
   async delete(id: string) {
-    // Prevent deleting a user who is involved in any VC pool
+    // Prevent deleting a user who is involved in any active VC pool
+    // (completed and cancelled pools should not block account deletion)
+    const activePoolStatuses = ['open', 'full', 'active'];
+
     const [membershipsCount, seatReservationsCount, paymentSubmissionsCount] =
       await Promise.all([
-        this.prisma.vc_pool_members.count({ where: { user_id: id } }),
-        this.prisma.vc_pool_seat_reservations.count({ where: { user_id: id } }),
-        this.prisma.vc_pool_payment_submissions.count({ where: { user_id: id } }),
+        this.prisma.vc_pool_members.count({
+          where: {
+            user_id: id,
+            is_active: true,
+            pool: { status: { in: activePoolStatuses } },
+          },
+        }),
+        this.prisma.vc_pool_seat_reservations.count({
+          where: {
+            user_id: id,
+            status: { in: ['reserved', 'pending_payment'] },
+            pool: { status: { in: activePoolStatuses } },
+          },
+        }),
+        this.prisma.vc_pool_payment_submissions.count({
+          where: {
+            user_id: id,
+            status: 'pending',
+            pool: { status: { in: activePoolStatuses } },
+          },
+        }),
       ]);
 
     if (
@@ -63,8 +84,8 @@ export class UsersService {
       paymentSubmissionsCount > 0
     ) {
       throw new BadRequestException(
-        'Cannot delete user: this account is linked to one or more VC pools. ' +
-          'Please remove the user from all VC pools before deleting the account.',
+        'Cannot delete user: this account is linked to one or more active VC pools. ' +
+          'Please remove the user from all active VC pools before deleting the account.',
       );
     }
 

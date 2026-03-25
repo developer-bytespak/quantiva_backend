@@ -12,11 +12,13 @@ export class PythonApiService {
   constructor(private configService: ConfigService) {
     this.baseUrl = this.configService.get<string>('PYTHON_API_URL', 'http://localhost:8000');
     this.logger.log(`🔧 PythonApiService initialized with baseUrl: ${this.baseUrl}`);
+    const internalApiKey = this.configService.get<string>('INTERNAL_API_KEY');
     this.axiosInstance = axios.create({
       baseURL: this.baseUrl,
       timeout: 300000, // 5 minutes - increased for face matching (embedding + comparison is CPU-intensive)
       headers: {
         'Content-Type': 'application/json',
+        ...(internalApiKey && { 'X-Internal-Api-Key': internalApiKey }),
       },
     });
   }

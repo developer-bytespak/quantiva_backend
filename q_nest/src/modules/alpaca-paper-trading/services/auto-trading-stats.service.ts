@@ -95,8 +95,8 @@ export class AutoTradingStatsService {
         dailyChangePercent: balance.dailyChangePercent,
       };
       
-      // Update session with fresh balance
-      this.sessionService.updateBalance(balance.equity);
+      // Update session threshold tracking with fresh available cash
+      this.sessionService.updateBalance(balance.cash);
     } catch (error: any) {
       this.logger.warn(`Failed to get Alpaca account data: ${error?.message}`);
     }

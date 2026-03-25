@@ -24,6 +24,7 @@ import { CreateConnectionDto } from './dto/create-connection.dto';
 import { UpdateConnectionDto } from './dto/update-connection.dto';
 import { PlaceOrderDto } from './dto/place-order.dto';
 import { BinanceService } from './integrations/binance.service';
+import { BinanceUSService } from './integrations/binance-us.service';
 import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
@@ -61,6 +62,7 @@ export class ExchangesController {
   constructor(
     private readonly exchangesService: ExchangesService,
     private readonly binanceService: BinanceService,
+    private readonly binanceUSService: BinanceUSService,
     private readonly bybitService: BybitService,
     private readonly alpacaService: AlpacaService,
     private readonly cacheService: CacheService,
@@ -207,8 +209,14 @@ export class ExchangesController {
       // Verify credentials with the exchange before creating connection
       let verification;
       const exchangeName = exchange.name.toLowerCase();
-      
-      if (exchangeName.includes('binance')) {
+      const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus';
+
+      if (isBinanceUS) {
+        verification = await this.binanceUSService.verifyApiKey(
+          createConnectionDto.api_key,
+          createConnectionDto.api_secret,
+        );
+      } else if (exchangeName.includes('binance')) {
         verification = await this.binanceService.verifyApiKey(
           createConnectionDto.api_key,
           createConnectionDto.api_secret,
@@ -1221,7 +1229,7 @@ export class ExchangesController {
       const topPositions = Array.isArray(positions) ? (positions as any[]).slice(0, 10) : [];
       
       // For crypto exchanges, append USDT to symbols. For stocks (Alpaca), use symbol as-is
-      const isCryptoExchange = exchangeName === 'binance' || exchangeName === 'bybit';
+      const isCryptoExchange = exchangeName === 'binance' || exchangeName === 'bybit' || exchangeName === 'binance.us' || exchangeName === 'binanceus';
       const assetType = isCryptoExchange ? 'crypto' : 'stock';
       
       const positionSymbols = new Set(topPositions.map((p) => 
