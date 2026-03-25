@@ -10,6 +10,7 @@ import {
   HttpCode,
   HttpStatus,
   BadRequestException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
@@ -128,8 +129,20 @@ export class AuthController {
       };
     }
 
-    // 2FA is required (original flow)
-    return result;
+    // 2FA is required - generate and send 2FA session token
+    const twoFAResult = result as any;
+    const twoFAToken = await this.tokenService.generate2FAToken(
+      twoFAResult.userId,
+      twoFAResult.email,
+    );
+
+    // Send 2FA token in httpOnly cookie (expires in 10 minutes)
+    this.setCookie(res, '2fa_token', twoFAToken, 10 * 60);
+
+    return {
+      requires2FA: true,
+      message: '2FA code sent to your email',
+    };
   }
 
   @Public()
@@ -163,6 +176,44 @@ export class AuthController {
       sessionId: result.sessionId,
       message: 'Authentication successful',
     };
+  }
+
+  @Public()
+  @Post('resend-2fa-code')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 60000, limit: 3 } })
+  async resend2FACode(
+    @Body() body: { emailOrUsername: string },
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // Get 2FA token from cookie
+    const twoFAToken = req.cookies['2fa_token'];
+    if (!twoFAToken) {
+      throw new UnauthorizedException('2FA session expired. Please login again.');
+    }
+
+    try {
+      // Verify the 2FA token is valid
+      const payload = await this.tokenService.verify2FAToken(twoFAToken);
+
+      // Verify the email matches
+      if (payload.email !== body.emailOrUsername) {
+        throw new UnauthorizedException('Invalid 2FA session');
+      }
+
+      // Resend 2FA code
+      await this.authService.resend2FACode(body.emailOrUsername);
+
+      return {
+        message: '2FA code resent to your email',
+      };
+    } catch (error: any) {
+      if (error.message?.includes('expired') || error.message?.includes('Invalid')) {
+        throw new UnauthorizedException('2FA session expired. Please login again.');
+      }
+      throw error;
+    }
   }
 
   @Public()

@@ -7,9 +7,9 @@ import { TokenService } from './token.service';
 type UserTier = 'FREE' | 'PRO' | 'ELITE' | 'INSTITUTIONAL';
 
 const TIER_SESSION_LIMITS: Record<UserTier, number> = {
-  FREE: 2,
-  PRO: 5,
-  ELITE: 10,
+  FREE: 5,
+  PRO: 10,
+  ELITE: 15,
   INSTITUTIONAL: 25,
 };
 
