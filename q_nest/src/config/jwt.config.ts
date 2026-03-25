@@ -6,7 +6,7 @@ export default registerAs('jwt', () => ({
     if (!secret) throw new Error('JWT_SECRET environment variable is required');
     return secret;
   })(),
-  accessTokenExpiry: process.env.JWT_ACCESS_EXPIRY || '45m',
+  accessTokenExpiry: process.env.JWT_ACCESS_EXPIRY || '30m',
   refreshTokenExpiry: process.env.JWT_REFRESH_EXPIRY || '7d',
   cookieDomain: process.env.COOKIE_DOMAIN,
   isProduction: process.env.NODE_ENV === 'production',

@@ -76,6 +76,29 @@ export class TokenService {
     }
   }
 
+  async generate2FAToken(userId: string, email: string): Promise<string> {
+    const jwtConfig = this.configService.get('jwt');
+    return this.jwtService.signAsync(
+      { sub: userId, email, purpose: '2fa_verification' },
+      { secret: jwtConfig.secret, expiresIn: '10m' },
+    );
+  }
+
+  async verify2FAToken(token: string): Promise<{ sub: string; email: string }> {
+    try {
+      const jwtConfig = this.configService.get('jwt');
+      const payload = await this.jwtService.verifyAsync<{ sub: string; email: string; purpose: string }>(token, {
+        secret: jwtConfig.secret,
+      });
+      if (payload.purpose !== '2fa_verification') {
+        throw new UnauthorizedException('Invalid 2FA token');
+      }
+      return { sub: payload.sub, email: payload.email };
+    } catch (error) {
+      throw new UnauthorizedException('Invalid or expired 2FA token');
+    }
+  }
+
   decodeToken(token: string): TokenPayload | null {
     try {
       const payload = this.jwtService.decode(token) as TokenPayload;
