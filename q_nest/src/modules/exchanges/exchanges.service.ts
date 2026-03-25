@@ -1010,20 +1010,35 @@ export class ExchangesService {
     const apiKey = this.encryptionService.decryptApiKey(connection.api_key_encrypted);
     const apiSecret = this.encryptionService.decryptApiKey(connection.api_secret_encrypted);
 
-    const exchangeName = connection.exchange.name.toLowerCase();
-    if (exchangeName !== 'binance') {
-      throw new Error(`OCO orders are only supported on Binance, not ${connection.exchange.name}`);
-    }
+    const exchangeService = this.getExchangeService(connection.exchange.name);
 
-    const result = await this.binanceService.placeOcoOrder(
-      apiKey,
-      apiSecret,
-      symbol,
-      side,
-      quantity,
-      takeProfitPrice,
-      stopLossPrice,
-    );
+    let result: { orderListId: number };
+    if (exchangeService instanceof BinanceService) {
+      result = await this.binanceService.placeOcoOrder(
+        apiKey,
+        apiSecret,
+        symbol,
+        side,
+        quantity,
+        takeProfitPrice,
+        stopLossPrice,
+      );
+    } else if (exchangeService instanceof BinanceUSService) {
+      const normalizedSymbol = symbol.toUpperCase().endsWith('USDT')
+        ? symbol.toUpperCase().replace(/USDT$/, 'USD')
+        : symbol;
+      result = await this.binanceUSService.placeOcoOrder(
+        apiKey,
+        apiSecret,
+        normalizedSymbol,
+        side,
+        quantity,
+        takeProfitPrice,
+        stopLossPrice,
+      );
+    } else {
+      throw new Error(`OCO orders are only supported on Binance/Binance US, not ${connection.exchange.name}`);
+    }
 
     return {
       orderListId: result.orderListId,
