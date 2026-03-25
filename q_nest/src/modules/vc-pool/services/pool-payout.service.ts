@@ -6,6 +6,8 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { QhqTokenService } from '../../qhq-token/qhq-token.service';
+import { QhqTransactionType } from '@prisma/client';
 
 const POOL_STATUS = {
   active: 'active',
@@ -29,7 +31,10 @@ const PAYOUT_TYPE = {
 export class PoolPayoutService {
   private readonly logger = new Logger(PoolPayoutService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly qhqService: QhqTokenService,
+  ) {}
 
   // ── Admin: Complete Pool ──
 
@@ -119,7 +124,18 @@ export class PoolPayoutService {
         const initialInvestment = Number(member.invested_amount_usdt);
         const grossPayout = (sharePercent * finalPoolValue) / 100;
         const profit = Math.max(0, grossPayout - initialInvestment);
-        const adminFeeDeducted = (adminProfitFeePercent * profit) / 100;
+        let adminFeeDeducted = (adminProfitFeePercent * profit) / 100;
+
+        // Apply QHQ fee reduction if member has QHQ balance (up to 5% of profit)
+        if (member.user_id && profit > 0) {
+          const qhqReduction = await this.applyQhqFeeReduction(
+            member.user_id,
+            profit,
+            poolId,
+          ).catch(() => 0);
+          adminFeeDeducted = Math.max(0, adminFeeDeducted - qhqReduction);
+        }
+
         const netPayout = grossPayout - adminFeeDeducted;
         const profitLoss = netPayout - initialInvestment;
 
@@ -393,6 +409,37 @@ export class PoolPayoutService {
     }
 
     return pool;
+  }
+
+  /**
+   * Applies QHQ fee reduction for a VC pool member (up to 5% of profit).
+   * Deducts QHQ tokens at a 1 QHQ = $1 USD rate, capped at 5% of profit.
+   * Returns the dollar amount reduced from admin fee.
+   */
+  private async applyQhqFeeReduction(
+    userId: string,
+    profit: number,
+    poolId: string,
+  ): Promise<number> {
+    const maxReduction = profit * 0.05; // 5% cap
+
+    const balance = await this.qhqService.getBalance(userId);
+    const available = Number(balance.pending_balance);
+    if (available <= 0) return 0;
+
+    // QHQ to spend = min(available balance, max reduction allowed)
+    const qhqToSpend = Math.min(available, maxReduction);
+    if (qhqToSpend < 1) return 0; // Minimum 1 QHQ
+
+    await this.qhqService.spendTokens(
+      userId,
+      QhqTransactionType.SPEND_VC_FEE_REDUCTION,
+      Math.floor(qhqToSpend),
+      `VC pool fee reduction for pool ${poolId}`,
+      poolId,
+    );
+
+    return Math.floor(qhqToSpend); // $1 per QHQ spent
   }
 }
 

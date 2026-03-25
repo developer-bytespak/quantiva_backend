@@ -32,6 +32,7 @@ import { AccountStreamGateway } from './gateways/account-stream.gateway';
 import { MarketDetailGateway } from './gateways/market-detail.gateway';
 import { GatewaysModule } from './gateways/gateways.module';
 import { TradeFeesModule } from './modules/trade-fees/trade-fees.module';
+import { QhqTokenModule } from './modules/qhq-token/qhq-token.module';
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { TradeFeesModule } from './modules/trade-fees/trade-fees.module';
     SubscriptionsModule,
     StripeModule,
     BinanceModule,
+    QhqTokenModule,
   ],
   controllers: [],
   providers: [AccountStreamGateway, MarketDetailGateway],

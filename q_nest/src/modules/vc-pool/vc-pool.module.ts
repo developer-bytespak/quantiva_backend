@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { StorageModule } from '../../storage/storage.module';
@@ -26,9 +26,10 @@ import { PoolValueUpdateScheduler } from './schedulers/pool-value-update.schedul
 import { PaymentVerificationScheduler } from './schedulers/payment-verification.scheduler';
 import { FeatureAccessService } from '../../common/feature-access.service';
 import { TierAccessGuard } from '../../common/guards/tier-access.guard';
+import { QhqTokenModule } from '../qhq-token/qhq-token.module';
 
 @Module({
-  imports: [PrismaModule, StorageModule, AdminAuthModule, BinanceModule, ExchangesModule, ScheduleModule],
+  imports: [PrismaModule, StorageModule, AdminAuthModule, BinanceModule, ExchangesModule, ScheduleModule, forwardRef(() => QhqTokenModule)],
   controllers: [
     AdminPoolController,
     AdminPoolPaymentsController,

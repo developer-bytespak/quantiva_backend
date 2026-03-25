@@ -37,6 +37,8 @@ import { MarketService } from '../market/market.service';
 import { MarketStocksDbService } from '../stocks-market/services/market-stocks-db.service';
 import { FmpService } from '../stocks-market/services/fmp.service';
 import { TradeFeesService } from '../trade-fees/trade-fees.service';
+import { QhqTokenService } from '../qhq-token/qhq-token.service';
+import { QhqTransactionType } from '@prisma/client';
 
 /**
  * Exchanges Controller
@@ -71,6 +73,7 @@ export class ExchangesController {
     private readonly marketStocksDbService: MarketStocksDbService,
     private readonly fmpService: FmpService,
     private readonly tradeFeesService: TradeFeesService,
+    private readonly qhqService: QhqTokenService,
   ) {}
 
   @Get()
@@ -713,6 +716,19 @@ export class ExchangesController {
 
     // Record trade fee (fire-and-forget)
     this.recordTradeFeeForOrder(user.sub, order, placeOrderDto.symbol, placeOrderDto.side);
+
+    // QHQ reward for live trade execution (non-blocking, daily cap enforced in service)
+    if (order.status === 'FILLED') {
+      this.qhqService
+        .earnTokens(
+          user.sub,
+          QhqTransactionType.EARN_TRADING,
+          0.1,
+          `Live trade executed: ${placeOrderDto.side} ${placeOrderDto.symbol}`,
+          order.orderId?.toString(),
+        )
+        .catch((err) => this.logger.error(`QHQ trade reward error: ${err.message}`));
+    }
 
     return {
       success: true,
