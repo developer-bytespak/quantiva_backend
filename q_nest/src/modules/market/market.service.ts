@@ -339,7 +339,7 @@ export class MarketService {
    * Much faster than CoinGecko API calls
    * @param limit - Maximum number of coins to return
    * @param search - Optional search query
-   * @param exchangeName - Optional exchange name ('binance' or 'bybit'). Defaults to 'binance' for backward compatibility
+  * @param exchangeName - Optional exchange name ('binance', 'binance.us', or 'bybit'). Defaults to 'binance' for backward compatibility
    */
   async getCachedMarketData(
     limit: number = 500,
@@ -350,31 +350,40 @@ export class MarketService {
       // Default to Binance for backward compatibility
       const exchange = (exchangeName || 'binance').toLowerCase();
       
-      // Fetch coins with USDT pairs for the specified exchange
+      // Normalize exchange aliases first
+      const normalizedExchange =
+        exchange === 'binanceus' || exchange === 'binance-us' ? 'binance.us' : exchange;
+
+      // Fetch exchange-specific coin universe for the specified exchange
       let coinsWithUsdt: string[] = [];
       try {
-        if (exchange === 'bybit') {
+        if (normalizedExchange === 'bybit') {
           coinsWithUsdt = await this.exchangesService.getBybitCoinsWithUsdtPairs();
           this.logger.log(`Fetching market data for ${coinsWithUsdt.length} Bybit coins with USDT pairs`);
+        } else if (normalizedExchange === 'binance.us') {
+          coinsWithUsdt = await this.exchangesService.getBinanceUSCoinsWithPreferredQuotePairs();
+          this.logger.log(`Fetching market data for ${coinsWithUsdt.length} Binance US coins with USD/USDT pairs`);
         } else {
           // Default to Binance
           coinsWithUsdt = await this.exchangesService.getBinanceCoinsWithUsdtPairs();
           this.logger.log(`Fetching market data for ${coinsWithUsdt.length} Binance coins with USDT pairs`);
         }
       } catch (error) {
-        this.logger.error(`Failed to fetch ${exchange} USDT pairs, falling back to all ${exchange} coins`, error);
-        // Fallback: get all coins if USDT-specific fetch fails
-        if (exchange === 'bybit') {
+        this.logger.error(`Failed to fetch ${normalizedExchange} filtered pairs, falling back to all ${normalizedExchange} coins`, error);
+        // Fallback: get all coins if filtered pair fetch fails
+        if (normalizedExchange === 'bybit') {
           coinsWithUsdt = await this.exchangesService.getAllBybitCoins();
+        } else if (normalizedExchange === 'binance.us') {
+          coinsWithUsdt = await this.exchangesService.getAllBinanceUSCoins();
         } else {
           coinsWithUsdt = await this.exchangesService.getAllBinanceCoins();
         }
-        this.logger.log(`Fallback: using all ${coinsWithUsdt.length} ${exchange} coins`);
+        this.logger.log(`Fallback: using all ${coinsWithUsdt.length} ${normalizedExchange} coins`);
       }
 
       if (coinsWithUsdt.length === 0) {
-        this.logger.warn(`No ${exchange} coins found`);
-        return { coins: [], lastSyncTime: null, exchange };
+        this.logger.warn(`No ${normalizedExchange} coins found`);
+        return { coins: [], lastSyncTime: null, exchange: normalizedExchange };
       }
 
       // Get latest market_rankings timestamp
@@ -427,7 +436,7 @@ export class MarketService {
         take: limit,
       });
 
-      this.logger.log(`Found ${assets.length} ${exchange} coins with USDT pairs in market rankings`);
+      this.logger.log(`Found ${assets.length} ${normalizedExchange} coins in market rankings after exchange filtering`);
 
       // Transform to CoinGeckoCoin format
       const coins: CoinGeckoCoin[] = assets
@@ -474,7 +483,7 @@ export class MarketService {
       return {
         coins,
         lastSyncTime: latestRanking.rank_timestamp,
-        exchange,
+        exchange: normalizedExchange,
       };
     } catch (error: any) {
       this.logger.error('Failed to fetch cached market data from database', {

@@ -681,7 +681,7 @@ export class ExchangesController {
       placeOrderDto.price,
     );
 
-    // Auto-place OCO (take-profit + stop-loss) for filled BUY orders on Binance
+    // Auto-place OCO (take-profit + stop-loss) for filled BUY orders on Binance/Binance US
     let ocoInfo: { orderListId: number; takeProfitPrice: number; stopLossPrice: number } | null = null;
     let ocoError: string | null = null;
     if (
