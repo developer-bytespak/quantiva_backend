@@ -134,15 +134,20 @@ export class SessionService {
 
   async deleteSession(sessionId: string): Promise<boolean> {
     // Actually delete the session from the database
+    this.logger.log(`[DELETE SESSION] Attempting to delete session: ${sessionId}`);
+
     const result = await this.prisma.user_sessions.deleteMany({
       where: { session_id: sessionId },
     });
-    
+
+    this.logger.log(`[DELETE SESSION] Result: ${result.count} session(s) deleted`);
+
     if (result.count === 0) {
-      console.warn(`Session ${sessionId} not found for deletion`);
+      this.logger.warn(`[DELETE SESSION] Session ${sessionId} not found for deletion`);
       return false;
     }
-    
+
+    this.logger.log(`[DELETE SESSION] ✅ Session ${sessionId} successfully deleted`);
     return true;
   }
 
