@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
@@ -190,6 +190,16 @@ export class BinanceService {
           }
 
           throw new BinanceApiException(binanceMsg, `BINANCE_${binanceCode}`);
+        }
+
+        // Binance may return plain 400 responses without a numeric error code.
+        if (error.response?.status === 400) {
+          const msg =
+            error.response?.data?.msg ||
+            error.response?.data?.message ||
+            error.message ||
+            'Bad request to Binance API';
+          throw new BinanceApiException(msg, 'BINANCE_BAD_REQUEST', HttpStatus.BAD_REQUEST);
         }
 
         // Exponential backoff for other errors
