@@ -535,7 +535,10 @@ export class ExchangesService {
     // Get the appropriate exchange service
     const exchangeName = connection.exchange.name.toLowerCase();
     const isBinance = exchangeName === 'binance';
-    const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus';
+    const isBinanceUS =
+      exchangeName === 'binance.us' ||
+      exchangeName === 'binanceus' ||
+      exchangeName === 'binance-us';
     const isBybit = exchangeName === 'bybit';
     const isAlpaca = exchangeName === 'alpaca';
 
@@ -962,17 +965,19 @@ export class ExchangesService {
     // Get the appropriate exchange service
     const exchangeService = this.getExchangeService(connection.exchange.name);
 
+    let placedOrder: OrderDto;
+
     if (exchangeService instanceof BinanceService) {
-      return this.binanceService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
+      placedOrder = await this.binanceService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
     } else if (exchangeService instanceof BinanceUSService) {
       const normalizedSymbol = symbol.toUpperCase().endsWith('USDT')
         ? symbol.toUpperCase().replace(/USDT$/, 'USD')
         : symbol;
-      return this.binanceUSService.placeOrder(apiKey, apiSecret, normalizedSymbol, side, type, quantity, price);
+      placedOrder = await this.binanceUSService.placeOrder(apiKey, apiSecret, normalizedSymbol, side, type, quantity, price);
     } else if (exchangeService instanceof BybitService) {
-      return this.bybitService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
+      placedOrder = await this.bybitService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
     } else if (exchangeService instanceof AlpacaService) {
-      return this.alpacaService.placeOrder(
+      placedOrder = await this.alpacaService.placeOrder(
         symbol,
         side,
         type,
@@ -984,6 +989,16 @@ export class ExchangesService {
     } else {
       throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
     }
+
+    // Ensure subsequent dashboard/orders requests are not served stale cache.
+    this.cacheService.invalidate(connectionId);
+
+    // Refresh snapshots in background (non-blocking for order placement latency).
+    this.syncConnectionData(connectionId).catch((err) =>
+      this.logger.warn(`Post-order sync failed for ${connectionId}: ${err?.message || err}`),
+    );
+
+    return placedOrder;
   }
 
   async placeOcoOrder(
@@ -1039,6 +1054,14 @@ export class ExchangesService {
     } else {
       throw new Error(`OCO orders are only supported on Binance/Binance US, not ${connection.exchange.name}`);
     }
+
+    // Ensure subsequent dashboard/orders requests are not served stale cache.
+    this.cacheService.invalidate(connectionId);
+
+    // Refresh snapshots in background (non-blocking for OCO placement latency).
+    this.syncConnectionData(connectionId).catch((err) =>
+      this.logger.warn(`Post-OCO sync failed for ${connectionId}: ${err?.message || err}`),
+    );
 
     return {
       orderListId: result.orderListId,
