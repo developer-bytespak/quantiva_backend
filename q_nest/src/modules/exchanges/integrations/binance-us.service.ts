@@ -679,13 +679,52 @@ export class BinanceUSService {
 
       const order = await this.makeSignedPostRequest('/api/v3/order', apiKey, apiSecret, params);
 
+      const executedQty = parseFloat(order.executedQty || order.origQty || '0');
+      const rawPrice = parseFloat(order.price || '0');
+      const quoteQty = parseFloat(order.cummulativeQuoteQty || '0');
+      let executionPrice =
+        rawPrice === 0 && executedQty > 0 && quoteQty > 0
+          ? quoteQty / executedQty
+          : rawPrice;
+
+      // For some MARKET responses, Binance.US may still return incomplete price fields.
+      // Query the order once to compute average fill price from cummulativeQuoteQty.
+      if (executionPrice <= 0 && order.orderId && order.symbol) {
+        try {
+          const orderDetails = await this.makeSignedRequest('/api/v3/order', apiKey, apiSecret, {
+            symbol: order.symbol,
+            orderId: order.orderId.toString(),
+          });
+          const detailExecutedQty = parseFloat(orderDetails.executedQty || executedQty.toString() || '0');
+          const detailQuoteQty = parseFloat(orderDetails.cummulativeQuoteQty || '0');
+          if (detailExecutedQty > 0 && detailQuoteQty > 0) {
+            executionPrice = detailQuoteQty / detailExecutedQty;
+          }
+        } catch {
+          // Keep initial values if details fetch fails.
+        }
+      }
+
+      // When commission is charged in base asset, the tradable amount is less than executedQty.
+      const knownQuotes = ['USD', 'USDT', 'BUSD', 'BTC', 'ETH', 'BNB'];
+      const symUp = (order.symbol || symbol || '').toUpperCase();
+      const quote = knownQuotes.find((q) => symUp.endsWith(q)) ?? '';
+      const baseAsset = quote ? symUp.slice(0, symUp.length - quote.length) : '';
+      const fills: Array<{ commission: string; commissionAsset: string }> = order.fills || [];
+      const baseAssetFees = fills.reduce((sum: number, fill: any) => {
+        return baseAsset && (fill.commissionAsset || '').toUpperCase() === baseAsset
+          ? sum + parseFloat(fill.commission || '0')
+          : sum;
+      }, 0);
+      const receivedQty = baseAssetFees > 0 ? Math.max(0, executedQty - baseAssetFees) : executedQty;
+
       return {
         orderId: order.orderId.toString(),
         symbol: order.symbol,
         side: order.side as 'BUY' | 'SELL',
         type: order.type,
-        quantity: parseFloat(order.executedQty || order.origQty || '0'),
-        price: parseFloat(order.price || '0'),
+        quantity: receivedQty,
+        price: executionPrice,
         status: order.status,
         time: order.transactTime || order.updateTime || Date.now(),
       };
