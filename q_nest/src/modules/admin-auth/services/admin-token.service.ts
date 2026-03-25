@@ -20,7 +20,7 @@ export class AdminTokenService {
   async generateAccessToken(payload: AdminTokenPayload): Promise<string> {
     const jwtConfig = this.configService.get('jwt');
     return this.jwtService.signAsync(payload, {
-      secret: jwtConfig.secret,
+      secret: jwtConfig.adminSecret,
       expiresIn: jwtConfig.accessTokenExpiry,
     });
   }
@@ -28,7 +28,7 @@ export class AdminTokenService {
   async generateRefreshToken(payload: AdminTokenPayload): Promise<string> {
     const jwtConfig = this.configService.get('jwt');
     return this.jwtService.signAsync(payload, {
-      secret: jwtConfig.secret,
+      secret: jwtConfig.adminSecret,
       expiresIn: jwtConfig.refreshTokenExpiry,
     });
   }
@@ -45,7 +45,7 @@ export class AdminTokenService {
     try {
       const jwtConfig = this.configService.get('jwt');
       return await this.jwtService.verifyAsync<AdminTokenPayload>(token, {
-        secret: jwtConfig.secret,
+        secret: jwtConfig.adminSecret,
       });
     } catch {
       throw new UnauthorizedException('Invalid or expired admin token');
