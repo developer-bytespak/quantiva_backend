@@ -79,7 +79,11 @@ export class ExchangesService {
     
     if (normalizedName === 'binance') {
       return this.binanceService;
-    } else if (normalizedName === 'binance.us' || normalizedName === 'binanceus') {
+    } else if (
+      normalizedName === 'binance.us' ||
+      normalizedName === 'binanceus' ||
+      normalizedName === 'binance-us'
+    ) {
       return this.binanceUSService;
     } else if (normalizedName === 'bybit') {
       return this.bybitService;
@@ -960,6 +964,11 @@ export class ExchangesService {
 
     if (exchangeService instanceof BinanceService) {
       return this.binanceService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
+    } else if (exchangeService instanceof BinanceUSService) {
+      const normalizedSymbol = symbol.toUpperCase().endsWith('USDT')
+        ? symbol.toUpperCase().replace(/USDT$/, 'USD')
+        : symbol;
+      return this.binanceUSService.placeOrder(apiKey, apiSecret, normalizedSymbol, side, type, quantity, price);
     } else if (exchangeService instanceof BybitService) {
       return this.bybitService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
     } else if (exchangeService instanceof AlpacaService) {
