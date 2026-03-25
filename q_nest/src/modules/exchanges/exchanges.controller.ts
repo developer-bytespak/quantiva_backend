@@ -801,8 +801,9 @@ export class ExchangesController {
       this.exchangesService.getConnectionData(connectionId, 'balance').catch(() => null),
     ]);
 
-    const quoteCurrency = 'USDT';
+    const quoteCurrency = this.resolveQuoteCurrency(exchangeName, balance as any);
     const quoteBalance = (balance as any)?.assets?.find((a: any) => a.symbol === quoteCurrency) || null;
+    const tradingPair = this.toTradingPair(symbol, quoteCurrency);
     const availableBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
 
     // Extract 24h stats from 1d candles if available
@@ -820,7 +821,7 @@ export class ExchangesController {
 
     const result = {
       symbol,
-      tradingPair: symbol,
+      tradingPair,
       currentPrice: ticker?.price || 0,
       change24h: ticker?.change24h || 0,
       changePercent24h: ticker?.changePercent24h || 0,
@@ -953,6 +954,9 @@ export class ExchangesController {
       if (exchangeName === 'bybit') {
         const tickers = await this.bybitService.getTickerPrices([symbol]);
         return tickers[0] || null;
+      } else if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
+        const tickers = await this.binanceUSService.getTickerPrices([symbol]);
+        return tickers[0] || null;
       } else {
         const tickers = await this.binanceService.getTickerPrices([symbol]);
         return tickers[0] || null;
@@ -985,6 +989,8 @@ export class ExchangesController {
           async () => {
             if (exchangeName === 'bybit') {
               return this.bybitService.getCandlestickData(symbol, normalizedInterval, 100);
+            } else if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
+              return this.binanceUSService.getCandlestickData(symbol, interval, 100);
             } else {
               return this.binanceService.getCandlestickData(symbol, interval, 100);
             }
@@ -1022,6 +1028,25 @@ export class ExchangesController {
       return '6h';
     }
     return interval;
+  }
+
+  private resolveQuoteCurrency(exchangeName: string, balance: any): string {
+    const assets: any[] = balance?.assets ?? [];
+    const hasAsset = (s: string) => assets.some((a: any) => a?.symbol === s);
+
+    if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
+      return hasAsset('USD') ? 'USD' : 'USDT';
+    }
+
+    return 'USDT';
+  }
+
+  private toTradingPair(symbol: string, quoteCurrency: string): string {
+    const upper = (symbol || '').toUpperCase();
+    const knownQuotes = ['USDT', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'FDUSD', 'USD'];
+    const existingQuote = knownQuotes.find((q) => upper.endsWith(q));
+    const base = existingQuote ? upper.slice(0, upper.length - existingQuote.length) : upper;
+    return `${base}${quoteCurrency.toUpperCase()}`;
   }
 
   /**
