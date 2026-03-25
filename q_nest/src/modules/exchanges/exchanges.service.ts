@@ -544,13 +544,31 @@ export class ExchangesService {
       if (isBinance) {
         // OPTIMIZATION: Fetch account info once and reuse it
         const accountInfo = await this.binanceService.getAccountInfo(apiKey, apiSecret);
-        
-        // Fetch balance, positions, and orders in parallel
-        [balance, positions, orders] = await Promise.all([
-          Promise.resolve(this.binanceService.mapAccountToBalance(accountInfo)),
+
+        // Keep dashboard resilient: if orders/positions fail, still return balance data.
+        balance = this.binanceService.mapAccountToBalance(accountInfo);
+        const [positionsResult, ordersResult] = await Promise.allSettled([
           this.binanceService.getPositionsFromAccount(apiKey, apiSecret, accountInfo),
           this.binanceService.getOpenOrders(apiKey, apiSecret),
         ]);
+
+        if (positionsResult.status === 'fulfilled') {
+          positions = positionsResult.value;
+        } else {
+          this.logger.warn(
+            `Binance positions fetch failed for ${connectionId}, continuing with empty positions: ${positionsResult.reason?.message ?? positionsResult.reason}`,
+          );
+          positions = [];
+        }
+
+        if (ordersResult.status === 'fulfilled') {
+          orders = ordersResult.value;
+        } else {
+          this.logger.warn(
+            `Binance open orders fetch failed for ${connectionId}, continuing with empty orders: ${ordersResult.reason?.message ?? ordersResult.reason}`,
+          );
+          orders = [];
+        }
 
         // Portfolio is calculated from positions
         portfolio = this.binanceService.calculatePortfolioFromPositions(positions);
@@ -558,12 +576,30 @@ export class ExchangesService {
         // OPTIMIZATION: Fetch account info once and reuse it
         const accountInfo = await this.binanceUSService.getAccountInfo(apiKey, apiSecret);
 
-        // Fetch balance, positions, and orders in parallel
-        [balance, positions, orders] = await Promise.all([
-          Promise.resolve(this.binanceUSService.mapAccountToBalance(accountInfo)),
+        // Keep dashboard resilient: if orders/positions fail, still return balance data.
+        balance = this.binanceUSService.mapAccountToBalance(accountInfo);
+        const [positionsResult, ordersResult] = await Promise.allSettled([
           this.binanceUSService.getPositionsFromAccount(apiKey, apiSecret, accountInfo),
           this.binanceUSService.getOpenOrders(apiKey, apiSecret),
         ]);
+
+        if (positionsResult.status === 'fulfilled') {
+          positions = positionsResult.value;
+        } else {
+          this.logger.warn(
+            `Binance.US positions fetch failed for ${connectionId}, continuing with empty positions: ${positionsResult.reason?.message ?? positionsResult.reason}`,
+          );
+          positions = [];
+        }
+
+        if (ordersResult.status === 'fulfilled') {
+          orders = ordersResult.value;
+        } else {
+          this.logger.warn(
+            `Binance.US open orders fetch failed for ${connectionId}, continuing with empty orders: ${ordersResult.reason?.message ?? ordersResult.reason}`,
+          );
+          orders = [];
+        }
 
         // Portfolio is calculated from positions
         portfolio = this.binanceUSService.calculatePortfolioFromPositions(positions);
@@ -582,7 +618,6 @@ export class ExchangesService {
         portfolio = this.bybitService.calculatePortfolioFromPositions(positions);
       } else if (isAlpaca) {
         // Alpaca: fetch account info, positions and orders
-        console.log(`[SYNC] Syncing Alpaca connection ${connectionId}, API Key starts with: ${apiKey.substring(0, 2)}...`);
         const accountInfo = await this.alpacaService.getAccountInfo(apiKey, apiSecret);
         const positionsRaw = await this.alpacaService.getPositions(apiKey, apiSecret);
         const ordersRaw = await this.alpacaService.getOrders(apiKey, apiSecret);

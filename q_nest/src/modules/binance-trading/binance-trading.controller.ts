@@ -27,7 +27,6 @@ export class BinanceTradingController {
   async getDashboard(@CurrentUser() user: TokenPayload) {
     try {
       const data = await this.binanceTradingService.getDashboard(user.sub);
-      console.log('Dashboard data:', data);
       return { success: true, data };
     } catch (error: any) {
       this.logger.error(`getDashboard failed: ${error?.message}`);

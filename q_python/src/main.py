@@ -1,7 +1,7 @@
 # FastAPI entrypoint
 import logging
 import sys
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 
 # Configure logging
@@ -31,14 +31,25 @@ def _safe_import_router(import_path, alias_name=None):
 app = FastAPI(title="Quantiva Python API", version="1.0.0")
 logger.info("FastAPI app created")
 
-# CORS middleware
+# CORS middleware — internal API only, no browser access needed
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-Internal-Api-Key"],
 )
+
+
+# Internal API key authentication — all endpoints require this header
+async def verify_internal_api_key(x_internal_api_key: str = Header(...)):
+    expected = os.environ.get("INTERNAL_API_KEY")
+    if not expected:
+        logger.error("INTERNAL_API_KEY env var not set — rejecting all requests")
+        raise HTTPException(status_code=500, detail="Internal API key not configured")
+    if x_internal_api_key != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return True
 
 logger.info("Application module imported (routers will be registered at startup)")
 
@@ -61,9 +72,9 @@ def register_routers(skip_ml_init: bool = False):
         router = _safe_import_router(path)
         if router:
             if tags:
-                app.include_router(router, prefix=prefix, tags=tags)
+                app.include_router(router, prefix=prefix, tags=tags, dependencies=[Depends(verify_internal_api_key)])
             else:
-                app.include_router(router, prefix=prefix)
+                app.include_router(router, prefix=prefix, dependencies=[Depends(verify_internal_api_key)])
             logger.info(f"{path} included")
 
     logger.info("All available routers registered")

@@ -297,24 +297,34 @@ export class BinanceUSService {
     accountInfo: BinanceAccountInfo,
   ): Promise<PositionDto[]> {
     try {
-      // Get prices for all assets with balances
-      const symbols = accountInfo.balances
-        .filter((b) => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0)
-        .map((b) => `${b.asset}USDT`);
+      const balancesWithValue = accountInfo.balances.filter((b) =>
+        parseFloat(b.free) > 0 || parseFloat(b.locked) > 0,
+      );
 
-      if (symbols.length === 0) {
+      if (balancesWithValue.length === 0) {
         return [];
       }
 
-      // Fetch prices for all symbols
-      const prices = await this.getTickerPrices(symbols);
-      const priceMap = new Map(prices.map((p) => [p.symbol.replace('USDT', ''), p.price]));
+      // Treat fiat/stable balances as $1 so portfolio can be calculated even without ticker pairs.
+      const STABLE_ASSETS = new Set(['USD', 'USDT', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'FDUSD']);
+      const priceMap = new Map<string, number>();
+      for (const asset of STABLE_ASSETS) {
+        priceMap.set(asset, 1);
+      }
 
-      const positions: PositionDto[] = accountInfo.balances
-        .filter((balance) => {
-          const total = parseFloat(balance.free) + parseFloat(balance.locked);
-          return total > 0;
-        })
+      // Fetch prices only for non-stable assets.
+      const symbols = balancesWithValue
+        .filter((b) => !STABLE_ASSETS.has(b.asset))
+        .map((b) => `${b.asset}USDT`);
+
+      if (symbols.length > 0) {
+        const prices = await this.getTickerPrices(symbols);
+        for (const p of prices) {
+          priceMap.set(p.symbol.replace('USDT', ''), p.price);
+        }
+      }
+
+      const positions: PositionDto[] = balancesWithValue
         .map((balance) => {
           const quantity = parseFloat(balance.free) + parseFloat(balance.locked);
           const currentPrice = priceMap.get(balance.asset) || 0;
@@ -903,6 +913,88 @@ export class BinanceUSService {
       }));
     } catch (error: any) {
       throw new BinanceApiException(`Failed to fetch recent trades for ${symbol}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get all orders for a symbol (NEW, FILLED, CANCELED, EXPIRED)
+   * Binance US API: GET /api/v3/allOrders
+   */
+  async getAllOrders(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    params?: { orderId?: number; startTime?: number; endTime?: number; limit?: number },
+  ): Promise<any[]> {
+    try {
+      const queryParams: Record<string, any> = {
+        symbol: symbol.toUpperCase(),
+        limit: Math.min(params?.limit || 500, 1000),
+      };
+      if (params?.orderId) queryParams.orderId = params.orderId;
+      if (params?.startTime) queryParams.startTime = params.startTime;
+      if (params?.endTime) queryParams.endTime = params.endTime;
+
+      const orders = await this.makeSignedRequest('/api/v3/allOrders', apiKey, apiSecret, queryParams);
+
+      return orders.map((o: any) => ({
+        orderId: o.orderId?.toString(),
+        symbol: o.symbol,
+        side: o.side,
+        type: o.type,
+        status: o.status,
+        quantity: parseFloat(o.origQty || '0'),
+        executedQty: parseFloat(o.executedQty || '0'),
+        price: parseFloat(o.price || '0'),
+        stopPrice: o.stopPrice ? parseFloat(o.stopPrice) : null,
+        timeInForce: o.timeInForce,
+        time: o.time,
+        updateTime: o.updateTime,
+        isWorking: o.isWorking,
+      }));
+    } catch (error: any) {
+      if (error instanceof BinanceApiException) throw error;
+      throw new BinanceApiException(`Failed to fetch all orders for ${symbol}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get filled trade executions for a symbol (with commission and buyer/seller side)
+   * Binance US API: GET /api/v3/myTrades
+   */
+  async getMyTrades(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    params?: { orderId?: number; startTime?: number; endTime?: number; limit?: number },
+  ): Promise<any[]> {
+    try {
+      const queryParams: Record<string, any> = {
+        symbol: symbol.toUpperCase(),
+        limit: Math.min(params?.limit || 500, 1000),
+      };
+      if (params?.orderId) queryParams.orderId = params.orderId;
+      if (params?.startTime) queryParams.startTime = params.startTime;
+      if (params?.endTime) queryParams.endTime = params.endTime;
+
+      const trades = await this.makeSignedRequest('/api/v3/myTrades', apiKey, apiSecret, queryParams);
+
+      return trades.map((t: any) => ({
+        id: t.id,
+        orderId: t.orderId,
+        symbol: t.symbol,
+        price: parseFloat(t.price),
+        qty: parseFloat(t.qty),
+        quoteQty: parseFloat(t.quoteQty),
+        commission: parseFloat(t.commission),
+        commissionAsset: t.commissionAsset,
+        time: t.time,
+        isBuyer: t.isBuyer,
+        isMaker: t.isMaker,
+      }));
+    } catch (error: any) {
+      if (error instanceof BinanceApiException) throw error;
+      throw new BinanceApiException(`Failed to fetch trades for ${symbol}: ${error.message}`);
     }
   }
 }

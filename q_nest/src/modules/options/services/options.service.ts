@@ -502,7 +502,10 @@ export class OptionsService {
             },
             portfolio_value: null, // Will be set by Python engine if needed
           },
-          { timeout: 15000 },
+          {
+            timeout: 15000,
+            headers: { 'X-Internal-Api-Key': process.env.INTERNAL_API_KEY },
+          },
         );
 
         if (response.data?.recommendation) {

@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { BinanceService } from '../exchanges/integrations/binance.service';
+import { BinanceUSService } from '../exchanges/integrations/binance-us.service';
 
 const STABLECOINS = new Set(['USDT', 'BUSD', 'USDC', 'TUSD', 'USDP', 'DAI', 'FDUSD']);
 
@@ -11,23 +12,29 @@ export class BinanceTradingService {
   constructor(
     private readonly exchangesService: ExchangesService,
     private readonly binanceService: BinanceService,
+    private readonly binanceUSService: BinanceUSService,
   ) {}
 
   /**
-   * Get user's Binance API credentials from their active connection
+   * Get user's Binance/Binance US API credentials from their active connection
+   * Supports both 'binance' and 'binance-us' exchanges
    */
-  private async getCredentials(userId: string) {
+  private async getCredentialsWithExchange(userId: string) {
     const connection = await this.exchangesService.getActiveConnectionByType(userId, 'crypto');
 
     if (!connection) {
       throw new NotFoundException(
-        'No active crypto exchange connection found. Please connect your Binance account first.',
+        'No active crypto exchange connection found. Please connect Binance or Binance US first.',
       );
     }
 
-    if (connection.exchange.name.toLowerCase() !== 'binance') {
+    const exchangeName = connection.exchange.name.toLowerCase();
+    const isUS = exchangeName === 'binance-us' || exchangeName === 'binance.us';
+    const isBinance = exchangeName === 'binance';
+
+    if (!isBinance && !isUS) {
       throw new NotFoundException(
-        `Active crypto connection is ${connection.exchange.name}, not Binance. Please connect Binance.`,
+        `Active crypto connection is ${connection.exchange.name}. Please connect Binance or Binance US.`,
       );
     }
 
@@ -35,14 +42,40 @@ export class BinanceTradingService {
       connection.connection_id,
     );
 
-    return { apiKey, apiSecret, connectionId: connection.connection_id };
+    return {
+      apiKey,
+      apiSecret,
+      connectionId: connection.connection_id,
+      exchangeName,
+      isUS,
+    };
+  }
+
+  /**
+   * Get the appropriate service based on exchange type
+   */
+  private getService(isUS: boolean) {
+    return isUS ? this.binanceUSService : this.binanceService;
+  }
+
+  /**
+   * Get user's Binance API credentials from their active connection (for backward compatibility)
+   */
+  private async getCredentials(userId: string) {
+    const creds = await this.getCredentialsWithExchange(userId);
+    return {
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      connectionId: creds.connectionId,
+    };
   }
 
   /**
    * Get non-stablecoin symbols user holds (for multi-symbol queries)
    */
-  private async getTradingSymbols(apiKey: string, apiSecret: string): Promise<string[]> {
-    const positions = await this.binanceService.getPositions(apiKey, apiSecret);
+  private async getTradingSymbols(apiKey: string, apiSecret: string, isUS: boolean): Promise<string[]> {
+    const service = this.getService(isUS);
+    const positions = await service.getPositions(apiKey, apiSecret);
     return positions
       .filter((p) => !STABLECOINS.has(p.symbol) && p.quantity > 0)
       .map((p) => `${p.symbol}USDT`);
@@ -53,8 +86,9 @@ export class BinanceTradingService {
    * User's full account balance (all assets with free/locked)
    */
   async getBalance(userId: string) {
-    const { apiKey, apiSecret } = await this.getCredentials(userId);
-    return this.binanceService.getAccountBalance(apiKey, apiSecret);
+    const { apiKey, apiSecret, isUS } = await this.getCredentialsWithExchange(userId);
+    const service = this.getService(isUS);
+    return service.getAccountBalance(apiKey, apiSecret);
   }
 
   /**
@@ -62,8 +96,9 @@ export class BinanceTradingService {
    * Current holdings with live prices and P&L
    */
   async getPositions(userId: string) {
-    const { apiKey, apiSecret } = await this.getCredentials(userId);
-    return this.binanceService.getPositions(apiKey, apiSecret);
+    const { apiKey, apiSecret, isUS } = await this.getCredentialsWithExchange(userId);
+    const service = this.getService(isUS);
+    return service.getPositions(apiKey, apiSecret);
   }
 
   /**
@@ -71,8 +106,9 @@ export class BinanceTradingService {
    * Currently open / pending orders
    */
   async getOpenOrders(userId: string, symbol?: string) {
-    const { apiKey, apiSecret } = await this.getCredentials(userId);
-    return this.binanceService.getOpenOrders(apiKey, apiSecret, symbol);
+    const { apiKey, apiSecret, isUS } = await this.getCredentialsWithExchange(userId);
+    const service = this.getService(isUS);
+    return service.getOpenOrders(apiKey, apiSecret, symbol);
   }
 
   /**
@@ -84,20 +120,21 @@ export class BinanceTradingService {
     userId: string,
     params: { symbol?: string; limit?: number; startTime?: number; endTime?: number },
   ) {
-    const { apiKey, apiSecret } = await this.getCredentials(userId);
+    const { apiKey, apiSecret, isUS } = await this.getCredentialsWithExchange(userId);
+    const service = this.getService(isUS);
 
     let symbols: string[];
     if (params.symbol) {
       symbols = [params.symbol.toUpperCase()];
     } else {
-      symbols = await this.getTradingSymbols(apiKey, apiSecret);
+      symbols = await this.getTradingSymbols(apiKey, apiSecret, isUS);
     }
 
     if (symbols.length === 0) return [];
 
     const results = await Promise.all(
       symbols.map((sym) =>
-        this.binanceService
+        service
           .getAllOrders(apiKey, apiSecret, sym, {
             limit: params.limit || 100,
             startTime: params.startTime,
@@ -123,20 +160,21 @@ export class BinanceTradingService {
     userId: string,
     params: { symbol?: string; limit?: number; startTime?: number; endTime?: number },
   ) {
-    const { apiKey, apiSecret } = await this.getCredentials(userId);
+    const { apiKey, apiSecret, isUS } = await this.getCredentialsWithExchange(userId);
+    const service = this.getService(isUS);
 
     let symbols: string[];
     if (params.symbol) {
       symbols = [params.symbol.toUpperCase()];
     } else {
-      symbols = await this.getTradingSymbols(apiKey, apiSecret);
+      symbols = await this.getTradingSymbols(apiKey, apiSecret, isUS);
     }
 
     if (symbols.length === 0) return [];
 
     const allTradesPerSymbol = await Promise.all(
       symbols.map((sym) =>
-        this.binanceService
+        service
           .getMyTrades(apiKey, apiSecret, sym, {
             limit: params.limit || 500,
             startTime: params.startTime,
@@ -217,20 +255,22 @@ export class BinanceTradingService {
   /**
    * GET /binance-trading/dashboard
    * Combined: account info + balance + positions + open orders
+   * Works for both Binance and Binance US
    */
   async getDashboard(userId: string) {
-    const { apiKey, apiSecret } = await this.getCredentials(userId);
+    const { apiKey, apiSecret, isUS } = await this.getCredentialsWithExchange(userId);
+    const service = this.getService(isUS);
 
     // Fetch account info once — reuse for balance + positions
-    const accountInfo = await this.binanceService.getAccountInfo(apiKey, apiSecret);
+    const accountInfo = await service.getAccountInfo(apiKey, apiSecret);
 
     const [balance, positions, openOrders] = await Promise.all([
-      Promise.resolve(this.binanceService.mapAccountToBalance(accountInfo)),
-      this.binanceService.getPositionsFromAccount(apiKey, apiSecret, accountInfo),
-      this.binanceService.getOpenOrders(apiKey, apiSecret),
+      Promise.resolve(service.mapAccountToBalance(accountInfo)),
+      service.getPositionsFromAccount(apiKey, apiSecret, accountInfo),
+      service.getOpenOrders(apiKey, apiSecret),
     ]);
 
-    const portfolio = this.binanceService.calculatePortfolioFromPositions(positions);
+    const portfolio = service.calculatePortfolioFromPositions(positions);
 
     return {
       account: {

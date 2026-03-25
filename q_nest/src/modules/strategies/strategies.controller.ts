@@ -2413,6 +2413,7 @@ export class StrategiesController {
         skip_external_apis: true, // Skip Finnhub/StockNewsAPI calls
       }, {
         timeout: 120000, // 2 minute timeout for FinBERT processing
+        headers: { 'X-Internal-Api-Key': process.env.INTERNAL_API_KEY },
       });
       
       // 4. Return detailed engine output
