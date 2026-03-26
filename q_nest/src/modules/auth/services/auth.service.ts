@@ -154,8 +154,6 @@ export class AuthService {
 
     return {
       requires2FA: true,
-      userId: user.user_id,
-      email: user.email,
       message: '2FA code sent to your email',
     };
   }
@@ -227,24 +225,6 @@ export class AuthService {
       refreshToken,
       sessionId,
     };
-  }
-
-  async resend2FACode(emailOrUsername: string) {
-    // Find user
-    const user = await this.prisma.users.findFirst({
-      where: {
-        OR: [{ email: emailOrUsername }, { username: emailOrUsername }],
-      },
-    });
-
-    if (!user) {
-      // Don't reveal if user exists (user enumeration protection)
-      return;
-    }
-
-    // Generate and send new 2FA code
-    const code = await this.twoFactorService.generateCode(user.user_id, 'login');
-    await this.twoFactorService.sendCodeByEmail(user.email, code);
   }
 
   async refresh(refreshToken: string) {
