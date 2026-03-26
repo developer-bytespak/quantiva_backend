@@ -12,6 +12,8 @@ import { MarketStocksDbService } from '../../stocks-market/services/market-stock
 export class PreBuiltStrategiesService implements OnModuleInit {
   private readonly logger = new Logger(PreBuiltStrategiesService.name);
 
+  private static readonly BINANCE_US_EXCHANGE_NAMES = new Set(['binance_us', 'binance.us']);
+
   constructor(
     private prisma: PrismaService,
     private pythonApi: PythonApiService,
@@ -114,17 +116,10 @@ export class PreBuiltStrategiesService implements OnModuleInit {
    */
   async getTopTrendingAssets(limit: number = 20, enrichWithRealtime: boolean = true, userId?: string) {
     // Route to Binance US path when the user's active connection is Binance US
-    if (userId && enrichWithRealtime) {
-      try {
-        const activeConnection = await this.exchangesService.getActiveConnection(userId);
-        const exchangeName = activeConnection.exchange?.name?.toLowerCase() || '';
-        if (exchangeName === 'binance_us' || exchangeName === 'binance.us') {
-          this.logger.log(`getTopTrendingAssets: routing to Binance.US path for user ${userId}`);
-          return this._getTopTrendingAssetsForBinanceUS(limit);
-        }
-      } catch {
-        // No active connection or lookup failed — fall through to default Binance.com path
-      }
+    const signalSource = await this.resolveSignalSource(userId);
+    if (signalSource.key === 'binance_us' && enrichWithRealtime) {
+      this.logger.log(`getTopTrendingAssets: routing to Binance.US path for user ${userId || 'unknown'}`);
+      return this._getTopTrendingAssetsForBinanceUS(limit);
     }
 
     try {
@@ -251,6 +246,29 @@ export class PreBuiltStrategiesService implements OnModuleInit {
     return [];
   }
 }
+
+  async getSignalSourceLabel(userId?: string): Promise<string> {
+    const source = await this.resolveSignalSource(userId);
+    return source.label;
+  }
+
+  private async resolveSignalSource(userId?: string): Promise<{ key: 'binance' | 'binance_us'; label: string }> {
+    if (!userId) {
+      return { key: 'binance', label: 'Binance.com (USDT pairs)' };
+    }
+
+    try {
+      const activeConnection = await this.exchangesService.getActiveConnection(userId);
+      const exchangeName = activeConnection.exchange?.name?.toLowerCase() || '';
+      if (PreBuiltStrategiesService.BINANCE_US_EXCHANGE_NAMES.has(exchangeName)) {
+        return { key: 'binance_us', label: 'Binance.US (USD pairs)' };
+      }
+    } catch {
+      // No active connection or lookup failed — default to Binance.com behavior
+    }
+
+    return { key: 'binance', label: 'Binance.com (USDT pairs)' };
+  }
 
   /**
    * Returns trending assets filtered to coins tradeable on Binance.US (USD quote).
