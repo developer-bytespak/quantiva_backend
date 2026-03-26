@@ -35,13 +35,16 @@ export class AdminOrUserJwtGuard implements CanActivate {
 
     const jwtConfig = this.configService.get('jwt');
     let payload: { sub?: string; role?: string; [k: string]: any };
-    try {
-      payload = await this.jwtService.verifyAsync(token, {
-        secret: jwtConfig.secret,
-      });
-    } catch {
+
+    // Try admin secret first, then user secret — supports both admin and user tokens
+    const verified = await this.jwtService
+      .verifyAsync(token, { secret: jwtConfig.adminSecret })
+      .catch(() => this.jwtService.verifyAsync(token, { secret: jwtConfig.secret }).catch(() => null));
+
+    if (!verified) {
       throw new UnauthorizedException('Invalid or expired token');
     }
+    payload = verified;
 
     if (!payload?.sub) {
       throw new UnauthorizedException('Invalid token payload');

@@ -1,7 +1,7 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { BinanceService } from '../../exchanges/integrations/binance.service';
-import { EncryptionUtil } from '../../../common/utils/encryption.util';
+import { ExchangesService } from '../../exchanges/exchanges.service';
 
 @Injectable()
 export class AdminBinanceService {
@@ -10,47 +10,30 @@ export class AdminBinanceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly binanceService: BinanceService,
+    private readonly exchangesService: ExchangesService,
   ) {}
 
   /**
-   * Get admin's decrypted Binance API credentials
+   * Get admin's decrypted Binance API credentials via the exchange connections system.
+   * Admin connects Binance through POST /exchanges/connections (same as users).
+   * ExchangesService.getEffectiveUserId maps admin → linked user by email.
    */
   private async getAdminBinanceCredentials(
     adminId: string,
   ): Promise<{ apiKey: string; apiSecret: string }> {
-    const admin = await this.prisma.admins.findUnique({
-      where: { admin_id: adminId },
-      select: {
-        binance_api_key_encrypted: true,
-        binance_api_secret_encrypted: true,
-      },
-    });
+    // Map admin → linked user account (matched by email)
+    const effectiveUserId = await this.exchangesService.getEffectiveUserId(adminId, 'admin');
 
-    if (!admin) {
-      throw new BadRequestException('Admin not found');
-    }
-
-    if (!admin.binance_api_key_encrypted || !admin.binance_api_secret_encrypted) {
+    // Find the active crypto connection for that user
+    const connection = await this.exchangesService.getActiveConnectionByType(effectiveUserId, 'crypto');
+    if (!connection) {
       throw new BadRequestException(
-        'Binance API credentials not configured for this admin account. Please configure Binance API keys in admin settings.',
+        'No active Binance connection found. Please connect Binance in Admin Settings → Exchange Configuration.',
       );
     }
 
-    try {
-      const encryptionKey = process.env.ENCRYPTION_KEY;
-      if (!encryptionKey) {
-        this.logger.error('ENCRYPTION_KEY not found in environment variables');
-        throw new BadRequestException('Encryption key not configured on server');
-      }
-
-      return {
-        apiKey: EncryptionUtil.decrypt(admin.binance_api_key_encrypted, encryptionKey),
-        apiSecret: EncryptionUtil.decrypt(admin.binance_api_secret_encrypted, encryptionKey),
-      };
-    } catch (error: any) {
-      this.logger.error(`Failed to decrypt admin Binance credentials: ${error.message}`);
-      throw new BadRequestException(`Failed to decrypt Binance credentials: ${error.message}`);
-    }
+    // Decrypt and return credentials
+    return this.exchangesService.getDecryptedCredentials(connection.connection_id);
   }
 
   /**
