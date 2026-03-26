@@ -5,6 +5,7 @@ import { PRE_BUILT_STRATEGIES } from '../data/pre-built-strategies';
 import { PythonApiService } from '../../../kyc/integrations/python-api.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { BinanceService } from '../../binance/binance.service';
+import { BinanceUSService } from '../../exchanges/integrations/binance-us.service';
 import { MarketStocksDbService } from '../../stocks-market/services/market-stocks-db.service';
 
 @Injectable()
@@ -17,6 +18,7 @@ export class PreBuiltStrategiesService implements OnModuleInit {
     @Inject(forwardRef(() => ExchangesService))
     private exchangesService: ExchangesService,
     private binanceService: BinanceService,
+    private binanceUSService: BinanceUSService,
     private marketStocksDbService: MarketStocksDbService,
   ) { }
 
@@ -110,7 +112,21 @@ export class PreBuiltStrategiesService implements OnModuleInit {
    * - Optional realtime OHLCV data from Binance
    * - Only returns assets tradeable on Binance (when enrichWithRealtime=true)
    */
-  async getTopTrendingAssets(limit: number = 20, enrichWithRealtime: boolean = true) {
+  async getTopTrendingAssets(limit: number = 20, enrichWithRealtime: boolean = true, userId?: string) {
+    // Route to Binance US path when the user's active connection is Binance US
+    if (userId && enrichWithRealtime) {
+      try {
+        const activeConnection = await this.exchangesService.getActiveConnection(userId);
+        const exchangeName = activeConnection.exchange?.name?.toLowerCase() || '';
+        if (exchangeName === 'binance_us' || exchangeName === 'binance.us') {
+          this.logger.log(`getTopTrendingAssets: routing to Binance.US path for user ${userId}`);
+          return this._getTopTrendingAssetsForBinanceUS(limit);
+        }
+      } catch {
+        // No active connection or lookup failed — fall through to default Binance.com path
+      }
+    }
+
     try {
       // Fetch more from DB to account for filtering out non-Binance tradeable assets
       // Typically ~60-70% of LunarCrush trending coins are on Binance
@@ -235,6 +251,101 @@ export class PreBuiltStrategiesService implements OnModuleInit {
     return [];
   }
 }
+
+  /**
+   * Returns trending assets filtered to coins tradeable on Binance.US (USD quote).
+   * Uses DB prices — no Binance.com API calls made.
+   */
+  private async _getTopTrendingAssetsForBinanceUS(limit: number): Promise<any[]> {
+    try {
+      const [rows, tradeableSet] = await Promise.all([
+        this.prisma.$queryRaw`
+          SELECT DISTINCT ON (ta.asset_id)
+            ta.asset_id,
+            ta.galaxy_score,
+            ta.alt_rank,
+            ta.social_score,
+            ta.price_usd,
+            ta.market_volume,
+            ta.volume_24h,
+            ta.price_change_24h,
+            ta.price_change_24h_usd,
+            ta.market_cap,
+            ta.high_24h,
+            ta.low_24h,
+            ta.poll_timestamp,
+            a.symbol,
+            a.name,
+            a.display_name,
+            a.logo_url,
+            a.coingecko_id,
+            a.asset_type,
+            a.market_cap_rank
+          FROM trending_assets ta
+          INNER JOIN assets a ON ta.asset_id = a.asset_id
+          WHERE
+            ta.galaxy_score IS NOT NULL
+            AND ta.alt_rank IS NOT NULL
+            AND ta.alt_rank < 300
+            AND ta.price_usd IS NOT NULL
+            AND ta.market_volume > 10000000
+            AND a.asset_type = 'crypto'
+            AND a.symbol NOT IN (
+              'USDT','USDC','DAI','PYUSD','USD1',
+              'WBETH','STETH','CBBTC','FBTC',
+              'XAUT','PAXG'
+            )
+          ORDER BY
+            ta.asset_id,
+            ta.poll_timestamp DESC
+          LIMIT 500
+        ` as Promise<any[]>,
+        this.binanceUSService.getTradeableBaseAssets(),
+      ]);
+
+      if (!rows.length) return [];
+
+      const results = (rows as any[])
+        .filter((r) => tradeableSet.has(r.symbol))
+        .slice(0, limit)
+        .map((r) => ({
+          asset_id: r.asset_id,
+          symbol: r.symbol,
+          name: r.display_name || r.name || r.symbol,
+          logo_url: r.logo_url,
+          coingecko_id: r.coingecko_id,
+          asset_type: r.asset_type,
+          price_usd: Number(r.price_usd),
+          price_change_24h: Number(r.price_change_24h || 0),
+          price_change_24h_usd: Number(r.price_change_24h_usd || 0),
+          market_cap: Number(r.market_cap || 0),
+          volume_24h: Number(r.volume_24h || r.market_volume || 0),
+          high_24h: Number(r.high_24h || 0),
+          low_24h: Number(r.low_24h || 0),
+          galaxy_score: Number(r.galaxy_score),
+          alt_rank: Number(r.alt_rank),
+          social_score: Number(r.social_score || 0),
+          market_volume: Number(r.market_volume),
+          market_cap_rank: r.market_cap_rank,
+          poll_timestamp: r.poll_timestamp,
+          is_tradeable: true,
+          realtime_data: {
+            price: Number(r.price_usd),
+            priceChangePercent: Number(r.price_change_24h || 0),
+            high24h: Number(r.high_24h || 0),
+            low24h: Number(r.low_24h || 0),
+            volume24h: Number(r.volume_24h || r.market_volume || 0),
+            quoteVolume24h: 0,
+          },
+        }));
+
+      this.logger.log(`Binance.US filter: ${results.length} tradeable USD assets (limit: ${limit})`);
+      return results;
+    } catch (err: any) {
+      this.logger.error(`_getTopTrendingAssetsForBinanceUS error: ${err?.message || err}`);
+      return [];
+    }
+  }
 
   /**
    * Get top N stocks from market database (for stocks connection)
