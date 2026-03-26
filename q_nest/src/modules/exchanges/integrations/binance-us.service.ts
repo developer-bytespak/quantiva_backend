@@ -197,6 +197,39 @@ export class BinanceUSService {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  // Cache for Binance.US tradeable USD base assets (e.g. 'BTC','ETH','SOL')
+  private tradeableSymbolsCache: { symbols: Set<string>; fetchedAt: number } | null = null;
+  private readonly TRADEABLE_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
+
+  /**
+   * Returns the set of base assets that have an active TRADING pair with USD quote on Binance.US.
+   * Uses a 5-minute in-memory cache to avoid hammering exchangeInfo.
+   * No API key required — public endpoint.
+   */
+  async getTradeableBaseAssets(): Promise<Set<string>> {
+    if (
+      this.tradeableSymbolsCache &&
+      Date.now() - this.tradeableSymbolsCache.fetchedAt < this.TRADEABLE_CACHE_TTL_MS
+    ) {
+      return this.tradeableSymbolsCache.symbols;
+    }
+    try {
+      const data = await this.makePublicRequest('/api/v3/exchangeInfo');
+      const symbols = new Set<string>(
+        (data.symbols as any[])
+          .filter((s) => s.status === 'TRADING' && s.quoteAsset === 'USD')
+          .map((s) => s.baseAsset as string),
+      );
+      this.tradeableSymbolsCache = { symbols, fetchedAt: Date.now() };
+      this.logger.log(`Binance.US tradeable USD base assets cached: ${symbols.size} symbols`);
+      return symbols;
+    } catch (error: any) {
+      this.logger.error(`Failed to fetch Binance.US tradeable symbols: ${error.message}`);
+      if (this.tradeableSymbolsCache) return this.tradeableSymbolsCache.symbols;
+      return new Set();
+    }
+  }
+
   /**
    * Verifies API key by fetching account information
    */

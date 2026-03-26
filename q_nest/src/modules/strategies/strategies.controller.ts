@@ -101,6 +101,7 @@ export class StrategiesController {
   // @AllowTier('PRO', 'ELITE')
   @Get('pre-built/:id/trending-with-insights')
   async getTrendingAssetsWithInsights(
+    @Req() req: any,
     @Param('id') strategyId: string,
     @Query('limit') limit?: string,
   ) {
@@ -132,7 +133,8 @@ export class StrategiesController {
       assets = await this.preBuiltStrategiesService.getTopStocks(limitNum);
       this.logger.log(`Retrieved ${assets.length} stocks from market database`);
     } else {
-      assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, true);
+      const userId = (req as any).subscriptionUser?.user_id;
+      assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, true, userId);
       this.logger.log(`Retrieved ${assets.length} crypto assets`);
     }
     
