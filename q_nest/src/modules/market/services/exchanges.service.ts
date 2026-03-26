@@ -18,6 +18,14 @@ export class ExchangesService {
   private binanceCoinUsdtCache: string[] | null = null;
   private cacheTimestampUsdt: number | null = null;
 
+  // Cache for Binance US coins list
+  private binanceUSCoinCache: string[] | null = null;
+  private binanceUSCacheTimestamp: number | null = null;
+
+  // Cache for Binance US coins with USD/USDT pairs
+  private binanceUSPreferredQuoteCache: string[] | null = null;
+  private binanceUSPreferredQuoteCacheTimestamp: number | null = null;
+
   // Cache for Bybit coins list
   private bybitCoinCache: string[] | null = null;
   private bybitCacheTimestamp: number | null = null;
@@ -235,6 +243,191 @@ export class ExchangesService {
   }
 
   /**
+   * Get all coins available on Binance US from CoinGecko Pro API
+   */
+  async getAllBinanceUSCoins(): Promise<string[]> {
+    const now = Date.now();
+
+    if (
+      this.binanceUSCoinCache &&
+      this.binanceUSCacheTimestamp &&
+      now - this.binanceUSCacheTimestamp < this.CACHE_DURATION
+    ) {
+      this.logger.log('Using cached Binance US coins');
+      return this.binanceUSCoinCache;
+    }
+
+    const coins = await this.fetchBinanceUSCoinsFromAPI();
+    this.binanceUSCoinCache = coins;
+    this.binanceUSCacheTimestamp = now;
+
+    return coins;
+  }
+
+  /**
+   * Fetch Binance US coins from CoinGecko Pro API with pagination
+   */
+  private async fetchBinanceUSCoinsFromAPI(): Promise<string[]> {
+    if (!this.apiKey) {
+      const errorMsg =
+        'CoinGecko API key not configured. Set COINGECKO_API_KEY environment variable.';
+      this.logger.error(errorMsg);
+      throw new Error(errorMsg);
+    }
+
+    const allCoins = new Set<string>();
+    let page = 1;
+    let hasMorePages = true;
+
+    while (hasMorePages) {
+      try {
+        this.logger.log(`Fetching Binance US tickers page ${page}...`);
+
+        const response = await axios.get(
+          `${this.baseUrl}/exchanges/binance_us/tickers`,
+          {
+            headers: {
+              ...(this.isProApiKey && this.apiKey
+                ? { 'x-cg-pro-api-key': this.apiKey }
+                : {}),
+            },
+            params: {
+              page,
+              per_page: 100,
+            },
+            timeout: 30000,
+          },
+        );
+
+        const tickers = response.data.tickers || [];
+
+        if (tickers.length === 0) {
+          hasMorePages = false;
+          break;
+        }
+
+        tickers.forEach((ticker: any) => {
+          if (ticker.coin_id) {
+            allCoins.add(ticker.coin_id);
+          }
+        });
+
+        page++;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      } catch (error: any) {
+        this.logger.error(
+          `Error fetching Binance US page ${page}: ${error.message}`,
+          error.response?.data || error,
+        );
+        if (page === 1) {
+          throw error;
+        }
+        break;
+      }
+    }
+
+    this.logger.log(
+      `Successfully fetched ${allCoins.size} unique coins from Binance US`,
+    );
+    return Array.from(allCoins);
+  }
+
+  /**
+   * Get Binance US coins with preferred quote pairs (USD first, then USDT)
+   */
+  async getBinanceUSCoinsWithPreferredQuotePairs(): Promise<string[]> {
+    const now = Date.now();
+
+    if (
+      this.binanceUSPreferredQuoteCache &&
+      this.binanceUSPreferredQuoteCacheTimestamp &&
+      now - this.binanceUSPreferredQuoteCacheTimestamp < this.CACHE_DURATION
+    ) {
+      this.logger.log('Using cached Binance US coins with preferred quote pairs');
+      return this.binanceUSPreferredQuoteCache;
+    }
+
+    const coins = await this.fetchBinanceUSCoinsPreferredQuotesFromAPI();
+    this.binanceUSPreferredQuoteCache = coins;
+    this.binanceUSPreferredQuoteCacheTimestamp = now;
+
+    return coins;
+  }
+
+  /**
+   * Fetch Binance US coins filtered to USD/USDT quote pairs
+   */
+  private async fetchBinanceUSCoinsPreferredQuotesFromAPI(): Promise<string[]> {
+    if (!this.apiKey) {
+      const errorMsg =
+        'CoinGecko API key not configured. Set COINGECKO_API_KEY environment variable.';
+      this.logger.error(errorMsg);
+      throw new Error(errorMsg);
+    }
+
+    const preferredQuoteCoins = new Set<string>();
+    const allowedQuotes = new Set(['USD', 'USDT']);
+    let page = 1;
+    let hasMorePages = true;
+
+    while (hasMorePages) {
+      try {
+        this.logger.log(`Fetching Binance US preferred quote pairs page ${page}...`);
+
+        const response = await axios.get(
+          `${this.baseUrl}/exchanges/binance_us/tickers`,
+          {
+            headers: {
+              ...(this.isProApiKey && this.apiKey
+                ? { 'x-cg-pro-api-key': this.apiKey }
+                : {}),
+            },
+            params: {
+              page,
+              per_page: 100,
+            },
+            timeout: 30000,
+          },
+        );
+
+        const tickers = response.data.tickers || [];
+
+        if (tickers.length === 0) {
+          hasMorePages = false;
+          break;
+        }
+
+        tickers.forEach((ticker: any) => {
+          if (!ticker.coin_id || !ticker.target) {
+            return;
+          }
+
+          if (allowedQuotes.has(String(ticker.target).toUpperCase())) {
+            preferredQuoteCoins.add(ticker.coin_id);
+          }
+        });
+
+        page++;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      } catch (error: any) {
+        this.logger.error(
+          `Error fetching Binance US preferred pairs page ${page}: ${error.message}`,
+          error.response?.data || error,
+        );
+        if (page === 1) {
+          throw error;
+        }
+        break;
+      }
+    }
+
+    this.logger.log(
+      `Successfully fetched ${preferredQuoteCoins.size} unique coins with USD/USDT pairs from Binance US`,
+    );
+    return Array.from(preferredQuoteCoins);
+  }
+
+  /**
    * Get all coins available on Bybit from CoinGecko Pro API
    * Paginates through the API and removes duplicates using a Set
    */
@@ -439,10 +632,14 @@ export class ExchangesService {
     this.cacheTimestamp = null;
     this.binanceCoinUsdtCache = null;
     this.cacheTimestampUsdt = null;
+    this.binanceUSCoinCache = null;
+    this.binanceUSCacheTimestamp = null;
+    this.binanceUSPreferredQuoteCache = null;
+    this.binanceUSPreferredQuoteCacheTimestamp = null;
     this.bybitCoinCache = null;
     this.bybitCacheTimestamp = null;
     this.bybitCoinUsdtCache = null;
     this.bybitCacheTimestampUsdt = null;
-    this.logger.log('Cleared Binance and Bybit coins cache (all coins and USDT pairs)');
+    this.logger.log('Cleared Binance, Binance US, and Bybit coins cache (all coins and filtered pairs)');
   }
 }

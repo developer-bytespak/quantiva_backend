@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ExchangesService } from '../exchanges.service';
 import { BinanceService } from '../integrations/binance.service';
+import { BinanceUSService } from '../integrations/binance-us.service';
 import { BybitService } from '../integrations/bybit.service';
 import { CacheService } from './cache.service';
 import { CacheKeyManager } from './cache-key-manager';
@@ -26,6 +27,7 @@ export class MarketDetailAggregatorService {
   constructor(
     private readonly exchangesService: ExchangesService,
     private readonly binanceService: BinanceService,
+    private readonly binanceUSService: BinanceUSService,
     private readonly bybitService: BybitService,
     private readonly cacheService: CacheService,
     private readonly marketService: MarketService,
@@ -131,14 +133,15 @@ export class MarketDetailAggregatorService {
 
     // Balance
     const balanceData = balance as any;
-    const quoteCurrency = 'USDT';
+    const quoteCurrency = this.resolveQuoteCurrency(exchangeName, balanceData, symbol);
     const quoteBalance = balanceData?.assets?.find((a: any) => a.symbol === quoteCurrency) || null;
     const availableBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
+    const tradingPair = this.toTradingPair(symbol, quoteCurrency);
 
     // Build unified response
     const result = {
       symbol,
-      tradingPair: symbol,
+      tradingPair,
       exchange: exchangeName,
 
       // Price data
@@ -201,6 +204,10 @@ export class MarketDetailAggregatorService {
       const tickers = await this.bybitService.getTickerPrices([symbol]);
       return tickers[0] || null;
     }
+    if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
+      const tickers = await this.binanceUSService.getTickerPrices([symbol]);
+      return tickers[0] || null;
+    }
     const tickers = await this.binanceService.getTickerPrices([symbol]);
     return tickers[0] || null;
   }
@@ -225,6 +232,9 @@ export class MarketDetailAggregatorService {
             if (exchangeName === 'bybit') {
               return this.bybitService.getCandlestickData(symbol, normalizedInterval, 100);
             }
+            if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
+              return this.binanceUSService.getCandlestickData(symbol, interval, 100);
+            }
             return this.binanceService.getCandlestickData(symbol, interval, 100);
           },
           candleTtl,
@@ -238,6 +248,29 @@ export class MarketDetailAggregatorService {
       map[interval] = candles;
     }
     return map;
+  }
+
+  private resolveQuoteCurrency(exchangeName: string, balance: any, symbol: string): string {
+    const upperSymbol = (symbol || '').toUpperCase();
+    const suffixMatch = ['USD', 'USDT'].find((q) => upperSymbol.endsWith(q));
+    if (suffixMatch) return suffixMatch;
+
+    const assets: any[] = balance?.assets ?? [];
+    const hasAsset = (s: string) => assets.some((a: any) => a?.symbol === s);
+
+    if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
+      return hasAsset('USD') ? 'USD' : 'USDT';
+    }
+
+    return 'USDT';
+  }
+
+  private toTradingPair(symbol: string, quoteCurrency: string): string {
+    const upper = (symbol || '').toUpperCase();
+    const knownQuotes = ['USDT', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'FDUSD', 'USD'];
+    const existingQuote = knownQuotes.find((q) => upper.endsWith(q));
+    const base = existingQuote ? upper.slice(0, upper.length - existingQuote.length) : upper;
+    return `${base}${quoteCurrency.toUpperCase()}`;
   }
 
   private async fetchOrderBook(exchangeName: string, connectionId: string, symbol: string) {

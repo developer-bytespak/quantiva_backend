@@ -1,4 +1,4 @@
-import { Controller, Get, Query, Param, HttpException, HttpStatus, Post, UseGuards, Logger } from '@nestjs/common';
+import { Controller, Get, Query, Param, HttpException, HttpStatus, Post, UseGuards, Logger, Req } from '@nestjs/common';
 import { MarketService } from './market.service';
 import { CoinDetailsCacheService } from './services/coin-details-cache.service';
 import { ExchangesService as MarketExchangesService } from './services/exchanges.service';
@@ -71,7 +71,7 @@ export class MarketController {
   async getCachedMarketData(
     @Query('limit') limit?: string,
     @Query('search') search?: string,
-    @CurrentUser() user?: TokenPayload,
+    @Req() req?: any,
   ) {
     try {
       const limitNum = limit ? parseInt(limit, 10) : 500;
@@ -82,14 +82,21 @@ export class MarketController {
         );
       }
 
-      // If user is authenticated, get their exchange connection
+      // Use subscription middleware user identity to detect active exchange.
       let exchangeName: string | undefined;
-      if (user && user.sub) {
+      const userId = req?.subscriptionUser?.user_id;
+      if (userId) {
         try {
-          const connection = await this.exchangesConnectionService.getActiveConnection(user.sub);
+          const connection = await this.exchangesConnectionService.getActiveConnection(userId);
           exchangeName = connection.exchange.name.toLowerCase();
-          // Only use if it's Binance or Bybit
-          if (exchangeName !== 'binance' && exchangeName !== 'bybit') {
+          // Only use if it's Binance, Binance US, or Bybit
+          if (
+            exchangeName !== 'binance' &&
+            exchangeName !== 'bybit' &&
+            exchangeName !== 'binance.us' &&
+            exchangeName !== 'binanceus' &&
+            exchangeName !== 'binance-us'
+          ) {
             exchangeName = undefined; // Fall back to default (Binance)
           }
         } catch (error) {
@@ -170,7 +177,7 @@ export class MarketController {
 
   /**
    * GET /api/market/exchanges/coins
-   * Fetch coins for the user's connected exchange (Binance or Bybit)
+  * Fetch coins for the user's connected exchange (Binance, Binance US, or Bybit)
    * Automatically routes based on user's active exchange connection
    * Requires authentication
    */
@@ -193,6 +200,12 @@ export class MarketController {
       let coins: string[];
       if (exchangeName === 'bybit') {
         coins = await this.exchangesService.getBybitCoinsWithUsdtPairs();
+      } else if (
+        exchangeName === 'binance.us' ||
+        exchangeName === 'binanceus' ||
+        exchangeName === 'binance-us'
+      ) {
+        coins = await this.exchangesService.getBinanceUSCoinsWithPreferredQuotePairs();
       } else if (exchangeName === 'binance') {
         coins = await this.exchangesService.getBinanceCoinsWithUsdtPairs();
       } else {
