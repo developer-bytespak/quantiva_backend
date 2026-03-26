@@ -119,7 +119,7 @@ async function run() {
     throw new Error('Missing BINANCE_US_API_KEY or BINANCE_US_API_SECRET environment variables');
   }
 
-  const assets = ['DOGE', 'SOL', 'UNI'];
+  const assets = ['DOGE', 'SOL', 'UNI', 'ADA'];
   const quote = 'USD';
   const liquidator = new BinanceUSLiquidator(apiKey, apiSecret);
 

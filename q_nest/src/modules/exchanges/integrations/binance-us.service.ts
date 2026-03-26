@@ -512,6 +512,93 @@ export class BinanceUSService {
   }
 
   /**
+   * Fetches exchangeInfo once and:
+   * 1. Adjusts quantity to comply with LOT_SIZE (step size)
+   * 2. Validates that the order notional value meets NOTIONAL / MIN_NOTIONAL filter
+   */
+  private async validateAndAdjustQuantity(
+    symbol: string,
+    quantity: number,
+    orderType: 'MARKET' | 'LIMIT',
+    price?: number,
+  ): Promise<string> {
+    try {
+      const info = await this.makePublicRequest('/api/v3/exchangeInfo', { symbol });
+      const filters: any[] = info?.symbols?.[0]?.filters ?? [];
+
+      let adjustedQuantity = quantity;
+      let decimalPlaces = 8;
+
+      const lotSizeFilter = filters.find((f) => f.filterType === 'LOT_SIZE');
+      if (lotSizeFilter) {
+        const stepSize: string = lotSizeFilter.stepSize;
+        const step = parseFloat(stepSize);
+        if (step > 0) {
+          decimalPlaces = (stepSize.replace(/0+$/, '').split('.')[1] ?? '').length;
+          adjustedQuantity = Math.floor(quantity / step) * step;
+        }
+      }
+
+      const adjustedQtyStr = adjustedQuantity.toFixed(decimalPlaces);
+
+      const notionalFilter =
+        filters.find((f) => f.filterType === 'NOTIONAL') ??
+        filters.find((f) => f.filterType === 'MIN_NOTIONAL');
+
+      if (notionalFilter) {
+        const minNotional = parseFloat(
+          notionalFilter.minNotional ?? notionalFilter.minNotionalValue ?? '0',
+        );
+
+        if (minNotional > 0) {
+          let effectivePrice = price;
+          if (!effectivePrice || orderType === 'MARKET') {
+            const ticker = await this.makePublicRequest('/api/v3/ticker/price', { symbol });
+            effectivePrice = parseFloat(ticker.price);
+          }
+
+          const notional = adjustedQuantity * effectivePrice;
+          if (notional < minNotional) {
+            throw new BinanceApiException(
+              `Order value $${notional.toFixed(4)} is below the minimum required $${minNotional} for ${symbol}. ` +
+                `Increase your quantity.`,
+              'BINANCE_US_-1013',
+            );
+          }
+        }
+      }
+
+      return adjustedQtyStr;
+    } catch (error) {
+      if (error instanceof BinanceApiException) throw error;
+      // Fallback to raw quantity if exchangeInfo is temporarily unavailable.
+      return quantity.toString();
+    }
+  }
+
+  /**
+   * Rounds a price to comply with PRICE_FILTER tickSize for the symbol.
+   */
+  private async roundPriceToTickSize(symbol: string, price: number): Promise<string> {
+    try {
+      const info = await this.makePublicRequest('/api/v3/exchangeInfo', { symbol });
+      const filters: any[] = info?.symbols?.[0]?.filters ?? [];
+      const priceFilter = filters.find((f) => f.filterType === 'PRICE_FILTER');
+      if (!priceFilter) return price.toFixed(8);
+
+      const tickSize: string = priceFilter.tickSize;
+      const tick = parseFloat(tickSize);
+      if (tick <= 0) return price.toFixed(8);
+
+      const decimalPlaces = (tickSize.replace(/0+$/, '').split('.')[1] ?? '').length;
+      const rounded = Math.round(price / tick) * tick;
+      return rounded.toFixed(decimalPlaces);
+    } catch {
+      return price.toFixed(8);
+    }
+  }
+
+  /**
    * Fetches candlestick/OHLCV data
    */
   async getCandlestickData(
@@ -790,13 +877,21 @@ export class BinanceUSService {
           : stopLossPrice * 1.005  // 0.5% above stop price for buys
         );
 
+      // Binance.US rejects OCO when quantity/price precision exceeds symbol filters.
+      const [roundedTpPrice, roundedSlPrice, roundedSlLimitPrice, adjustedQty] = await Promise.all([
+        this.roundPriceToTickSize(symbol, takeProfitPrice),
+        this.roundPriceToTickSize(symbol, stopLossPrice),
+        this.roundPriceToTickSize(symbol, effectiveStopLimitPrice),
+        this.validateAndAdjustQuantity(symbol, quantity, 'LIMIT', takeProfitPrice),
+      ]);
+
       const params: Record<string, any> = {
         symbol,
         side: side.toUpperCase(),
-        quantity: quantity.toString(),
-        price: takeProfitPrice.toFixed(8),        // Take profit limit price
-        stopPrice: stopLossPrice.toFixed(8),      // Stop trigger price
-        stopLimitPrice: effectiveStopLimitPrice.toFixed(8), // Stop limit price
+        quantity: adjustedQty,
+        price: roundedTpPrice,        // Take profit limit price
+        stopPrice: roundedSlPrice,    // Stop trigger price
+        stopLimitPrice: roundedSlLimitPrice, // Stop limit price
         stopLimitTimeInForce: 'GTC',
       };
 
