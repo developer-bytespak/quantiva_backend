@@ -785,11 +785,14 @@ export class BinanceUSService {
         throw new BinanceApiException('Price is required for LIMIT orders');
       }
 
+      // Validate and adjust quantity to comply with LOT_SIZE and MIN_NOTIONAL filters
+      const adjustedQuantity = await this.validateAndAdjustQuantity(symbol, quantity, type, price);
+
       const params: Record<string, any> = {
         symbol,
         side: side.toUpperCase(),
         type: type === 'MARKET' ? 'MARKET' : 'LIMIT',
-        quantity: quantity.toString(),
+        quantity: adjustedQuantity,
       };
 
       if (type === 'LIMIT') {
