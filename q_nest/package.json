@@ -18,7 +18,8 @@
     "prisma:db:push": "prisma db push",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
-    "prisma:migrate:reset": "prisma migrate reset"
+    "prisma:migrate:reset": "prisma migrate reset",
+    "prisma:seed": "ts-node prisma/seed.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

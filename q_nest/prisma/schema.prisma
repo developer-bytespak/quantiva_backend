@@ -61,9 +61,9 @@ model users {
   monthly_fee_summaries monthly_fee_summaries[]
 
   // QHQ Token system
-  qhq_balance           qhq_balances?
-  qhq_transactions      qhq_transactions[]
-  qhq_wallet_link       qhq_wallet_links?
+  qhq_balance      qhq_balances?
+  qhq_transactions qhq_transactions[]
+  qhq_wallet_link  qhq_wallet_links?
 
   @@index([current_tier])
   @@map("users")
@@ -1697,49 +1697,49 @@ enum QhqTransactionType {
 
 /// Global token configuration (singleton row, id = 1)
 model qhq_token_config {
-  id                    Int       @id @default(1)
-  total_supply          Decimal   @default(100000000) @db.Decimal(30, 18)
-  circulating_supply    Decimal   @default(0) @db.Decimal(30, 18)
-  total_burned          Decimal   @default(0) @db.Decimal(30, 18)
-  contract_address      String?   @db.VarChar(42)
-  network               String    @default("base") @db.VarChar(20)
-  current_merkle_root   String?   @db.VarChar(66)
-  merkle_last_updated   DateTime? @db.Timestamp(6)
-  updated_at            DateTime  @updatedAt @db.Timestamp(6)
+  id                  Int       @id @default(1)
+  total_supply        Decimal   @default(100000000) @db.Decimal(30, 18)
+  circulating_supply  Decimal   @default(0) @db.Decimal(30, 18)
+  total_burned        Decimal   @default(0) @db.Decimal(30, 18)
+  contract_address    String?   @db.VarChar(42)
+  network             String    @default("base") @db.VarChar(20)
+  current_merkle_root String?   @db.VarChar(66)
+  merkle_last_updated DateTime? @db.Timestamp(6)
+  updated_at          DateTime  @updatedAt @db.Timestamp(6)
 
   @@map("qhq_token_config")
 }
 
 /// Off-chain balance ledger — one row per user
 model qhq_balances {
-  id                  String   @id @default(uuid()) @db.Uuid
-  user_id             String   @unique @db.Uuid
-  pending_balance     Decimal  @default(0) @db.Decimal(30, 18)
-  cumulative_earned   Decimal  @default(0) @db.Decimal(30, 18)
-  lifetime_claimed    Decimal  @default(0) @db.Decimal(30, 18)
-  lifetime_spent      Decimal  @default(0) @db.Decimal(30, 18)
-  lifetime_burned     Decimal  @default(0) @db.Decimal(30, 18)
-  created_at          DateTime @default(now()) @db.Timestamp(6)
-  updated_at          DateTime @updatedAt @db.Timestamp(6)
+  id                String   @id @default(uuid()) @db.Uuid
+  user_id           String   @unique @db.Uuid
+  pending_balance   Decimal  @default(0) @db.Decimal(30, 18)
+  cumulative_earned Decimal  @default(0) @db.Decimal(30, 18)
+  lifetime_claimed  Decimal  @default(0) @db.Decimal(30, 18)
+  lifetime_spent    Decimal  @default(0) @db.Decimal(30, 18)
+  lifetime_burned   Decimal  @default(0) @db.Decimal(30, 18)
+  created_at        DateTime @default(now()) @db.Timestamp(6)
+  updated_at        DateTime @updatedAt @db.Timestamp(6)
 
-  user                users    @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
 
   @@map("qhq_balances")
 }
 
 /// Full audit log of all QHQ movements
 model qhq_transactions {
-  id             String               @id @default(uuid()) @db.Uuid
-  user_id        String               @db.Uuid
-  type           QhqTransactionType
-  amount         Decimal              @db.Decimal(30, 18)
-  balance_after  Decimal              @db.Decimal(30, 18)
-  description    String               @db.VarChar(500)
-  reference_id   String?              @db.VarChar(255)
-  tx_hash        String?              @db.VarChar(66)
-  created_at     DateTime             @default(now()) @db.Timestamp(6)
+  id            String             @id @default(uuid()) @db.Uuid
+  user_id       String             @db.Uuid
+  type          QhqTransactionType
+  amount        Decimal            @db.Decimal(30, 18)
+  balance_after Decimal            @db.Decimal(30, 18)
+  description   String             @db.VarChar(500)
+  reference_id  String?            @db.VarChar(255)
+  tx_hash       String?            @db.VarChar(66)
+  created_at    DateTime           @default(now()) @db.Timestamp(6)
 
-  user           users                @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
 
   @@index([user_id, created_at])
   @@index([type])
@@ -1748,14 +1748,14 @@ model qhq_transactions {
 
 /// Links a platform user account to a Base chain wallet address
 model qhq_wallet_links {
-  id              String   @id @default(uuid()) @db.Uuid
-  user_id         String   @unique @db.Uuid
-  wallet_address  String   @unique @db.VarChar(42)
-  network         String   @default("base") @db.VarChar(20)
-  is_verified     Boolean  @default(false)
-  linked_at       DateTime @default(now()) @db.Timestamp(6)
+  id             String   @id @default(uuid()) @db.Uuid
+  user_id        String   @unique @db.Uuid
+  wallet_address String   @unique @db.VarChar(42)
+  network        String   @default("base") @db.VarChar(20)
+  is_verified    Boolean  @default(false)
+  linked_at      DateTime @default(now()) @db.Timestamp(6)
 
-  user            users    @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
 
   @@index([wallet_address])
   @@map("qhq_wallet_links")
@@ -1776,14 +1776,14 @@ model qhq_reward_rules {
 
 /// Tracks pending subscription discounts purchased with QHQ
 model qhq_subscription_discounts {
-  id                String   @id @default(uuid()) @db.Uuid
-  user_id           String   @db.Uuid
-  qhq_spent         Decimal  @db.Decimal(30, 18)
-  discount_percent  Int
-  applied           Boolean  @default(false)
-  applied_at        DateTime? @db.Timestamp(6)
-  expires_at        DateTime @db.Timestamp(6)
-  created_at        DateTime @default(now()) @db.Timestamp(6)
+  id               String    @id @default(uuid()) @db.Uuid
+  user_id          String    @db.Uuid
+  qhq_spent        Decimal   @db.Decimal(30, 18)
+  discount_percent Int
+  applied          Boolean   @default(false)
+  applied_at       DateTime? @db.Timestamp(6)
+  expires_at       DateTime  @db.Timestamp(6)
+  created_at       DateTime  @default(now()) @db.Timestamp(6)
 
   @@index([user_id, applied])
   @@map("qhq_subscription_discounts")
