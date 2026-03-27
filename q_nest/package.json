@@ -2,10 +2,10 @@
   "name": "q_nest",
   "version": "0.1.0",
   "scripts": {
-    "build": "npm ci --include=dev && npx -p @nestjs/cli nest build",
+    "build": "npm ci --include=dev && nest build",
     "start": "node dist/src/main.js",
-    "start:dev": "npx -p @nestjs/cli nest start --watch",
-    "start:debug": "npx -p @nestjs/cli nest start --debug --watch",
+    "start:dev": "nest start --watch",
+    "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/src/main.js",
     "dev": "npm run start:dev",
     "test": "jest",
