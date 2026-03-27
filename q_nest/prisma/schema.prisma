@@ -491,6 +491,10 @@ model strategy_signals {
   @@index([strategy_id])
   @@index([user_id])
   @@index([asset_id])
+  @@index([strategy_id, timestamp])
+  @@index([strategy_id, asset_id, timestamp])
+  @@index([user_id, timestamp])
+  @@index([asset_id, timestamp])
   @@map("strategy_signals")
 }
 
