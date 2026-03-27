@@ -108,15 +108,15 @@ export class AccountStreamGateway implements OnGatewayConnection, OnGatewayDisco
       if (socketIds) {
         socketIds.delete(client.id);
         
-        // If no more sockets for this user, disconnect from Binance
+        // If no more sockets for this user, schedule cleanup after grace period
         if (socketIds.size === 0) {
-          this.logger.log(`No more active connections for user ${userId}, disconnecting from Binance`);
-          this.userSockets.delete(userId);
-          
-          // Delay disconnection to allow for quick reconnects
+          this.logger.log(`No more active connections for user ${userId}, scheduling Binance disconnect`);
+
+          // Don't delete yet — check again after grace period for reconnects
           setTimeout(async () => {
             const currentSockets = this.userSockets.get(userId);
             if (!currentSockets || currentSockets.size === 0) {
+              this.userSockets.delete(userId);
               await this.binanceUserWsService.disconnect(userId);
               this.logger.log(`Disconnected Binance WS for user ${userId}`);
             }

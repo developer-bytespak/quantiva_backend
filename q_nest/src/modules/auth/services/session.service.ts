@@ -7,9 +7,9 @@ import { TokenService } from './token.service';
 type UserTier = 'FREE' | 'PRO' | 'ELITE' | 'INSTITUTIONAL';
 
 const TIER_SESSION_LIMITS: Record<UserTier, number> = {
-  FREE: 2,
-  PRO: 5,
-  ELITE: 10,
+  FREE: 5,
+  PRO: 10,
+  ELITE: 15,
   INSTITUTIONAL: 25,
 };
 
@@ -24,16 +24,16 @@ export class SessionService {
   ) {}
 
   async getUserTier(userId: string): Promise<UserTier> {
+    const now = new Date();
     const activeSubscription = await this.prisma.user_subscriptions.findFirst({
       where: {
         user_id: userId,
         status: 'active',
-        expires_at: {
-          gt: new Date(),
-        },
-      },
-      include: {
-        plan: true,
+        OR: [
+          { expires_at: { gt: now } },
+          { expires_at: null, current_period_end: { gt: now } },
+          { expires_at: null, current_period_end: null }, // lifetime or no expiry set
+        ],
       },
     });
 
@@ -41,8 +41,9 @@ export class SessionService {
       return 'FREE';
     }
 
-    const planName = activeSubscription.plan.name.toUpperCase() as UserTier;
-    return TIER_SESSION_LIMITS[planName] ? planName : 'FREE';
+    // Use the tier enum directly from the subscription (FREE/PRO/ELITE)
+    const tier = activeSubscription.tier as string as UserTier;
+    return TIER_SESSION_LIMITS[tier] ? tier : 'FREE';
   }
 
   async getActiveSessionCount(userId: string): Promise<number> {
