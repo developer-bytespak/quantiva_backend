@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SubscriptionStatus } from '@prisma/client';
 import { cursorTo } from 'readline';
@@ -26,11 +26,32 @@ export enum FeatureType {
 
 
 @Injectable()
-export class SubscriptionsService {
+export class SubscriptionsService implements OnModuleInit {
+  private readonly logger = new Logger(SubscriptionsService.name);
+  private plansCache: any[] | null = null;
+  private plansGroupedCache: any[] | null = null;
+
   constructor(private prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
     private readonly appGateway: AppGateway,
   ) { }
+
+  async onModuleInit() {
+    try {
+      await this.refreshPlansCache();
+      this.logger.log(`Plans cache loaded: ${this.plansCache?.length} plans`);
+    } catch (error: any) {
+      this.logger.warn(`Failed to preload plans cache: ${error.message}`);
+    }
+  }
+
+  /** Reload plans from DB into memory. Call after admin updates a plan. */
+  async refreshPlansCache(): Promise<void> {
+    this.plansCache = await this.prisma.subscription_plans.findMany({
+      orderBy: [{ tier: 'asc' }, { billing_period: 'asc' }],
+    });
+    this.plansGroupedCache = null; // clear grouped cache so it regenerates
+  }
 
   /** True if string is a valid UUID format (so safe to use in plan_id lookup). */
   private isUuid(s: string): boolean {
@@ -60,19 +81,22 @@ export class SubscriptionsService {
   }
 
   async findAllPlans() {
-    return this.prisma.subscription_plans.findMany({
-      orderBy: [{ tier: 'asc' }, { billing_period: 'asc' }],
-    });
+    if (this.plansCache) {
+      return this.plansCache;
+    }
+    await this.refreshPlansCache();
+    return this.plansCache!;
   }
 
   /**
    * Find all plans grouped by tier with pricing tiers
    */
   async findAllPlansGrouped() {
-    const allPlans = await this.prisma.subscription_plans.findMany({
-      orderBy: [{ tier: 'asc' }, { billing_period: 'asc' }],
-    });
+    if (this.plansGroupedCache) {
+      return this.plansGroupedCache;
+    }
 
+    const allPlans = await this.findAllPlans();
     const grouped: any = {};
 
     allPlans.forEach((plan: any) => {
@@ -95,7 +119,8 @@ export class SubscriptionsService {
       };
     });
 
-    return Object.values(grouped);
+    this.plansGroupedCache = Object.values(grouped);
+    return this.plansGroupedCache;
   }
 
   async findPlan(id: string) {
@@ -211,6 +236,7 @@ export class SubscriptionsService {
       results.push(result);
     }
 
+    await this.refreshPlansCache();
     return results;
   }
 
@@ -262,6 +288,7 @@ export class SubscriptionsService {
       }
     }
 
+    await this.refreshPlansCache();
     return results;
   }
 
@@ -269,18 +296,22 @@ export class SubscriptionsService {
    * Delete plan by tier (deletes all billing period variants)
    */
   async deletePlan(tier: PlanTier) {
-    return this.prisma.subscription_plans.deleteMany({
+    const result = this.prisma.subscription_plans.deleteMany({
       where: { tier },
     });
+    await this.refreshPlansCache();
+    return result;
   }
 
   /**
    * Delete single plan by ID
    */
   async deletePlanById(planId: string) {
-    return this.prisma.subscription_plans.delete({
+    const result = this.prisma.subscription_plans.delete({
       where: { plan_id: planId },
     });
+    await this.refreshPlansCache();
+    return result;
   }
 
   async findAllSubscriptions() {
