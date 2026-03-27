@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { OpenAIProvider } from './providers/openai.provider';
 import { GeminiProvider } from './providers/gemini.provider';
@@ -503,6 +504,25 @@ SIGNAL DATA:
         }),
       ),
     };
+  }
+
+  /**
+   * Evict expired entries from the in-memory cache every hour.
+   * Without this, entries that are never accessed again stay in memory forever.
+   */
+  @Cron('0 * * * *')
+  cleanupExpiredCache(): void {
+    const now = Date.now();
+    let evicted = 0;
+    for (const [key, entry] of this.cache) {
+      if (now >= entry.expiresAt) {
+        this.cache.delete(key);
+        evicted++;
+      }
+    }
+    if (evicted > 0) {
+      this.logger.log(`Cache cleanup: evicted ${evicted} expired entries, ${this.cache.size} remaining`);
+    }
   }
 
   /**

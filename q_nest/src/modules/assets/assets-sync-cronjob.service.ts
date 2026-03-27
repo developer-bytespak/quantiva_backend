@@ -22,9 +22,9 @@ export class AssetsSyncCronjobService implements OnModuleInit {
 
   /**
    * Sync top 500 coins from CoinGecko to assets and market_rankings tables
-   * Runs every 5 minutes (CoinGecko Pro tier)
+   * Runs every 15 minutes (CoinGecko Pro tier)
    */
-  @Cron('*/5 * * * *') // Every 5 minutes
+  @Cron('*/15 * * * *') // Every 15 minutes
   async syncAssetsFromCoinGecko(): Promise<void> {
     if (this.isRunning) {
       return;
