@@ -134,8 +134,12 @@ export class MarketDetailAggregatorService {
     // Balance
     const balanceData = balance as any;
     const quoteCurrency = this.resolveQuoteCurrency(exchangeName, balanceData, symbol);
+    const baseCurrency = this.resolveBaseCurrency(symbol, quoteCurrency);
     const quoteBalance = balanceData?.assets?.find((a: any) => a.symbol === quoteCurrency) || null;
-    const availableBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
+    const baseBalance = balanceData?.assets?.find((a: any) => a.symbol === baseCurrency) || null;
+    const availableQuoteBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
+    const availableBaseBalance = baseBalance ? parseFloat(baseBalance.free || '0') : 0;
+    const lockedBaseBalance = baseBalance ? parseFloat(baseBalance.locked || '0') : 0;
     const tradingPair = this.toTradingPair(symbol, quoteCurrency);
 
     // Build unified response
@@ -153,7 +157,11 @@ export class MarketDetailAggregatorService {
       volume24h,
 
       // Account
-      availableBalance,
+      availableBalance: availableQuoteBalance,
+      availableQuoteBalance,
+      availableBaseBalance,
+      lockedBaseBalance,
+      baseCurrency,
       quoteCurrency,
 
       // Chart data (multi-interval)
@@ -271,6 +279,17 @@ export class MarketDetailAggregatorService {
     const existingQuote = knownQuotes.find((q) => upper.endsWith(q));
     const base = existingQuote ? upper.slice(0, upper.length - existingQuote.length) : upper;
     return `${base}${quoteCurrency.toUpperCase()}`;
+  }
+
+  private resolveBaseCurrency(symbol: string, quoteCurrency: string): string {
+    const upper = (symbol || '').toUpperCase();
+    const normalizedQuote = (quoteCurrency || '').toUpperCase();
+
+    if (normalizedQuote && upper.endsWith(normalizedQuote)) {
+      return upper.slice(0, upper.length - normalizedQuote.length);
+    }
+
+    return upper;
   }
 
   private async fetchOrderBook(exchangeName: string, connectionId: string, symbol: string) {

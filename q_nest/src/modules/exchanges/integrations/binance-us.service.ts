@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import {
   AccountBalanceDto,
@@ -717,6 +717,16 @@ export class BinanceUSService {
 
         throw new BinanceApiException(binanceMsg, `BINANCE_US_${binanceCode}`);
       }
+
+      if (error.response?.status === 400) {
+        const msg =
+          error.response?.data?.msg ||
+          error.response?.data?.message ||
+          error.message ||
+          'Bad request to Binance.US API';
+        throw new BinanceApiException(msg, 'BINANCE_US_BAD_REQUEST', HttpStatus.BAD_REQUEST);
+      }
+
       throw new BinanceApiException(error.message || 'Failed to place order');
     }
   }
@@ -764,6 +774,16 @@ export class BinanceUSService {
 
         throw new BinanceApiException(binanceMsg, `BINANCE_US_${binanceCode}`);
       }
+
+      if (error.response?.status === 400) {
+        const msg =
+          error.response?.data?.msg ||
+          error.response?.data?.message ||
+          error.message ||
+          'Bad request to Binance.US API';
+        throw new BinanceApiException(msg, 'BINANCE_US_BAD_REQUEST', HttpStatus.BAD_REQUEST);
+      }
+
       throw new BinanceApiException(error.message || 'Failed to delete order');
     }
   }
