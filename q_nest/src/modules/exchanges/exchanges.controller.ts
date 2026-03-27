@@ -681,16 +681,23 @@ export class ExchangesController {
       placeOrderDto.price,
     );
 
-    // Auto-place OCO (take-profit + stop-loss) for filled BUY orders on Binance/Binance US
+    // Auto-place OCO (take-profit + stop-loss) only for Binance US when explicitly requested (autoOco)
     let ocoInfo: { orderListId: number; takeProfitPrice: number; stopLossPrice: number } | null = null;
     let ocoError: string | null = null;
-    if (
-      placeOrderDto.side === 'BUY' &&
-      order.status === 'FILLED' &&
-      order.quantity > 0 &&
-      order.price > 0
-    ) {
-      try {
+
+    try {
+      const connection = await this.exchangesService.getConnectionById(connectionId);
+      const exchangeName = (connection?.exchange?.name || '').toLowerCase();
+      const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus';
+
+      if (
+        isBinanceUS &&
+        placeOrderDto.autoOco === true &&
+        placeOrderDto.side === 'BUY' &&
+        order.status === 'FILLED' &&
+        order.quantity > 0 &&
+        order.price > 0
+      ) {
         const slPct = placeOrderDto.stopLoss ?? 0.05;
         const tpPct = placeOrderDto.takeProfit ?? 0.10;
         const stopLossPrice = parseFloat((order.price * (1 - slPct)).toPrecision(8));
@@ -704,11 +711,11 @@ export class ExchangesController {
           takeProfitPrice,
           stopLossPrice,
         );
-      } catch (err: any) {
-        // OCO failure must not roll back the main order, but surface it to the caller
-        ocoError = err?.message ?? 'OCO order failed';
-        this.logger.warn(`OCO order failed after BUY ${order.orderId}: ${ocoError}`);
       }
+    } catch (err: any) {
+      // OCO failure must not roll back the main order, but surface it to the caller
+      ocoError = err?.message ?? 'OCO order failed';
+      this.logger.warn(`OCO order failed after BUY ${order?.orderId}: ${ocoError}`);
     }
 
     // Record trade fee (fire-and-forget)
@@ -802,9 +809,13 @@ export class ExchangesController {
     ]);
 
     const quoteCurrency = this.resolveQuoteCurrency(exchangeName, balance as any);
+    const baseCurrency = this.resolveBaseCurrency(symbol, quoteCurrency);
     const quoteBalance = (balance as any)?.assets?.find((a: any) => a.symbol === quoteCurrency) || null;
+    const baseBalance = (balance as any)?.assets?.find((a: any) => a.symbol === baseCurrency) || null;
     const tradingPair = this.toTradingPair(symbol, quoteCurrency);
-    const availableBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
+    const availableQuoteBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
+    const availableBaseBalance = baseBalance ? parseFloat(baseBalance.free || '0') : 0;
+    const lockedBaseBalance = baseBalance ? parseFloat(baseBalance.locked || '0') : 0;
 
     // Extract 24h stats from 1d candles if available
     let high24h = 0;
@@ -828,7 +839,11 @@ export class ExchangesController {
       high24h,
       low24h,
       volume24h,
-      availableBalance,
+      availableBalance: availableQuoteBalance,
+      availableQuoteBalance,
+      availableBaseBalance,
+      lockedBaseBalance,
+      baseCurrency,
       quoteCurrency,
       // Multi-interval candles: { '1d': [...], '1h': [...], '15m': [...] }
       candlesByInterval,
@@ -1047,6 +1062,17 @@ export class ExchangesController {
     const existingQuote = knownQuotes.find((q) => upper.endsWith(q));
     const base = existingQuote ? upper.slice(0, upper.length - existingQuote.length) : upper;
     return `${base}${quoteCurrency.toUpperCase()}`;
+  }
+
+  private resolveBaseCurrency(symbol: string, quoteCurrency: string): string {
+    const upper = (symbol || '').toUpperCase();
+    const normalizedQuote = (quoteCurrency || '').toUpperCase();
+
+    if (normalizedQuote && upper.endsWith(normalizedQuote)) {
+      return upper.slice(0, upper.length - normalizedQuote.length);
+    }
+
+    return upper;
   }
 
   /**

@@ -58,6 +58,18 @@ class BinanceUSLiquidator {
     return res.data;
   }
 
+  private async signedDelete(path: string, params: Record<string, string> = {}) {
+    const timestamp = await this.serverTime();
+    const query = new URLSearchParams({
+      ...params,
+      timestamp: timestamp.toString(),
+      recvWindow: '60000',
+    }).toString();
+    const signature = this.sign(query);
+    const res = await this.client.delete(`${path}?${query}&signature=${signature}`);
+    return res.data;
+  }
+
   async getFreeBalance(asset: string): Promise<number> {
     const account = await this.signedGet('/api/v3/account');
     const balance = (account.balances || []).find((b: any) => b.asset === asset);
@@ -108,6 +120,11 @@ class BinanceUSLiquidator {
       quantity: quantity.toString(),
     });
   }
+
+  async cancelOpenOrders(symbol: string): Promise<number> {
+    const cancelled = await this.signedDelete('/api/v3/openOrders', { symbol });
+    return Array.isArray(cancelled) ? cancelled.length : 0;
+  }
 }
 
 async function run() {
@@ -119,7 +136,7 @@ async function run() {
     throw new Error('Missing BINANCE_US_API_KEY or BINANCE_US_API_SECRET environment variables');
   }
 
-  const assets = ['DOGE', 'SOL', 'UNI', 'ADA'];
+  const assets = ['LTC'];
   const quote = 'USD';
   const liquidator = new BinanceUSLiquidator(apiKey, apiSecret);
 
@@ -135,6 +152,13 @@ async function run() {
     const symbol = `${asset}${quote}`;
 
     try {
+      if (execute) {
+        const cancelledCount = await liquidator.cancelOpenOrders(symbol);
+        console.log(`Cancelled ${cancelledCount} open orders for ${symbol}`);
+      } else {
+        console.log(`DRY RUN: would cancel open orders for ${symbol} before selling`);
+      }
+
       const free = await liquidator.getFreeBalance(asset);
       const rules = await liquidator.getSymbolRules(symbol);
       const price = await liquidator.getPrice(symbol);
