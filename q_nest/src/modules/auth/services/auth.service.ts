@@ -154,8 +154,6 @@ export class AuthService {
 
     return {
       requires2FA: true,
-      userId: user.user_id,
-      email: user.email,
       message: '2FA code sent to your email',
     };
   }
@@ -227,24 +225,6 @@ export class AuthService {
       refreshToken,
       sessionId,
     };
-  }
-
-  async resend2FACode(emailOrUsername: string) {
-    // Find user
-    const user = await this.prisma.users.findFirst({
-      where: {
-        OR: [{ email: emailOrUsername }, { username: emailOrUsername }],
-      },
-    });
-
-    if (!user) {
-      // Don't reveal if user exists (user enumeration protection)
-      return;
-    }
-
-    // Generate and send new 2FA code
-    const code = await this.twoFactorService.generateCode(user.user_id, 'login');
-    await this.twoFactorService.sendCodeByEmail(user.email, code);
   }
 
   async refresh(refreshToken: string) {
@@ -680,7 +660,7 @@ export class AuthService {
       this.prisma.vc_pool_seat_reservations.count({
         where: {
           user_id: userId,
-          status: { in: ['reserved', 'pending_payment'] },
+          status: { in: ['reserved', 'confirmed'] },
           pool: { status: { in: activePoolStatuses } },
         },
       }),
@@ -746,7 +726,9 @@ export class AuthService {
     // Step 8: Use database transaction to delete all related entities
     // Deletion order: child entities → parent entities
     // Note: timeout set to 60 seconds (default 5s) to allow deletion of users with large amounts of data
-    const deletionSummary = await this.prisma.$transaction(
+    let deletionSummary: any;
+    try {
+    deletionSummary = await this.prisma.$transaction(
       async (tx) => {
         const summary = {
         user_id: userId,
@@ -969,6 +951,68 @@ export class AuthService {
       });
       summary.entities_deleted['risk_events'] = riskEventsDeleted.count;
 
+      // ===== PHASE 8a: DELETE OPTIONS TRADING DATA =====
+      // options_positions must be deleted before options_orders (FK reference)
+      // These tables have no onDelete: Cascade on user_id, so must be deleted explicitly.
+
+      const optionsPositionsDeleted = await tx.options_positions.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['options_positions'] = optionsPositionsDeleted.count;
+
+      const optionsOrdersDeleted = await tx.options_orders.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['options_orders'] = optionsOrdersDeleted.count;
+
+      // ===== PHASE 8b: DELETE VC POOL DATA =====
+      // None of these tables have onDelete: Cascade on user_id, so all must be deleted explicitly.
+      // Correct deletion order: transactions → payouts/cancellations → payment_submissions → members → seat_reservations
+
+      // Delete vc_pool_transactions first (has optional FKs to members and payment_submissions)
+      const vcPoolTransactionsDeleted = await tx.vc_pool_transactions.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['vc_pool_transactions'] = vcPoolTransactionsDeleted.count;
+
+      // Get member IDs for this user (needed to delete child tables of members)
+      const userMemberIds = await tx.vc_pool_members.findMany({
+        where: { user_id: userId },
+        select: { member_id: true },
+      });
+      const memberIdList = userMemberIds.map((m) => m.member_id);
+
+      // Delete vc_pool_payouts (FK to vc_pool_members, no cascade)
+      const vcPoolPayoutsDeleted = await tx.vc_pool_payouts.deleteMany({
+        where: { member_id: { in: memberIdList } },
+      });
+      summary.entities_deleted['vc_pool_payouts'] = vcPoolPayoutsDeleted.count;
+
+      // Delete vc_pool_cancellations (FK to vc_pool_members, no cascade)
+      const vcPoolCancellationsDeleted = await tx.vc_pool_cancellations.deleteMany({
+        where: { member_id: { in: memberIdList } },
+      });
+      summary.entities_deleted['vc_pool_cancellations'] = vcPoolCancellationsDeleted.count;
+
+      // Delete vc_pool_payment_submissions (FK to users AND vc_pool_seat_reservations, no cascade)
+      // Must be deleted before members and seat_reservations
+      const vcPoolPaymentSubmissionsDeleted = await tx.vc_pool_payment_submissions.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['vc_pool_payment_submissions'] = vcPoolPaymentSubmissionsDeleted.count;
+
+      // Delete vc_pool_members (FK to users, no cascade)
+      const vcPoolMembersDeleted = await tx.vc_pool_members.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['vc_pool_members'] = vcPoolMembersDeleted.count;
+
+      // Delete vc_pool_seat_reservations last (FK to users, no cascade; payment_submissions must be gone first)
+      const vcPoolSeatReservationsDeleted = await tx.vc_pool_seat_reservations.deleteMany({
+        where: { user_id: userId },
+      });
+      summary.entities_deleted['vc_pool_seat_reservations'] = vcPoolSeatReservationsDeleted.count;
+
       // ===== PHASE 9: DELETE USER RECORD =====
 
       await tx.users.delete({
@@ -982,6 +1026,10 @@ export class AuthService {
           timeout: 60000, // 60 seconds - allows deletion of users with large amounts of data
         },
       );
+    } catch (txError: any) {
+      console.error(`[ACCOUNT_DELETION] Transaction failed for user ${userId} (${user.email}):`, txError?.message, txError?.code, txError?.meta);
+      throw txError;
+    }
 
     // Step 8: Delete cloud storage files AFTER database transaction succeeds
     // This ensures files are only deleted if all database operations succeed

@@ -496,6 +496,10 @@ model strategy_signals {
   @@index([strategy_id])
   @@index([user_id])
   @@index([asset_id])
+  @@index([strategy_id, timestamp])
+  @@index([strategy_id, asset_id, timestamp])
+  @@index([user_id, timestamp])
+  @@index([asset_id, timestamp])
   @@map("strategy_signals")
 }
 
@@ -1065,10 +1069,11 @@ enum BinancePaymentStatus {
 // ── VC Pool Models ──
 
 model admins {
-  admin_id      String  @id @default(uuid()) @db.Uuid
-  email         String  @unique @db.VarChar(255)
-  password_hash String  @db.VarChar(255)
-  full_name     String? @db.VarChar(120)
+  admin_id       String  @id @default(uuid()) @db.Uuid
+  email          String  @unique @db.VarChar(255)
+  password_hash  String  @db.VarChar(255)
+  full_name      String? @db.VarChar(120)
+  is_super_admin Boolean @default(false)
 
   stripe_secret_key_encrypted     String?
   stripe_publishable_key          String? @db.VarChar(255)

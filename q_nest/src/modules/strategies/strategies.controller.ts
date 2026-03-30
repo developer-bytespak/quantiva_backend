@@ -72,8 +72,18 @@ export class StrategiesController {
   @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
   @AllowTier('PRO', 'ELITE')
   @Get('pre-built')
-  getPreBuiltStrategies(@Query('asset_type') assetType?: 'crypto' | 'stock') {
-    return this.preBuiltStrategiesService.getPreBuiltStrategies(assetType);
+  async getPreBuiltStrategies(
+    @Req() req: any,
+    @Query('asset_type') assetType?: 'crypto' | 'stock',
+  ) {
+    const userId = this.getRequestUserId(req);
+    const exchangeLabel = await this.preBuiltStrategiesService.getSignalSourceLabel(userId);
+    const strategies = await this.preBuiltStrategiesService.getPreBuiltStrategies(assetType);
+
+    return strategies.map((strategy: any) => ({
+      ...strategy,
+      description: `${strategy.description || ''} Signals source: ${exchangeLabel}.`.trim(),
+    }));
   }
 
   /**
@@ -84,12 +94,14 @@ export class StrategiesController {
   @AllowTier('PRO', 'ELITE')
   @Get('trending-assets')
   getTrendingAssets(
+    @Req() req: any,
     @Query('limit') limit?: string,
     @Query('realtime') realtime?: string,
   ) {
     const limitNum = limit ? parseInt(limit, 10) : 50;
     const enrichWithRealtime = realtime === 'true' || realtime === '1';
-    return this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, enrichWithRealtime);
+    const userId = this.getRequestUserId(req);
+    return this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, enrichWithRealtime, userId);
   }
 
   /**
@@ -101,6 +113,7 @@ export class StrategiesController {
   // @AllowTier('PRO', 'ELITE')
   @Get('pre-built/:id/trending-with-insights')
   async getTrendingAssetsWithInsights(
+    @Req() req: any,
     @Param('id') strategyId: string,
     @Query('limit') limit?: string,
   ) {
@@ -125,6 +138,9 @@ export class StrategiesController {
     // Get trending assets based on strategy type
     // Use database cached data (synced by cronjob) - no live API calls
     let assets: any[];
+    const userId = this.getRequestUserId(req);
+    const exchangeLabel = await this.preBuiltStrategiesService.getSignalSourceLabel(userId);
+
     if (isStockStrategy) {
       this.logger.log(`Fetching stocks for strategy: ${strategy.name} (limit: ${limitNum})`);
       // Use the same data source as market page (market_rankings table via getAllWithAssetId)
@@ -132,8 +148,8 @@ export class StrategiesController {
       assets = await this.preBuiltStrategiesService.getTopStocks(limitNum);
       this.logger.log(`Retrieved ${assets.length} stocks from market database`);
     } else {
-      assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, true);
-      this.logger.log(`Retrieved ${assets.length} crypto assets`);
+      assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, true, userId);
+      this.logger.log(`Retrieved ${assets.length} crypto assets for ${exchangeLabel}`);
     }
     
     if (assets.length === 0) {
@@ -214,10 +230,18 @@ export class StrategiesController {
       strategy: {
         id: strategy.strategy_id,
         name: strategy.name,
-        description: strategy.description,
+        description: `${strategy.description || ''} Signals source: ${exchangeLabel}.`.trim(),
       },
-      assets: finalAssets,
+      signal_exchange: exchangeLabel,
+      assets: finalAssets.map((asset) => ({
+        ...asset,
+        signal_exchange: exchangeLabel,
+      })),
     };
+  }
+
+  private getRequestUserId(req: any): string | undefined {
+    return req?.subscriptionUser?.user_id || req?.user?.sub || req?.user?.user_id || req?.user?.id;
   }
 
   /**

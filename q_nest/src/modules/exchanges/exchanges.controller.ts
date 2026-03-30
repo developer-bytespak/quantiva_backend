@@ -37,8 +37,6 @@ import { MarketService } from '../market/market.service';
 import { MarketStocksDbService } from '../stocks-market/services/market-stocks-db.service';
 import { FmpService } from '../stocks-market/services/fmp.service';
 import { TradeFeesService } from '../trade-fees/trade-fees.service';
-import { QhqTokenService } from '../qhq-token/qhq-token.service';
-import { QhqTransactionType } from '@prisma/client';
 
 /**
  * Exchanges Controller
@@ -73,7 +71,6 @@ export class ExchangesController {
     private readonly marketStocksDbService: MarketStocksDbService,
     private readonly fmpService: FmpService,
     private readonly tradeFeesService: TradeFeesService,
-    private readonly qhqService: QhqTokenService,
   ) {}
 
   @Get()
@@ -684,20 +681,40 @@ export class ExchangesController {
       placeOrderDto.price,
     );
 
-    // Auto-place OCO (take-profit + stop-loss) for filled BUY orders on Binance
+    // ⚠️ IMPORTANT: Manual orders do NOT auto-place OCO
+    // Only place OCO if explicitly requested via autoOco flag
+    // Top Trades (auto-trading) handle OCO separately in their execution flow
     let ocoInfo: { orderListId: number; takeProfitPrice: number; stopLossPrice: number } | null = null;
     let ocoError: string | null = null;
-    if (
-      placeOrderDto.side === 'BUY' &&
-      order.status === 'FILLED' &&
-      order.quantity > 0 &&
-      order.price > 0
-    ) {
-      try {
+
+    try {
+      const connection = await this.exchangesService.getConnectionById(connectionId);
+      const exchangeName = (connection?.exchange?.name || '').toLowerCase();
+      const isBinance = exchangeName === 'binance' || exchangeName === 'binance.us' || exchangeName === 'binanceus';
+      
+      // Determine if order is from Top Trade (auto-trading) or manual
+      const isTopTrade = placeOrderDto.source === 'top_trade';
+
+      // Place OCO if:
+      // 1. Top Trade BUY order (always auto-place OCO)
+      // 2. OR manual order with explicit autoOco=true flag
+      if (
+        isBinance &&
+        placeOrderDto.side === 'BUY' &&
+        order.status === 'FILLED' &&
+        order.quantity > 0 &&
+        order.price > 0 &&
+        (isTopTrade || placeOrderDto.autoOco === true)
+      ) {
         const slPct = placeOrderDto.stopLoss ?? 0.05;
         const tpPct = placeOrderDto.takeProfit ?? 0.10;
         const stopLossPrice = parseFloat((order.price * (1 - slPct)).toPrecision(8));
         const takeProfitPrice = parseFloat((order.price * (1 + tpPct)).toPrecision(8));
+
+        const orderSource = isTopTrade ? '[TOP TRADE]' : '[MANUAL]';
+        this.logger.log(
+          `${orderSource} AUTO-Placing OCO: ${order.symbol} qty=${order.quantity} TP=${takeProfitPrice} SL=${stopLossPrice}`
+        );
 
         ocoInfo = await this.exchangesService.placeOcoOrder(
           connectionId,
@@ -707,28 +724,20 @@ export class ExchangesController {
           takeProfitPrice,
           stopLossPrice,
         );
-      } catch (err: any) {
-        // OCO failure must not roll back the main order, but surface it to the caller
-        ocoError = err?.message ?? 'OCO order failed';
-        this.logger.warn(`OCO order failed after BUY ${order.orderId}: ${ocoError}`);
+        
+        this.logger.log(`${orderSource} ✅ OCO placed!`);
+      } else if (placeOrderDto.side === 'BUY' && order.status === 'FILLED') {
+        this.logger.log(
+          `[MANUAL] No OCO (send source='top_trade' or autoOco=true to enable)`
+        );
       }
+    } catch (err: any) {
+      ocoError = err?.message ?? 'OCO order failed';
+      this.logger.error(`OCO failed: ${err?.message}`);
     }
 
     // Record trade fee (fire-and-forget)
     this.recordTradeFeeForOrder(user.sub, order, placeOrderDto.symbol, placeOrderDto.side);
-
-    // QHQ reward for live trade execution (non-blocking, daily cap enforced in service)
-    if (order.status === 'FILLED') {
-      this.qhqService
-        .earnTokens(
-          user.sub,
-          QhqTransactionType.EARN_TRADING,
-          0.1,
-          `Live trade executed: ${placeOrderDto.side} ${placeOrderDto.symbol}`,
-          order.orderId?.toString(),
-        )
-        .catch((err) => this.logger.error(`QHQ trade reward error: ${err.message}`));
-    }
 
     return {
       success: true,
@@ -817,9 +826,14 @@ export class ExchangesController {
       this.exchangesService.getConnectionData(connectionId, 'balance').catch(() => null),
     ]);
 
-    const quoteCurrency = 'USDT';
+    const quoteCurrency = this.resolveQuoteCurrency(exchangeName, balance as any);
+    const baseCurrency = this.resolveBaseCurrency(symbol, quoteCurrency);
     const quoteBalance = (balance as any)?.assets?.find((a: any) => a.symbol === quoteCurrency) || null;
-    const availableBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
+    const baseBalance = (balance as any)?.assets?.find((a: any) => a.symbol === baseCurrency) || null;
+    const tradingPair = this.toTradingPair(symbol, quoteCurrency);
+    const availableQuoteBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
+    const availableBaseBalance = baseBalance ? parseFloat(baseBalance.free || '0') : 0;
+    const lockedBaseBalance = baseBalance ? parseFloat(baseBalance.locked || '0') : 0;
 
     // Extract 24h stats from 1d candles if available
     let high24h = 0;
@@ -836,14 +850,18 @@ export class ExchangesController {
 
     const result = {
       symbol,
-      tradingPair: symbol,
+      tradingPair,
       currentPrice: ticker?.price || 0,
       change24h: ticker?.change24h || 0,
       changePercent24h: ticker?.changePercent24h || 0,
       high24h,
       low24h,
       volume24h,
-      availableBalance,
+      availableBalance: availableQuoteBalance,
+      availableQuoteBalance,
+      availableBaseBalance,
+      lockedBaseBalance,
+      baseCurrency,
       quoteCurrency,
       // Multi-interval candles: { '1d': [...], '1h': [...], '15m': [...] }
       candlesByInterval,
@@ -969,6 +987,9 @@ export class ExchangesController {
       if (exchangeName === 'bybit') {
         const tickers = await this.bybitService.getTickerPrices([symbol]);
         return tickers[0] || null;
+      } else if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
+        const tickers = await this.binanceUSService.getTickerPrices([symbol]);
+        return tickers[0] || null;
       } else {
         const tickers = await this.binanceService.getTickerPrices([symbol]);
         return tickers[0] || null;
@@ -1001,6 +1022,8 @@ export class ExchangesController {
           async () => {
             if (exchangeName === 'bybit') {
               return this.bybitService.getCandlestickData(symbol, normalizedInterval, 100);
+            } else if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
+              return this.binanceUSService.getCandlestickData(symbol, interval, 100);
             } else {
               return this.binanceService.getCandlestickData(symbol, interval, 100);
             }
@@ -1038,6 +1061,36 @@ export class ExchangesController {
       return '6h';
     }
     return interval;
+  }
+
+  private resolveQuoteCurrency(exchangeName: string, balance: any): string {
+    const assets: any[] = balance?.assets ?? [];
+    const hasAsset = (s: string) => assets.some((a: any) => a?.symbol === s);
+
+    if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
+      return hasAsset('USD') ? 'USD' : 'USDT';
+    }
+
+    return 'USDT';
+  }
+
+  private toTradingPair(symbol: string, quoteCurrency: string): string {
+    const upper = (symbol || '').toUpperCase();
+    const knownQuotes = ['USDT', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'FDUSD', 'USD'];
+    const existingQuote = knownQuotes.find((q) => upper.endsWith(q));
+    const base = existingQuote ? upper.slice(0, upper.length - existingQuote.length) : upper;
+    return `${base}${quoteCurrency.toUpperCase()}`;
+  }
+
+  private resolveBaseCurrency(symbol: string, quoteCurrency: string): string {
+    const upper = (symbol || '').toUpperCase();
+    const normalizedQuote = (quoteCurrency || '').toUpperCase();
+
+    if (normalizedQuote && upper.endsWith(normalizedQuote)) {
+      return upper.slice(0, upper.length - normalizedQuote.length);
+    }
+
+    return upper;
   }
 
   /**

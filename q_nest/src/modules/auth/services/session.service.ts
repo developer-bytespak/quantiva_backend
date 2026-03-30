@@ -24,16 +24,16 @@ export class SessionService {
   ) {}
 
   async getUserTier(userId: string): Promise<UserTier> {
+    const now = new Date();
     const activeSubscription = await this.prisma.user_subscriptions.findFirst({
       where: {
         user_id: userId,
         status: 'active',
-        expires_at: {
-          gt: new Date(),
-        },
-      },
-      include: {
-        plan: true,
+        OR: [
+          { expires_at: { gt: now } },
+          { expires_at: null, current_period_end: { gt: now } },
+          { expires_at: null, current_period_end: null }, // lifetime or no expiry set
+        ],
       },
     });
 
@@ -41,23 +41,17 @@ export class SessionService {
       return 'FREE';
     }
 
-    const planName = activeSubscription.plan.name.toUpperCase() as UserTier;
-    return TIER_SESSION_LIMITS[planName] ? planName : 'FREE';
+    // Use the tier enum directly from the subscription (FREE/PRO/ELITE)
+    const tier = activeSubscription.tier as string as UserTier;
+    return TIER_SESSION_LIMITS[tier] ? tier : 'FREE';
   }
 
   async getActiveSessionCount(userId: string): Promise<number> {
     const now = new Date();
-
-    // First, check total sessions before cleanup
-    const totalBefore = await this.prisma.user_sessions.count({
-      where: { user_id: userId },
-    });
-    this.logger.log(`[Sessions] User ${userId}: Total sessions before cleanup: ${totalBefore}`);
-
     // Clean up expired sessions for this user first
     await this.cleanupExpiredSessionsForUser(userId);
-
-    const activeCount = await this.prisma.user_sessions.count({
+    
+    return this.prisma.user_sessions.count({
       where: {
         user_id: userId,
         revoked: false,
@@ -66,19 +60,12 @@ export class SessionService {
         },
       },
     });
-
-    this.logger.log(`[Sessions] User ${userId}: Active sessions after cleanup: ${activeCount}`);
-
-    return activeCount;
   }
 
   async checkSessionLimit(userId: string): Promise<void> {
     const tier = await this.getUserTier(userId);
     const activeCount = await this.getActiveSessionCount(userId);
     const limit = TIER_SESSION_LIMITS[tier];
-
-    // Debug logging
-    this.logger.log(`[Session Check] User: ${userId}, Tier: ${tier}, Active: ${activeCount}, Limit: ${limit}`);
 
     if (activeCount >= limit) {
       throw new ForbiddenException(
@@ -119,35 +106,32 @@ export class SessionService {
   }
 
   async revokeSession(sessionId: string): Promise<void> {
-    // Delete the session immediately instead of just marking as revoked
-    const result = await this.prisma.user_sessions.deleteMany({
-      where: {
+    // Use updateMany to avoid throwing error if session doesn't exist
+    const result = await this.prisma.user_sessions.updateMany({
+      where: { 
         session_id: sessionId,
+        revoked: false, // Only revoke if not already revoked
       },
+      data: { revoked: true },
     });
-
+    
     // Optionally log if session was not found (but don't throw error)
     if (result.count === 0) {
-      this.logger.warn(`Session ${sessionId} not found for revocation`);
+      console.warn(`Session ${sessionId} not found or already revoked`);
     }
   }
 
   async deleteSession(sessionId: string): Promise<boolean> {
     // Actually delete the session from the database
-    this.logger.log(`[DELETE SESSION] Attempting to delete session: ${sessionId}`);
-
     const result = await this.prisma.user_sessions.deleteMany({
       where: { session_id: sessionId },
     });
-
-    this.logger.log(`[DELETE SESSION] Result: ${result.count} session(s) deleted`);
-
+    
     if (result.count === 0) {
-      this.logger.warn(`[DELETE SESSION] Session ${sessionId} not found for deletion`);
+      console.warn(`Session ${sessionId} not found for deletion`);
       return false;
     }
-
-    this.logger.log(`[DELETE SESSION] ✅ Session ${sessionId} successfully deleted`);
+    
     return true;
   }
 
@@ -233,10 +217,17 @@ export class SessionService {
   }
 
   async revokeAllUserSessions(userId: string): Promise<void> {
-    // Delete all sessions for the user immediately
-    await this.prisma.user_sessions.deleteMany({
+    const now = new Date();
+    await this.prisma.user_sessions.updateMany({
       where: {
         user_id: userId,
+        revoked: false,
+        expires_at: {
+          gt: now,
+        },
+      },
+      data: {
+        revoked: true,
       },
     });
   }

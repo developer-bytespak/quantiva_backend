@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsIn, IsNumber, IsPositive, IsOptional, Min, Max } from 'class-validator';
+import { IsString, IsNotEmpty, IsIn, IsNumber, IsPositive, IsOptional, Min, Max, IsBoolean } from 'class-validator';
 
 export class PlaceOrderDto {
   @IsString()
@@ -33,5 +33,15 @@ export class PlaceOrderDto {
   @Min(0.001)
   @Max(5)
   takeProfit?: number;
+
+  /** When true, allow backend to auto-place OCO (take-profit + stop-loss) after a filled BUY. */
+  @IsOptional()
+  @IsBoolean()
+  autoOco?: boolean;
+
+  /** Source of order: 'top_trade', 'manual', etc. Used to determine auto-OCO behavior. */
+  @IsOptional()
+  @IsString()
+  source?: string;
 }
 

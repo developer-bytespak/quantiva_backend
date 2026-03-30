@@ -7,8 +7,8 @@ interface RateLimitEntry {
 
 @Injectable()
 export class RateLimitService {
-  private readonly MAX_ATTEMPTS = 10;
-  private readonly LOCK_DURATION = 10 * 60 * 1000; // 10 minutes in milliseconds
+  private readonly MAX_ATTEMPTS = 5;
+  private readonly LOCK_DURATION = 5 * 60 * 1000; // 5 minutes in milliseconds
   private readonly attempts = new Map<string, RateLimitEntry>();
 
   checkRateLimit(ipAddress: string): void {

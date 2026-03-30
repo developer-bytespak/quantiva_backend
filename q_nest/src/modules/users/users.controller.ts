@@ -40,6 +40,13 @@ export class UsersController {
     limits: {
       fileSize: 5 * 1024 * 1024, // 5MB
     },
+    fileFilter: (_req: any, file: any, cb: any) => {
+      if (!file.mimetype.match(/^image\/(jpeg|png|webp)$/)) {
+        cb(new BadRequestException('Only JPEG, PNG, and WebP images are allowed'), false);
+      } else {
+        cb(null, true);
+      }
+    },
   }))
   @HttpCode(HttpStatus.OK)
   async uploadProfilePicture(
@@ -48,18 +55,6 @@ export class UsersController {
   ) {
     if (!file) {
       throw new BadRequestException('No file provided');
-    }
-
-    // Validate file type
-    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-    if (!allowedMimeTypes.includes(file.mimetype)) {
-      throw new BadRequestException('Invalid file type. Only JPEG, PNG, WebP, and GIF images are allowed.');
-    }
-
-    // Validate file size (5MB max)
-    const maxSize = 5 * 1024 * 1024; // 5MB in bytes
-    if (file.size > maxSize) {
-      throw new BadRequestException('File size exceeds 5MB limit.');
     }
 
     try {

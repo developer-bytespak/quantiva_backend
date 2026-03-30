@@ -22,38 +22,105 @@ export class AssetsSyncCronjobService implements OnModuleInit {
 
   /**
    * Sync top 500 coins from CoinGecko to assets and market_rankings tables
-   * Runs every 5 minutes (CoinGecko Pro tier)
+   * Runs every 15 minutes (CoinGecko Pro tier)
    */
-  @Cron('*/5 * * * *') // Every 5 minutes
+  @Cron('*/15 * * * *') // Every 15 minutes
   async syncAssetsFromCoinGecko(): Promise<void> {
     if (this.isRunning) {
       return;
     }
 
     this.isRunning = true;
+    try {
+      const coins = await this.marketService.getTop500Coins();
+      const result = await this.syncCoins(coins);
+      this.logger.log(`CoinGecko sync complete: created=${result.created}, updated=${result.updated}, errors=${result.errors}, rankings=${result.marketSnapshots}`);
+      this.lastSyncTime = new Date();
+    } catch (error: any) {
+      this.logger.error(`Fatal error in CoinGecko assets sync: ${error.message}`);
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  /**
+   * Shared sync logic used by both scheduled and manual sync
+   */
+  private async syncCoins(coins: any[]): Promise<{ created: number; updated: number; errors: number; total: number; marketSnapshots: number }> {
     let createdCount = 0;
     let updatedCount = 0;
     let errorCount = 0;
     let marketRankingsCount = 0;
+    const rankTimestamp = new Date();
 
-    try {
-      const coins = await this.marketService.getTop500Coins();
-      const rankTimestamp = new Date();
+    for (const coin of coins) {
+      try {
+        const symbol = coin.symbol.toUpperCase();
+        const now = new Date();
 
-      for (const coin of coins) {
-        try {
-          const symbol = coin.symbol.toUpperCase();
-          const now = new Date();
+        // Check if asset already exists
+        const existingAsset = await this.prisma.assets.findFirst({
+          where: { symbol },
+        });
 
-          // Check if asset already exists
-          const existingAsset = await this.prisma.assets.findFirst({
+        if (existingAsset) {
+          // Update existing asset with full metadata
+          await this.prisma.assets.update({
+            where: { asset_id: existingAsset.asset_id },
+            data: {
+              name: coin.name,
+              display_name: coin.name,
+              coingecko_id: coin.id,
+              logo_url: coin.image,
+              market_cap_rank: coin.market_cap_rank,
+              last_seen_at: now,
+              is_active: true,
+            },
+          });
+
+          // Create market_rankings snapshot
+          await this.createMarketRankingSnapshot(
+            existingAsset.asset_id,
+            coin,
+            rankTimestamp,
+          );
+          marketRankingsCount++;
+          updatedCount++;
+        } else {
+          // Create new asset only if it doesn't exist
+          // Double-check to prevent race conditions
+          const duplicateCheck = await this.prisma.assets.findFirst({
             where: { symbol },
           });
 
-          if (existingAsset) {
-            // Update existing asset with full metadata
+          if (!duplicateCheck) {
+            const newAsset = await this.prisma.assets.create({
+              data: {
+                symbol,
+                name: coin.name,
+                display_name: coin.name,
+                coingecko_id: coin.id,
+                logo_url: coin.image,
+                market_cap_rank: coin.market_cap_rank,
+                asset_type: 'crypto',
+                is_active: true,
+                first_seen_at: now,
+                last_seen_at: now,
+              },
+            });
+
+            // Create initial market_rankings snapshot
+            await this.createMarketRankingSnapshot(
+              newAsset.asset_id,
+              coin,
+              rankTimestamp,
+            );
+            marketRankingsCount++;
+            createdCount++;
+          } else {
+            // Asset was created between checks, update it instead
             await this.prisma.assets.update({
-              where: { asset_id: existingAsset.asset_id },
+              where: { asset_id: duplicateCheck.asset_id },
               data: {
                 name: coin.name,
                 display_name: coin.name,
@@ -67,107 +134,54 @@ export class AssetsSyncCronjobService implements OnModuleInit {
 
             // Create market_rankings snapshot
             await this.createMarketRankingSnapshot(
-              existingAsset.asset_id,
+              duplicateCheck.asset_id,
               coin,
               rankTimestamp,
             );
             marketRankingsCount++;
             updatedCount++;
-          } else {
-            // Create new asset only if it doesn't exist
-            // Double-check to prevent race conditions
-            const duplicateCheck = await this.prisma.assets.findFirst({
-              where: { symbol },
+          }
+        }
+      } catch (error: any) {
+        // Handle duplicate key errors (in case unique constraint is added later)
+        if (error.code === 'P2002' || error.message?.includes('Unique constraint')) {
+          try {
+            const existingAsset = await this.prisma.assets.findFirst({
+              where: { symbol: coin.symbol.toUpperCase() },
             });
-
-            if (!duplicateCheck) {
-              const newAsset = await this.prisma.assets.create({
-                data: {
-                  symbol,
-                  name: coin.name,
-                  display_name: coin.name,
-                  coingecko_id: coin.id,
-                  logo_url: coin.image,
-                  market_cap_rank: coin.market_cap_rank,
-                  asset_type: 'crypto',
-                  is_active: true,
-                  first_seen_at: now,
-                  last_seen_at: now,
-                },
-              });
-
-              // Create initial market_rankings snapshot
-              await this.createMarketRankingSnapshot(
-                newAsset.asset_id,
-                coin,
-                rankTimestamp,
-              );
-              marketRankingsCount++;
-              createdCount++;
-            } else {
-              // Asset was created between checks, update it instead
+            if (existingAsset) {
               await this.prisma.assets.update({
-                where: { asset_id: duplicateCheck.asset_id },
+                where: { asset_id: existingAsset.asset_id },
                 data: {
                   name: coin.name,
                   display_name: coin.name,
                   coingecko_id: coin.id,
                   logo_url: coin.image,
                   market_cap_rank: coin.market_cap_rank,
-                  last_seen_at: now,
+                  last_seen_at: new Date(),
                   is_active: true,
                 },
               });
-
-              // Create market_rankings snapshot
-              await this.createMarketRankingSnapshot(
-                duplicateCheck.asset_id,
-                coin,
-                rankTimestamp,
-              );
-              marketRankingsCount++;
               updatedCount++;
             }
-          }
-        } catch (error: any) {
-          // Handle duplicate key errors (in case unique constraint is added later)
-          if (error.code === 'P2002' || error.message?.includes('Unique constraint')) {
-            // Asset already exists, try to update it
-            try {
-              const existingAsset = await this.prisma.assets.findFirst({
-                where: { symbol: coin.symbol.toUpperCase() },
-              });
-              if (existingAsset) {
-                await this.prisma.assets.update({
-                  where: { asset_id: existingAsset.asset_id },
-                  data: {
-                    name: coin.name,
-                    display_name: coin.name,
-                    coingecko_id: coin.id,
-                    logo_url: coin.image,
-                    market_cap_rank: coin.market_cap_rank,
-                    last_seen_at: new Date(),
-                    is_active: true,
-                  },
-                });
-                updatedCount++;
-              }
-            } catch (updateError: any) {
-              errorCount++;
-            }
-          } else {
+          } catch (updateError: any) {
+            this.logger.warn(`Failed to update asset ${coin.symbol} after P2002: ${(updateError as Error).message}`);
             errorCount++;
           }
-          // Continue with next coin
+        } else {
+          this.logger.warn(`Failed to sync asset ${coin.symbol}: ${(error as Error).message}`);
+          errorCount++;
         }
       }
-
-      this.lastSyncTime = new Date();
-    } catch (error: any) {
-      this.logger.error(`Fatal error in CoinGecko assets sync: ${error.message}`);
-    } finally {
-      this.isRunning = false;
     }
+
+    return {
+      created: createdCount,
+      updated: updatedCount,
+      errors: errorCount,
+      total: coins.length,
+      marketSnapshots: marketRankingsCount,
+    };
   }
 
   /**
@@ -206,7 +220,7 @@ export class AssetsSyncCronjobService implements OnModuleInit {
         },
       });
     } catch (error: any) {
-      // Skip failed market_rankings for this asset
+      this.logger.warn(`Failed to upsert market ranking for asset ${assetId}: ${(error as Error).message}`);
     }
   }
 
@@ -227,147 +241,8 @@ export class AssetsSyncCronjobService implements OnModuleInit {
    * Manual sync method (can be called via API endpoint)
    */
   async manualSync(): Promise<{ created: number; updated: number; errors: number; total: number; marketSnapshots: number }> {
-    let createdCount = 0;
-    let updatedCount = 0;
-    let errorCount = 0;
-    let marketRankingsCount = 0;
-
-    try {
-      const coins = await this.marketService.getTop500Coins();
-      const rankTimestamp = new Date();
-
-      for (const coin of coins) {
-        try {
-          const symbol = coin.symbol.toUpperCase();
-          const now = new Date();
-
-          // Check if asset already exists
-          const existingAsset = await this.prisma.assets.findFirst({
-            where: { symbol },
-          });
-
-          if (existingAsset) {
-            // Update existing asset with full metadata
-            await this.prisma.assets.update({
-              where: { asset_id: existingAsset.asset_id },
-              data: {
-                name: coin.name,
-                display_name: coin.name,
-                coingecko_id: coin.id,
-                logo_url: coin.image,
-                market_cap_rank: coin.market_cap_rank,
-                last_seen_at: now,
-                is_active: true,
-              },
-            });
-
-            // Create market_rankings snapshot
-            await this.createMarketRankingSnapshot(
-              existingAsset.asset_id,
-              coin,
-              rankTimestamp,
-            );
-            marketRankingsCount++;
-            updatedCount++;
-          } else {
-            // Create new asset only if it doesn't exist
-            // Double-check to prevent race conditions
-            const duplicateCheck = await this.prisma.assets.findFirst({
-              where: { symbol },
-            });
-
-            if (!duplicateCheck) {
-              const newAsset = await this.prisma.assets.create({
-                data: {
-                  symbol,
-                  name: coin.name,
-                  display_name: coin.name,
-                  coingecko_id: coin.id,
-                  logo_url: coin.image,
-                  market_cap_rank: coin.market_cap_rank,
-                  asset_type: 'crypto',
-                  is_active: true,
-                  first_seen_at: now,
-                  last_seen_at: now,
-                },
-              });
-
-              // Create initial market_rankings snapshot
-              await this.createMarketRankingSnapshot(
-                newAsset.asset_id,
-                coin,
-                rankTimestamp,
-              );
-              marketRankingsCount++;
-              createdCount++;
-            } else {
-              // Asset was created between checks, update it instead
-              await this.prisma.assets.update({
-                where: { asset_id: duplicateCheck.asset_id },
-                data: {
-                  name: coin.name,
-                  display_name: coin.name,
-                  coingecko_id: coin.id,
-                  logo_url: coin.image,
-                  market_cap_rank: coin.market_cap_rank,
-                  last_seen_at: now,
-                  is_active: true,
-                },
-              });
-
-              // Create market_rankings snapshot
-              await this.createMarketRankingSnapshot(
-                duplicateCheck.asset_id,
-                coin,
-                rankTimestamp,
-              );
-              marketRankingsCount++;
-              updatedCount++;
-            }
-          }
-        } catch (error: any) {
-          // Handle duplicate key errors (in case unique constraint is added later)
-          if (error.code === 'P2002' || error.message?.includes('Unique constraint')) {
-            // Asset already exists, try to update it
-            try {
-              const existingAsset = await this.prisma.assets.findFirst({
-                where: { symbol: coin.symbol.toUpperCase() },
-              });
-              if (existingAsset) {
-                await this.prisma.assets.update({
-                  where: { asset_id: existingAsset.asset_id },
-                  data: {
-                    name: coin.name,
-                    display_name: coin.name,
-                    coingecko_id: coin.id,
-                    logo_url: coin.image,
-                    market_cap_rank: coin.market_cap_rank,
-                    last_seen_at: new Date(),
-                    is_active: true,
-                  },
-                });
-                updatedCount++;
-              }
-            } catch (updateError: any) {
-              errorCount++;
-            }
-          } else {
-            errorCount++;
-          }
-        }
-      }
-
-      return {
-        created: createdCount,
-        updated: updatedCount,
-        errors: errorCount,
-        total: coins.length,
-        marketSnapshots: marketRankingsCount,
-      };
-    } catch (error: any) {
-      this.logger.error(`Fatal error in manual sync: ${error.message}`);
-      throw error;
-    }
+    const coins = await this.marketService.getTop500Coins();
+    return this.syncCoins(coins);
   }
 }
 

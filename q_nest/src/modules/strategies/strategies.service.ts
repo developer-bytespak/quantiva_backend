@@ -1,9 +1,8 @@
 import { Injectable, Inject, forwardRef, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { StrategyType, RiskLevel, QhqTransactionType } from '@prisma/client';
+import { StrategyType, RiskLevel } from '@prisma/client';
 import { CreateStrategyDto } from './dto/create-strategy.dto';
 import { StrategyValidationService } from './services/strategy-validation.service';
-import { QhqTokenService } from '../qhq-token/qhq-token.service';
 
 @Injectable()
 export class StrategiesService {
@@ -13,7 +12,6 @@ export class StrategiesService {
   constructor(
     private prisma: PrismaService,
     private validationService: StrategyValidationService,
-    private qhqService: QhqTokenService,
   ) {}
 
   setStrategyScheduler(scheduler: any) {
@@ -169,22 +167,6 @@ export class StrategiesService {
       } catch (error) {
         // Log error but don't fail strategy creation
         console.error(`Failed to schedule strategy ${strategy.strategy_id}:`, error);
-      }
-    }
-
-    // QHQ reward for creating a custom strategy (non-blocking)
-    if (dto.user_id) {
-      const rewardAmount = await this.qhqService.getRuleAmount('STRATEGY_CREATED');
-      if (rewardAmount > 0) {
-        this.qhqService
-          .earnTokens(
-            dto.user_id,
-            QhqTransactionType.EARN_STRATEGY,
-            rewardAmount,
-            `Created strategy: ${strategy.name}`,
-            strategy.strategy_id,
-          )
-          .catch((err) => this.logger.error(`QHQ strategy reward error: ${err.message}`));
       }
     }
 

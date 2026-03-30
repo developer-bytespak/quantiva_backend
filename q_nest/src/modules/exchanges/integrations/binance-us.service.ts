@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import {
   AccountBalanceDto,
@@ -195,6 +195,39 @@ export class BinanceUSService {
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // Cache for Binance.US tradeable USD base assets (e.g. 'BTC','ETH','SOL')
+  private tradeableSymbolsCache: { symbols: Set<string>; fetchedAt: number } | null = null;
+  private readonly TRADEABLE_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
+
+  /**
+   * Returns the set of base assets that have an active TRADING pair with USD quote on Binance.US.
+   * Uses a 5-minute in-memory cache to avoid hammering exchangeInfo.
+   * No API key required — public endpoint.
+   */
+  async getTradeableBaseAssets(): Promise<Set<string>> {
+    if (
+      this.tradeableSymbolsCache &&
+      Date.now() - this.tradeableSymbolsCache.fetchedAt < this.TRADEABLE_CACHE_TTL_MS
+    ) {
+      return this.tradeableSymbolsCache.symbols;
+    }
+    try {
+      const data = await this.makePublicRequest('/api/v3/exchangeInfo');
+      const symbols = new Set<string>(
+        (data.symbols as any[])
+          .filter((s) => s.status === 'TRADING' && s.quoteAsset === 'USD')
+          .map((s) => s.baseAsset as string),
+      );
+      this.tradeableSymbolsCache = { symbols, fetchedAt: Date.now() };
+      this.logger.log(`Binance.US tradeable USD base assets cached: ${symbols.size} symbols`);
+      return symbols;
+    } catch (error: any) {
+      this.logger.error(`Failed to fetch Binance.US tradeable symbols: ${error.message}`);
+      if (this.tradeableSymbolsCache) return this.tradeableSymbolsCache.symbols;
+      return new Set();
+    }
   }
 
   /**
@@ -512,6 +545,93 @@ export class BinanceUSService {
   }
 
   /**
+   * Fetches exchangeInfo once and:
+   * 1. Adjusts quantity to comply with LOT_SIZE (step size)
+   * 2. Validates that the order notional value meets NOTIONAL / MIN_NOTIONAL filter
+   */
+  private async validateAndAdjustQuantity(
+    symbol: string,
+    quantity: number,
+    orderType: 'MARKET' | 'LIMIT',
+    price?: number,
+  ): Promise<string> {
+    try {
+      const info = await this.makePublicRequest('/api/v3/exchangeInfo', { symbol });
+      const filters: any[] = info?.symbols?.[0]?.filters ?? [];
+
+      let adjustedQuantity = quantity;
+      let decimalPlaces = 8;
+
+      const lotSizeFilter = filters.find((f) => f.filterType === 'LOT_SIZE');
+      if (lotSizeFilter) {
+        const stepSize: string = lotSizeFilter.stepSize;
+        const step = parseFloat(stepSize);
+        if (step > 0) {
+          decimalPlaces = (stepSize.replace(/0+$/, '').split('.')[1] ?? '').length;
+          adjustedQuantity = Math.floor(quantity / step) * step;
+        }
+      }
+
+      const adjustedQtyStr = adjustedQuantity.toFixed(decimalPlaces);
+
+      const notionalFilter =
+        filters.find((f) => f.filterType === 'NOTIONAL') ??
+        filters.find((f) => f.filterType === 'MIN_NOTIONAL');
+
+      if (notionalFilter) {
+        const minNotional = parseFloat(
+          notionalFilter.minNotional ?? notionalFilter.minNotionalValue ?? '0',
+        );
+
+        if (minNotional > 0) {
+          let effectivePrice = price;
+          if (!effectivePrice || orderType === 'MARKET') {
+            const ticker = await this.makePublicRequest('/api/v3/ticker/price', { symbol });
+            effectivePrice = parseFloat(ticker.price);
+          }
+
+          const notional = adjustedQuantity * effectivePrice;
+          if (notional < minNotional) {
+            throw new BinanceApiException(
+              `Order value $${notional.toFixed(4)} is below the minimum required $${minNotional} for ${symbol}. ` +
+                `Increase your quantity.`,
+              'BINANCE_US_-1013',
+            );
+          }
+        }
+      }
+
+      return adjustedQtyStr;
+    } catch (error) {
+      if (error instanceof BinanceApiException) throw error;
+      // Fallback to raw quantity if exchangeInfo is temporarily unavailable.
+      return quantity.toString();
+    }
+  }
+
+  /**
+   * Rounds a price to comply with PRICE_FILTER tickSize for the symbol.
+   */
+  private async roundPriceToTickSize(symbol: string, price: number): Promise<string> {
+    try {
+      const info = await this.makePublicRequest('/api/v3/exchangeInfo', { symbol });
+      const filters: any[] = info?.symbols?.[0]?.filters ?? [];
+      const priceFilter = filters.find((f) => f.filterType === 'PRICE_FILTER');
+      if (!priceFilter) return price.toFixed(8);
+
+      const tickSize: string = priceFilter.tickSize;
+      const tick = parseFloat(tickSize);
+      if (tick <= 0) return price.toFixed(8);
+
+      const decimalPlaces = (tickSize.replace(/0+$/, '').split('.')[1] ?? '').length;
+      const rounded = Math.round(price / tick) * tick;
+      return rounded.toFixed(decimalPlaces);
+    } catch {
+      return price.toFixed(8);
+    }
+  }
+
+  /**
    * Fetches candlestick/OHLCV data
    */
   async getCandlestickData(
@@ -597,6 +717,16 @@ export class BinanceUSService {
 
         throw new BinanceApiException(binanceMsg, `BINANCE_US_${binanceCode}`);
       }
+
+      if (error.response?.status === 400) {
+        const msg =
+          error.response?.data?.msg ||
+          error.response?.data?.message ||
+          error.message ||
+          'Bad request to Binance.US API';
+        throw new BinanceApiException(msg, 'BINANCE_US_BAD_REQUEST', HttpStatus.BAD_REQUEST);
+      }
+
       throw new BinanceApiException(error.message || 'Failed to place order');
     }
   }
@@ -644,6 +774,16 @@ export class BinanceUSService {
 
         throw new BinanceApiException(binanceMsg, `BINANCE_US_${binanceCode}`);
       }
+
+      if (error.response?.status === 400) {
+        const msg =
+          error.response?.data?.msg ||
+          error.response?.data?.message ||
+          error.message ||
+          'Bad request to Binance.US API';
+        throw new BinanceApiException(msg, 'BINANCE_US_BAD_REQUEST', HttpStatus.BAD_REQUEST);
+      }
+
       throw new BinanceApiException(error.message || 'Failed to delete order');
     }
   }
@@ -665,11 +805,14 @@ export class BinanceUSService {
         throw new BinanceApiException('Price is required for LIMIT orders');
       }
 
+      // Validate and adjust quantity to comply with LOT_SIZE and MIN_NOTIONAL filters
+      const adjustedQuantity = await this.validateAndAdjustQuantity(symbol, quantity, type, price);
+
       const params: Record<string, any> = {
         symbol,
         side: side.toUpperCase(),
         type: type === 'MARKET' ? 'MARKET' : 'LIMIT',
-        quantity: quantity.toString(),
+        quantity: adjustedQuantity,
       };
 
       if (type === 'LIMIT') {
@@ -679,13 +822,52 @@ export class BinanceUSService {
 
       const order = await this.makeSignedPostRequest('/api/v3/order', apiKey, apiSecret, params);
 
+      const executedQty = parseFloat(order.executedQty || order.origQty || '0');
+      const rawPrice = parseFloat(order.price || '0');
+      const quoteQty = parseFloat(order.cummulativeQuoteQty || '0');
+      let executionPrice =
+        rawPrice === 0 && executedQty > 0 && quoteQty > 0
+          ? quoteQty / executedQty
+          : rawPrice;
+
+      // For some MARKET responses, Binance.US may still return incomplete price fields.
+      // Query the order once to compute average fill price from cummulativeQuoteQty.
+      if (executionPrice <= 0 && order.orderId && order.symbol) {
+        try {
+          const orderDetails = await this.makeSignedRequest('/api/v3/order', apiKey, apiSecret, {
+            symbol: order.symbol,
+            orderId: order.orderId.toString(),
+          });
+          const detailExecutedQty = parseFloat(orderDetails.executedQty || executedQty.toString() || '0');
+          const detailQuoteQty = parseFloat(orderDetails.cummulativeQuoteQty || '0');
+          if (detailExecutedQty > 0 && detailQuoteQty > 0) {
+            executionPrice = detailQuoteQty / detailExecutedQty;
+          }
+        } catch {
+          // Keep initial values if details fetch fails.
+        }
+      }
+
+      // When commission is charged in base asset, the tradable amount is less than executedQty.
+      const knownQuotes = ['USD', 'USDT', 'BUSD', 'BTC', 'ETH', 'BNB'];
+      const symUp = (order.symbol || symbol || '').toUpperCase();
+      const quote = knownQuotes.find((q) => symUp.endsWith(q)) ?? '';
+      const baseAsset = quote ? symUp.slice(0, symUp.length - quote.length) : '';
+      const fills: Array<{ commission: string; commissionAsset: string }> = order.fills || [];
+      const baseAssetFees = fills.reduce((sum: number, fill: any) => {
+        return baseAsset && (fill.commissionAsset || '').toUpperCase() === baseAsset
+          ? sum + parseFloat(fill.commission || '0')
+          : sum;
+      }, 0);
+      const receivedQty = baseAssetFees > 0 ? Math.max(0, executedQty - baseAssetFees) : executedQty;
+
       return {
         orderId: order.orderId.toString(),
         symbol: order.symbol,
         side: order.side as 'BUY' | 'SELL',
         type: order.type,
-        quantity: parseFloat(order.executedQty || order.origQty || '0'),
-        price: parseFloat(order.price || '0'),
+        quantity: receivedQty,
+        price: executionPrice,
         status: order.status,
         time: order.transactTime || order.updateTime || Date.now(),
       };
@@ -751,13 +933,21 @@ export class BinanceUSService {
           : stopLossPrice * 1.005  // 0.5% above stop price for buys
         );
 
+      // Binance.US rejects OCO when quantity/price precision exceeds symbol filters.
+      const [roundedTpPrice, roundedSlPrice, roundedSlLimitPrice, adjustedQty] = await Promise.all([
+        this.roundPriceToTickSize(symbol, takeProfitPrice),
+        this.roundPriceToTickSize(symbol, stopLossPrice),
+        this.roundPriceToTickSize(symbol, effectiveStopLimitPrice),
+        this.validateAndAdjustQuantity(symbol, quantity, 'LIMIT', takeProfitPrice),
+      ]);
+
       const params: Record<string, any> = {
         symbol,
         side: side.toUpperCase(),
-        quantity: quantity.toString(),
-        price: takeProfitPrice.toFixed(8),        // Take profit limit price
-        stopPrice: stopLossPrice.toFixed(8),      // Stop trigger price
-        stopLimitPrice: effectiveStopLimitPrice.toFixed(8), // Stop limit price
+        quantity: adjustedQty,
+        price: roundedTpPrice,        // Take profit limit price
+        stopPrice: roundedSlPrice,    // Stop trigger price
+        stopLimitPrice: roundedSlLimitPrice, // Stop limit price
         stopLimitTimeInForce: 'GTC',
       };
 

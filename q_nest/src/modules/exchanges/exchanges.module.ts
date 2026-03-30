@@ -19,7 +19,6 @@ import { MarketModule } from '../market/market.module';
 import { StocksMarketModule } from '../stocks-market/stocks-market.module';
 import { BinanceModule } from '../binance/binance.module';
 import { TradeFeesModule } from '../trade-fees/trade-fees.module';
-import { QhqTokenModule } from '../qhq-token/qhq-token.module';
 
 @Module({
   imports: [
@@ -31,7 +30,6 @@ import { QhqTokenModule } from '../qhq-token/qhq-token.module';
     StocksMarketModule,
     BinanceModule,
     TradeFeesModule,
-    forwardRef(() => QhqTokenModule),
   ],
   controllers: [ExchangesController, /* Health endpoint for paper trading */ PaperTradingController],
   providers: [

@@ -79,7 +79,11 @@ export class ExchangesService {
     
     if (normalizedName === 'binance') {
       return this.binanceService;
-    } else if (normalizedName === 'binance.us' || normalizedName === 'binanceus') {
+    } else if (
+      normalizedName === 'binance.us' ||
+      normalizedName === 'binanceus' ||
+      normalizedName === 'binance-us'
+    ) {
       return this.binanceUSService;
     } else if (normalizedName === 'bybit') {
       return this.bybitService;
@@ -531,7 +535,10 @@ export class ExchangesService {
     // Get the appropriate exchange service
     const exchangeName = connection.exchange.name.toLowerCase();
     const isBinance = exchangeName === 'binance';
-    const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus';
+    const isBinanceUS =
+      exchangeName === 'binance.us' ||
+      exchangeName === 'binanceus' ||
+      exchangeName === 'binance-us';
     const isBybit = exchangeName === 'bybit';
     const isAlpaca = exchangeName === 'alpaca';
 
@@ -594,6 +601,28 @@ export class ExchangesService {
 
         if (ordersResult.status === 'fulfilled') {
           orders = ordersResult.value;
+
+          // Binance US often has no open orders when market buys are instantly filled.
+          // Fallback to recent order history so Action Center can still show activity.
+          if (orders.length === 0) {
+            try {
+              const recentOrders = await this.fetchBinanceUSRecentOrders(
+                apiKey,
+                apiSecret,
+                accountInfo,
+              );
+              if (recentOrders.length > 0) {
+                orders = recentOrders;
+                this.logger.debug(
+                  `Loaded ${recentOrders.length} recent Binance.US orders for ${connectionId} as fallback`,
+                );
+              }
+            } catch (historyError: any) {
+              this.logger.warn(
+                `Binance.US recent orders fallback failed for ${connectionId}: ${historyError?.message ?? historyError}`,
+              );
+            }
+          }
         } else {
           this.logger.warn(
             `Binance.US open orders fetch failed for ${connectionId}, continuing with empty orders: ${ordersResult.reason?.message ?? ordersResult.reason}`,
@@ -742,6 +771,103 @@ export class ExchangesService {
       
       throw error;
     }
+  }
+
+  /**
+   * Binance US fallback: fetch recent historical orders (FILLED/NEW/etc.)
+   * for held assets when open orders are empty.
+   */
+  private async fetchBinanceUSRecentOrders(
+    apiKey: string,
+    apiSecret: string,
+    accountInfo: any,
+  ): Promise<OrderDto[]> {
+    const STABLE_ASSETS = new Set(['USD', 'USDT', 'USDC', 'BUSD', 'TUSD', 'USDP', 'DAI', 'FDUSD']);
+
+    const heldAssets = Array.from(
+      new Set(
+        (accountInfo?.balances || [])
+          .filter((b: any) => (parseFloat(b?.free || '0') + parseFloat(b?.locked || '0')) > 0)
+          .map((b: any) => String(b?.asset || '').toUpperCase())
+          .filter((asset: string) => asset && !STABLE_ASSETS.has(asset)),
+      ),
+    );
+
+    if (heldAssets.length === 0) {
+      return [];
+    }
+
+    const candidateSymbols = Array.from(
+      new Set(heldAssets.flatMap((asset) => [`${asset}USD`, `${asset}USDT`])),
+    );
+
+    const ordersSettled = await Promise.allSettled(
+      candidateSymbols.map((symbol) =>
+        this.binanceUSService.getAllOrders(apiKey, apiSecret, symbol, { limit: 50 }),
+      ),
+    );
+
+    const tradesSettled = await Promise.allSettled(
+      candidateSymbols.map((symbol) =>
+        this.binanceUSService.getMyTrades(apiKey, apiSecret, symbol, { limit: 50 }),
+      ),
+    );
+
+    const rawOrders: any[] = [];
+    for (const result of ordersSettled) {
+      if (result.status === 'fulfilled' && Array.isArray(result.value)) {
+        rawOrders.push(...result.value);
+      }
+    }
+
+    // Derive FILLED order-like rows from trade history so instantly-filled market orders
+    // can still appear in dashboard activity when open orders are empty.
+    for (const result of tradesSettled) {
+      if (result.status !== 'fulfilled' || !Array.isArray(result.value)) {
+        continue;
+      }
+
+      for (const trade of result.value) {
+        rawOrders.push({
+          orderId: trade?.orderId,
+          symbol: trade?.symbol,
+          side: trade?.isBuyer ? 'BUY' : 'SELL',
+          type: 'MARKET',
+          status: 'FILLED',
+          quantity: trade?.qty,
+          price: trade?.price,
+          time: trade?.time,
+          updateTime: trade?.time,
+        });
+      }
+    }
+
+    if (rawOrders.length === 0) {
+      return [];
+    }
+
+    const unique = new Map<string, any>();
+    for (const order of rawOrders) {
+      const key = `${order?.orderId || ''}:${order?.symbol || ''}`;
+      if (!unique.has(key)) {
+        unique.set(key, order);
+      }
+    }
+
+    return Array.from(unique.values())
+      .map((order: any) => ({
+        orderId: String(order?.orderId || ''),
+        symbol: order?.symbol || '',
+        side: (order?.side === 'SELL' ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
+        type: order?.type || '',
+        quantity: Number(order?.quantity || 0),
+        price: Number(order?.price || 0),
+        status: order?.status || '',
+        time: Number(order?.updateTime || order?.time || Date.now()),
+      }))
+      .filter((order) => order.orderId && order.symbol)
+      .sort((a, b) => b.time - a.time)
+      .slice(0, 50);
   }
 
   /**
@@ -958,12 +1084,19 @@ export class ExchangesService {
     // Get the appropriate exchange service
     const exchangeService = this.getExchangeService(connection.exchange.name);
 
+    let placedOrder: OrderDto;
+
     if (exchangeService instanceof BinanceService) {
-      return this.binanceService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
+      placedOrder = await this.binanceService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
+    } else if (exchangeService instanceof BinanceUSService) {
+      const normalizedSymbol = symbol.toUpperCase().endsWith('USDT')
+        ? symbol.toUpperCase().replace(/USDT$/, 'USD')
+        : symbol;
+      placedOrder = await this.binanceUSService.placeOrder(apiKey, apiSecret, normalizedSymbol, side, type, quantity, price);
     } else if (exchangeService instanceof BybitService) {
-      return this.bybitService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
+      placedOrder = await this.bybitService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
     } else if (exchangeService instanceof AlpacaService) {
-      return this.alpacaService.placeOrder(
+      placedOrder = await this.alpacaService.placeOrder(
         symbol,
         side,
         type,
@@ -975,6 +1108,16 @@ export class ExchangesService {
     } else {
       throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
     }
+
+    // Ensure subsequent dashboard/orders requests are not served stale cache.
+    this.cacheService.invalidate(connectionId);
+
+    // Refresh snapshots in background (non-blocking for order placement latency).
+    this.syncConnectionData(connectionId).catch((err) =>
+      this.logger.warn(`Post-order sync failed for ${connectionId}: ${err?.message || err}`),
+    );
+
+    return placedOrder;
   }
 
   async placeOcoOrder(
@@ -1001,19 +1144,42 @@ export class ExchangesService {
     const apiKey = this.encryptionService.decryptApiKey(connection.api_key_encrypted);
     const apiSecret = this.encryptionService.decryptApiKey(connection.api_secret_encrypted);
 
-    const exchangeName = connection.exchange.name.toLowerCase();
-    if (exchangeName !== 'binance') {
-      throw new Error(`OCO orders are only supported on Binance, not ${connection.exchange.name}`);
+    const exchangeService = this.getExchangeService(connection.exchange.name);
+
+    let result: { orderListId: number };
+    if (exchangeService instanceof BinanceService) {
+      result = await this.binanceService.placeOcoOrder(
+        apiKey,
+        apiSecret,
+        symbol,
+        side,
+        quantity,
+        takeProfitPrice,
+        stopLossPrice,
+      );
+    } else if (exchangeService instanceof BinanceUSService) {
+      const normalizedSymbol = symbol.toUpperCase().endsWith('USDT')
+        ? symbol.toUpperCase().replace(/USDT$/, 'USD')
+        : symbol;
+      result = await this.binanceUSService.placeOcoOrder(
+        apiKey,
+        apiSecret,
+        normalizedSymbol,
+        side,
+        quantity,
+        takeProfitPrice,
+        stopLossPrice,
+      );
+    } else {
+      throw new Error(`OCO orders are only supported on Binance/Binance US, not ${connection.exchange.name}`);
     }
 
-    const result = await this.binanceService.placeOcoOrder(
-      apiKey,
-      apiSecret,
-      symbol,
-      side,
-      quantity,
-      takeProfitPrice,
-      stopLossPrice,
+    // Ensure subsequent dashboard/orders requests are not served stale cache.
+    this.cacheService.invalidate(connectionId);
+
+    // Refresh snapshots in background (non-blocking for OCO placement latency).
+    this.syncConnectionData(connectionId).catch((err) =>
+      this.logger.warn(`Post-OCO sync failed for ${connectionId}: ${err?.message || err}`),
     );
 
     return {

@@ -18,8 +18,6 @@ import { AppGateway } from 'src/gateways/app.gateway';
 import { NotificationsService } from '../notifications/notifications.service';
 import { TradeFeesService } from '../trade-fees/trade-fees.service';
 import { PrismaService } from '../../prisma/prisma.service';
-import { QhqTokenService } from '../qhq-token/qhq-token.service';
-import { QhqTransactionType } from '@prisma/client';
 // import { NotificationType } from '@prisma/client';
 
 interface RawBodyRequest extends Request {
@@ -37,7 +35,6 @@ export class StripeController {
     private readonly subscriptionsService: SubscriptionsService,
     private readonly tradeFeesService: TradeFeesService,
     private readonly prisma: PrismaService,
-    private readonly qhqService: QhqTokenService,
   ) {}
 
   @Post('create-checkout-session')
@@ -271,9 +268,6 @@ export class StripeController {
             this.logger.log(
               `Subscription updated for user ${userId}, plan ${planId} and payment recorded`,
             );
-
-            // QHQ reward for subscription payment (non-blocking)
-            this.awardSubscriptionQhq(userId, planId);
           } else {
             // User has no current subscription — create new subscription and update all related tables
             const newSubscription = await this.subscriptionsService.createSubscription({
@@ -303,9 +297,6 @@ export class StripeController {
             this.logger.log(
               `New subscription created for user ${userId}, plan ${planId}; user_subscriptions, users, subscription_usage, and payment_history updated`,
             );
-
-            // QHQ reward for subscription payment (non-blocking)
-            this.awardSubscriptionQhq(userId, planId);
           }
         } catch (err: any) {
           this.logger.error(
@@ -353,31 +344,5 @@ export class StripeController {
     }
 
     return { received: true };
-  }
-
-  /**
-   * Award QHQ tokens based on the subscription plan tier.
-   * PRO = 10 QHQ, ELITE = 25 QHQ per payment.
-   */
-  private awardSubscriptionQhq(userId: string, planId: string): void {
-    this.prisma.subscription_plans
-      .findUnique({ where: { plan_id: planId }, select: { tier: true } })
-      .then((plan) => {
-        if (!plan) return;
-        const ruleKey =
-          plan.tier === 'ELITE' ? 'MONTHLY_ELITE' : plan.tier === 'PRO' ? 'MONTHLY_PRO' : null;
-        if (!ruleKey) return;
-        return this.qhqService.getRuleAmount(ruleKey).then((amount) => {
-          if (amount <= 0) return;
-          return this.qhqService.earnTokens(
-            userId,
-            QhqTransactionType.EARN_SUBSCRIPTION,
-            amount,
-            `Subscription payment: ${plan.tier}`,
-            planId,
-          );
-        });
-      })
-      .catch((err) => this.logger.error(`QHQ subscription reward error: ${err.message}`));
   }
 }

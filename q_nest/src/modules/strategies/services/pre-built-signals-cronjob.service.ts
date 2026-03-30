@@ -10,7 +10,7 @@ import { ConnectionStatus, StrategyType } from '@prisma/client';
 @Injectable()
 export class PreBuiltSignalsCronjobService {
   private readonly logger = new Logger(PreBuiltSignalsCronjobService.name);
-  private readonly BATCH_SIZE = 3; // Process 3 assets at a time
+  private readonly BATCH_SIZE = 10; // Process 10 assets at a time
   private readonly LLM_LIMIT = 10; // Generate LLM for top 10 signals per strategy
   private isRunning = false; // Prevent concurrent executions
 

@@ -29,7 +29,10 @@ export class BinanceTradingService {
     }
 
     const exchangeName = connection.exchange.name.toLowerCase();
-    const isUS = exchangeName === 'binance-us' || exchangeName === 'binance.us';
+    const isUS =
+      exchangeName === 'binance-us' ||
+      exchangeName === 'binance.us' ||
+      exchangeName === 'binanceus';
     const isBinance = exchangeName === 'binance';
 
     if (!isBinance && !isUS) {
@@ -75,10 +78,11 @@ export class BinanceTradingService {
    */
   private async getTradingSymbols(apiKey: string, apiSecret: string, isUS: boolean): Promise<string[]> {
     const service = this.getService(isUS);
+    const quote = isUS ? 'USD' : 'USDT';
     const positions = await service.getPositions(apiKey, apiSecret);
     return positions
       .filter((p) => !STABLECOINS.has(p.symbol) && p.quantity > 0)
-      .map((p) => `${p.symbol}USDT`);
+      .map((p) => `${p.symbol}${quote}`);
   }
 
   /**

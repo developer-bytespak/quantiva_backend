@@ -121,7 +121,7 @@ async function bootstrap() {
 
   // Server timeout for long-running requests
   const httpServer = app.getHttpServer();
-  httpServer.timeout = 120000; // 2 minutes in milliseconds
+  httpServer.timeout = 300000; // 5 minutes in milliseconds
   
   console.log(`══════════════════════════════════════════════`);
   console.log(`  Quantiva NestJS server started`);
