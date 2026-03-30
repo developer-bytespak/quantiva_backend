@@ -26,7 +26,8 @@ python-dateutil>=2.8.2
 # - Model is cached in ~/.cache/huggingface/ after first download
 # - Requires transformers, torch, and huggingface-hub for model loading
 transformers>=4.32.0
-torch>=2.0.0
+#torch>=2.0.0
+torch==2.2.2+cpu --extra-index-url https://download.pytorch.org/whl/cpu
 huggingface-hub>=0.16.0
 
 # Environment and Database
