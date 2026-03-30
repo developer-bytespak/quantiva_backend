@@ -15,6 +15,7 @@ import { ExchangesService } from '../modules/exchanges/exchanges.service';
 import { CacheService } from '../modules/exchanges/services/cache.service';
 import { CacheKeyManager } from '../modules/exchanges/services/cache-key-manager';
 import { BinanceMarketStreamService } from '../modules/binance/binance-market-stream.service';
+import { WsAuthService } from './ws-auth.service';
 
 interface Subscription {
   connectionId: string;
@@ -71,12 +72,22 @@ export class MarketDetailGateway
     private readonly exchangesService: ExchangesService,
     private readonly cacheService: CacheService,
     private readonly marketStream: BinanceMarketStreamService,
+    private readonly wsAuthService: WsAuthService,
   ) {}
 
   // ── Lifecycle ────────────────────────────────────────────
 
   async handleConnection(client: Socket): Promise<void> {
-    this.logger.log(`Market-detail client connected: ${client.id}`);
+    // Verify JWT token
+    const authResult = this.wsAuthService.verifyConnection(client);
+    if (!authResult.authenticated) {
+      this.logger.warn(`Unauthorized market-detail connection: ${client.id} — ${authResult.error}`);
+      client.emit('error', { code: 'UNAUTHORIZED', message: authResult.error || 'Authentication required' });
+      client.disconnect();
+      return;
+    }
+    client.data.userId = authResult.userId;
+    this.logger.log(`Market-detail client connected: ${client.id}, userId: ${authResult.userId}`);
   }
 
   async handleDisconnect(client: Socket): Promise<void> {

@@ -16,27 +16,29 @@ export class SignalsController {
     @Query('latest_only') latestOnly?: string,
     @Query('limit') limit?: string,
     @Query('realtime') realtime?: string,
+    @Query('page') page?: string,
   ) {
     const latest = latestOnly === 'true' || latestOnly === '1';
     const cap = limit ? Number(limit) : undefined;
     const enrichWithRealtime = realtime === 'true' || realtime === '1';
+    const pageNum = page ? Number(page) : undefined;
 
     if (latest) {
-      return this.signalsService.findLatestSignals({ 
-        strategyId, 
-        userId, 
+      return this.signalsService.findLatestSignals({
+        strategyId,
+        userId,
         limit: cap,
         enrichWithRealtime,
       });
     }
 
     if (strategyId) {
-      return this.signalsService.findByStrategy(strategyId);
+      return this.signalsService.findByStrategy(strategyId, pageNum, cap);
     }
     if (userId) {
-      return this.signalsService.findByUser(userId);
+      return this.signalsService.findByUser(userId, pageNum, cap);
     }
-    return this.signalsService.findAll();
+    return this.signalsService.findAll(pageNum, cap);
   }
 
   @Get(':id')

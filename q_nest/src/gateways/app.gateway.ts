@@ -10,6 +10,7 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { NotificationsService } from 'src/modules/notifications/notifications.service';
+import { WsAuthService } from './ws-auth.service';
 
 @WebSocketGateway({
   cors: {
@@ -24,10 +25,22 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(AppGateway.name);
   private readonly onlineUsers = new Set<string>();
 
-  constructor(private readonly notificationsService: NotificationsService) {}
+  constructor(
+    private readonly notificationsService: NotificationsService,
+    private readonly wsAuthService: WsAuthService,
+  ) {}
 
   async handleConnection(client: Socket): Promise<void> {
-    const userId = (client.handshake?.query?.userId as string)?.trim();
+    // Verify JWT token and extract userId
+    const authResult = this.wsAuthService.verifyConnection(client);
+    if (!authResult.authenticated || !authResult.userId) {
+      this.logger.warn(`Unauthorized connection attempt: ${client.id} — ${authResult.error}`);
+      client.emit('error', { code: 'UNAUTHORIZED', message: authResult.error || 'Authentication required' });
+      client.disconnect();
+      return;
+    }
+
+    const userId = authResult.userId;
     client.data.userId = userId;
     this.logger.log(`AppGateway handleConnection ${userId}`);
 
@@ -35,7 +48,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     client.emit('connection:status', {
       connected: true,
-      userId: userId ?? null,
+      userId,
       socketId: client.id,
       onlineUsers: [...this.onlineUsers],
     });

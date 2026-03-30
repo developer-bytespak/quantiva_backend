@@ -11,6 +11,7 @@ import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { OptionsBinanceService } from './services/options-binance.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
+import { WsAuthService } from '../../gateways/ws-auth.service';
 
 interface OptionsSubscription {
   connectionId: string;
@@ -64,12 +65,22 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect 
   constructor(
     private readonly optionsBinance: OptionsBinanceService,
     private readonly exchangesService: ExchangesService,
+    private readonly wsAuthService: WsAuthService,
   ) {}
 
   // ── Lifecycle ────────────────────────────────────────────
 
   handleConnection(client: Socket): void {
-    this.logger.log(`Options client connected: ${client.id}`);
+    // Verify JWT token
+    const authResult = this.wsAuthService.verifyConnection(client);
+    if (!authResult.authenticated) {
+      this.logger.warn(`Unauthorized options connection: ${client.id} — ${authResult.error}`);
+      client.emit('error', { code: 'UNAUTHORIZED', message: authResult.error || 'Authentication required' });
+      client.disconnect();
+      return;
+    }
+    client.data.userId = authResult.userId;
+    this.logger.log(`Options client connected: ${client.id}, userId: ${authResult.userId}`);
   }
 
   handleDisconnect(client: Socket): void {

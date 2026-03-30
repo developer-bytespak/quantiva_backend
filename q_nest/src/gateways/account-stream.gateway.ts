@@ -7,11 +7,12 @@ import {
   ConnectedSocket,
   MessageBody,
 } from '@nestjs/websockets';
-import { Logger, UseGuards } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { BinanceUserWsService } from '../modules/exchanges/services/binance-user-ws.service';
 import { ExchangesService } from '../modules/exchanges/exchanges.service';
 import { EncryptionService } from '../modules/exchanges/services/encryption.service';
+import { WsAuthService } from './ws-auth.service';
 
 @WebSocketGateway({
   namespace: 'account-stream',
@@ -31,6 +32,7 @@ export class AccountStreamGateway implements OnGatewayConnection, OnGatewayDisco
     private readonly binanceUserWsService: BinanceUserWsService,
     private readonly exchangesService: ExchangesService,
     private readonly encryptionService: EncryptionService,
+    private readonly wsAuthService: WsAuthService,
   ) {
     // Relay Binance User Data Stream events to the appropriate user's socket
     this.binanceUserWsService.on('balance:update', (data: any) => {
@@ -61,12 +63,15 @@ export class AccountStreamGateway implements OnGatewayConnection, OnGatewayDisco
    */
   async handleConnection(client: Socket): Promise<void> {
     try {
-      // Extract userId from auth/handshake
-      // For now, we'll use a default user or extract from query params
-      // In production, verify JWT token here
-      const userId = client.handshake.auth?.userId || 
-                     client.handshake.query?.userId as string || 
-                     'default-user';
+      // Verify JWT token and extract userId
+      const authResult = this.wsAuthService.verifyConnection(client);
+      if (!authResult.authenticated || !authResult.userId) {
+        this.logger.warn(`Unauthorized connection attempt: ${client.id} — ${authResult.error}`);
+        client.emit('error', { code: 'UNAUTHORIZED', message: authResult.error || 'Authentication required' });
+        client.disconnect();
+        return;
+      }
+      const userId = authResult.userId;
 
       this.logger.log(`Client connected: ${client.id}, userId: ${userId}`);
 

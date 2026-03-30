@@ -4,6 +4,7 @@ import { SignalAction, OrderType } from '@prisma/client';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
 import { BinanceService } from '../binance/binance.service';
 import { ALPACA_SUPPORTED_CRYPTO } from '../exchanges/integrations/alpaca.service';
+import { parsePagination, paginate, PaginatedResponse } from '../../common/utils/pagination';
 
 @Injectable()
 export class SignalsService {
@@ -15,16 +16,23 @@ export class SignalsService {
     private binanceService: BinanceService,
   ) {}
 
-  async findAll() {
-    return this.prisma.strategy_signals.findMany({
-      include: {
-        strategy: true,
-        user: true,
-        asset: true,
-        details: true,
-        explanations: true,
-      },
-    });
+  async findAll(page?: number, limit?: number): Promise<PaginatedResponse<any>> {
+    const { take, skip, page: p, limit: l } = parsePagination(page, limit);
+    const where = {};
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.strategy_signals.findMany({
+        where,
+        take,
+        skip,
+        orderBy: { timestamp: 'desc' },
+        include: {
+          asset: { select: { asset_id: true, symbol: true, name: true, logo_url: true } },
+          strategy: { select: { strategy_id: true, name: true } },
+        },
+      }),
+      this.prisma.strategy_signals.count({ where }),
+    ]);
+    return paginate(data, total, p, l);
   }
 
   async findOne(id: string) {
@@ -41,25 +49,42 @@ export class SignalsService {
     });
   }
 
-  async findByStrategy(strategyId: string) {
-    return this.prisma.strategy_signals.findMany({
-      where: { strategy_id: strategyId },
-      include: {
-        strategy: true,
-        user: true,
-        asset: true,
-      },
-    });
+  async findByStrategy(strategyId: string, page?: number, limit?: number): Promise<PaginatedResponse<any>> {
+    const { take, skip, page: p, limit: l } = parsePagination(page, limit);
+    const where = { strategy_id: strategyId };
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.strategy_signals.findMany({
+        where,
+        take,
+        skip,
+        orderBy: { timestamp: 'desc' },
+        include: {
+          asset: { select: { asset_id: true, symbol: true, name: true, logo_url: true } },
+          strategy: { select: { strategy_id: true, name: true } },
+        },
+      }),
+      this.prisma.strategy_signals.count({ where }),
+    ]);
+    return paginate(data, total, p, l);
   }
 
-  async findByUser(userId: string) {
-    return this.prisma.strategy_signals.findMany({
-      where: { user_id: userId },
-      include: {
-        strategy: true,
-        asset: true,
-      },
-    });
+  async findByUser(userId: string, page?: number, limit?: number): Promise<PaginatedResponse<any>> {
+    const { take, skip, page: p, limit: l } = parsePagination(page, limit);
+    const where = { user_id: userId };
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.strategy_signals.findMany({
+        where,
+        take,
+        skip,
+        orderBy: { timestamp: 'desc' },
+        include: {
+          asset: { select: { asset_id: true, symbol: true, name: true, logo_url: true } },
+          strategy: { select: { strategy_id: true, name: true } },
+        },
+      }),
+      this.prisma.strategy_signals.count({ where }),
+    ]);
+    return paginate(data, total, p, l);
   }
 
   /**
@@ -86,36 +111,24 @@ export class SignalsService {
       take: options?.limit || undefined,
     });
 
+    // Step 1: Deduplicate signals by asset (keep latest per asset, no API calls yet)
     const seen = new Map<string, any>();
     for (const s of signals) {
       const assetId = s.asset?.asset_id || s.asset_id;
       if (!assetId) continue; // skip malformed rows
-      
+
       // Filter for Alpaca-supported cryptocurrencies only
       const assetSymbol = s.asset?.symbol || '';
       const baseSymbol = assetSymbol.replace(/USDT?$/, ''); // Remove USDT or USDC suffix
       if (!ALPACA_SUPPORTED_CRYPTO.includes(baseSymbol)) {
-        this.logger.debug(`Filtering out ${assetSymbol} - not supported by Alpaca`);
         continue; // Skip unsupported assets
       }
-      
+
       if (!seen.has(assetId)) {
         // Normalize shape: ensure `explanations` array exists; fallback to legacy `explanation`
         const explanations = (s.explanations && s.explanations.length > 0)
           ? s.explanations
           : (s['explanation'] ? [{ text: s['explanation'] }] : []);
-
-        let realtimeData = null;
-        
-        // Enrich with realtime Binance data if requested
-        if (options?.enrichWithRealtime && s.asset?.symbol) {
-          try {
-            realtimeData = await this.binanceService.getEnrichedMarketData(s.asset.symbol);
-            this.logger.debug(`Enriched signal for ${s.asset.symbol} with realtime data`);
-          } catch (error: any) {
-            this.logger.warn(`Could not fetch realtime data for ${s.asset.symbol}: ${error.message}`);
-          }
-        }
 
         seen.set(assetId, {
           signal_id: s.signal_id,
@@ -127,9 +140,32 @@ export class SignalsService {
           final_score: s.final_score ?? null,
           explanations,
           details: s.details?.[0] || null,
-          realtime_data: realtimeData,
+          realtime_data: null,
         });
       }
+    }
+
+    // Step 2: Enrich all unique assets with realtime Binance data in parallel
+    if (options?.enrichWithRealtime) {
+      const entries = [...seen.entries()].filter(([, s]) => s.asset?.symbol);
+      const results = await Promise.allSettled(
+        entries.map(([assetId, s]) =>
+          this.binanceService.getEnrichedMarketData(s.asset.symbol)
+            .then(data => ({ assetId, data }))
+        )
+      );
+
+      let enrichedCount = 0;
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          const signal = seen.get(r.value.assetId);
+          if (signal) {
+            signal.realtime_data = r.value.data;
+            enrichedCount++;
+          }
+        }
+      }
+      this.logger.log(`Enriched ${enrichedCount}/${entries.length} signals with realtime data (parallel)`);
     }
 
     return Array.from(seen.values()).sort((a, b) => {
