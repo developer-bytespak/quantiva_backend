@@ -6,11 +6,17 @@ export class PortfolioController {
   constructor(private readonly portfolioService: PortfolioService) {}
 
   @Get()
-  findAll(@Query('userId') userId?: string) {
+  findAll(
+    @Query('userId') userId?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const pageNum = page ? Number(page) : undefined;
+    const limitNum = limit ? Number(limit) : undefined;
     if (userId) {
-      return this.portfolioService.findByUser(userId);
+      return this.portfolioService.findByUser(userId, pageNum, limitNum);
     }
-    return this.portfolioService.findAll();
+    return this.portfolioService.findAll(pageNum, limitNum);
   }
 
   @Get(':id')

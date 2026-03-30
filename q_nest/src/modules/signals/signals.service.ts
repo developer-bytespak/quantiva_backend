@@ -4,6 +4,7 @@ import { SignalAction, OrderType } from '@prisma/client';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
 import { BinanceService } from '../binance/binance.service';
 import { ALPACA_SUPPORTED_CRYPTO } from '../exchanges/integrations/alpaca.service';
+import { parsePagination, paginate, PaginatedResponse } from '../../common/utils/pagination';
 
 @Injectable()
 export class SignalsService {
@@ -15,16 +16,23 @@ export class SignalsService {
     private binanceService: BinanceService,
   ) {}
 
-  async findAll() {
-    return this.prisma.strategy_signals.findMany({
-      include: {
-        strategy: true,
-        user: true,
-        asset: true,
-        details: true,
-        explanations: true,
-      },
-    });
+  async findAll(page?: number, limit?: number): Promise<PaginatedResponse<any>> {
+    const { take, skip, page: p, limit: l } = parsePagination(page, limit);
+    const where = {};
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.strategy_signals.findMany({
+        where,
+        take,
+        skip,
+        orderBy: { timestamp: 'desc' },
+        include: {
+          asset: { select: { asset_id: true, symbol: true, name: true, logo_url: true } },
+          strategy: { select: { strategy_id: true, name: true } },
+        },
+      }),
+      this.prisma.strategy_signals.count({ where }),
+    ]);
+    return paginate(data, total, p, l);
   }
 
   async findOne(id: string) {
@@ -41,25 +49,42 @@ export class SignalsService {
     });
   }
 
-  async findByStrategy(strategyId: string) {
-    return this.prisma.strategy_signals.findMany({
-      where: { strategy_id: strategyId },
-      include: {
-        strategy: true,
-        user: true,
-        asset: true,
-      },
-    });
+  async findByStrategy(strategyId: string, page?: number, limit?: number): Promise<PaginatedResponse<any>> {
+    const { take, skip, page: p, limit: l } = parsePagination(page, limit);
+    const where = { strategy_id: strategyId };
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.strategy_signals.findMany({
+        where,
+        take,
+        skip,
+        orderBy: { timestamp: 'desc' },
+        include: {
+          asset: { select: { asset_id: true, symbol: true, name: true, logo_url: true } },
+          strategy: { select: { strategy_id: true, name: true } },
+        },
+      }),
+      this.prisma.strategy_signals.count({ where }),
+    ]);
+    return paginate(data, total, p, l);
   }
 
-  async findByUser(userId: string) {
-    return this.prisma.strategy_signals.findMany({
-      where: { user_id: userId },
-      include: {
-        strategy: true,
-        asset: true,
-      },
-    });
+  async findByUser(userId: string, page?: number, limit?: number): Promise<PaginatedResponse<any>> {
+    const { take, skip, page: p, limit: l } = parsePagination(page, limit);
+    const where = { user_id: userId };
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.strategy_signals.findMany({
+        where,
+        take,
+        skip,
+        orderBy: { timestamp: 'desc' },
+        include: {
+          asset: { select: { asset_id: true, symbol: true, name: true, logo_url: true } },
+          strategy: { select: { strategy_id: true, name: true } },
+        },
+      }),
+      this.prisma.strategy_signals.count({ where }),
+    ]);
+    return paginate(data, total, p, l);
   }
 
   /**

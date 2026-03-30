@@ -1,20 +1,30 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PortfolioType, PositionSide } from '@prisma/client';
+import { parsePagination, paginate, PaginatedResponse } from '../../common/utils/pagination';
 
 @Injectable()
 export class PortfolioService {
   constructor(private prisma: PrismaService) {}
 
-  async findAll() {
-    return this.prisma.portfolios.findMany({
-      include: {
-        user: true,
-        positions: {
-          include: { asset: true },
+  async findAll(page?: number, limit?: number): Promise<PaginatedResponse<any>> {
+    const { take, skip, page: p, limit: l } = parsePagination(page, limit);
+    const where = {};
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.portfolios.findMany({
+        where,
+        take,
+        skip,
+        orderBy: { created_at: 'desc' },
+        include: {
+          positions: {
+            include: { asset: { select: { asset_id: true, symbol: true, name: true, logo_url: true } } },
+          },
         },
-      },
-    });
+      }),
+      this.prisma.portfolios.count({ where }),
+    ]);
+    return paginate(data, total, p, l);
   }
 
   async findOne(id: string) {
@@ -30,15 +40,24 @@ export class PortfolioService {
     });
   }
 
-  async findByUser(userId: string) {
-    return this.prisma.portfolios.findMany({
-      where: { user_id: userId },
-      include: {
-        positions: {
-          include: { asset: true },
+  async findByUser(userId: string, page?: number, limit?: number): Promise<PaginatedResponse<any>> {
+    const { take, skip, page: p, limit: l } = parsePagination(page, limit);
+    const where = { user_id: userId };
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.portfolios.findMany({
+        where,
+        take,
+        skip,
+        orderBy: { created_at: 'desc' },
+        include: {
+          positions: {
+            include: { asset: { select: { asset_id: true, symbol: true, name: true, logo_url: true } } },
+          },
         },
-      },
-    });
+      }),
+      this.prisma.portfolios.count({ where }),
+    ]);
+    return paginate(data, total, p, l);
   }
 
   async create(data: {
