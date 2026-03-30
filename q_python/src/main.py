@@ -116,10 +116,7 @@ async def startup_event():
     skip = os.environ.get("SKIP_ML_INIT", "").lower()
     skip_bool = skip in ("1", "true", "yes")
 
-    # Make heavy model pre-warming opt-in for cloud stability.
-    # FinBERT remains available via lazy loading on first request.
-    prewarm = os.environ.get("PREWARM_ML_INIT", "").lower()
-    prewarm_enabled = prewarm in ("1", "true", "yes")
+    
     try:
         register_routers(skip_ml_init=skip_bool)
         logger.info("✅ All routers registered successfully")
