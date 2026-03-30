@@ -681,27 +681,40 @@ export class ExchangesController {
       placeOrderDto.price,
     );
 
-    // Auto-place OCO (take-profit + stop-loss) only for Binance US when explicitly requested (autoOco)
+    // ⚠️ IMPORTANT: Manual orders do NOT auto-place OCO
+    // Only place OCO if explicitly requested via autoOco flag
+    // Top Trades (auto-trading) handle OCO separately in their execution flow
     let ocoInfo: { orderListId: number; takeProfitPrice: number; stopLossPrice: number } | null = null;
     let ocoError: string | null = null;
 
     try {
       const connection = await this.exchangesService.getConnectionById(connectionId);
       const exchangeName = (connection?.exchange?.name || '').toLowerCase();
-      const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus';
+      const isBinance = exchangeName === 'binance' || exchangeName === 'binance.us' || exchangeName === 'binanceus';
+      
+      // Determine if order is from Top Trade (auto-trading) or manual
+      const isTopTrade = placeOrderDto.source === 'top_trade';
 
+      // Place OCO if:
+      // 1. Top Trade BUY order (always auto-place OCO)
+      // 2. OR manual order with explicit autoOco=true flag
       if (
-        isBinanceUS &&
-        placeOrderDto.autoOco === true &&
+        isBinance &&
         placeOrderDto.side === 'BUY' &&
         order.status === 'FILLED' &&
         order.quantity > 0 &&
-        order.price > 0
+        order.price > 0 &&
+        (isTopTrade || placeOrderDto.autoOco === true)
       ) {
         const slPct = placeOrderDto.stopLoss ?? 0.05;
         const tpPct = placeOrderDto.takeProfit ?? 0.10;
         const stopLossPrice = parseFloat((order.price * (1 - slPct)).toPrecision(8));
         const takeProfitPrice = parseFloat((order.price * (1 + tpPct)).toPrecision(8));
+
+        const orderSource = isTopTrade ? '[TOP TRADE]' : '[MANUAL]';
+        this.logger.log(
+          `${orderSource} AUTO-Placing OCO: ${order.symbol} qty=${order.quantity} TP=${takeProfitPrice} SL=${stopLossPrice}`
+        );
 
         ocoInfo = await this.exchangesService.placeOcoOrder(
           connectionId,
@@ -711,11 +724,16 @@ export class ExchangesController {
           takeProfitPrice,
           stopLossPrice,
         );
+        
+        this.logger.log(`${orderSource} ✅ OCO placed!`);
+      } else if (placeOrderDto.side === 'BUY' && order.status === 'FILLED') {
+        this.logger.log(
+          `[MANUAL] No OCO (send source='top_trade' or autoOco=true to enable)`
+        );
       }
     } catch (err: any) {
-      // OCO failure must not roll back the main order, but surface it to the caller
       ocoError = err?.message ?? 'OCO order failed';
-      this.logger.warn(`OCO order failed after BUY ${order?.orderId}: ${ocoError}`);
+      this.logger.error(`OCO failed: ${err?.message}`);
     }
 
     // Record trade fee (fire-and-forget)

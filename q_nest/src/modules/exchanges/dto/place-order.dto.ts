@@ -38,5 +38,10 @@ export class PlaceOrderDto {
   @IsOptional()
   @IsBoolean()
   autoOco?: boolean;
+
+  /** Source of order: 'top_trade', 'manual', etc. Used to determine auto-OCO behavior. */
+  @IsOptional()
+  @IsString()
+  source?: string;
 }
 
