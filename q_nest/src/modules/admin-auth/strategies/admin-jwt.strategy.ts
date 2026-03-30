@@ -56,6 +56,9 @@ export class AdminJwtStrategy extends PassportStrategy(Strategy, 'admin-jwt') {
       }
     }
 
-    return payload;
+    return {
+      ...payload,
+      is_super_admin: admin.is_super_admin,
+    };
   }
 }

@@ -31,6 +31,7 @@ export class AdminAuthService {
       sub: admin.admin_id,
       email: admin.email,
       role: 'admin',
+      is_super_admin: admin.is_super_admin,
     };
 
     const refreshToken =
@@ -53,6 +54,7 @@ export class AdminAuthService {
         admin_id: admin.admin_id,
         email: admin.email,
         full_name: admin.full_name,
+        is_super_admin: admin.is_super_admin,
       },
       accessToken,
       refreshToken,
@@ -79,6 +81,7 @@ export class AdminAuthService {
       sub: admin.admin_id,
       email: admin.email,
       role: 'admin',
+      is_super_admin: admin.is_super_admin,
     };
 
     const newRefreshToken =
@@ -126,6 +129,7 @@ export class AdminAuthService {
         default_admin_profit_fee_percent: true,
         default_cancellation_fee_percent: true,
         default_payment_window_minutes: true,
+        is_super_admin: true,
         created_at: true,
       },
     });
