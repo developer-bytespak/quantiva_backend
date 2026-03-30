@@ -109,8 +109,8 @@ export class StrategiesController {
    * Allowed: admin JWT or user JWT (PRO/ELITE).
    * Endpoint: GET /strategies/pre-built/:id/trending-with-insights
    */
-  // @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
-  // @AllowTier('PRO', 'ELITE')
+  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
+  @AllowTier('PRO', 'ELITE')
   @Get('pre-built/:id/trending-with-insights')
   async getTrendingAssetsWithInsights(
     @Req() req: any,
