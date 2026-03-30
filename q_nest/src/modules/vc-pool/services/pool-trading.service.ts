@@ -384,6 +384,9 @@ export class PoolTradingService {
       },
     });
 
+    // Recalculate pool value after closing exchange order
+    await this.recalculatePoolValue(poolId);
+
     this.logger.log(
       `Pool exchange order ${orderId} closed: exit=${exitPriceUsdt}, PnL=${realizedPnl.toFixed(8)}`,
     );
@@ -444,18 +447,62 @@ export class PoolTradingService {
 
     if (!pool || !pool.total_invested_usdt) return;
 
+    // Realized PnL from closed manual trades
     const closedTrades = await this.prisma.vc_pool_trades.findMany({
       where: { pool_id: poolId, is_open: false },
       select: { pnl_usdt: true },
     });
-
-    const closedPnl = closedTrades.reduce(
+    let closedPnl = closedTrades.reduce(
       (sum, t) => sum + (t.pnl_usdt ? Number(t.pnl_usdt) : 0),
       0,
     );
 
+    // Realized PnL from closed exchange orders
+    const closedExchangeOrders = await this.prisma.vc_pool_exchange_orders.findMany({
+      where: { pool_id: poolId, is_open: false },
+      select: { realized_pnl_usdt: true },
+    });
+    closedPnl += closedExchangeOrders.reduce(
+      (sum, o) => sum + (o.realized_pnl_usdt ? Number(o.realized_pnl_usdt) : 0),
+      0,
+    );
+
+    // Unrealized PnL from open manual trades
+    const openTrades = await this.prisma.vc_pool_trades.findMany({
+      where: { pool_id: poolId, is_open: true },
+      select: { asset_pair: true, action: true, quantity: true, entry_price_usdt: true },
+    });
+
+    // Unrealized PnL from open exchange orders
+    const openExchangeOrders = await this.prisma.vc_pool_exchange_orders.findMany({
+      where: { pool_id: poolId, is_open: true },
+      select: { symbol: true, side: true, quantity: true, entry_price_usdt: true },
+    });
+
+    let unrealizedPnl = 0;
+    const allOpenPositions = [
+      ...openTrades.map((t) => ({ symbol: t.asset_pair, side: t.action, qty: Number(t.quantity), entry: Number(t.entry_price_usdt) })),
+      ...openExchangeOrders.map((o) => ({ symbol: o.symbol.includes('USDT') ? o.symbol : `${o.symbol}USDT`, side: (o.side || '').toUpperCase(), qty: Number(o.quantity), entry: Number(o.entry_price_usdt) })),
+    ];
+
+    if (allOpenPositions.length > 0) {
+      const symbols = [...new Set(allOpenPositions.map((p) => p.symbol))];
+      const tickers = await this.binanceService.getTickerPrices(symbols);
+      const priceMap = new Map(tickers.map((t) => [t.symbol, t.price]));
+
+      for (const pos of allOpenPositions) {
+        const currentPrice = priceMap.get(pos.symbol);
+        if (currentPrice === undefined) continue;
+        if (pos.side === 'BUY') {
+          unrealizedPnl += (currentPrice - pos.entry) * pos.qty;
+        } else {
+          unrealizedPnl += (pos.entry - currentPrice) * pos.qty;
+        }
+      }
+    }
+
     const totalInvested = Number(pool.total_invested_usdt);
-    const currentValue = totalInvested + closedPnl;
+    const currentValue = totalInvested + closedPnl + unrealizedPnl;
     const totalProfit = currentValue - totalInvested;
 
     await this.prisma.vc_pools.update({
@@ -466,7 +513,7 @@ export class PoolTradingService {
       },
     });
 
-    return { currentValue, totalProfit, closedPnl };
+    return { currentValue, totalProfit, closedPnl, unrealizedPnl };
   }
 
   // ── Helpers ──
@@ -506,14 +553,25 @@ export class PoolTradingService {
       pool?.current_pool_value_usdt ?? pool?.total_invested_usdt ?? 0,
     );
 
+    // Include both manual trades and exchange orders in allocated capital
     const openTrades = await this.prisma.vc_pool_trades.findMany({
       where: { pool_id: poolId, is_open: true },
       select: { quantity: true, entry_price_usdt: true },
     });
-    const allocated = openTrades.reduce(
+    const openExchangeOrders = await this.prisma.vc_pool_exchange_orders.findMany({
+      where: { pool_id: poolId, is_open: true },
+      select: { quantity: true, entry_price_usdt: true },
+    });
+
+    const allocatedTrades = openTrades.reduce(
       (sum, t) => sum + Number(t.quantity) * Number(t.entry_price_usdt),
       0,
     );
+    const allocatedOrders = openExchangeOrders.reduce(
+      (sum, o) => sum + Number(o.quantity) * Number(o.entry_price_usdt),
+      0,
+    );
+    const allocated = allocatedTrades + allocatedOrders;
     const available = poolCapital - allocated;
 
     if (tradeValue > available) {
