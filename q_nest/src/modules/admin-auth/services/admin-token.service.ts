@@ -7,6 +7,7 @@ export interface AdminTokenPayload {
   sub: string; // admin_id
   email: string;
   role: 'admin';
+  is_super_admin?: boolean;
   session_id?: string;
 }
 

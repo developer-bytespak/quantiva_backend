@@ -16,6 +16,9 @@ import { AdminBinanceService } from './services/admin-binance.service';
 import { AdminBinanceController } from './controllers/admin-binance.controller';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 import { BinanceModule } from '../binance/binance.module';
+import { SuperAdminManagementController } from './controllers/super-admin-management.controller';
+import { SuperAdminGuard } from './guards/super-admin.guard';
+import { SuperAdminManagementService } from './services/super-admin-management.service';
 
 @Module({
   imports: [
@@ -37,7 +40,11 @@ import { BinanceModule } from '../binance/binance.module';
       inject: [ConfigService],
     }),
   ],
-  controllers: [AdminAuthController, AdminBinanceController],
+  controllers: [
+    AdminAuthController,
+    AdminBinanceController,
+    SuperAdminManagementController,
+  ],
   providers: [
     AdminAuthService,
     AdminTokenService,
@@ -47,6 +54,8 @@ import { BinanceModule } from '../binance/binance.module';
     AdminJwtAuthGuard,
     AdminOrUserJwtGuard,
     AdminBinanceService,
+    SuperAdminGuard,
+    SuperAdminManagementService,
   ],
   exports: [
     JwtModule,
@@ -56,6 +65,8 @@ import { BinanceModule } from '../binance/binance.module';
     AdminJwtAuthGuard,
     AdminOrUserJwtGuard,
     AdminBinanceService,
+    SuperAdminGuard,
+    SuperAdminManagementService,
   ],
 })
 export class AdminAuthModule {}
