@@ -18,7 +18,8 @@ import { AppGateway } from 'src/gateways/app.gateway';
 import { NotificationsService } from '../notifications/notifications.service';
 import { TradeFeesService } from '../trade-fees/trade-fees.service';
 import { PrismaService } from '../../prisma/prisma.service';
-// import { NotificationType } from '@prisma/client';
+import { QhqTokenService } from '../qhq-token/qhq-token.service';
+import { QhqTransactionType } from '.prisma/client';
 
 interface RawBodyRequest extends Request {
   rawBody?: Buffer;
@@ -35,6 +36,7 @@ export class StripeController {
     private readonly subscriptionsService: SubscriptionsService,
     private readonly tradeFeesService: TradeFeesService,
     private readonly prisma: PrismaService,
+    private readonly qhqService: QhqTokenService,
   ) {}
 
   @Post('create-checkout-session')
@@ -339,6 +341,42 @@ export class StripeController {
           this.logger.error(
             `Failed to handle Stripe subscription cancel for ${stripeSubscriptionId}: ${err?.message}`,
           );
+        }
+      }
+    }
+
+    // ─── Award QHQ on every successful subscription payment ─────────────
+    if (event.type === 'invoice.paid') {
+      const invoice = event.data.object as any;
+      const stripeSubscriptionId =
+        typeof invoice.subscription === 'string'
+          ? invoice.subscription
+          : invoice.subscription?.id ?? null;
+
+      if (stripeSubscriptionId) {
+        try {
+          const sub = await this.prisma.user_subscriptions.findFirst({
+            where: { external_id: stripeSubscriptionId, status: 'active' },
+          });
+
+          if (sub) {
+            const ruleKey = sub.tier === 'ELITE' ? 'MONTHLY_ELITE' : sub.tier === 'PRO' ? 'MONTHLY_PRO' : null;
+            if (ruleKey) {
+              const amount = await this.qhqService.getRuleAmount(ruleKey);
+              if (amount > 0) {
+                await this.qhqService.earnTokens(
+                  sub.user_id,
+                  QhqTransactionType.EARN_SUBSCRIPTION,
+                  amount,
+                  `Subscription payment: ${sub.tier}`,
+                  invoice.id,
+                );
+                this.logger.log(`Awarded ${amount} QHQ to user ${sub.user_id} for ${sub.tier} payment (invoice ${invoice.id})`);
+              }
+            }
+          }
+        } catch (err: any) {
+          this.logger.error(`Failed to award subscription QHQ: ${err.message}`);
         }
       }
     }
