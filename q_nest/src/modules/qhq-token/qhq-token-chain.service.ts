@@ -36,9 +36,10 @@ export class QhqTokenChainService implements OnModuleInit {
   }
 
   private async initializeChainConnection() {
-    const rpcUrl = this.configService.get<string>('QHQ_BASE_RPC_URL') || 'https://mainnet.base.org';
+    const rpcUrl = this.configService.get<string>('BASE_RPC_URL') || 'https://mainnet.base.org';
     const contractAddress = this.configService.get<string>('QHQ_CONTRACT_ADDRESS');
     const walletPassword = this.configService.get<string>('QHQ_WALLET_PASSWORD');
+    const keystoreInline = this.configService.get<string>('TREASURY_KEYSTORE');
     const keystorePath = this.configService.get<string>('QHQ_KEYSTORE_PATH') ||
       path.join(process.cwd(), 'treasury-wallet.json');
 
@@ -49,9 +50,15 @@ export class QhqTokenChainService implements OnModuleInit {
 
     this.provider = new ethers.JsonRpcProvider(rpcUrl);
 
-    // Load encrypted keystore (never store raw private key in env)
-    if (fs.existsSync(keystorePath) && walletPassword) {
-      const encryptedJson = fs.readFileSync(keystorePath, 'utf8');
+    // Load encrypted keystore — prefer inline env var (Render), fall back to file path (local)
+    let encryptedJson: string | null = null;
+    if (keystoreInline) {
+      encryptedJson = keystoreInline;
+    } else if (fs.existsSync(keystorePath)) {
+      encryptedJson = fs.readFileSync(keystorePath, 'utf8');
+    }
+
+    if (encryptedJson && walletPassword) {
       this.signer = await ethers.Wallet.fromEncryptedJson(encryptedJson, walletPassword);
       this.signer = this.signer.connect(this.provider) as ethers.Wallet;
       this.logger.log(`Treasury wallet loaded: ${this.signer.address}`);

@@ -3,7 +3,7 @@ module.exports = {
   rootDir: 'src',
   testMatch: ['**/*.spec.ts', '**/*.e2e-spec.ts'],
   transform: {
-    '^.+\\.(t|j)s$': 'ts-jest',
+    '^.+\\.(t|j)s$': ['ts-jest', { diagnostics: false }],
   },
   transformIgnorePatterns: [
     'node_modules/(?!(@prisma/client|@prisma)/)',
