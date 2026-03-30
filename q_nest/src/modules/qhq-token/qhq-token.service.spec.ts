@@ -3,7 +3,7 @@ import { BadRequestException } from '@nestjs/common';
 import { QhqTokenService } from './qhq-token.service';
 import { QhqTokenChainService } from './qhq-token-chain.service';
 import { PrismaService } from '../../prisma/prisma.service';
-import { QhqTransactionType } from '@prisma/client';
+import { QhqTransactionType } from '.prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
@@ -17,6 +17,7 @@ const mockPrismaService = () => ({
   },
   qhq_transactions: {
     create: jest.fn(),
+    findFirst: jest.fn(),
     findMany: jest.fn(),
     count: jest.fn(),
   },
@@ -711,8 +712,8 @@ describe('QhqTokenService', () => {
         .mockResolvedValueOnce({ rule_key: 'MONTHLY_ELITE', amount: new Decimal(25), is_active: true });
 
       prisma.user_subscriptions.findMany.mockResolvedValue([
-        { user_id: 'user-1', plan: { plan_tier: 'PRO' } },
-        { user_id: 'user-2', plan: { plan_tier: 'ELITE' } },
+        { user_id: 'user-1', tier: 'PRO' },
+        { user_id: 'user-2', tier: 'ELITE' },
       ]);
 
       prisma.$transaction.mockImplementation(async (fn: any) => {
@@ -732,7 +733,7 @@ describe('QhqTokenService', () => {
       prisma.qhq_reward_rules.findUnique.mockResolvedValue(null); // getRuleAmount returns 0
 
       prisma.user_subscriptions.findMany.mockResolvedValue([
-        { user_id: 'user-1', plan: { plan_tier: 'PRO' } },
+        { user_id: 'user-1', tier: 'PRO' },
       ]);
 
       const awarded = await service.processMonthlyAllocations();
@@ -747,8 +748,8 @@ describe('QhqTokenService', () => {
         .mockResolvedValueOnce({ rule_key: 'MONTHLY_ELITE', amount: new Decimal(25), is_active: true });
 
       prisma.user_subscriptions.findMany.mockResolvedValue([
-        { user_id: 'user-fail', plan: { plan_tier: 'PRO' } },
-        { user_id: 'user-ok', plan: { plan_tier: 'PRO' } },
+        { user_id: 'user-fail', tier: 'PRO' },
+        { user_id: 'user-ok', tier: 'PRO' },
       ]);
 
       let callCount = 0;
@@ -787,8 +788,11 @@ describe('QhqTokenService', () => {
       });
 
       prisma.user_subscriptions.findMany.mockResolvedValue([
-        { user_id: 'loyal-user' },
+        { user_id: 'loyal-user', subscription_id: 'sub-1' },
       ]);
+
+      // Dedup check: no existing loyalty bonus
+      prisma.qhq_transactions.findFirst.mockResolvedValue(null);
 
       prisma.$transaction.mockImplementation(async (fn: any) => {
         const txClient = mockPrismaService();
@@ -801,6 +805,26 @@ describe('QhqTokenService', () => {
       const awarded = await service.processLoyaltyBonuses();
 
       expect(awarded).toBe(1);
+    });
+
+    it('should skip user who already received loyalty bonus', async () => {
+      prisma.qhq_reward_rules.findUnique.mockResolvedValue({
+        rule_key: 'LOYALTY_12_MONTHS',
+        amount: new Decimal(50),
+        is_active: true,
+      });
+
+      prisma.user_subscriptions.findMany.mockResolvedValue([
+        { user_id: 'loyal-user', subscription_id: 'sub-1' },
+      ]);
+
+      // Dedup check: already received
+      prisma.qhq_transactions.findFirst.mockResolvedValue({ id: 'existing-tx' });
+
+      const awarded = await service.processLoyaltyBonuses();
+
+      expect(awarded).toBe(0);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
     });
   });
 

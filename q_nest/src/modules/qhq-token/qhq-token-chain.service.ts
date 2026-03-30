@@ -59,8 +59,8 @@ export class QhqTokenChainService implements OnModuleInit {
     }
 
     if (encryptedJson && walletPassword) {
-      this.signer = await ethers.Wallet.fromEncryptedJson(encryptedJson, walletPassword);
-      this.signer = this.signer.connect(this.provider) as ethers.Wallet;
+      const decrypted = await ethers.Wallet.fromEncryptedJson(encryptedJson, walletPassword);
+      this.signer = (decrypted instanceof ethers.Wallet ? decrypted : new ethers.Wallet(decrypted.privateKey)).connect(this.provider) as ethers.Wallet;
       this.logger.log(`Treasury wallet loaded: ${this.signer.address}`);
     } else {
       this.logger.warn('No keystore found — read-only chain mode');

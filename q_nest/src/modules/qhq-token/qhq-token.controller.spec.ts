@@ -18,7 +18,7 @@ const mockQhqService = () => ({
   getRewardRules: jest.fn().mockResolvedValue([]),
 });
 
-const mockUser = { user_id: 'user-1', email: 'test@test.com' };
+const mockUser = { sub: 'user-1', email: 'test@test.com' };
 
 // ─── Test Suite ──────────────────────────────────────────────────────────────
 

@@ -6,9 +6,10 @@ import { GatewaysModule } from 'src/gateways/gateways.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { TradeFeesModule } from '../trade-fees/trade-fees.module';
 import { PrismaModule } from '../../prisma/prisma.module';
+import { QhqTokenModule } from '../qhq-token/qhq-token.module';
 
 @Module({
-  imports: [PrismaModule, SubscriptionsModule, GatewaysModule, NotificationsModule, forwardRef(() => TradeFeesModule)],
+  imports: [PrismaModule, SubscriptionsModule, GatewaysModule, NotificationsModule, forwardRef(() => TradeFeesModule), forwardRef(() => QhqTokenModule)],
   controllers: [StripeController],
   providers: [StripeService],
   exports: [StripeService],
