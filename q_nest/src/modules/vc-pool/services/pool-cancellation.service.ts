@@ -234,11 +234,26 @@ export class PoolCancellationService {
 
     const result = memberships.map((m) => {
       const pool = m.pool;
-      const sharePercent = Number(m.share_percent || 0);
       const investedAmount = Number(m.invested_amount_usdt);
-      const poolValue = Number(pool.current_pool_value_usdt || pool.total_invested_usdt || 0);
-      const currentValue = (sharePercent * poolValue) / 100;
-      const pnl = currentValue - investedAmount;
+      const isPoolActive = pool.status === 'active' || pool.status === 'completed';
+
+      let sharePercent: number;
+      let poolValue: number;
+      let currentValue: number;
+      let pnl: number;
+
+      if (isPoolActive) {
+        sharePercent = Number(m.share_percent || 0);
+        poolValue = Number(pool.current_pool_value_usdt || pool.total_invested_usdt || 0);
+        currentValue = (sharePercent * poolValue) / 100;
+        pnl = currentValue - investedAmount;
+      } else {
+        // Pool not started yet — no trading, value = investment, no PnL
+        sharePercent = 0;
+        poolValue = investedAmount;
+        currentValue = investedAmount;
+        pnl = 0;
+      }
 
       // Detect membership status
       let membershipStatus = 'unknown';
@@ -451,12 +466,15 @@ export class PoolCancellationService {
     }
 
     // Recalculate refund at current pool value (may have changed since request)
-    const pool = cancellation.pool;
+    // Re-fetch pool to get the latest value (the included pool may be stale)
+    const pool = await this.prisma.vc_pools.findUnique({
+      where: { pool_id: poolId },
+    });
     let memberValue: number;
     let poolValue: number | null = null;
 
     if (pool.status === POOL_STATUS.active) {
-      // Recalculate from current pool value
+      // Recalculate from current pool value (freshly fetched)
       poolValue = Number(pool.current_pool_value_usdt || pool.total_invested_usdt);
       const sharePercent = Number(cancellation.member.share_percent || 0);
       memberValue = (sharePercent * poolValue) / 100;
@@ -632,10 +650,22 @@ export class PoolCancellationService {
         }
       }
 
-      // Decrement verified_members_count
+      // Decrement verified_members_count and reduce total_invested if pool is active
+      const poolUpdateData: Record<string, any> = {
+        verified_members_count: { decrement: 1 },
+      };
+      if (pool.status === POOL_STATUS.active) {
+        const refundedAmount = Number(cancellation.refund_amount) + Number(cancellation.fee_amount);
+        poolUpdateData.total_invested_usdt = {
+          decrement: Number(cancellation.member.invested_amount_usdt),
+        };
+        poolUpdateData.current_pool_value_usdt = {
+          decrement: refundedAmount,
+        };
+      }
       await tx.vc_pools.update({
         where: { pool_id: poolId },
-        data: { verified_members_count: { decrement: 1 } },
+        data: poolUpdateData,
       });
 
       return updatedCancellation;

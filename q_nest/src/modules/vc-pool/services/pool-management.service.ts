@@ -364,7 +364,7 @@ export class PoolManagementService {
       contribution_amount: p.contribution_amount,
       max_members: p.max_members,
       available_seats:
-        p.max_members - p.reserved_seats_count - p.verified_members_count,
+        Math.max(0, p.max_members - p.reserved_seats_count - p.verified_members_count),
       duration_days: p.duration_days,
       pool_fee_percent: p.pool_fee_percent,
       payment_window_minutes: p.payment_window_minutes,
@@ -448,13 +448,30 @@ export class PoolManagementService {
 
     // Calculate user metrics if they're a member
     let userMetrics: any = null;
+    const isPoolActive = pool.status === POOL_STATUS.active || pool.status === POOL_STATUS.completed;
+
     if (membership) {
-      const sharePercent = Number(membership.share_percent || 0);
       const investedAmount = Number(membership.invested_amount_usdt);
-      const poolValue = Number(pool.current_pool_value_usdt || pool.total_invested_usdt || 0);
-      const currentValue = (sharePercent * poolValue) / 100;
-      const profitLoss = currentValue - investedAmount;
-      const profitLossPct = investedAmount > 0 ? (profitLoss / investedAmount) * 100 : 0;
+
+      let sharePercent: number;
+      let currentValue: number;
+      let profitLoss: number;
+      let profitLossPct: number;
+
+      if (isPoolActive) {
+        // Pool has started — use real share_percent and pool value for calculations
+        sharePercent = Number(membership.share_percent || 0);
+        const poolValue = Number(pool.current_pool_value_usdt || pool.total_invested_usdt || 0);
+        currentValue = (sharePercent * poolValue) / 100;
+        profitLoss = currentValue - investedAmount;
+        profitLossPct = investedAmount > 0 ? (profitLoss / investedAmount) * 100 : 0;
+      } else {
+        // Pool not started yet (open/full) — no trading has happened, value = investment
+        sharePercent = 0;
+        currentValue = investedAmount;
+        profitLoss = 0;
+        profitLossPct = 0;
+      }
 
       userMetrics = {
         is_member: true,
@@ -495,9 +512,30 @@ export class PoolManagementService {
     const progressPct = Math.min(100, Math.max(0, (elapsedMs / totalMs) * 100));
     const daysRemaining = Math.max(0, Math.ceil((endDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
 
-    // Calculate pool ROI
-    const totalInvested = Number(pool.total_invested_usdt || 0);
-    const poolROI = totalInvested > 0 ? ((Number(pool.current_pool_value_usdt || 0) - totalInvested) / totalInvested) * 100 : 0;
+    // For non-active pools, calculate total invested dynamically from verified members
+    let totalInvested: number;
+    let currentPoolValue: number;
+    let totalProfit: number;
+
+    if (isPoolActive) {
+      totalInvested = Number(pool.total_invested_usdt || 0);
+      currentPoolValue = Number(pool.current_pool_value_usdt || 0);
+      totalProfit = Number(pool.total_profit_usdt || 0);
+    } else {
+      // Pool not started — sum up verified members' investments as the live total
+      const verifiedMembers = await this.prisma.vc_pool_members.findMany({
+        where: { pool_id: poolId, is_active: true },
+        select: { invested_amount_usdt: true },
+      });
+      totalInvested = verifiedMembers.reduce(
+        (sum, m) => sum + Number(m.invested_amount_usdt),
+        0,
+      );
+      currentPoolValue = totalInvested; // No trading yet, value = invested
+      totalProfit = 0;
+    }
+
+    const poolROI = totalInvested > 0 ? ((currentPoolValue - totalInvested) / totalInvested) * 100 : 0;
 
     return {
       // Pool Metadata
@@ -516,7 +554,7 @@ export class PoolManagementService {
         max_members: pool.max_members,
         verified_members_count: pool.verified_members_count,
         reserved_seats_count: pool.reserved_seats_count,
-        available_seats: pool.max_members - pool.reserved_seats_count - pool.verified_members_count,
+        available_seats: Math.max(0, pool.max_members - pool.reserved_seats_count - pool.verified_members_count),
         duration_days: pool.duration_days,
         pool_fee_percent: Number(pool.pool_fee_percent || 0),
         admin_profit_fee_percent: Number(pool.admin_profit_fee_percent || 0),
@@ -524,12 +562,18 @@ export class PoolManagementService {
         payment_window_minutes: pool.payment_window_minutes,
       },
 
-      // Pool Financials
+      // Pool Financials — calculate fees dynamically if not yet stored (only stored at completion)
       pool_financials: {
-        total_invested_usdt: Number(pool.total_invested_usdt || 0),
-        current_pool_value_usdt: Number(pool.current_pool_value_usdt || 0),
-        total_profit_usdt: Number(pool.total_profit_usdt || 0),
-        total_pool_fees_usdt: Number(pool.total_pool_fees_usdt || 0),
+        total_invested_usdt: totalInvested,
+        current_pool_value_usdt: currentPoolValue,
+        total_profit_usdt: totalProfit,
+        total_pool_fees_usdt: Number(pool.total_pool_fees_usdt || 0) || await (async () => {
+          const submissions = await this.prisma.vc_pool_payment_submissions.findMany({
+            where: { pool_id: poolId, status: 'verified' },
+            select: { pool_fee_amount: true },
+          });
+          return submissions.reduce((sum, s) => sum + (s.pool_fee_amount ? Number(s.pool_fee_amount) : 0), 0);
+        })(),
         pool_roi_pct: poolROI,
       },
 
