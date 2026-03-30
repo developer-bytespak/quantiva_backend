@@ -111,36 +111,24 @@ export class SignalsService {
       take: options?.limit || undefined,
     });
 
+    // Step 1: Deduplicate signals by asset (keep latest per asset, no API calls yet)
     const seen = new Map<string, any>();
     for (const s of signals) {
       const assetId = s.asset?.asset_id || s.asset_id;
       if (!assetId) continue; // skip malformed rows
-      
+
       // Filter for Alpaca-supported cryptocurrencies only
       const assetSymbol = s.asset?.symbol || '';
       const baseSymbol = assetSymbol.replace(/USDT?$/, ''); // Remove USDT or USDC suffix
       if (!ALPACA_SUPPORTED_CRYPTO.includes(baseSymbol)) {
-        this.logger.debug(`Filtering out ${assetSymbol} - not supported by Alpaca`);
         continue; // Skip unsupported assets
       }
-      
+
       if (!seen.has(assetId)) {
         // Normalize shape: ensure `explanations` array exists; fallback to legacy `explanation`
         const explanations = (s.explanations && s.explanations.length > 0)
           ? s.explanations
           : (s['explanation'] ? [{ text: s['explanation'] }] : []);
-
-        let realtimeData = null;
-        
-        // Enrich with realtime Binance data if requested
-        if (options?.enrichWithRealtime && s.asset?.symbol) {
-          try {
-            realtimeData = await this.binanceService.getEnrichedMarketData(s.asset.symbol);
-            this.logger.debug(`Enriched signal for ${s.asset.symbol} with realtime data`);
-          } catch (error: any) {
-            this.logger.warn(`Could not fetch realtime data for ${s.asset.symbol}: ${error.message}`);
-          }
-        }
 
         seen.set(assetId, {
           signal_id: s.signal_id,
@@ -152,9 +140,32 @@ export class SignalsService {
           final_score: s.final_score ?? null,
           explanations,
           details: s.details?.[0] || null,
-          realtime_data: realtimeData,
+          realtime_data: null,
         });
       }
+    }
+
+    // Step 2: Enrich all unique assets with realtime Binance data in parallel
+    if (options?.enrichWithRealtime) {
+      const entries = [...seen.entries()].filter(([, s]) => s.asset?.symbol);
+      const results = await Promise.allSettled(
+        entries.map(([assetId, s]) =>
+          this.binanceService.getEnrichedMarketData(s.asset.symbol)
+            .then(data => ({ assetId, data }))
+        )
+      );
+
+      let enrichedCount = 0;
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          const signal = seen.get(r.value.assetId);
+          if (signal) {
+            signal.realtime_data = r.value.data;
+            enrichedCount++;
+          }
+        }
+      }
+      this.logger.log(`Enriched ${enrichedCount}/${entries.length} signals with realtime data (parallel)`);
     }
 
     return Array.from(seen.values()).sort((a, b) => {
