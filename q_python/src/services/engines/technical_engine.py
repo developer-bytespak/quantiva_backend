@@ -5,7 +5,6 @@ Calculates technical indicators and trend scores based on OHLCV data.
 from typing import Dict, Any, Optional, List
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
 from datetime import datetime, timedelta
 import logging
 import requests
@@ -17,6 +16,37 @@ logger = logging.getLogger(__name__)
 
 
 class TechnicalEngine(BaseEngine):
+    @staticmethod
+    def _rsi(series: pd.Series, length: int) -> pd.Series:
+        delta = series.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.ewm(alpha=1/length, min_periods=length).mean()
+        avg_loss = loss.ewm(alpha=1/length, min_periods=length).mean()
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
+    @staticmethod
+    def _macd(series: pd.Series, fast: int, slow: int, signal: int) -> pd.DataFrame:
+        ema_fast = series.ewm(span=fast, adjust=False).mean()
+        ema_slow = series.ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        return pd.DataFrame({
+            'macd': macd_line,
+            'signal': signal_line,
+            'hist': macd_line - signal_line
+        })
+
+    @staticmethod
+    def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int) -> pd.Series:
+        prev_close = close.shift(1)
+        tr = pd.concat([
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs()
+        ], axis=1).max(axis=1)
+        return tr.ewm(alpha=1/length, min_periods=length).mean()
     """
     Technical analysis engine that calculates:
     - Moving Averages (MA20, MA50, MA200)
@@ -192,21 +222,21 @@ class TechnicalEngine(BaseEngine):
             
             # RSI (14 and 30 periods)
             if len(df) >= 30:
-                rsi_14 = ta.rsi(df['close'], length=14)
-                rsi_30 = ta.rsi(df['close'], length=30)
+                rsi_14 = self._rsi(df['close'], length=14)
+                rsi_30 = self._rsi(df['close'], length=30)
                 indicators['rsi_14'] = float(rsi_14.iloc[-1]) if not rsi_14.empty else None
                 indicators['rsi_30'] = float(rsi_30.iloc[-1]) if not rsi_30.empty else None
             else:
                 indicators['rsi_14'] = None
                 indicators['rsi_30'] = None
-            
+
             # MACD (12, 26, 9)
             if len(df) >= 26:
-                macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+                macd = self._macd(df['close'], fast=12, slow=26, signal=9)
                 if macd is not None and not macd.empty:
-                    indicators['macd'] = float(macd.iloc[-1, 0]) if macd.shape[1] > 0 else None
-                    indicators['macd_signal'] = float(macd.iloc[-1, 1]) if macd.shape[1] > 1 else None
-                    indicators['macd_hist'] = float(macd.iloc[-1, 2]) if macd.shape[1] > 2 else None
+                    indicators['macd'] = float(macd['macd'].iloc[-1]) if 'macd' in macd else None
+                    indicators['macd_signal'] = float(macd['signal'].iloc[-1]) if 'signal' in macd else None
+                    indicators['macd_hist'] = float(macd['hist'].iloc[-1]) if 'hist' in macd else None
                 else:
                     indicators['macd'] = None
                     indicators['macd_signal'] = None
@@ -215,10 +245,10 @@ class TechnicalEngine(BaseEngine):
                 indicators['macd'] = None
                 indicators['macd_signal'] = None
                 indicators['macd_hist'] = None
-            
+
             # ATR (14 period)
             if len(df) >= 14:
-                atr = ta.atr(df['high'], df['low'], df['close'], length=14)
+                atr = self._atr(df['high'], df['low'], df['close'], length=14)
                 indicators['atr'] = float(atr.iloc[-1]) if not atr.empty else None
             else:
                 indicators['atr'] = None
