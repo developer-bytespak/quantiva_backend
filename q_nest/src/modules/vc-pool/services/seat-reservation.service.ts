@@ -323,12 +323,39 @@ export class SeatReservationService {
       pool_id: poolId,
       membership: membership
         ? { exists: true, is_active: membership.is_active, joined_at: membership.joined_at, payment_method: membership.payment_method }
-        : { exists: false },
+        : { exists: false, is_active: false, joined_at: null, payment_method: null },
       reservation: reservation
         ? { ...reservation, minutes_remaining: minutesRemaining }
-        : null,
-      payment: submission,
-      cancellation: cancellationInfo,
+        : { reservation_id: null, status: null, expires_at: null, payment_method: null, minutes_remaining: null },
+      payment: submission ?? {
+        submission_id: null,
+        payment_method: null,
+        status: null,
+        total_amount: null,
+        investment_amount: null,
+        pool_fee_amount: null,
+        screenshot_url: null,
+        rejection_reason: null,
+        payment_deadline: null,
+        verified_at: null,
+        binance_tx_id: null,
+        tx_hash: null,
+        binance_payment_status: null,
+        exact_amount_expected: null,
+        user_wallet_address: null,
+      },
+      cancellation: cancellationInfo ?? {
+        has_cancellation: false,
+        is_historical: false,
+        cancellation_id: null,
+        status: null,
+        requested_at: null,
+        approved_at: null,
+        refunded_at: null,
+        contribution_amount: null,
+        cancellation_fee_amount: null,
+        refund_amount: null,
+      },
       can_request_exit: canRequestExit,
     };
   }
