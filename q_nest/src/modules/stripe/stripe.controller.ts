@@ -78,12 +78,23 @@ export class StripeController {
     // }
 
 
+    // Check for pending QHQ subscription discount
+    let discountPercent: number | undefined;
+    const pendingDiscount = await this.qhqService.getPendingDiscount(userId);
+    if (pendingDiscount) {
+      discountPercent = pendingDiscount.discount_percent;
+    }
+
     const session = await this.stripeService.createCheckoutSession({
       priceId: price_id,
       successUrl: success_url,
       cancelUrl: cancel_url,
       clientReferenceId: userId,
-      metadata: plan_id ? { plan_id: plan_id } : undefined,
+      metadata: {
+        ...(plan_id ? { plan_id } : {}),
+        ...(pendingDiscount ? { qhq_discount_id: pendingDiscount.id } : {}),
+      },
+      discountPercent,
     });
     return { url: session.url, sessionId: session.id };
   }
@@ -300,6 +311,38 @@ export class StripeController {
               `New subscription created for user ${userId}, plan ${planId}; user_subscriptions, users, subscription_usage, and payment_history updated`,
             );
           }
+          // ── Award QHQ tokens for subscription payment ──
+          const sub = await this.prisma.user_subscriptions.findFirst({
+            where: { user_id: userId, status: 'active' },
+          });
+          if (sub) {
+            const ruleKey = sub.tier === 'ELITE' ? 'MONTHLY_ELITE' : sub.tier === 'PRO' ? 'MONTHLY_PRO' : null;
+            if (ruleKey) {
+              const monthlyAmount = await this.qhqService.getRuleAmount(ruleKey);
+              if (monthlyAmount > 0) {
+                const multiplier = sub.billing_period === 'YEARLY' ? 12 : sub.billing_period === 'QUARTERLY' ? 3 : 1;
+                const totalAmount = monthlyAmount * multiplier;
+                await this.qhqService.earnTokens(
+                  userId,
+                  QhqTransactionType.EARN_SUBSCRIPTION,
+                  totalAmount,
+                  `Subscription payment: ${sub.tier} (${sub.billing_period})`,
+                  session.id,
+                );
+                this.logger.log(`Awarded ${totalAmount} QHQ to user ${userId} for ${sub.tier} ${sub.billing_period}`);
+              }
+            }
+          }
+
+          // Mark QHQ discount as applied if one was used
+          const qhqDiscountId = session.metadata?.qhq_discount_id;
+          if (qhqDiscountId) {
+            await this.prisma.qhq_subscription_discounts.update({
+              where: { id: qhqDiscountId },
+              data: { applied: true },
+            }).catch((err) => this.logger.warn(`Failed to mark QHQ discount as applied: ${err.message}`));
+            this.logger.log(`QHQ discount ${qhqDiscountId} marked as applied for user ${userId}`);
+          }
         } catch (err: any) {
           this.logger.error(
             `Failed to create/update subscription or record payment for user ${userId}: ${err?.message}`,
@@ -341,44 +384,6 @@ export class StripeController {
           this.logger.error(
             `Failed to handle Stripe subscription cancel for ${stripeSubscriptionId}: ${err?.message}`,
           );
-        }
-      }
-    }
-
-    // ─── Award QHQ on every successful subscription payment ─────────────
-    if (event.type === 'invoice.paid') {
-      const invoice = event.data.object as any;
-      const stripeSubscriptionId =
-        typeof invoice.subscription === 'string'
-          ? invoice.subscription
-          : invoice.subscription?.id ?? null;
-
-      if (stripeSubscriptionId) {
-        try {
-          const sub = await this.prisma.user_subscriptions.findFirst({
-            where: { external_id: stripeSubscriptionId, status: 'active' },
-          });
-
-          if (sub) {
-            const ruleKey = sub.tier === 'ELITE' ? 'MONTHLY_ELITE' : sub.tier === 'PRO' ? 'MONTHLY_PRO' : null;
-            if (ruleKey) {
-              const monthlyAmount = await this.qhqService.getRuleAmount(ruleKey);
-              if (monthlyAmount > 0) {
-                const multiplier = sub.billing_period === 'YEARLY' ? 12 : sub.billing_period === 'QUARTERLY' ? 3 : 1;
-                const totalAmount = monthlyAmount * multiplier;
-                await this.qhqService.earnTokens(
-                  sub.user_id,
-                  QhqTransactionType.EARN_SUBSCRIPTION,
-                  totalAmount,
-                  `Subscription payment: ${sub.tier} (${sub.billing_period})`,
-                  invoice.id,
-                );
-                this.logger.log(`Awarded ${totalAmount} QHQ to user ${sub.user_id} for ${sub.tier} ${sub.billing_period} payment (invoice ${invoice.id})`);
-              }
-            }
-          }
-        } catch (err: any) {
-          this.logger.error(`Failed to award subscription QHQ: ${err.message}`);
         }
       }
     }
