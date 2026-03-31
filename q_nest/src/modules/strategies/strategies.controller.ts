@@ -24,6 +24,8 @@ import axios from 'axios';
 import { FeatureAccessService, FeatureType } from 'src/common/feature-access.service';
 import { AppGateway } from 'src/gateways/app.gateway';
 import { NotificationsService } from '../notifications/notifications.service';
+import { QhqTokenService } from '../qhq-token/qhq-token.service';
+import { QhqTransactionType } from '.prisma/client';
 
 @Controller('strategies')
 export class StrategiesController {
@@ -47,6 +49,7 @@ export class StrategiesController {
     private readonly featureAccessService: FeatureAccessService,
     private readonly appGateway: AppGateway,
     private readonly notificationsService: NotificationsService,
+    private readonly qhqService: QhqTokenService,
 
   ) {
     this.pythonApiUrl = this.configService.get<string>('PYTHON_API_URL') || 'http://localhost:8000/api/v1';
@@ -903,6 +906,16 @@ export class StrategiesController {
     await this.notificationsService.sendNotification(user.sub, "Stock Strategy Created", "Your new stock strategy has been created");
     this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
 
+    // Award QHQ for strategy creation (non-blocking)
+    this.qhqService.getRuleAmount('STRATEGY_CREATED').then((amount) => {
+      if (amount > 0) {
+        this.qhqService.earnTokens(
+          user.sub, QhqTransactionType.EARN_STRATEGY, amount,
+          `Created strategy: ${strategy.name}`, strategy.strategy_id,
+        ).catch((err) => this.logger.warn(`QHQ strategy reward failed: ${err.message}`));
+      }
+    });
+
     return {
       success: true,
       message: 'Stock strategy created successfully',
@@ -966,6 +979,16 @@ export class StrategiesController {
     const notification = await this.notificationsService.createNotification({user_id: user.sub, type: "crypto_strategy_created",title:"Crypto Strategy Created",message:"Your new crypto strategy has been created",read:false,metadata:null});
     await this.notificationsService.sendNotification(user.sub, "Crypto Strategy Created", "Your new crypto strategy has been created");
     this.appGateway.emitNotificationCount(user.sub, 1, notification); // notification count increment by 1
+
+    // Award QHQ for strategy creation (non-blocking)
+    this.qhqService.getRuleAmount('STRATEGY_CREATED').then((amount) => {
+      if (amount > 0) {
+        this.qhqService.earnTokens(
+          user.sub, QhqTransactionType.EARN_STRATEGY, amount,
+          `Created strategy: ${strategy.name}`, strategy.strategy_id,
+        ).catch((err) => this.logger.warn(`QHQ strategy reward failed: ${err.message}`));
+      }
+    });
 
     return {
       success: true,

@@ -30,11 +30,13 @@ import { FeatureAccessService } from '../../common/feature-access.service';
 import { TierAccessGuard } from '../../common/guards/tier-access.guard';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AppGateway } from 'src/gateways/app.gateway';
+import { QhqTokenModule } from '../qhq-token/qhq-token.module';
 
 @Module({
   imports: [
     PrismaModule,
     AdminAuthModule,
+    QhqTokenModule,
     NotificationsModule,
     KycModule,
     forwardRef(() => SignalsModule),
