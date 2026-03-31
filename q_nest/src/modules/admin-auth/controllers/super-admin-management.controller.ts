@@ -13,6 +13,7 @@ import { CurrentAdmin } from '../decorators/current-admin.decorator';
 import { DeleteVcPoolAdminDto } from '../dto/delete-vc-pool-admin.dto';
 import { CreateVcPoolAdminDto } from '../dto/create-vc-pool-admin.dto';
 import { SuperAdminListUsersDto } from '../dto/super-admin-list-users.dto';
+import { SuperAdminUnifiedFinanceDto } from '../dto/super-admin-unified-finance.dto';
 import { SuperAdminUsersGrowthDto } from '../dto/super-admin-users-growth.dto';
 import { AdminJwtAuthGuard } from '../guards/admin-jwt-auth.guard';
 import { SuperAdminGuard } from '../guards/super-admin.guard';
@@ -44,6 +45,24 @@ export class SuperAdminManagementController {
   @Get('vc-pool-admins')
   async listVcPoolAdmins() {
     return this.superAdminManagementService.listVcPoolAdmins();
+  }
+
+  @Get('pools-oversight')
+  async listPoolsOversight(
+    @Query('status') status?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.superAdminManagementService.listPoolsOversight({
+      status,
+      page: page ? parseInt(page, 10) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+  }
+
+  @Get('finance/unified')
+  async getUnifiedFinance(@Query() query: SuperAdminUnifiedFinanceDto) {
+    return this.superAdminManagementService.getUnifiedFinance(query);
   }
 
   @Post('vc-pool-admins')
