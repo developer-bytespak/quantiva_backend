@@ -21,8 +21,20 @@ export class StripeService {
     cancelUrl?: string;
     clientReferenceId?: string;
     metadata?: Record<string, string>;
+    discountPercent?: number;
   }) {
     try {
+      // If QHQ discount is available, create a one-time Stripe coupon
+      let discounts: any[] | undefined;
+      if (params.discountPercent && params.discountPercent > 0) {
+        const coupon = await this.stripe.coupons.create({
+          percent_off: params.discountPercent,
+          duration: 'once',
+          name: `QHQ ${params.discountPercent}% Discount`,
+        });
+        discounts = [{ coupon: coupon.id }];
+      }
+
       const session = await this.stripe.checkout.sessions.create({
         mode: 'subscription',
         payment_method_types: ['card'],
@@ -35,6 +47,7 @@ export class StripeService {
         success_url: params.successUrl || 'http://localhost:3001/success',
         cancel_url: params.cancelUrl || 'http://localhost:3001/cancel',
         ...(params.clientReferenceId && { client_reference_id: params.clientReferenceId }),
+        ...(discounts && { discounts }),
         metadata: params.metadata,
       });
 
