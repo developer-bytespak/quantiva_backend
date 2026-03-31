@@ -362,16 +362,18 @@ export class StripeController {
           if (sub) {
             const ruleKey = sub.tier === 'ELITE' ? 'MONTHLY_ELITE' : sub.tier === 'PRO' ? 'MONTHLY_PRO' : null;
             if (ruleKey) {
-              const amount = await this.qhqService.getRuleAmount(ruleKey);
-              if (amount > 0) {
+              const monthlyAmount = await this.qhqService.getRuleAmount(ruleKey);
+              if (monthlyAmount > 0) {
+                const multiplier = sub.billing_period === 'YEARLY' ? 12 : sub.billing_period === 'QUARTERLY' ? 3 : 1;
+                const totalAmount = monthlyAmount * multiplier;
                 await this.qhqService.earnTokens(
                   sub.user_id,
                   QhqTransactionType.EARN_SUBSCRIPTION,
-                  amount,
-                  `Subscription payment: ${sub.tier}`,
+                  totalAmount,
+                  `Subscription payment: ${sub.tier} (${sub.billing_period})`,
                   invoice.id,
                 );
-                this.logger.log(`Awarded ${amount} QHQ to user ${sub.user_id} for ${sub.tier} payment (invoice ${invoice.id})`);
+                this.logger.log(`Awarded ${totalAmount} QHQ to user ${sub.user_id} for ${sub.tier} ${sub.billing_period} payment (invoice ${invoice.id})`);
               }
             }
           }
