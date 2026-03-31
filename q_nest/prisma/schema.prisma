@@ -517,7 +517,7 @@ model signal_details {
   time_in_force  String?          @db.VarChar(20)
   metadata       Json?            @db.Json
   created_at     DateTime?        @db.Timestamp(6)
-  signal         strategy_signals @relation(fields: [signal_id], references: [signal_id])
+  signal         strategy_signals @relation(fields: [signal_id], references: [signal_id], onDelete: Cascade)
 
   @@index([signal_id])
   @@map("signal_details")
@@ -532,7 +532,7 @@ model signal_explanations {
   error_message      String?
   explanation_status String?          @db.VarChar(20)
   retry_count        Int              @default(0)
-  signal             strategy_signals @relation(fields: [signal_id], references: [signal_id])
+  signal             strategy_signals @relation(fields: [signal_id], references: [signal_id], onDelete: Cascade)
 
   @@index([signal_id])
   @@map("signal_explanations")
