@@ -1,10 +1,11 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SubscriptionStatus } from '@prisma/client';
 import { cursorTo } from 'readline';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AppGateway } from 'src/gateways/app.gateway';
 import { tryCatch } from 'bullmq';
+import { SubscriptionLoaderMiddleware } from '../../common/middleware/subscription-loader.middleware';
 
 export enum PlanTier {
   FREE = 'FREE',
@@ -31,10 +32,19 @@ export class SubscriptionsService implements OnModuleInit {
   private plansCache: any[] | null = null;
   private plansGroupedCache: any[] | null = null;
 
-  constructor(private prisma: PrismaService,
+  constructor(
+    private prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
     private readonly appGateway: AppGateway,
+    @Optional() private readonly subscriptionLoader?: SubscriptionLoaderMiddleware,
   ) { }
+
+  /**
+   * Clear the cached subscription for a user so the next request fetches fresh from DB.
+   */
+  private clearSubscriptionCache(userId: string): void {
+    this.subscriptionLoader?.clearUserCache(userId);
+  }
 
   async onModuleInit() {
     try {
@@ -351,7 +361,7 @@ export class SubscriptionsService implements OnModuleInit {
     auto_renew?: boolean;
   }) {
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       // 1️⃣ Plan fetch karo to get tier & billing_period
       const plan = await tx.subscription_plans.findUnique({
         where: { plan_id: data.plan_id },
@@ -496,6 +506,10 @@ export class SubscriptionsService implements OnModuleInit {
       }
       return subscription;
     }, { timeout: 30000 });
+
+    // Clear subscription cache so next request gets fresh data
+    this.clearSubscriptionCache(data.user_id);
+    return result;
   }
 
   async updateSubscription(id: string, data: {
@@ -506,7 +520,7 @@ export class SubscriptionsService implements OnModuleInit {
     auto_renew?: boolean;
     external_id?: string;
   }) {
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       // 1️⃣ Get current subscription
 
       const currentSubscription = await tx.user_subscriptions.findUnique({
@@ -707,6 +721,10 @@ export class SubscriptionsService implements OnModuleInit {
 
       return updated;
     }, { timeout: 30000 });
+
+    // Clear subscription cache so next request gets fresh data
+    if (result?.user_id) this.clearSubscriptionCache(result.user_id);
+    return result;
   }
 
   async deleteSubscription(id: string) {
@@ -796,7 +814,7 @@ export class SubscriptionsService implements OnModuleInit {
    * Cancel subscription
    */
   async cancelSubscription(subscriptionId: string) {
-    return this.prisma.user_subscriptions.update({
+    const result = await this.prisma.user_subscriptions.update({
       where: { subscription_id: subscriptionId },
       data: {
         status: 'cancelled',
@@ -804,6 +822,8 @@ export class SubscriptionsService implements OnModuleInit {
         auto_renew: false,
       },
     });
+    if (result?.user_id) this.clearSubscriptionCache(result.user_id);
+    return result;
   }
 
   async cancelUserSubscription(userId: string, options?: {

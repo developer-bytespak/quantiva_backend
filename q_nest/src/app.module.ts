@@ -77,8 +77,10 @@ import { QhqTokenModule } from './modules/qhq-token/qhq-token.module';
   providers: [
     AccountStreamGateway,
     MarketDetailGateway,
+    SubscriptionLoaderMiddleware,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
   ],
+  exports: [SubscriptionLoaderMiddleware],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

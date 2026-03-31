@@ -44,30 +44,42 @@ export class AssetsSyncCronjobService implements OnModuleInit {
   }
 
   /**
-   * Shared sync logic used by both scheduled and manual sync
+   * Shared sync logic used by both scheduled and manual sync.
+   * Processes coins in batched upserts instead of sequential queries.
+   * ~20 queries per sync instead of ~1,500.
    */
   private async syncCoins(coins: any[]): Promise<{ created: number; updated: number; errors: number; total: number; marketSnapshots: number }> {
-    let createdCount = 0;
-    let updatedCount = 0;
+    const BATCH_SIZE = 50;
+    let upsertedCount = 0;
     let errorCount = 0;
     let marketRankingsCount = 0;
     const rankTimestamp = new Date();
+    const now = new Date();
 
-    for (const coin of coins) {
+    for (let i = 0; i < coins.length; i += BATCH_SIZE) {
+      const batch = coins.slice(i, i + BATCH_SIZE);
+      const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+      const totalBatches = Math.ceil(coins.length / BATCH_SIZE);
+
+      // Step 1: Batch upsert assets
       try {
-        const symbol = coin.symbol.toUpperCase();
-        const now = new Date();
-
-        // Check if asset already exists
-        const existingAsset = await this.prisma.assets.findFirst({
-          where: { symbol },
-        });
-
-        if (existingAsset) {
-          // Update existing asset with full metadata
-          await this.prisma.assets.update({
-            where: { asset_id: existingAsset.asset_id },
-            data: {
+        const assetUpserts = batch.map((coin) => {
+          const symbol = coin.symbol.toUpperCase();
+          return this.prisma.assets.upsert({
+            where: { symbol_asset_type: { symbol, asset_type: 'crypto' } },
+            create: {
+              symbol,
+              name: coin.name,
+              display_name: coin.name,
+              coingecko_id: coin.id,
+              logo_url: coin.image,
+              market_cap_rank: coin.market_cap_rank,
+              asset_type: 'crypto',
+              is_active: true,
+              first_seen_at: now,
+              last_seen_at: now,
+            },
+            update: {
               name: coin.name,
               display_name: coin.name,
               coingecko_id: coin.id,
@@ -76,152 +88,61 @@ export class AssetsSyncCronjobService implements OnModuleInit {
               last_seen_at: now,
               is_active: true,
             },
+            select: { asset_id: true },
           });
+        });
 
-          // Create market_rankings snapshot
-          await this.createMarketRankingSnapshot(
-            existingAsset.asset_id,
-            coin,
-            rankTimestamp,
-          );
-          marketRankingsCount++;
-          updatedCount++;
-        } else {
-          // Create new asset only if it doesn't exist
-          // Double-check to prevent race conditions
-          const duplicateCheck = await this.prisma.assets.findFirst({
-            where: { symbol },
+        const results = await this.prisma.$transaction(assetUpserts);
+        upsertedCount += results.length;
+
+        // Step 2: Batch upsert market_rankings using the returned asset_ids
+        const rankingUpserts = results.map((asset, idx) => {
+          const coin = batch[idx];
+          return this.prisma.market_rankings.upsert({
+            where: {
+              rank_timestamp_asset_id: {
+                rank_timestamp: rankTimestamp,
+                asset_id: asset.asset_id,
+              },
+            },
+            create: {
+              rank_timestamp: rankTimestamp,
+              asset_id: asset.asset_id,
+              rank: coin.market_cap_rank,
+              market_cap: coin.market_cap,
+              price_usd: coin.current_price,
+              volume_24h: coin.total_volume,
+              change_percent_24h: coin.price_change_percentage_24h || 0,
+              change_24h: coin.price_change_24h || 0,
+            },
+            update: {
+              rank: coin.market_cap_rank,
+              market_cap: coin.market_cap,
+              price_usd: coin.current_price,
+              volume_24h: coin.total_volume,
+              change_percent_24h: coin.price_change_percentage_24h || 0,
+              change_24h: coin.price_change_24h || 0,
+            },
           });
+        });
 
-          if (!duplicateCheck) {
-            const newAsset = await this.prisma.assets.create({
-              data: {
-                symbol,
-                name: coin.name,
-                display_name: coin.name,
-                coingecko_id: coin.id,
-                logo_url: coin.image,
-                market_cap_rank: coin.market_cap_rank,
-                asset_type: 'crypto',
-                is_active: true,
-                first_seen_at: now,
-                last_seen_at: now,
-              },
-            });
+        await this.prisma.$transaction(rankingUpserts);
+        marketRankingsCount += rankingUpserts.length;
 
-            // Create initial market_rankings snapshot
-            await this.createMarketRankingSnapshot(
-              newAsset.asset_id,
-              coin,
-              rankTimestamp,
-            );
-            marketRankingsCount++;
-            createdCount++;
-          } else {
-            // Asset was created between checks, update it instead
-            await this.prisma.assets.update({
-              where: { asset_id: duplicateCheck.asset_id },
-              data: {
-                name: coin.name,
-                display_name: coin.name,
-                coingecko_id: coin.id,
-                logo_url: coin.image,
-                market_cap_rank: coin.market_cap_rank,
-                last_seen_at: now,
-                is_active: true,
-              },
-            });
-
-            // Create market_rankings snapshot
-            await this.createMarketRankingSnapshot(
-              duplicateCheck.asset_id,
-              coin,
-              rankTimestamp,
-            );
-            marketRankingsCount++;
-            updatedCount++;
-          }
-        }
+        this.logger.log(`Batch ${batchNum}/${totalBatches}: upserted ${results.length} assets + ${rankingUpserts.length} rankings`);
       } catch (error: any) {
-        // Handle duplicate key errors (in case unique constraint is added later)
-        if (error.code === 'P2002' || error.message?.includes('Unique constraint')) {
-          try {
-            const existingAsset = await this.prisma.assets.findFirst({
-              where: { symbol: coin.symbol.toUpperCase() },
-            });
-            if (existingAsset) {
-              await this.prisma.assets.update({
-                where: { asset_id: existingAsset.asset_id },
-                data: {
-                  name: coin.name,
-                  display_name: coin.name,
-                  coingecko_id: coin.id,
-                  logo_url: coin.image,
-                  market_cap_rank: coin.market_cap_rank,
-                  last_seen_at: new Date(),
-                  is_active: true,
-                },
-              });
-              updatedCount++;
-            }
-          } catch (updateError: any) {
-            this.logger.warn(`Failed to update asset ${coin.symbol} after P2002: ${(updateError as Error).message}`);
-            errorCount++;
-          }
-        } else {
-          this.logger.warn(`Failed to sync asset ${coin.symbol}: ${(error as Error).message}`);
-          errorCount++;
-        }
+        this.logger.error(`Batch ${batchNum}/${totalBatches} failed: ${error.message}`);
+        errorCount += batch.length;
       }
     }
 
     return {
-      created: createdCount,
-      updated: updatedCount,
+      created: 0, // upsert doesn't distinguish create vs update
+      updated: upsertedCount,
       errors: errorCount,
       total: coins.length,
       marketSnapshots: marketRankingsCount,
     };
-  }
-
-  /**
-   * Create or update market_rankings snapshot for an asset
-   */
-  private async createMarketRankingSnapshot(
-    assetId: string,
-    coin: any,
-    rankTimestamp: Date,
-  ): Promise<void> {
-    try {
-      await this.prisma.market_rankings.upsert({
-        where: {
-          rank_timestamp_asset_id: {
-            rank_timestamp: rankTimestamp,
-            asset_id: assetId,
-          },
-        },
-        create: {
-          rank_timestamp: rankTimestamp,
-          asset_id: assetId,
-          rank: coin.market_cap_rank,
-          market_cap: coin.market_cap,
-          price_usd: coin.current_price,
-          volume_24h: coin.total_volume,
-          change_percent_24h: coin.price_change_percentage_24h || 0,
-          change_24h: coin.price_change_24h || 0,
-        },
-        update: {
-          rank: coin.market_cap_rank,
-          market_cap: coin.market_cap,
-          price_usd: coin.current_price,
-          volume_24h: coin.total_volume,
-          change_percent_24h: coin.price_change_percentage_24h || 0,
-          change_24h: coin.price_change_24h || 0,
-        },
-      });
-    } catch (error: any) {
-      this.logger.warn(`Failed to upsert market ranking for asset ${assetId}: ${(error as Error).message}`);
-    }
   }
 
   /**
