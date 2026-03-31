@@ -124,7 +124,7 @@ export class PoolCancellationService {
     });
 
     if (!member) {
-      throw new NotFoundException('You are not a member of this pool');
+      return { has_cancellation: false };
     }
 
     const cancellation = await this.prisma.vc_pool_cancellations.findUnique({
