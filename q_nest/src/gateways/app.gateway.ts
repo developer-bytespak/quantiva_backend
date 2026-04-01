@@ -15,7 +15,7 @@ import { WsAuthService } from './ws-auth.service';
 @WebSocketGateway({
   cors: {
     // TODO: Update origin when hosted on AWS — replace Vercel URL with AWS domain
-    origin: ['http://quantiva-hq.vercel.app', 'https://quantiva-hq.vercel.app', 'http://localhost:3001'],
+    origin: ['http://quantiva-hq.vercel.app','https://www.bytes-test-5.com', 'https://quantiva-hq.vercel.app', 'http://localhost:3001'],
     credentials: true,
   },
 })
