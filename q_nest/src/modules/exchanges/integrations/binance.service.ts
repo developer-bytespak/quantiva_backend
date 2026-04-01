@@ -1274,6 +1274,7 @@ export class BinanceService {
         quantity: parseFloat(o.origQty || '0'),
         executedQty: parseFloat(o.executedQty || '0'),
         price: parseFloat(o.price || '0'),
+        cummulativeQuoteQty: parseFloat(o.cummulativeQuoteQty || '0'),
         stopPrice: o.stopPrice ? parseFloat(o.stopPrice) : null,
         timeInForce: o.timeInForce,
         time: o.time,

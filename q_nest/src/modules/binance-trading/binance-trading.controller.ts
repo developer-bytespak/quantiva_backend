@@ -108,17 +108,65 @@ export class BinanceTradingController {
     @CurrentUser() user: TokenPayload,
     @Query('symbol') symbol?: string,
     @Query('limit') limit?: string,
+    @Query('period') period?: '1d' | '1w' | '1m' | '6m',
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
   ) {
     try {
-      const data = await this.binanceTradingService.getAllOrders(user.sub, {
+      // Resolve time filter
+      let filterStartTime: number | undefined;
+      let filterEndTime: number | undefined;
+
+      if (period) {
+        const now = Date.now();
+        const periodMs: Record<string, number> = {
+          '1d': 24 * 60 * 60 * 1000,
+          '1w': 7 * 24 * 60 * 60 * 1000,
+          '1m': 30 * 24 * 60 * 60 * 1000,
+          '6m': 180 * 24 * 60 * 60 * 1000,
+        };
+        if (periodMs[period]) {
+          filterStartTime = now - periodMs[period];
+          filterEndTime = now;
+        }
+      } else {
+        filterStartTime = startTime ? parseInt(startTime, 10) : undefined;
+        filterEndTime = endTime ? parseInt(endTime, 10) : undefined;
+      }
+
+      // Fetch all orders (no time filter to Binance — filter after)
+      const allOrders = await this.binanceTradingService.getAllOrders(user.sub, {
         symbol,
-        limit: limit ? parseInt(limit, 10) : 100,
-        startTime: startTime ? parseInt(startTime, 10) : undefined,
-        endTime: endTime ? parseInt(endTime, 10) : undefined,
+        limit: limit ? parseInt(limit, 10) : 500,
       });
-      return { success: true, data };
+
+      // Apply time filter using updateTime (execution time)
+      const orders = (filterStartTime || filterEndTime)
+        ? allOrders.filter((o: any) => {
+            const orderTime = o.updateTime || o.time || 0;
+            if (filterStartTime && orderTime < filterStartTime) return false;
+            if (filterEndTime && orderTime > filterEndTime) return false;
+            return true;
+          })
+        : allOrders;
+
+      const totalOrders = orders.length;
+      const filledOrders = orders.filter((o: any) => o.status === 'FILLED').length;
+      const canceledOrders = orders.filter((o: any) => ['CANCELED', 'EXPIRED', 'REJECTED'].includes(o.status)).length;
+      const pendingOrders = orders.filter((o: any) => ['NEW', 'PARTIALLY_FILLED'].includes(o.status)).length;
+      const totalVolume = orders.reduce((sum: number, o: any) => sum + (o.totalValue || 0), 0);
+
+      return {
+        success: true,
+        data: orders,
+        summary: {
+          totalOrders,
+          filledOrders,
+          canceledOrders,
+          pendingOrders,
+          totalVolume: Math.round(totalVolume * 100) / 100,
+        },
+      };
     } catch (error: any) {
       this.logger.error(`getAllOrders failed: ${error?.message}`);
       throw new HttpException(
