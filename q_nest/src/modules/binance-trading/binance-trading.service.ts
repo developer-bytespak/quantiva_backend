@@ -74,7 +74,8 @@ export class BinanceTradingService {
   }
 
   /**
-   * Get non-stablecoin symbols user holds (for multi-symbol queries)
+   * Get all symbols user has traded (current holdings + open orders).
+   * For trade history, use getAllTradedSymbols instead to also include fully-sold symbols.
    */
   private async getTradingSymbols(apiKey: string, apiSecret: string, isUS: boolean): Promise<string[]> {
     const service = this.getService(isUS);
@@ -83,6 +84,51 @@ export class BinanceTradingService {
     return positions
       .filter((p) => !STABLECOINS.has(p.symbol) && p.quantity > 0)
       .map((p) => `${p.symbol}${quote}`);
+  }
+
+  /**
+   * Get ALL symbols user has ever traded — includes fully-sold assets.
+   * Combines: current holdings + open orders + account balances (including dust).
+   */
+  private async getAllTradedSymbols(apiKey: string, apiSecret: string, isUS: boolean): Promise<string[]> {
+    const service = this.getService(isUS);
+    const quote = isUS ? 'USD' : 'USDT';
+    const symbolSet = new Set<string>();
+
+    // 1. Current holdings (non-zero balance)
+    const positions = await service.getPositions(apiKey, apiSecret);
+    for (const p of positions) {
+      if (!STABLECOINS.has(p.symbol) && p.quantity > 0) {
+        symbolSet.add(`${p.symbol}${quote}`);
+      }
+    }
+
+    // 2. All account balances — includes dust from past trades (e.g. 0.00001 BTC from fees)
+    try {
+      const accountInfo = await service.getAccountInfo(apiKey, apiSecret);
+      for (const b of accountInfo.balances) {
+        const total = parseFloat(b.free) + parseFloat(b.locked);
+        if (total > 0 && !STABLECOINS.has(b.asset)) {
+          symbolSet.add(`${b.asset}${quote}`);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`getAllTradedSymbols: getAccountInfo failed: ${(err as any)?.message}`);
+    }
+
+    // 3. Open orders — catches symbols with pending orders but zero balance
+    try {
+      const openOrders = await service.getOpenOrders(apiKey, apiSecret);
+      for (const o of openOrders) {
+        if (o.symbol && !symbolSet.has(o.symbol)) {
+          symbolSet.add(o.symbol);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`getAllTradedSymbols: getOpenOrders failed: ${(err as any)?.message}`);
+    }
+
+    return Array.from(symbolSet);
   }
 
   /**
@@ -171,89 +217,130 @@ export class BinanceTradingService {
     if (params.symbol) {
       symbols = [params.symbol.toUpperCase()];
     } else {
-      symbols = await this.getTradingSymbols(apiKey, apiSecret, isUS);
+      // Use getAllTradedSymbols to include fully-sold assets
+      symbols = await this.getAllTradedSymbols(apiKey, apiSecret, isUS);
     }
 
     if (symbols.length === 0) return [];
 
-    const allTradesPerSymbol = await Promise.all(
-      symbols.map((sym) =>
-        service
-          .getMyTrades(apiKey, apiSecret, sym, {
-            limit: params.limit || 500,
-            startTime: params.startTime,
-            endTime: params.endTime,
-          })
-          .catch((err) => {
-            this.logger.warn(`getMyTrades failed for ${sym}: ${err.message}`);
-            return [];
-          }),
+    // Fetch orders and fills in parallel
+    const [allOrdersPerSymbol, allTradesPerSymbol] = await Promise.all([
+      Promise.all(
+        symbols.map((sym) =>
+          service
+            .getAllOrders(apiKey, apiSecret, sym, {
+              limit: params.limit || 500,
+              startTime: params.startTime,
+              endTime: params.endTime,
+            })
+            .catch((err) => {
+              this.logger.warn(`getAllOrders failed for ${sym}: ${err.message}`);
+              return [];
+            }),
+        ),
       ),
-    );
+      Promise.all(
+        symbols.map((sym) =>
+          service
+            .getMyTrades(apiKey, apiSecret, sym, {
+              limit: params.limit || 500,
+              startTime: params.startTime,
+              endTime: params.endTime,
+            })
+            .catch((err) => {
+              this.logger.warn(`getMyTrades failed for ${sym}: ${err.message}`);
+              return [];
+            }),
+        ),
+      ),
+    ]);
 
-    const allTrades = allTradesPerSymbol.flat();
-    if (allTrades.length === 0) return [];
+    const allOrders = allOrdersPerSymbol.flat();
+    const allFills = allTradesPerSymbol.flat();
 
-    // Group by symbol
-    const tradesBySymbol: Record<string, any[]> = {};
-    for (const trade of allTrades) {
-      if (!tradesBySymbol[trade.symbol]) tradesBySymbol[trade.symbol] = [];
-      tradesBySymbol[trade.symbol].push(trade);
+    // Group fills by orderId for enrichment
+    const fillsByOrderId: Record<string, any[]> = {};
+    for (const fill of allFills) {
+      const oid = String(fill.orderId);
+      if (!fillsByOrderId[oid]) fillsByOrderId[oid] = [];
+      fillsByOrderId[oid].push(fill);
     }
 
-    const closedTrades: any[] = [];
+    // Include all orders that have been executed (any amount filled)
+    const enrichedOrders = allOrders
+      .filter((o) => o.status === 'FILLED' || o.status === 'PARTIALLY_FILLED' || o.executedQty > 0)
+      .map((order) => {
+        const fills = fillsByOrderId[String(order.orderId)] || [];
+        const totalFilledQty = fills.reduce((s: number, f: any) => s + f.qty, 0);
+        const totalQuoteQty = fills.reduce((s: number, f: any) => s + f.quoteQty, 0);
+        const totalFee = fills.reduce((s: number, f: any) => s + f.commission, 0);
+        const avgPrice = totalFilledQty > 0 ? totalQuoteQty / totalFilledQty : order.price || 0;
+        const feeAsset = fills.length > 0 ? fills[0].commissionAsset : '';
+        const fillPercent = order.quantity > 0
+          ? Math.round((order.executedQty / order.quantity) * 100)
+          : 0;
 
-    for (const [symbol, trades] of Object.entries(tradesBySymbol)) {
-      // Sort oldest first for FIFO matching
-      trades.sort((a, b) => a.time - b.time);
+        return {
+          orderId: order.orderId,
+          symbol: order.symbol,
+          side: order.side,
+          type: order.type,
+          status: order.status,
+          fillPercent,
+          quantity: order.quantity,
+          filledQuantity: order.executedQty,
+          avgPrice: Math.round(avgPrice * 100000000) / 100000000,
+          orderPrice: order.type === 'MARKET' ? 'Market' : order.price || order.stopPrice || 0,
+          totalValue: Math.round(totalQuoteQty * 100000000) / 100000000,
+          totalFee: Math.round(totalFee * 100000000) / 100000000,
+          feeAsset,
+          stopPrice: order.stopPrice,
+          time: order.time,
+          updateTime: order.updateTime,
+          profitLoss: 0,
+          profitLossPercent: 0,
+        };
+      });
 
-      const buyQueue: any[] = [];
+    // FIFO matching: attach P&L to SELL orders
+    const ordersBySymbol: Record<string, any[]> = {};
+    for (const o of enrichedOrders) {
+      if (!ordersBySymbol[o.symbol]) ordersBySymbol[o.symbol] = [];
+      ordersBySymbol[o.symbol].push(o);
+    }
 
-      for (const trade of trades) {
-        if (trade.isBuyer) {
-          buyQueue.push({ ...trade, remainingQty: trade.qty });
-        } else {
-          let remainingSellQty = trade.qty;
+    for (const [, orders] of Object.entries(ordersBySymbol)) {
+      const sorted = [...orders].sort((a, b) => a.time - b.time);
+      const buyQueue: { avgPrice: number; remainingQty: number }[] = [];
 
-          while (remainingSellQty > 0 && buyQueue.length > 0) {
+      for (const order of sorted) {
+        if (order.side === 'BUY') {
+          buyQueue.push({ avgPrice: order.avgPrice, remainingQty: order.filledQuantity });
+        } else if (order.side === 'SELL') {
+          let remainingQty = order.filledQuantity;
+          let totalPL = 0;
+          let totalEntryCost = 0;
+
+          while (remainingQty > 0 && buyQueue.length > 0) {
             const oldest = buyQueue[0];
-            const matchedQty = Math.min(remainingSellQty, oldest.remainingQty);
-            const profitLoss = (trade.price - oldest.price) * matchedQty;
-            const profitLossPercent =
-              oldest.price > 0 ? ((trade.price - oldest.price) / oldest.price) * 100 : 0;
+            const matchedQty = Math.min(remainingQty, oldest.remainingQty);
+            totalPL += (order.avgPrice - oldest.avgPrice) * matchedQty;
+            totalEntryCost += oldest.avgPrice * matchedQty;
 
-            const durationMs = trade.time - oldest.time;
-            const durationH = Math.floor(durationMs / (1000 * 60 * 60));
-            const durationM = Math.floor((durationMs % (1000 * 60 * 60)) / (1000 * 60));
-            const duration = durationH > 0 ? `${durationH}h ${durationM}m` : `${durationM}m`;
-
-            closedTrades.push({
-              symbol,
-              entryPrice: oldest.price,
-              exitPrice: trade.price,
-              quantity: matchedQty,
-              profitLoss: Math.round(profitLoss * 1000) / 1000,
-              profitLossPercent: Math.round(profitLossPercent * 100) / 100,
-              entryTime: new Date(oldest.time).toISOString(),
-              exitTime: new Date(trade.time).toISOString(),
-              duration,
-              entryOrderId: oldest.orderId,
-              exitOrderId: trade.orderId,
-              commission: trade.commission + oldest.commission,
-              commissionAsset: trade.commissionAsset,
-            });
-
-            remainingSellQty -= matchedQty;
+            remainingQty -= matchedQty;
             oldest.remainingQty -= matchedQty;
             if (oldest.remainingQty <= 0) buyQueue.shift();
           }
+
+          order.profitLoss = Math.round(totalPL * 1000) / 1000;
+          order.profitLossPercent = totalEntryCost > 0
+            ? Math.round(((totalPL / totalEntryCost) * 100) * 100) / 100
+            : 0;
         }
       }
     }
 
-    return closedTrades.sort(
-      (a, b) => new Date(b.exitTime).getTime() - new Date(a.exitTime).getTime(),
-    );
+    return enrichedOrders.sort((a, b) => b.time - a.time);
   }
 
   /**

@@ -143,18 +143,56 @@ export class BinanceTradingController {
     @Query('limit') limit?: string,
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
+    @Query('period') period?: '1d' | '1w' | '1m' | '6m',
   ) {
     try {
-      const trades = await this.binanceTradingService.getTradeHistory(user.sub, {
+      // Resolve time filter boundaries (period shortcut or explicit startTime/endTime)
+      let filterStartTime: number | undefined;
+      let filterEndTime: number | undefined;
+
+      if (period) {
+        const now = Date.now();
+        const periodMs: Record<string, number> = {
+          '1d': 24 * 60 * 60 * 1000,
+          '1w': 7 * 24 * 60 * 60 * 1000,
+          '1m': 30 * 24 * 60 * 60 * 1000,
+          '6m': 180 * 24 * 60 * 60 * 1000,
+        };
+        if (periodMs[period]) {
+          filterStartTime = now - periodMs[period];
+          filterEndTime = now;
+        }
+      } else {
+        filterStartTime = startTime ? parseInt(startTime, 10) : undefined;
+        filterEndTime = endTime ? parseInt(endTime, 10) : undefined;
+      }
+
+      // Fetch ALL trades (no time filter to Binance) so FIFO matching works correctly,
+      // then filter by time after enrichment + P&L calculation
+      const allTrades = await this.binanceTradingService.getTradeHistory(user.sub, {
         symbol,
-        limit: limit ? parseInt(limit, 10) : 100,
-        startTime: startTime ? parseInt(startTime, 10) : undefined,
-        endTime: endTime ? parseInt(endTime, 10) : undefined,
+        limit: limit ? parseInt(limit, 10) : 500,
       });
 
+      // Apply time filter after FIFO matching
+      // Use updateTime (when order was filled/triggered) instead of time (when order was placed)
+      // This correctly handles stop-loss/limit orders that were placed days/weeks before triggering
+      const trades = (filterStartTime || filterEndTime)
+        ? allTrades.filter((t: any) => {
+            const fillTime = t.updateTime || t.time || 0;
+            if (filterStartTime && fillTime < filterStartTime) return false;
+            if (filterEndTime && fillTime > filterEndTime) return false;
+            return true;
+          })
+        : allTrades;
+
       const totalTrades = trades.length;
-      const profitableTrades = trades.filter((t: any) => t.profitLoss > 0).length;
+      const sellTrades = trades.filter((t: any) => t.side === 'SELL');
+      const profitableTrades = sellTrades.filter((t: any) => t.profitLoss > 0).length;
+      const losingTrades = sellTrades.filter((t: any) => t.profitLoss < 0).length;
       const totalProfitLoss = trades.reduce((sum: number, t: any) => sum + (t.profitLoss || 0), 0);
+      const totalVolume = trades.reduce((sum: number, t: any) => sum + (t.totalValue || 0), 0);
+      const totalFees = trades.reduce((sum: number, t: any) => sum + (t.totalFee || 0), 0);
 
       return {
         success: true,
@@ -162,9 +200,11 @@ export class BinanceTradingController {
         summary: {
           totalTrades,
           profitableTrades,
-          losingTrades: totalTrades - profitableTrades,
+          losingTrades,
           totalProfitLoss: Math.round(totalProfitLoss * 1000) / 1000,
-          winRate: totalTrades > 0 ? Math.round((profitableTrades / totalTrades) * 10000) / 100 : 0,
+          winRate: sellTrades.length > 0 ? Math.round((profitableTrades / sellTrades.length) * 10000) / 100 : 0,
+          totalVolume: Math.round(totalVolume * 100) / 100,
+          totalFees: Math.round(totalFees * 100000000) / 100000000,
         },
       };
     } catch (error: any) {
