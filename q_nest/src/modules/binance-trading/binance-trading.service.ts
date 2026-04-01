@@ -143,12 +143,100 @@ export class BinanceTradingService {
 
   /**
    * GET /binance-trading/positions
-   * Current holdings with live prices and P&L
+   * Current holdings with live prices, real avg entry price (FIFO), and P&L
    */
   async getPositions(userId: string) {
     const { apiKey, apiSecret, isUS } = await this.getCredentialsWithExchange(userId);
     const service = this.getService(isUS);
-    return service.getPositions(apiKey, apiSecret);
+    const quote = isUS ? 'USD' : 'USDT';
+
+    // 1. Get basic positions (balances + live prices + 24h change)
+    const basicPositions = await service.getPositions(apiKey, apiSecret);
+
+    // 2. Get trade fills for each non-stablecoin position to calculate real avg entry price
+    const nonStablePositions = basicPositions.filter(
+      (p) => !STABLECOINS.has(p.symbol) && p.quantity > 0,
+    );
+
+    const fillsPerSymbol = await Promise.all(
+      nonStablePositions.map((p) =>
+        service
+          .getMyTrades(apiKey, apiSecret, `${p.symbol}${quote}`, { limit: 1000 })
+          .then((fills) => ({ symbol: p.symbol, fills }))
+          .catch(() => ({ symbol: p.symbol, fills: [] as any[] })),
+      ),
+    );
+
+    // 3. FIFO matching per symbol to get avg entry price for remaining holdings
+    const entryPriceMap = new Map<string, number>();
+
+    for (const { symbol, fills } of fillsPerSymbol) {
+      if (fills.length === 0) continue;
+
+      // Sort oldest first
+      const sorted = [...fills].sort((a, b) => a.time - b.time);
+      const buyQueue: { price: number; remainingQty: number }[] = [];
+
+      for (const fill of sorted) {
+        if (fill.isBuyer) {
+          const fPrice = Number(fill.price) || 0;
+          const fQty = Number(fill.qty) || 0;
+          if (fPrice > 0 && fQty > 0) {
+            buyQueue.push({ price: fPrice, remainingQty: fQty });
+          }
+        } else {
+          // SELL — consume from oldest buys
+          let remaining = Number(fill.qty) || 0;
+          while (remaining > 0 && buyQueue.length > 0) {
+            const oldest = buyQueue[0];
+            const matched = Math.min(remaining, oldest.remainingQty);
+            remaining -= matched;
+            oldest.remainingQty -= matched;
+            if (oldest.remainingQty <= 0) buyQueue.shift();
+          }
+        }
+      }
+
+      // Remaining buy queue = current position's cost basis
+      if (buyQueue.length > 0) {
+        const totalCost = buyQueue.reduce((s, b) => s + b.price * b.remainingQty, 0);
+        const totalQty = buyQueue.reduce((s, b) => s + b.remainingQty, 0);
+        if (totalQty > 0) {
+          entryPriceMap.set(symbol, totalCost / totalQty);
+        }
+      }
+    }
+
+    // 4. Enrich positions with real entry price and true P&L
+    return basicPositions.map((p) => {
+      const qty = Number(p.quantity) || 0;
+      const curPrice = Number(p.currentPrice) || 0;
+      const realEntryPrice = entryPriceMap.get(p.symbol);
+      const hasRealEntry = realEntryPrice !== undefined && realEntryPrice > 0;
+      const avgEntryPrice = hasRealEntry ? realEntryPrice : (Number(p.entryPrice) || curPrice);
+      const totalCost = avgEntryPrice * qty;
+      const marketValue = curPrice * qty;
+      const totalPnl = hasRealEntry ? marketValue - totalCost : 0;
+      const totalPnlPercent = hasRealEntry && totalCost > 0
+        ? ((marketValue - totalCost) / totalCost) * 100
+        : 0;
+
+      return {
+        symbol: p.symbol,
+        quantity: qty,
+        avgEntryPrice: Math.round(avgEntryPrice * 100000000) / 100000000,
+        currentPrice: curPrice,
+        marketValue: Math.round(marketValue * 100000000) / 100000000,
+        totalCost: Math.round(totalCost * 100000000) / 100000000,
+        // Real P&L since entry (FIFO-based avg entry vs current price)
+        unrealizedPnl: Math.round(totalPnl * 1000) / 1000,
+        unrealizedPnlPercent: Math.round(totalPnlPercent * 100) / 100,
+        // 24h market movement (from Binance ticker)
+        dailyChangePnl: Math.round((Number(p.unrealizedPnl) || 0) * 1000) / 1000,
+        dailyChangePercent: Math.round((Number(p.pnlPercent) || 0) * 100) / 100,
+        hasRealEntry,
+      };
+    });
   }
 
   /**
