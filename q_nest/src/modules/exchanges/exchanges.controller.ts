@@ -739,8 +739,18 @@ export class ExchangesController {
       this.logger.error(`OCO failed: ${err?.message}`);
     }
 
-    // Record trade fee (fire-and-forget)
-    this.recordTradeFeeForOrder(user.sub, order, placeOrderDto.symbol, placeOrderDto.side);
+    // Record platform trade fee only for Top Trades BUY executions.
+    const shouldRecordPlatformFee =
+      placeOrderDto.source === 'top_trade' && placeOrderDto.side === 'BUY';
+
+    if (shouldRecordPlatformFee) {
+      this.recordTradeFeeForOrder(
+        user.sub,
+        order,
+        placeOrderDto.symbol,
+        placeOrderDto.side,
+      );
+    }
 
     // Award QHQ for filled top trade only (fire-and-forget, daily cap enforced in service)
     if (order.status === 'FILLED' && placeOrderDto.source === 'top_trade') {
