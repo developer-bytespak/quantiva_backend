@@ -6,6 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { AppGateway } from '../../../gateways/app.gateway';
 
 const POOL_STATUS = {
   open: 'open',
@@ -24,7 +25,10 @@ const EXIT_REQUEST_STATUS = {
 export class PoolCancellationService {
   private readonly logger = new Logger(PoolCancellationService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly appGateway: AppGateway,
+  ) {}
 
   // ── User: Request Cancellation ──
 
@@ -508,6 +512,14 @@ export class PoolCancellationService {
       `Cancellation ${cancellationId} approved by admin ${adminId}, refund: ${refundAmount}`,
     );
 
+    // Notify user in real-time via WebSocket
+    this.appGateway.emitPoolEvent(cancellation.member.user_id, 'pool:cancellation-updated', {
+      pool_id: poolId,
+      cancellation_id: cancellationId,
+      status: 'approved',
+      refund_amount: refundAmount,
+    });
+
     return {
       cancellation_id: updated.cancellation_id,
       contribution_amount: Number(updated.invested_amount),
@@ -544,6 +556,7 @@ export class PoolCancellationService {
 
     const cancellation = await this.prisma.vc_pool_cancellations.findUnique({
       where: { cancellation_id: cancellationId },
+      include: { member: { select: { user_id: true } } },
     });
 
     if (!cancellation || cancellation.pool_id !== poolId) {
@@ -567,6 +580,13 @@ export class PoolCancellationService {
     });
 
     this.logger.log(`Cancellation ${cancellationId} rejected by admin ${adminId}`);
+
+    // Notify user in real-time via WebSocket
+    this.appGateway.emitPoolEvent(cancellation.member.user_id, 'pool:cancellation-updated', {
+      pool_id: poolId,
+      cancellation_id: cancellationId,
+      status: 'rejected',
+    });
 
     return {
       cancellation_id: updated.cancellation_id,
@@ -674,6 +694,13 @@ export class PoolCancellationService {
     this.logger.log(
       `Cancellation ${cancellationId} marked as refunded by admin ${adminId}, member deactivated`,
     );
+
+    // Notify user in real-time via WebSocket
+    this.appGateway.emitPoolEvent(cancellation.member.user_id, 'pool:refund-completed', {
+      pool_id: poolId,
+      cancellation_id: cancellationId,
+      refund_amount: Number(result.refund_amount),
+    });
 
     return {
       cancellation_id: cancellationId,
