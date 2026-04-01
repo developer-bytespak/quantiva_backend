@@ -6,6 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { AppGateway } from '../../../gateways/app.gateway';
 
 const POOL_STATUS = {
   active: 'active',
@@ -29,7 +30,10 @@ const PAYOUT_TYPE = {
 export class PoolPayoutService {
   private readonly logger = new Logger(PoolPayoutService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly appGateway: AppGateway,
+  ) {}
 
   // ── Admin: Complete Pool ──
 
@@ -247,6 +251,7 @@ export class PoolPayoutService {
 
     const payout = await this.prisma.vc_pool_payouts.findUnique({
       where: { payout_id: payoutId },
+      include: { member: { select: { user_id: true } } },
     });
 
     if (!payout || payout.pool_id !== poolId) {
@@ -270,6 +275,13 @@ export class PoolPayoutService {
     });
 
     this.logger.log(`Payout ${payoutId} marked as paid by admin ${adminId}`);
+
+    // Notify user in real-time via WebSocket
+    this.appGateway.emitPoolEvent(payout.member.user_id, 'pool:payout-ready', {
+      pool_id: poolId,
+      payout_id: payoutId,
+      net_payout: Number(payout.net_payout),
+    });
 
     return {
       payout_id: updated.payout_id,

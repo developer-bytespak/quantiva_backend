@@ -6,6 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { AppGateway } from '../../../gateways/app.gateway';
 
 const POOL_STATUS = { open: 'open', full: 'full' } as const;
 
@@ -13,7 +14,10 @@ const POOL_STATUS = { open: 'open', full: 'full' } as const;
 export class PaymentReviewService {
   private readonly logger = new Logger(PaymentReviewService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly appGateway: AppGateway,
+  ) {}
 
   // ── List payment submissions for a pool ──
 
@@ -189,6 +193,13 @@ export class PaymentReviewService {
       `Payment ${submissionId} approved by admin ${adminId} for pool ${poolId}`,
     );
 
+    // Notify user in real-time via WebSocket
+    this.appGateway.emitPoolEvent(submission.user_id, 'pool:payment-verified', {
+      pool_id: poolId,
+      submission_id: submissionId,
+      member_id: result.member.member_id,
+    });
+
     return {
       message: 'Payment approved. User is now a pool member.',
       submission_id: result.submission.submission_id,
@@ -246,6 +257,13 @@ export class PaymentReviewService {
     this.logger.log(
       `Payment ${submissionId} rejected by admin ${adminId}: ${rejectionReason}`,
     );
+
+    // Notify user in real-time via WebSocket
+    this.appGateway.emitPoolEvent(submission.user_id, 'pool:payment-rejected', {
+      pool_id: poolId,
+      submission_id: submissionId,
+      rejection_reason: rejectionReason,
+    });
 
     return {
       message: 'Payment rejected. Seat has been released.',

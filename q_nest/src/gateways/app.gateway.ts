@@ -80,6 +80,16 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+  /** Emit a VC pool event to a specific user */
+  emitPoolEvent(userId: string, event: string, data: Record<string, any>): void {
+    if (!this.server) return;
+    try {
+      this.server.to(`user:${userId}`).emit(event, data);
+    } catch (error) {
+      this.logger.warn(`Failed to emit ${event} to user ${userId}: ${error}`);
+    }
+  }
+
   emitNotificationCount(userId: string, count: number , payload: any): void {
     if (!this.server) return; // server not initialised yet (e.g. called during bootstrap)
     try {
