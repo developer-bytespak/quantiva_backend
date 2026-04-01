@@ -251,12 +251,12 @@ export class BinanceTradingService {
 
   /**
    * GET /binance-trading/orders/all
-   * All orders: NEW, FILLED, CANCELED, EXPIRED, PENDING_CANCEL
-   * Requires a symbol — if none given, queries all held asset pairs
+   * All orders enriched: NEW, FILLED, CANCELED, EXPIRED, PARTIALLY_FILLED
+   * Includes avg fill price, total value, fill percent calculated from cummulativeQuoteQty
    */
   async getAllOrders(
     userId: string,
-    params: { symbol?: string; limit?: number; startTime?: number; endTime?: number },
+    params: { symbol?: string; limit?: number },
   ) {
     const { apiKey, apiSecret, isUS } = await this.getCredentialsWithExchange(userId);
     const service = this.getService(isUS);
@@ -265,7 +265,7 @@ export class BinanceTradingService {
     if (params.symbol) {
       symbols = [params.symbol.toUpperCase()];
     } else {
-      symbols = await this.getTradingSymbols(apiKey, apiSecret, isUS);
+      symbols = await this.getAllTradedSymbols(apiKey, apiSecret, isUS);
     }
 
     if (symbols.length === 0) return [];
@@ -274,9 +274,7 @@ export class BinanceTradingService {
       symbols.map((sym) =>
         service
           .getAllOrders(apiKey, apiSecret, sym, {
-            limit: params.limit || 100,
-            startTime: params.startTime,
-            endTime: params.endTime,
+            limit: params.limit || 500,
           })
           .catch((err) => {
             this.logger.warn(`getAllOrders failed for ${sym}: ${err.message}`);
@@ -285,9 +283,36 @@ export class BinanceTradingService {
       ),
     );
 
-    return results
-      .flat()
-      .sort((a: any, b: any) => (b.time || 0) - (a.time || 0));
+    const allOrders = results.flat();
+
+    // Enrich each order with calculated fields
+    return allOrders
+      .map((order) => {
+        const qty = Number(order.quantity) || 0;
+        const execQty = Number(order.executedQty) || 0;
+        const quoteQty = Number(order.cummulativeQuoteQty) || 0;
+        const avgFillPrice = execQty > 0 ? quoteQty / execQty : 0;
+        const fillPercent = qty > 0 ? Math.round((execQty / qty) * 100) : 0;
+
+        return {
+          orderId: order.orderId,
+          symbol: order.symbol,
+          side: order.side,
+          type: order.type,
+          status: order.status,
+          fillPercent,
+          quantity: qty,
+          filledQuantity: execQty,
+          avgFillPrice: Math.round(avgFillPrice * 100000000) / 100000000,
+          orderPrice: order.type === 'MARKET' ? 'Market' : (order.price || order.stopPrice || 0),
+          totalValue: Math.round(quoteQty * 100000000) / 100000000,
+          stopPrice: order.stopPrice,
+          timeInForce: order.timeInForce,
+          time: order.time,
+          updateTime: order.updateTime,
+        };
+      })
+      .sort((a, b) => (b.updateTime || b.time || 0) - (a.updateTime || a.time || 0));
   }
 
   /**
