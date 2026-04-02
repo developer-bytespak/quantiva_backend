@@ -1422,7 +1422,7 @@ export class StrategiesController {
       // Build where clause - filter by target assets if specified.
       let whereClause: any = {
         strategy_id: strategyId,
-        action: { in: ['BUY', 'SELL'] }, // Only actionable signals for trading view
+        action: 'BUY', // Only BUY signals for trading view
       };
       
       // If strategy has specific target assets, only return signals for those assets
