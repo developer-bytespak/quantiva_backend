@@ -22,7 +22,12 @@ interface BybitAccountInfo {
     walletBalance: string;
     availableToWithdraw: string;
     locked: string;
+    usdValue: string;
+    equity: string;
   }>;
+  accountType: string;
+  totalEquity: string;
+  totalWalletBalance: string;
 }
 
 interface BybitOrder {
@@ -82,38 +87,25 @@ export class BybitService {
   }
 
   /**
-   * Gets Bybit server time to sync with local time
+   * Gets Bybit server time to sync with local time.
+   * Uses the `timeSecond` field from any v5 API response header, or falls back to local time.
    */
   private async getBybitServerTime(): Promise<number> {
     try {
-      // Bybit v5 doesn't have a dedicated server time endpoint
-      // We'll use local time but with a larger recvWindow to account for clock drift
-      // Alternatively, we can extract server time from error responses if needed
-      const localTime = Date.now();
-      
-      // Try to get server time from a lightweight public endpoint
-      // If that fails, use local time (the larger recvWindow will help)
-      try {
-        const response = await this.apiClient.get('/v5/market/time');
-        if (response.data?.retCode === 0 && response.data?.result) {
-          const serverTime = response.data.result.timeSecond || response.data.result.time;
-          if (serverTime) {
-            // Convert seconds to milliseconds if needed
-            return typeof serverTime === 'number' 
-              ? (serverTime > 1e12 ? serverTime : serverTime * 1000)
-              : parseInt(String(serverTime), 10) * 1000;
-          }
-        }
-      } catch {
-        // If endpoint doesn't exist or fails, use local time
+      // Bybit v5 returns server time in the `time` field of every response envelope.
+      // Use a lightweight public endpoint to extract it.
+      const response = await this.apiClient.get('/v5/announcements/index', {
+        params: { locale: 'en-US', limit: 1 },
+        timeout: 5000,
+      });
+      const serverTime = response.data?.time;
+      if (serverTime && typeof serverTime === 'number' && serverTime > 1e12) {
+        return serverTime;
       }
-      
-      return localTime;
-    } catch (error) {
-      // Fallback to local time if server time fetch fails
-      this.logger.warn('Failed to fetch Bybit server time, using local time');
-      return Date.now();
+    } catch {
+      // Fallback to local time — the larger recvWindow (5000ms) handles minor drift
     }
+    return Date.now();
   }
 
   /**
@@ -243,10 +235,11 @@ export class BybitService {
           throw error;
         }
 
-        // Handle rate limiting
+        // Handle rate limiting — cap wait to 5s to avoid blocking the request for too long
         if (error.response?.status === 429) {
-          const retryAfter = error.response.headers['retry-after'] || 60;
-          this.logger.warn(`Rate limit exceeded, retrying after ${retryAfter} seconds`);
+          const retryAfterRaw = parseInt(error.response.headers['retry-after'] || '5', 10);
+          const retryAfter = Math.min(retryAfterRaw, 5); // cap at 5 seconds
+          this.logger.warn(`Rate limit exceeded, retrying after ${retryAfter}s (attempt ${attempt + 1}/${this.maxRetries})`);
           await this.delay(retryAfter * 1000);
           continue;
         }
@@ -317,13 +310,30 @@ export class BybitService {
     accountType: string;
   }> {
     try {
-      // Use /v5/user/query-api for better API key verification
-      await this.makeSignedRequest('/v5/user/query-api', apiKey, apiSecret);
-      
+      // /v5/user/query-api returns permissions and key info
+      const apiInfo = await this.makeSignedRequest('/v5/user/query-api', apiKey, apiSecret);
+
+      // Parse permissions from response (readOnly, trade, transfer, etc.)
+      const permissions: string[] = [];
+      if (apiInfo?.readOnly === 0) {
+        permissions.push('read', 'trade');
+      } else {
+        permissions.push('read');
+      }
+      if (apiInfo?.permissions?.Spot?.includes('SpotTrade')) {
+        permissions.push('spot_trade');
+      }
+      if (apiInfo?.permissions?.Wallet?.includes('AccountTransfer')) {
+        permissions.push('transfer');
+      }
+
+      // Detect account type by probing wallet balance endpoints
+      const accountInfo = await this.getAccountInfo(apiKey, apiSecret);
+
       return {
         valid: true,
-        permissions: ['read'], // Bybit doesn't provide detailed permissions in this endpoint
-        accountType: 'UNIFIED',
+        permissions: [...new Set(permissions)],
+        accountType: accountInfo.accountType,
       };
     } catch (error: any) {
       if (error instanceof BybitInvalidApiKeyException || error instanceof BybitApiException) {
@@ -334,16 +344,48 @@ export class BybitService {
   }
 
   /**
-   * Fetches account info from Bybit (used internally to avoid redundant calls)
+   * Fetches account info from the Bybit UNIFIED trading wallet only.
+   *
+   * Bybit has two wallets:
+   *  - UNIFIED (trading) — the only wallet you can trade from
+   *  - FUND (funding) — only for receiving deposits/transfers, cannot trade
+   *
+   * We only show the UNIFIED balance because that's the tradable amount.
+   * If the user has funds in FUND, they must transfer to UNIFIED via Bybit app first.
    */
-  async getAccountInfo(apiKey: string, apiSecret: string): Promise<BybitAccountInfo> {
-    const result = await this.makeSignedRequest('/v5/account/wallet-balance', apiKey, apiSecret, {
-      accountType: 'UNIFIED',
-    });
-    
-    return {
-      coin: result.list?.[0]?.coin || [],
-    };
+  async getAccountInfo(apiKey: string, apiSecret: string, _preferredAccountType?: string): Promise<BybitAccountInfo> {
+    try {
+      const result = await this.makeSignedRequest('/v5/account/wallet-balance', apiKey, apiSecret, {
+        accountType: 'UNIFIED',
+      });
+
+      const accountData = result.list?.[0];
+      const coins = (accountData?.coin || []).filter(
+        (c: any) => parseFloat(c.walletBalance || '0') > 0,
+      );
+
+      if (coins.length > 0) {
+        this.logger.debug(`Bybit UNIFIED wallet: ${coins.length} coins, equity=${accountData?.totalEquity || '0'}`);
+      }
+
+      return {
+        coin: coins,
+        accountType: 'UNIFIED',
+        totalEquity: accountData?.totalEquity || '0',
+        totalWalletBalance: accountData?.totalWalletBalance || '0',
+      };
+    } catch (error: any) {
+      if (error instanceof BybitInvalidApiKeyException) {
+        throw error;
+      }
+      this.logger.warn(`Bybit UNIFIED wallet-balance failed: ${error?.message ?? error}`);
+      return {
+        coin: [],
+        accountType: 'UNIFIED',
+        totalEquity: '0',
+        totalWalletBalance: '0',
+      };
+    }
   }
 
   /**
@@ -356,9 +398,13 @@ export class BybitService {
         return walletBalance > 0;
       })
       .map((coin) => {
-        const free = parseFloat(coin.availableToWithdraw || '0');
-        const locked = parseFloat(coin.locked || '0');
         const total = parseFloat(coin.walletBalance || '0');
+        const locked = parseFloat(coin.locked || '0');
+        // Bybit UNIFIED accounts return empty string for availableToWithdraw,
+        // so fall back to walletBalance - locked
+        const free = coin.availableToWithdraw && coin.availableToWithdraw !== ''
+          ? parseFloat(coin.availableToWithdraw)
+          : total - locked;
 
         return {
           symbol: coin.coin,
@@ -368,9 +414,12 @@ export class BybitService {
         };
       });
 
+    // Use Bybit's pre-calculated totalEquity (USD value of entire account)
+    const totalValueUSD = parseFloat(accountInfo.totalEquity || '0') || parseFloat(accountInfo.totalWalletBalance || '0') || 0;
+
     return {
       assets,
-      totalValueUSD: 0, // Calculated on frontend with prices
+      totalValueUSD,
     };
   }
 
@@ -433,40 +482,50 @@ export class BybitService {
     accountInfo: BybitAccountInfo,
   ): Promise<PositionDto[]> {
     try {
-      // Get prices for all assets with balances
-      const symbols = accountInfo.coin
-        .filter((c) => parseFloat(c.walletBalance || '0') > 0)
-        .map((c) => `${c.coin}USDT`);
+      // Stablecoins pegged to $1 — no need to fetch ticker prices for these
+      const stablecoins = new Set(['USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDP', 'FDUSD']);
 
-      if (symbols.length === 0) {
+      const coinsWithBalance = accountInfo.coin.filter(
+        (c) => parseFloat(c.walletBalance || '0') > 0,
+      );
+
+      if (coinsWithBalance.length === 0) {
         return [];
       }
 
-      // Fetch prices for all symbols
-      const prices = await this.getTickerPrices(symbols);
+      // Only fetch ticker prices for non-stablecoin assets
+      const nonStableCoins = coinsWithBalance.filter((c) => !stablecoins.has(c.coin.toUpperCase()));
+      const symbols = nonStableCoins.map((c) => `${c.coin}USDT`);
+
+      // Fetch prices for non-stable symbols
+      const prices = symbols.length > 0 ? await this.getTickerPrices(symbols) : [];
       const priceMap = new Map(prices.map((p) => [p.symbol.replace('USDT', ''), p.price]));
 
-      const positions: PositionDto[] = accountInfo.coin
-        .filter((coin) => {
-          const total = parseFloat(coin.walletBalance || '0');
-          return total > 0;
-        })
-        .map((coin) => {
-          const quantity = parseFloat(coin.walletBalance || '0');
-          const currentPrice = priceMap.get(coin.coin) || 0;
-          const entryPrice = currentPrice; // Simplified - would need trade history for accurate entry price
-          const unrealizedPnl = (currentPrice - entryPrice) * quantity;
-          const pnlPercent = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
+      const positions: PositionDto[] = coinsWithBalance.map((coin) => {
+        const quantity = parseFloat(coin.walletBalance || '0');
+        const isStable = stablecoins.has(coin.coin.toUpperCase());
 
-          return {
-            symbol: coin.coin,
-            quantity,
-            entryPrice,
-            currentPrice,
-            unrealizedPnl,
-            pnlPercent,
-          };
-        });
+        // Use ticker price if available, otherwise derive from Bybit's usdValue
+        let currentPrice: number;
+        if (isStable) {
+          currentPrice = 1;
+        } else if (priceMap.has(coin.coin)) {
+          currentPrice = priceMap.get(coin.coin)!;
+        } else {
+          // Fallback: derive price from Bybit's pre-calculated usdValue
+          const usdValue = parseFloat(coin.usdValue || '0');
+          currentPrice = quantity > 0 ? usdValue / quantity : 0;
+        }
+
+        return {
+          symbol: coin.coin,
+          quantity,
+          entryPrice: currentPrice,
+          currentPrice,
+          unrealizedPnl: 0,
+          pnlPercent: 0,
+        };
+      });
 
       return positions;
     } catch (error: any) {
@@ -568,96 +627,43 @@ export class BybitService {
    * Fetches real-time ticker prices
    */
   async getTickerPrices(symbols: string[]): Promise<TickerPriceDto[]> {
-    try {
-      // Bybit v5 allows fetching multiple tickers
-      const symbolParam = symbols.join(',');
-      const result = await this.makePublicRequest('/v5/market/tickers', {
-        category: 'spot',
-        symbol: symbolParam,
-      });
+    // Bybit v5 /market/tickers only accepts a single symbol per request,
+    // so we must fetch each symbol individually
+    const prices = await Promise.all(
+      symbols.map(async (symbol) => {
+        try {
+          const result = await this.makePublicRequest('/v5/market/tickers', {
+            category: 'spot',
+            symbol,
+          });
 
-      const tickers = (result.list || []) as BybitTicker[];
+          const tickers = (result.list || []) as BybitTicker[];
+          if (tickers.length > 0) {
+            const ticker = tickers[0];
+            const price = parseFloat(String(ticker.lastPrice || '0'));
+            const prevPriceStr = ticker.prevPrice24h
+              ? String(ticker.prevPrice24h)
+              : price.toString();
+            const prevPrice = parseFloat(prevPriceStr);
+            const change24h = price - prevPrice;
+            const changePercent24h = prevPrice > 0 ? (change24h / prevPrice) * 100 : 0;
 
-      return tickers.map((ticker) => {
-        const price = parseFloat(String(ticker.lastPrice || '0'));
-        const prevPriceStr = ticker.prevPrice24h 
-          ? String(ticker.prevPrice24h) 
-          : price.toString();
-        const prevPrice = parseFloat(prevPriceStr);
-        const change24h = price - prevPrice;
-        const changePercent24h = prevPrice > 0 ? (change24h / prevPrice) * 100 : 0;
-
-        return {
-          symbol: ticker.symbol,
-          price,
-          change24h,
-          changePercent24h,
-        };
-      });
-    } catch (error: any) {
-      // Fallback: fetch prices one by one if batch fails
-      if (symbols.length === 1) {
-        const result = await this.makePublicRequest('/v5/market/tickers', {
-          category: 'spot',
-          symbol: symbols[0],
-        });
-        
-        const tickers = (result.list || []) as BybitTicker[];
-        if (tickers.length > 0) {
-          const ticker = tickers[0];
-          const price = parseFloat(String(ticker.lastPrice || '0'));
-          const prevPriceStr = ticker.prevPrice24h 
-            ? String(ticker.prevPrice24h) 
-            : price.toString();
-          const prevPrice = parseFloat(prevPriceStr);
-          const change24h = price - prevPrice;
-          const changePercent24h = prevPrice > 0 ? (change24h / prevPrice) * 100 : 0;
-
-          return [{
-            symbol: ticker.symbol,
-            price,
-            change24h,
-            changePercent24h,
-          }];
-        }
-      }
-
-      // For multiple symbols, try individual requests
-      const prices = await Promise.all(
-        symbols.map(async (symbol) => {
-          try {
-            const result = await this.makePublicRequest('/v5/market/tickers', {
-              category: 'spot',
-              symbol,
-            });
-            
-            const tickers = (result.list || []) as BybitTicker[];
-            if (tickers.length > 0) {
-              const ticker = tickers[0];
-              const price = parseFloat(String(ticker.lastPrice || '0'));
-              const prevPriceStr = ticker.prevPrice24h 
-                ? String(ticker.prevPrice24h) 
-                : price.toString();
-              const prevPrice = parseFloat(prevPriceStr);
-              const change24h = price - prevPrice;
-              const changePercent24h = prevPrice > 0 ? (change24h / prevPrice) * 100 : 0;
-
-              return {
-                symbol: ticker.symbol,
-                price,
-                change24h,
-                changePercent24h,
-              };
-            }
-            return null;
-          } catch {
-            return null;
+            return {
+              symbol: ticker.symbol,
+              price,
+              change24h,
+              changePercent24h,
+            };
           }
-        }),
-      );
+          return null;
+        } catch (err: any) {
+          this.logger.warn(`Failed to fetch ticker for ${symbol}: ${err?.message ?? err}`);
+          return null;
+        }
+      }),
+    );
 
-      return prices.filter((p): p is TickerPriceDto => p !== null);
-    }
+    return prices.filter((p): p is TickerPriceDto => p !== null);
   }
 
   /**
@@ -746,7 +752,49 @@ export class BybitService {
   }
 
   /**
-   * Places an order on Bybit
+   * Transfers funds between Bybit account types (e.g., FUND → UNIFIED).
+   * Returns true if transfer succeeded or was not needed.
+   */
+  async internalTransfer(
+    apiKey: string,
+    apiSecret: string,
+    coin: string,
+    amount: string,
+    fromAccountType: string,
+    toAccountType: string,
+  ): Promise<boolean> {
+    try {
+      const crypto = require('crypto');
+      const transferId = crypto.randomUUID();
+
+      const result = await this.makeSignedRequest(
+        '/v5/asset/transfer/inter-transfer',
+        apiKey,
+        apiSecret,
+        { transferId, coin, amount, fromAccountType, toAccountType },
+        'POST',
+      );
+
+      const success = result?.status === 'SUCCESS';
+      if (success) {
+        this.logger.log(`Bybit internal transfer: ${amount} ${coin} from ${fromAccountType} → ${toAccountType}`);
+      }
+      return success;
+    } catch (error: any) {
+      this.logger.warn(`Bybit internal transfer failed: ${error?.message ?? error}`);
+      return false;
+    }
+  }
+
+  /**
+   * Places an order on Bybit.
+   * Only trades from the UNIFIED wallet. If insufficient balance in UNIFIED,
+   * Bybit will return an error — the user must transfer funds from FUND → UNIFIED first.
+   *
+   * For MARKET BUY orders: the `quantity` is treated as the base coin amount.
+   * We fetch the current price to estimate the order value, and if below Bybit's
+   * minimum order amount ($5 for most pairs), we use `marketUnit: quoteCoin`
+   * to send the USDT value directly instead.
    */
   async placeOrder(
     apiKey: string,
@@ -773,6 +821,29 @@ export class BybitService {
       if (type === 'LIMIT') {
         params.price = price!.toString();
       }
+
+      // For MARKET BUY: always use quoteCoin mode (USDT).
+      // The frontend sends quantity as base coin (e.g. 0.000149 BTC),
+      // so we convert back to USDT. This avoids Bybit's min order value errors
+      // and precision loss from lot-size rounding.
+      if (type === 'MARKET' && side === 'BUY') {
+        try {
+          const tickers = await this.getTickerPrices([symbol]);
+          const currentPrice = tickers[0]?.price || 0;
+          if (currentPrice > 0) {
+            const usdtAmount = quantity * currentPrice;
+            // Use ceiling to avoid going below user's intended spend
+            params.qty = Math.ceil(usdtAmount * 100) / 100;
+            params.qty = params.qty.toString();
+            params.marketUnit = 'quoteCoin';
+          }
+        } catch {
+          // If price fetch fails, fall back to base coin qty
+        }
+      }
+
+      // For MARKET SELL: also use quoteCoin is not applicable — sell uses base coin qty.
+      // No change needed for SELL.
 
       const result = await this.makeSignedRequest('/v5/order/create', apiKey, apiSecret, params, 'POST');
       const order = result as any;

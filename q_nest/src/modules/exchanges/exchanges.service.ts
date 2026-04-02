@@ -634,14 +634,48 @@ export class ExchangesService {
         portfolio = this.binanceUSService.calculatePortfolioFromPositions(positions);
       } else if (isBybit) {
         // OPTIMIZATION: Fetch account info once and reuse it
-        const accountInfo = await this.bybitService.getAccountInfo(apiKey, apiSecret);
-        
-        // Fetch balance, positions, and orders in parallel
-        [balance, positions, orders] = await Promise.all([
-          Promise.resolve(this.bybitService.mapAccountToBalance(accountInfo)),
+        // Use stored account type from connection_metadata if available
+        const metadata = (connection.connection_metadata as any) || {};
+        const preferredAccountType = metadata.bybitAccountType || metadata.accountType || undefined;
+        const accountInfo = await this.bybitService.getAccountInfo(apiKey, apiSecret, preferredAccountType);
+
+        // Persist detected account type for future syncs
+        if (accountInfo.accountType && accountInfo.accountType !== preferredAccountType) {
+          await this.prisma.user_exchange_connections.update({
+            where: { connection_id: connectionId },
+            data: {
+              connection_metadata: {
+                ...metadata,
+                bybitAccountType: accountInfo.accountType,
+              },
+            },
+          }).catch((err) => this.logger.warn(`Failed to persist Bybit account type: ${err?.message}`));
+        }
+
+        // Keep dashboard resilient: if positions/orders fail, still return balance data
+        balance = this.bybitService.mapAccountToBalance(accountInfo);
+        const [positionsResult, ordersResult] = await Promise.allSettled([
           this.bybitService.getPositionsFromAccount(apiKey, apiSecret, accountInfo),
           this.bybitService.getOpenOrders(apiKey, apiSecret),
         ]);
+
+        if (positionsResult.status === 'fulfilled') {
+          positions = positionsResult.value;
+        } else {
+          this.logger.warn(
+            `Bybit positions fetch failed for ${connectionId}, continuing with empty positions: ${positionsResult.reason?.message ?? positionsResult.reason}`,
+          );
+          positions = [];
+        }
+
+        if (ordersResult.status === 'fulfilled') {
+          orders = ordersResult.value;
+        } else {
+          this.logger.warn(
+            `Bybit open orders fetch failed for ${connectionId}, continuing with empty orders: ${ordersResult.reason?.message ?? ordersResult.reason}`,
+          );
+          orders = [];
+        }
 
         // Portfolio is calculated from positions
         portfolio = this.bybitService.calculatePortfolioFromPositions(positions);

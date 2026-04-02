@@ -474,7 +474,7 @@ export class ExchangesService {
         this.logger.log(`Fetching Bybit tickers page ${page}...`);
 
         const response = await axios.get(
-          `${this.baseUrl}/exchanges/bybit/tickers`,
+          `${this.baseUrl}/exchanges/bybit_spot/tickers`,
           {
             headers: {
               ...(this.isProApiKey && this.apiKey
@@ -573,7 +573,7 @@ export class ExchangesService {
         this.logger.log(`Fetching Bybit USDT pairs page ${page}...`);
 
         const response = await axios.get(
-          `${this.baseUrl}/exchanges/bybit/tickers`,
+          `${this.baseUrl}/exchanges/bybit_spot/tickers`,
           {
             headers: {
               ...(this.isProApiKey && this.apiKey
