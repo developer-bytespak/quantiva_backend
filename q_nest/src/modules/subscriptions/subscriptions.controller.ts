@@ -1,11 +1,14 @@
 import { Controller, Get, Post, Put, Delete, Body, Param, Query, Req, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { SubscriptionsService } from './subscriptions.service';
-import { BadRequest } from 'ccxt';
+import { PrismaService } from '../../prisma/prisma.service';
 
 
 @Controller('/subscriptions')
 export class SubscriptionsController {
-  constructor(private readonly subscriptionsService: SubscriptionsService) { }
+  constructor(
+    private readonly subscriptionsService: SubscriptionsService,
+    private readonly prisma: PrismaService,
+  ) { }
 
   @Get('usage/check/:featureType')
   async checkUsage(
@@ -38,22 +41,29 @@ export class SubscriptionsController {
   }
 
   @Put('update')
-  updateSubscription(@Req() req:any, @Body() updateSubscriptionDto: any) {
-    const id =  req.subscriptionUser?.subscription_id;
-    const tier = req.subscriptionUser?.tier;
+  async updateSubscription(@Req() req:any, @Body() updateSubscriptionDto: any) {
+    const userId = req.subscriptionUser?.user_id;
+    if (!userId) {
+      throw new BadRequestException('User not authenticated');
+    }
 
-    if(!id) {
+    // Query DB directly instead of relying on cached tier
+    const active = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: userId, status: 'active' },
+    });
+
+    if (!active) {
       throw new BadRequestException('Subscription ID is required to update subscription');
     }
 
     // User must cancel current PRO/ELITE subscription before updating
-    if (tier === 'PRO' || tier === 'ELITE') {
+    if (active.tier === 'PRO' || active.tier === 'ELITE') {
       throw new BadRequestException(
         'Cancel your current subscription.',
       );
     }
 
-    return this.subscriptionsService.updateSubscription(id, updateSubscriptionDto);
+    return this.subscriptionsService.updateSubscription(active.subscription_id, updateSubscriptionDto);
   }
 
   @Post('plans')

@@ -44,26 +44,26 @@ export class StripeController {
     @Req() req: any,
   ) {
 
-    // Request logged via interceptor
-
-
-    const tier = req.subscriptionUser?.tier;
-
-    if (tier === 'PRO' || tier === 'ELITE') {
-      throw new BadRequestException(
-        'Cancel your current subscription.',
-      );
-    } 
-    
-    const { price_id, success_url, cancel_url, plan_id } = req.body;
-
-    // console.log("BODY:", req.body);  
-    if (!price_id) {
-      throw new BadRequestException('price_id is required');
-    }
     const userId = req.subscriptionUser?.user_id;
     if (!userId) {
       throw new UnauthorizedException('User not authenticated!');
+    }
+
+    // Query DB directly instead of relying on cached tier
+    const activeSubscription = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: userId, status: 'active' },
+    });
+
+    if (activeSubscription && (activeSubscription.tier === 'PRO' || activeSubscription.tier === 'ELITE')) {
+      throw new BadRequestException(
+        'Cancel your current subscription.',
+      );
+    }
+
+    const { price_id, success_url, cancel_url, plan_id } = req.body;
+
+    if (!price_id) {
+      throw new BadRequestException('price_id is required');
     }
 
     // if (plan_id) {
@@ -106,17 +106,17 @@ export class StripeController {
       throw new UnauthorizedException('User not authenticated');
     }
 
-    const tier = req.subscriptionUser?.tier;
+    // Query DB directly instead of relying on cached tier
+    const active = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: userId, status: 'active' },
+      include: { plan: true },
+    });
 
-    if(tier == 'FREE'){
+    if (!active || active.tier === 'FREE') {
       throw new BadRequestException('You are already on the FREE tier');
     }
 
-    const active = await this.subscriptionsService.getActiveSubscriptionWithFeatures(
-      userId,
-    );
-
-    if (!active || active.billing_provider !== 'stripe' || !active.external_id) {
+    if (active.billing_provider !== 'stripe' || !active.external_id) {
       throw new BadRequestException('No active Stripe subscription to cancel');
     }
 
