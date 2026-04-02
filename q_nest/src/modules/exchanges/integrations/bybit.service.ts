@@ -810,12 +810,32 @@ export class BybitService {
         throw new BybitApiException('Price is required for LIMIT orders');
       }
 
+      // Fetch instrument info to get basePrecision for qty truncation
+      let basePrecision: string | null = null;
+      try {
+        const instResult = await this.makePublicRequest('/v5/market/instruments-info', {
+          category: 'spot',
+          symbol,
+        });
+        basePrecision = instResult.list?.[0]?.lotSizeFilter?.basePrecision || null;
+      } catch {
+        this.logger.warn(`Failed to fetch instrument info for ${symbol}, using raw quantity`);
+      }
+
+      // Truncate quantity to Bybit's allowed precision (e.g., 0.000001 for BTC)
+      let adjustedQty = quantity;
+      if (basePrecision) {
+        const decimals = (basePrecision.split('.')[1] || '').replace(/0+$/, '').length;
+        const factor = Math.pow(10, decimals);
+        adjustedQty = Math.floor(quantity * factor) / factor;
+      }
+
       const params: Record<string, any> = {
         category: 'spot',
         symbol,
         side: side === 'BUY' ? 'Buy' : 'Sell',
         orderType: type === 'MARKET' ? 'Market' : 'Limit',
-        qty: quantity.toString(),
+        qty: adjustedQty.toString(),
       };
 
       if (type === 'LIMIT') {
@@ -823,16 +843,12 @@ export class BybitService {
       }
 
       // For MARKET BUY: always use quoteCoin mode (USDT).
-      // The frontend sends quantity as base coin (e.g. 0.000149 BTC),
-      // so we convert back to USDT. This avoids Bybit's min order value errors
-      // and precision loss from lot-size rounding.
       if (type === 'MARKET' && side === 'BUY') {
         try {
           const tickers = await this.getTickerPrices([symbol]);
           const currentPrice = tickers[0]?.price || 0;
           if (currentPrice > 0) {
             const usdtAmount = quantity * currentPrice;
-            // Use ceiling to avoid going below user's intended spend
             params.qty = Math.ceil(usdtAmount * 100) / 100;
             params.qty = params.qty.toString();
             params.marketUnit = 'quoteCoin';
@@ -841,9 +857,6 @@ export class BybitService {
           // If price fetch fails, fall back to base coin qty
         }
       }
-
-      // For MARKET SELL: also use quoteCoin is not applicable — sell uses base coin qty.
-      // No change needed for SELL.
 
       const result = await this.makeSignedRequest('/v5/order/create', apiKey, apiSecret, params, 'POST');
       const order = result as any;
