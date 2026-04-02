@@ -76,6 +76,27 @@ export class UsersController {
     }
   }
 
+  @Delete('me/profile-picture')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async removeProfilePicture(@CurrentUser() user: TokenPayload) {
+    try {
+      const oldUrl = await this.usersService.removeProfilePicture(user.sub);
+
+      // Delete from Cloudinary if there was a previous image
+      if (oldUrl) {
+        await this.cloudinaryService.deleteImage(oldUrl).catch(() => {});
+      }
+
+      return { message: 'Profile picture removed' };
+    } catch (error) {
+      throw new HttpException(
+        'Failed to remove profile picture',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
   @Get()
   findAll() {
     return this.usersService.findAll();

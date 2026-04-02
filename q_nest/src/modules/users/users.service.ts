@@ -157,5 +157,20 @@ export class UsersService {
       } as any,
     });
   }
+
+  async removeProfilePicture(userId: string) {
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+      select: { profile_pic_url: true } as any,
+    });
+    const oldUrl = (user as any)?.profile_pic_url ?? null;
+
+    await this.prisma.users.update({
+      where: { user_id: userId },
+      data: { profile_pic_url: null } as any,
+    });
+
+    return oldUrl;
+  }
 }
 

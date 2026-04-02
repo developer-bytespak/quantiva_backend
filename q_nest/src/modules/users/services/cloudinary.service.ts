@@ -13,6 +13,25 @@ export class CloudinaryService {
     });
   }
 
+  /**
+   * Extract the Cloudinary public_id from a secure_url so we can delete it.
+   * e.g. "https://res.cloudinary.com/.../profile_pictures/abc123.jpg" → "profile_pictures/abc123"
+   */
+  private extractPublicId(url: string): string | null {
+    try {
+      const match = url.match(/\/upload\/(?:v\d+\/)?(.*?)(?:\.\w+)?$/);
+      return match?.[1] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async deleteImage(imageUrl: string): Promise<void> {
+    const publicId = this.extractPublicId(imageUrl);
+    if (!publicId) return;
+    await cloudinary.uploader.destroy(publicId);
+  }
+
   async uploadImage(file: Express.Multer.File): Promise<string> {
     return new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
