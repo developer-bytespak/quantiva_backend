@@ -31,6 +31,7 @@ import { CacheService } from './services/cache.service';
 import { CacheKeyManager } from './services/cache-key-manager';
 import { CacheHeadersInterceptor, CacheControl } from '../../common/interceptors/cache-headers.interceptor';
 import { MarketDetailAggregatorService } from './services/market-detail-aggregator.service';
+import { PricePerformanceService } from './services/price-performance.service';
 import { ExchangeType } from '@prisma/client';
 import { ForbiddenException } from '@nestjs/common';
 import { MarketService } from '../market/market.service';
@@ -70,6 +71,7 @@ export class ExchangesController {
     private readonly cacheService: CacheService,
     private readonly marketService: MarketService,
     private readonly marketDetailAggregator: MarketDetailAggregatorService,
+    private readonly pricePerformanceService: PricePerformanceService,
     private readonly marketStocksDbService: MarketStocksDbService,
     private readonly fmpService: FmpService,
     private readonly tradeFeesService: TradeFeesService,
@@ -646,6 +648,22 @@ export class ExchangesController {
     return {
       success: true,
       data: candles,
+      last_updated: new Date().toISOString(),
+    };
+  }
+
+  @Get('connections/:connectionId/price-performance/:symbol')
+  @UseGuards(ConnectionOwnerGuard)
+  @CacheControl({ maxAge: 300, staleWhileRevalidate: 60, public: false })
+  async getPricePerformance(
+    @Param('connectionId') connectionId: string,
+    @Param('symbol') symbol: string,
+  ) {
+    const data = await this.pricePerformanceService.getPricePerformance(connectionId, symbol);
+
+    return {
+      success: true,
+      data,
       last_updated: new Date().toISOString(),
     };
   }

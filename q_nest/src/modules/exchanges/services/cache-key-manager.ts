@@ -28,6 +28,10 @@ export class CacheKeyManager {
     return `candle-bundle:${connectionId}:${symbol}`;
   }
 
+  static pricePerformance(connectionId: string, symbol: string): string {
+    return `price-performance:${connectionId}:${symbol}`;
+  }
+
   // ─── Order Book ───────────────────────────────
   static orderBook(connectionId: string, symbol: string): string {
     return `orderbook:${connectionId}:${symbol}`;
