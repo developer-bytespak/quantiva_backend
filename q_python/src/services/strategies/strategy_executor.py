@@ -99,34 +99,46 @@ class StrategyExecutor:
             Evaluation result with conditions met status
         """
         if not rules:
-            return {'all_met': True, 'conditions': []}
+            return {'all_met': False, 'conditions': [], 'no_rules': True}
         
         conditions_met = []
         logic_operator = 'AND'  # Default
-        
+
         for rule in rules:
             condition_met = self._evaluate_single_rule(
                 rule, indicators, market_data, engine_scores, fusion_result
             )
+
+            # Track if this rule was skipped due to missing indicator data
+            indicator_missing = (
+                'indicator' in rule and
+                indicators.get(rule['indicator']) is None
+            )
+
             conditions_met.append({
                 'rule': rule,
-                'met': condition_met
+                'met': condition_met,
+                'skipped': indicator_missing,
             })
-            
+
             # Get logic operator (AND/OR)
             if 'logic' in rule:
                 logic_operator = rule['logic']
-        
+
         # Determine if all conditions are met based on logic
         if logic_operator == 'OR':
             all_met = any(c['met'] for c in conditions_met)
         else:  # AND (default)
             all_met = all(c['met'] for c in conditions_met)
-        
+
+        skipped_count = sum(1 for c in conditions_met if c.get('skipped', False))
+
         return {
             'all_met': all_met,
             'conditions': conditions_met,
-            'logic': logic_operator
+            'logic': logic_operator,
+            'indicators_missing': skipped_count,
+            'all_skipped': skipped_count == len(conditions_met) and len(conditions_met) > 0,
         }
     
     def _evaluate_single_rule(
@@ -304,21 +316,21 @@ class StrategyExecutor:
     ) -> str:
         """
         Determine trading signal based on entry/exit conditions.
-        
+
         Args:
             entry_result: Entry conditions evaluation result
             exit_result: Exit conditions evaluation result
-        
+
         Returns:
             Signal: 'BUY', 'SELL', or 'HOLD'
         """
-        # If exit conditions are met, signal SELL
-        if exit_result['all_met']:
+        # Only signal SELL if exit rules actually exist and are met
+        if exit_result['all_met'] and not exit_result.get('no_rules', False):
             return 'SELL'
-        
-        # If entry conditions are met, signal BUY
-        if entry_result['all_met']:
+
+        # Only signal BUY if entry rules actually exist and are met
+        if entry_result['all_met'] and not entry_result.get('no_rules', False):
             return 'BUY'
-        
+
         # Otherwise, HOLD
         return 'HOLD'

@@ -176,7 +176,19 @@ class SignalGenerator:
             # Extract indicator values for strategy execution
             indicators = {}
             if 'trend' in engine_scores and 'metadata' in engine_scores['trend']:
-                trend_indicators = engine_scores['trend']['metadata'].get('indicators', {})
+                trend_meta = engine_scores['trend']['metadata']
+                trend_indicators = trend_meta.get('indicators', {})
+
+                # If primary indicators are empty, try timeframe-specific ones as fallback
+                if not any(v is not None for v in trend_indicators.values()):
+                    timeframes = trend_meta.get('timeframes', {})
+                    for tf in ['1d', '4h', '1h']:
+                        tf_indicators = timeframes.get(tf, {})
+                        if tf_indicators and any(v is not None for v in tf_indicators.values()):
+                            self.logger.info(f"Using {tf} timeframe indicators as fallback (primary empty)")
+                            trend_indicators = tf_indicators
+                            break
+
                 indicators.update({
                     'MA20': trend_indicators.get('ma20'),
                     'MA50': trend_indicators.get('ma50'),
@@ -200,10 +212,27 @@ class SignalGenerator:
             entry_rules = strategy_data.get('entry_rules', [])
             exit_rules = strategy_data.get('exit_rules', [])
             has_strategy_rules = (entry_rules and len(entry_rules) > 0) or (exit_rules and len(exit_rules) > 0)
-            
+
             if has_strategy_rules:
-                # Strategy has rules - use executor's decision (may override fusion)
-                final_action = execution_result.get('signal', fusion_result.get('action', 'HOLD'))
+                # Check if executor could actually evaluate the rules (indicators available?)
+                entry_details = execution_result.get('entry_details', {})
+                exit_details = execution_result.get('exit_details', {})
+
+                entry_all_skipped = entry_details.get('all_skipped', False)
+                exit_no_rules = exit_details.get('no_rules', False)
+                exit_all_skipped = exit_details.get('all_skipped', False)
+
+                if entry_all_skipped and (exit_no_rules or exit_all_skipped):
+                    # All indicator-based rules were unevaluable (missing OHLCV data)
+                    # Fall back to fusion engine decision instead of guaranteed HOLD
+                    final_action = fusion_result.get('action', 'HOLD')
+                    self.logger.warning(
+                        f"Strategy {strategy_id}: All indicator rules skipped (missing data). "
+                        f"Falling back to fusion engine action: {final_action}"
+                    )
+                else:
+                    # Strategy rules were evaluable - use executor's decision
+                    final_action = execution_result.get('signal', fusion_result.get('action', 'HOLD'))
             else:
                 # No strategy rules - use fusion engine's action decision
                 final_action = fusion_result.get('action', 'HOLD')
