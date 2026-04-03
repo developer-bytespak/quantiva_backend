@@ -8,6 +8,7 @@ import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
 import { BinanceUserWsService } from './services/binance-user-ws.service';
+import { BybitUserWsService } from './services/bybit-user-ws.service';
 import { ConnectionNotFoundException } from './exceptions/binance.exceptions';
 import {
   AccountBalanceDto,
@@ -38,6 +39,7 @@ export class ExchangesService {
     private alpacaService: AlpacaService,
     private cacheService: CacheService,
     private binanceUserWsService: BinanceUserWsService,
+    private bybitUserWsService: BybitUserWsService,
   ) {}
 
   /**
@@ -780,6 +782,15 @@ export class ExchangesService {
           );
       }
 
+      // Start Bybit WebSocket for real-time balance/order updates after first sync.
+      if (isBybit && connection.user_id) {
+        this.bybitUserWsService
+          .connect(connection.user_id, apiKey, apiSecret)
+          .catch((err) =>
+            this.logger.warn(`Bybit WS connect failed for ${connection.user_id}: ${err?.message}`),
+          );
+      }
+
       // Update last_synced_at
       await this.prisma.user_exchange_connections.update({
         where: { connection_id: connectionId },
@@ -956,6 +967,26 @@ export class ExchangesService {
       const wsOrders = this.binanceUserWsService.getLastOrders(connection.user_id);
       if (wsOrders.length > 0) {
         this.logger.debug(`Serving orders from WS cache for connection ${connectionId}`);
+        this.cacheService.setCached(cacheKey, wsOrders);
+        return wsOrders as any;
+      }
+    }
+
+    // Try Bybit WebSocket cache for balance (zero REST weight)
+    if (dataType === 'balance' && exchangeName === 'bybit' && connection.user_id) {
+      const wsBalance = this.bybitUserWsService.getLastBalance(connection.user_id);
+      if (wsBalance && Object.keys(wsBalance).length > 0) {
+        this.logger.debug(`Serving Bybit balance from WS cache for connection ${connectionId}`);
+        this.cacheService.setCached(cacheKey, wsBalance);
+        return wsBalance as any;
+      }
+    }
+
+    // Try Bybit WebSocket cache for orders (zero REST weight)
+    if (dataType === 'orders' && exchangeName === 'bybit' && connection.user_id) {
+      const wsOrders = this.bybitUserWsService.getLastOrders(connection.user_id);
+      if (wsOrders.length > 0) {
+        this.logger.debug(`Serving Bybit orders from WS cache for connection ${connectionId}`);
         this.cacheService.setCached(cacheKey, wsOrders);
         return wsOrders as any;
       }

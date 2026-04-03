@@ -10,6 +10,7 @@ import {
 import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { BinanceUserWsService } from '../modules/exchanges/services/binance-user-ws.service';
+import { BybitUserWsService } from '../modules/exchanges/services/bybit-user-ws.service';
 import { ExchangesService } from '../modules/exchanges/exchanges.service';
 import { EncryptionService } from '../modules/exchanges/services/encryption.service';
 import { WsAuthService } from './ws-auth.service';
@@ -31,6 +32,7 @@ export class AccountStreamGateway implements OnGatewayConnection, OnGatewayDisco
 
   constructor(
     private readonly binanceUserWsService: BinanceUserWsService,
+    private readonly bybitUserWsService: BybitUserWsService,
     private readonly exchangesService: ExchangesService,
     private readonly encryptionService: EncryptionService,
     private readonly wsAuthService: WsAuthService,
@@ -44,6 +46,20 @@ export class AccountStreamGateway implements OnGatewayConnection, OnGatewayDisco
     });
     this.binanceUserWsService.on('binance:status', (data: any) => {
       this.emitToUser(data.userId, 'binance:status', data);
+    });
+
+    // Relay Bybit WebSocket events to the appropriate user's socket
+    this.bybitUserWsService.on('balance:update', (data: any) => {
+      this.emitToUser(data.userId, 'balance:update', data);
+    });
+    this.bybitUserWsService.on('order:update', (data: any) => {
+      this.emitToUser(data.userId, 'order:update', data);
+    });
+    this.bybitUserWsService.on('execution:update', (data: any) => {
+      this.emitToUser(data.userId, 'execution:update', data);
+    });
+    this.bybitUserWsService.on('bybit:status', (data: any) => {
+      this.emitToUser(data.userId, 'bybit:status', data);
     });
   }
 
@@ -124,7 +140,8 @@ export class AccountStreamGateway implements OnGatewayConnection, OnGatewayDisco
             if (!currentSockets || currentSockets.size === 0) {
               this.userSockets.delete(userId);
               await this.binanceUserWsService.disconnect(userId);
-              this.logger.log(`Disconnected Binance WS for user ${userId}`);
+              await this.bybitUserWsService.disconnect(userId);
+              this.logger.log(`Disconnected exchange WS for user ${userId}`);
             }
           }, 5000); // 5 second grace period
         }
@@ -147,14 +164,20 @@ export class AccountStreamGateway implements OnGatewayConnection, OnGatewayDisco
     try {
       this.logger.log(`Subscribing to account data for user ${userId}`);
       
-      // Connect to Binance user data stream with user's own API keys
+      // Connect to exchange user data stream with user's own API keys
       const connectionId = client.handshake.auth?.connectionId || client.handshake.query?.connectionId as string;
       if (connectionId) {
         const connection = await this.exchangesService.getConnectionById(connectionId);
         if (connection?.api_key_encrypted && connection?.api_secret_encrypted) {
           const apiKey = this.encryptionService.decryptApiKey(connection.api_key_encrypted);
           const apiSecret = this.encryptionService.decryptApiKey(connection.api_secret_encrypted);
-          await this.binanceUserWsService.connect(userId, apiKey, apiSecret);
+          const exchangeName = (connection.exchange?.name || '').toLowerCase();
+
+          if (exchangeName === 'bybit') {
+            await this.bybitUserWsService.connect(userId, apiKey, apiSecret);
+          } else {
+            await this.binanceUserWsService.connect(userId, apiKey, apiSecret);
+          }
         } else {
           this.logger.warn(`No encrypted keys for connection ${connectionId}`);
         }

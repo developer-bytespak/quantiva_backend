@@ -12,6 +12,7 @@ import { CacheService } from './services/cache.service';
 import { MarketDetailAggregatorService } from './services/market-detail-aggregator.service';
 import { ConnectionOwnerGuard } from './guards/connection-owner.guard';
 import { BinanceUserWsService } from './services/binance-user-ws.service';
+import { BybitUserWsService } from './services/bybit-user-ws.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
 import { AdminAuthModule } from '../admin-auth/admin-auth.module';
@@ -45,6 +46,7 @@ import { QhqTokenModule } from '../qhq-token/qhq-token.module';
     MarketDetailAggregatorService,
     ConnectionOwnerGuard,
     BinanceUserWsService,
+    BybitUserWsService,
   ],
   exports: [
     ExchangesService, 
@@ -56,6 +58,7 @@ import { QhqTokenModule } from '../qhq-token/qhq-token.module';
     CacheService,
     MarketDetailAggregatorService,
     BinanceUserWsService,
+    BybitUserWsService,
   ],
 })
 export class ExchangesModule {}
