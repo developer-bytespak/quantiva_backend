@@ -12,6 +12,7 @@ import { SessionService } from './session.service';
 import { TwoFactorService } from './two-factor.service';
 import { RateLimitService } from './rate-limit.service';
 import * as bcrypt from 'bcrypt';
+import { promises as dns } from 'dns';
 import { RegisterDto } from '../dto/register.dto';
 import { LoginDto } from '../dto/login.dto';
 import { Verify2FADto } from '../dto/verify-2fa.dto';
@@ -42,6 +43,24 @@ export class AuthService {
 
   async register(registerDto: RegisterDto) {
     const { email, username, password } = registerDto;
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      throw new BadRequestException('Please enter a valid email address');
+    }
+
+    // Validate email domain has MX records (can actually receive email)
+    try {
+      const domain = email.split('@')[1];
+      const mxRecords = await dns.resolveMx(domain);
+      if (!mxRecords || mxRecords.length === 0) {
+        throw new BadRequestException('This email domain cannot receive emails. Please use a valid email address.');
+      }
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      throw new BadRequestException('Invalid email domain. Please use a valid email address.');
+    }
 
     // Check if user already exists
     const existingUser = await this.prisma.users.findFirst({
