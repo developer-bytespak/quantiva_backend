@@ -10,6 +10,7 @@ import { BybitService } from './integrations/bybit.service';
 import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
 import { MarketDetailAggregatorService } from './services/market-detail-aggregator.service';
+import { PricePerformanceService } from './services/price-performance.service';
 import { ConnectionOwnerGuard } from './guards/connection-owner.guard';
 import { BinanceUserWsService } from './services/binance-user-ws.service';
 import { PrismaModule } from '../../prisma/prisma.module';
@@ -43,6 +44,7 @@ import { QhqTokenModule } from '../qhq-token/qhq-token.module';
     AlpacaService,
     CacheService,
     MarketDetailAggregatorService,
+    PricePerformanceService,
     ConnectionOwnerGuard,
     BinanceUserWsService,
   ],
@@ -55,6 +57,7 @@ import { QhqTokenModule } from '../qhq-token/qhq-token.module';
     AlpacaService,
     CacheService,
     MarketDetailAggregatorService,
+    PricePerformanceService,
     BinanceUserWsService,
   ],
 })
