@@ -474,6 +474,147 @@ export class BybitService {
   }
 
   /**
+   * Fetches all order history from Bybit (equivalent of Binance getAllOrders).
+   * Uses /v5/order/history which returns filled, cancelled, and rejected orders.
+   */
+  async getAllOrders(
+    apiKey: string,
+    apiSecret: string,
+    symbol?: string,
+    params?: { limit?: number; startTime?: number; endTime?: number },
+  ): Promise<any[]> {
+    try {
+      const reqParams: any = {
+        category: 'spot',
+        limit: Math.min(params?.limit || 50, 50), // Bybit max 50 per page
+      };
+      if (symbol) reqParams.symbol = symbol;
+      if (params?.startTime) reqParams.startTime = params.startTime.toString();
+      if (params?.endTime) reqParams.endTime = params.endTime.toString();
+
+      const allOrders: any[] = [];
+      let cursor: string | undefined;
+
+      // Paginate through order history
+      do {
+        if (cursor) reqParams.cursor = cursor;
+        const result = await this.makeSignedRequest('/v5/order/history', apiKey, apiSecret, reqParams);
+        const orders = result.list || [];
+
+        for (const o of orders) {
+          const execQty = parseFloat(o.cumExecQty || '0');
+          const execValue = parseFloat(o.cumExecValue || '0');
+          const avgPrice = execQty > 0 ? execValue / execQty : parseFloat(o.price || '0');
+
+          allOrders.push({
+            orderId: o.orderId,
+            symbol: o.symbol,
+            side: o.side === 'Buy' ? 'BUY' : 'SELL',
+            type: o.orderType,
+            status: this.mapBybitOrderStatus(o.orderStatus),
+            quantity: parseFloat(o.qty || '0'),
+            executedQty: execQty,
+            cummulativeQuoteQty: execValue,
+            price: parseFloat(o.price || '0'),
+            stopPrice: parseFloat(o.triggerPrice || '0') || undefined,
+            avgPrice,
+            timeInForce: o.timeInForce,
+            time: parseInt(o.createdTime || '0', 10),
+            updateTime: parseInt(o.updatedTime || o.createdTime || '0', 10),
+          });
+        }
+
+        cursor = result.nextPageCursor;
+        // Stop if we have enough or no more pages
+      } while (cursor && allOrders.length < (params?.limit || 500));
+
+      return allOrders;
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
+        throw error;
+      }
+      throw new BybitApiException('Failed to fetch order history');
+    }
+  }
+
+  /**
+   * Fetches trade execution history (fills) from Bybit (equivalent of Binance getMyTrades).
+   * Uses /v5/execution/list which returns individual trade fills.
+   */
+  async getMyTrades(
+    apiKey: string,
+    apiSecret: string,
+    symbol?: string,
+    params?: { limit?: number; startTime?: number; endTime?: number },
+  ): Promise<any[]> {
+    try {
+      const reqParams: any = {
+        category: 'spot',
+        limit: Math.min(params?.limit || 100, 100), // Bybit max 100 per page
+      };
+      if (symbol) reqParams.symbol = symbol;
+      if (params?.startTime) reqParams.startTime = params.startTime.toString();
+      if (params?.endTime) reqParams.endTime = params.endTime.toString();
+
+      const allTrades: any[] = [];
+      let cursor: string | undefined;
+
+      do {
+        if (cursor) reqParams.cursor = cursor;
+        const result = await this.makeSignedRequest('/v5/execution/list', apiKey, apiSecret, reqParams);
+        const trades = result.list || [];
+
+        for (const t of trades) {
+          const qty = parseFloat(t.execQty || '0');
+          const price = parseFloat(t.execPrice || '0');
+          const fee = parseFloat(t.execFee || '0');
+
+          allTrades.push({
+            id: t.execId,
+            orderId: t.orderId,
+            symbol: t.symbol,
+            side: t.side === 'Buy' ? 'BUY' : 'SELL',
+            isBuyer: t.side === 'Buy',
+            price,
+            qty,
+            quoteQty: qty * price,
+            commission: Math.abs(fee),
+            commissionAsset: t.feeCurrency || '',
+            time: parseInt(t.execTime || '0', 10),
+          });
+        }
+
+        cursor = result.nextPageCursor;
+      } while (cursor && allTrades.length < (params?.limit || 500));
+
+      return allTrades;
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
+        throw error;
+      }
+      throw new BybitApiException('Failed to fetch trade history');
+    }
+  }
+
+  /**
+   * Maps Bybit order status to normalized status matching Binance format.
+   */
+  private mapBybitOrderStatus(status: string): string {
+    const map: Record<string, string> = {
+      'New': 'NEW',
+      'PartiallyFilled': 'PARTIALLY_FILLED',
+      'Filled': 'FILLED',
+      'Cancelled': 'CANCELED',
+      'PartiallyFilledCanceled': 'CANCELED',
+      'Rejected': 'REJECTED',
+      'Deactivated': 'EXPIRED',
+      'Triggered': 'NEW',
+      'Untriggered': 'NEW',
+    };
+    return map[status] || status;
+  }
+
+  /**
    * Fetches current positions from account info (optimized version that reuses account info)
    */
   async getPositionsFromAccount(
