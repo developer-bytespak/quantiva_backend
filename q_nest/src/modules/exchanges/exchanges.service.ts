@@ -1204,8 +1204,19 @@ export class ExchangesService {
         takeProfitPrice,
         stopLossPrice,
       );
+    } else if (exchangeService instanceof BybitService) {
+      const bracketResult = await this.bybitService.placeBracketOrder(
+        apiKey,
+        apiSecret,
+        symbol,
+        side,
+        quantity,
+        takeProfitPrice,
+        stopLossPrice,
+      );
+      result = { orderListId: bracketResult.orderListId };
     } else {
-      throw new Error(`OCO orders are only supported on Binance/Binance US, not ${connection.exchange.name}`);
+      throw new Error(`OCO orders are not supported for ${connection.exchange.name}`);
     }
 
     // Ensure subsequent dashboard/orders requests are not served stale cache.

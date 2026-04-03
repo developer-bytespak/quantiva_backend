@@ -474,8 +474,9 @@ export class BybitService {
   }
 
   /**
-   * Fetches all order history from Bybit (equivalent of Binance getAllOrders).
-   * Uses /v5/order/history which returns filled, cancelled, and rejected orders.
+   * Fetches all orders from Bybit: both historical (/v5/order/history) and
+   * active stop/conditional orders (/v5/order/realtime with StopOrder filter).
+   * This ensures TP/SL orders show as "pending" in the orders page, not missing.
    */
   async getAllOrders(
     apiKey: string,
@@ -486,46 +487,63 @@ export class BybitService {
     try {
       const reqParams: any = {
         category: 'spot',
-        limit: Math.min(params?.limit || 50, 50), // Bybit max 50 per page
+        limit: Math.min(params?.limit || 50, 50),
       };
       if (symbol) reqParams.symbol = symbol;
       if (params?.startTime) reqParams.startTime = params.startTime.toString();
       if (params?.endTime) reqParams.endTime = params.endTime.toString();
 
       const allOrders: any[] = [];
-      let cursor: string | undefined;
+      const seenOrderIds = new Set<string>();
 
-      // Paginate through order history
+      const mapOrder = (o: any) => {
+        const execQty = parseFloat(o.cumExecQty || '0');
+        const execValue = parseFloat(o.cumExecValue || '0');
+        const avgPrice = execQty > 0 ? execValue / execQty : parseFloat(o.price || o.avgPrice || '0');
+
+        return {
+          orderId: o.orderId,
+          symbol: o.symbol,
+          side: o.side === 'Buy' ? 'BUY' : 'SELL',
+          type: o.orderType,
+          status: this.mapBybitOrderStatus(o.orderStatus),
+          quantity: parseFloat(o.qty || '0'),
+          executedQty: execQty,
+          cummulativeQuoteQty: execValue,
+          price: parseFloat(o.price || '0'),
+          stopPrice: parseFloat(o.triggerPrice || '0') || undefined,
+          avgPrice,
+          timeInForce: o.timeInForce,
+          time: parseInt(o.createdTime || '0', 10),
+          updateTime: parseInt(o.updatedTime || o.createdTime || '0', 10),
+        };
+      };
+
+      // 1. Fetch active stop orders (TP/SL that are waiting to trigger)
+      try {
+        const activeParams: any = { category: 'spot', limit: 50, orderFilter: 'StopOrder' };
+        if (symbol) activeParams.symbol = symbol;
+        const activeResult = await this.makeSignedRequest('/v5/order/realtime', apiKey, apiSecret, activeParams);
+        for (const o of (activeResult.list || [])) {
+          seenOrderIds.add(o.orderId);
+          allOrders.push(mapOrder(o));
+        }
+      } catch {
+        // Non-fatal — active orders might fail but history still works
+      }
+
+      // 2. Fetch order history (filled, cancelled, deactivated)
+      let cursor: string | undefined;
       do {
         if (cursor) reqParams.cursor = cursor;
         const result = await this.makeSignedRequest('/v5/order/history', apiKey, apiSecret, reqParams);
-        const orders = result.list || [];
-
-        for (const o of orders) {
-          const execQty = parseFloat(o.cumExecQty || '0');
-          const execValue = parseFloat(o.cumExecValue || '0');
-          const avgPrice = execQty > 0 ? execValue / execQty : parseFloat(o.price || '0');
-
-          allOrders.push({
-            orderId: o.orderId,
-            symbol: o.symbol,
-            side: o.side === 'Buy' ? 'BUY' : 'SELL',
-            type: o.orderType,
-            status: this.mapBybitOrderStatus(o.orderStatus),
-            quantity: parseFloat(o.qty || '0'),
-            executedQty: execQty,
-            cummulativeQuoteQty: execValue,
-            price: parseFloat(o.price || '0'),
-            stopPrice: parseFloat(o.triggerPrice || '0') || undefined,
-            avgPrice,
-            timeInForce: o.timeInForce,
-            time: parseInt(o.createdTime || '0', 10),
-            updateTime: parseInt(o.updatedTime || o.createdTime || '0', 10),
-          });
+        for (const o of (result.list || [])) {
+          if (!seenOrderIds.has(o.orderId)) {
+            seenOrderIds.add(o.orderId);
+            allOrders.push(mapOrder(o));
+          }
         }
-
         cursor = result.nextPageCursor;
-        // Stop if we have enough or no more pages
       } while (cursor && allOrders.length < (params?.limit || 500));
 
       return allOrders;
@@ -952,24 +970,28 @@ export class BybitService {
       }
 
       // Fetch instrument info to get basePrecision for qty truncation
-      let basePrecision: string | null = null;
+      // Fetch instrument info for precision rules
+      let basePrecisionDecimals = 8;
+      let tickSizeDecimals = 1;
       try {
         const instResult = await this.makePublicRequest('/v5/market/instruments-info', {
           category: 'spot',
           symbol,
         });
-        basePrecision = instResult.list?.[0]?.lotSizeFilter?.basePrecision || null;
+        const info = instResult.list?.[0];
+        if (info) {
+          const bp = info.lotSizeFilter?.basePrecision || '0.000001';
+          basePrecisionDecimals = (bp.split('.')[1] || '').replace(/0+$/, '').length;
+          const ts = info.priceFilter?.tickSize || '0.1';
+          tickSizeDecimals = (ts.split('.')[1] || '').replace(/0+$/, '').length;
+        }
       } catch {
-        this.logger.warn(`Failed to fetch instrument info for ${symbol}, using raw quantity`);
+        this.logger.warn(`Failed to fetch instrument info for ${symbol}, using defaults`);
       }
 
       // Truncate quantity to Bybit's allowed precision (e.g., 0.000001 for BTC)
-      let adjustedQty = quantity;
-      if (basePrecision) {
-        const decimals = (basePrecision.split('.')[1] || '').replace(/0+$/, '').length;
-        const factor = Math.pow(10, decimals);
-        adjustedQty = Math.floor(quantity * factor) / factor;
-      }
+      const qtyFactor = Math.pow(10, basePrecisionDecimals);
+      let adjustedQty = Math.floor(quantity * qtyFactor) / qtyFactor;
 
       const params: Record<string, any> = {
         category: 'spot',
@@ -980,7 +1002,10 @@ export class BybitService {
       };
 
       if (type === 'LIMIT') {
-        params.price = price!.toString();
+        // Round price to Bybit's tickSize precision (e.g., 0.1 for BTC = 1 decimal)
+        const priceFactor = Math.pow(10, tickSizeDecimals);
+        const roundedPrice = Math.round(price! * priceFactor) / priceFactor;
+        params.price = roundedPrice.toString();
       }
 
       // For MARKET BUY: always use quoteCoin mode (USDT).
@@ -1000,17 +1025,54 @@ export class BybitService {
       }
 
       const result = await this.makeSignedRequest('/v5/order/create', apiKey, apiSecret, params, 'POST');
-      const order = result as any;
+      const orderId = result?.orderId || '';
 
+      // Bybit /v5/order/create only returns orderId — no fill data.
+      // For market orders, query the order to get actual fill price and status.
+      if (type === 'MARKET' && orderId) {
+        try {
+          // Wait for Bybit to process the fill before querying
+          await this.delay(500);
+
+          const orderDetail = await this.makeSignedRequest('/v5/order/history', apiKey, apiSecret, {
+            category: 'spot',
+            orderId,
+          });
+
+          this.logger.debug(`Order ${orderId} history response: ${JSON.stringify(orderDetail).substring(0, 300)}`);
+
+          const filled = orderDetail.list?.[0];
+          if (filled) {
+            const execQty = parseFloat(filled.cumExecQty || '0');
+            const execValue = parseFloat(filled.cumExecValue || '0');
+            const avgPrice = parseFloat(filled.avgPrice || '0') || (execQty > 0 ? execValue / execQty : 0);
+
+            return {
+              orderId,
+              symbol: filled.symbol || symbol,
+              side,
+              type,
+              quantity: execQty || quantity,
+              price: avgPrice,
+              status: this.mapBybitOrderStatus(filled.orderStatus || 'New'),
+              time: parseInt(filled.createdTime || Date.now().toString(), 10),
+            };
+          }
+        } catch (err: any) {
+          this.logger.warn(`Failed to fetch fill details for order ${orderId}: ${err?.message}`);
+        }
+      }
+
+      // Fallback: return what we have from the create response
       return {
-        orderId: order.orderId || '',
-        symbol: order.symbol || symbol,
-        side: side,
-        type: type,
-        quantity: parseFloat(order.qty || quantity.toString()),
-        price: parseFloat(order.price || price?.toString() || '0'),
-        status: order.orderStatus || 'NEW',
-        time: parseInt(order.createdTime || Date.now().toString(), 10),
+        orderId,
+        symbol: result?.symbol || symbol,
+        side,
+        type,
+        quantity,
+        price: parseFloat(result?.price || price?.toString() || '0'),
+        status: result?.orderStatus ? this.mapBybitOrderStatus(result.orderStatus) : 'NEW',
+        time: parseInt(result?.createdTime || Date.now().toString(), 10),
       };
     } catch (error: any) {
       if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
@@ -1021,18 +1083,51 @@ export class BybitService {
   }
 
   /**
-   * Places a bracket order with Take Profit and Stop Loss for Bybit
-   * Bybit spot doesn't have native OCO, but we can achieve similar functionality using
-   * two separate conditional orders: one for take profit, one for stop loss
-   * 
-   * @param apiKey - Bybit API key
-   * @param apiSecret - Bybit API secret  
-   * @param symbol - Trading pair symbol (e.g., BTCUSDT)
-   * @param side - SELL for closing a long position, BUY for closing a short
-   * @param quantity - Amount of the asset to sell/buy
-   * @param takeProfitPrice - Price at which to take profit
-   * @param stopLossPrice - Price at which to trigger stop loss
-   * @returns Object containing both order IDs for tracking
+   * Cancels all active StopOrders for a symbol.
+   * Used to clean up leftover TP/SL orders before placing new ones.
+   */
+  async cancelActiveStopOrders(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+  ): Promise<number> {
+    let cancelled = 0;
+    try {
+      const result = await this.makeSignedRequest('/v5/order/realtime', apiKey, apiSecret, {
+        category: 'spot',
+        symbol,
+        orderFilter: 'StopOrder',
+        limit: 50,
+      });
+
+      for (const order of (result.list || [])) {
+        if (order.orderStatus === 'Untriggered' || order.orderStatus === 'New') {
+          try {
+            await this.makeSignedRequest('/v5/order/cancel', apiKey, apiSecret, {
+              category: 'spot',
+              symbol,
+              orderId: order.orderId,
+              orderFilter: 'StopOrder',
+            }, 'POST');
+            cancelled++;
+          } catch (err: any) {
+            this.logger.warn(`Failed to cancel stop order ${order.orderId}: ${err?.message}`);
+          }
+        }
+      }
+
+      if (cancelled > 0) {
+        this.logger.log(`Cancelled ${cancelled} existing stop order(s) for ${symbol}`);
+      }
+    } catch (err: any) {
+      this.logger.warn(`Failed to fetch active stop orders for ${symbol}: ${err?.message}`);
+    }
+    return cancelled;
+  }
+
+  /**
+   * Places a bracket order with Take Profit and Stop Loss for Bybit.
+   * Cancels any existing StopOrders for the symbol first to avoid orphans.
    */
   async placeBracketOrder(
     apiKey: string,
@@ -1050,22 +1145,80 @@ export class BybitService {
     quantity: number;
     takeProfitPrice: number;
     stopLossPrice: number;
+    orderListId: number;
   }> {
     try {
+      // Cancel any existing TP/SL stop orders for this symbol first
+      await this.cancelActiveStopOrders(apiKey, apiSecret, symbol);
+
       this.logger.log(
         `Placing bracket order: ${symbol} ${side} qty=${quantity} ` +
         `TP=${takeProfitPrice} SL=${stopLossPrice}`
       );
 
-      // Place Take Profit order (LIMIT order at TP price)
+      // Fetch instrument info for precision rules
+      let basePrecisionDecimals = 8;
+      let tickSizeDecimals = 2;
+      try {
+        const instResult = await this.makePublicRequest('/v5/market/instruments-info', {
+          category: 'spot',
+          symbol,
+        });
+        const info = instResult.list?.[0];
+        if (info) {
+          const bp = info.lotSizeFilter?.basePrecision || '0.000001';
+          basePrecisionDecimals = (bp.split('.')[1] || '').replace(/0+$/, '').length;
+          const ts = info.priceFilter?.tickSize || '0.01';
+          tickSizeDecimals = (ts.split('.')[1] || '').replace(/0+$/, '').length;
+        }
+      } catch {
+        this.logger.warn(`Failed to fetch instrument info for ${symbol}, using defaults`);
+      }
+
+      // Truncate qty and round prices to allowed precision
+      const qtyFactor = Math.pow(10, basePrecisionDecimals);
+      const adjustedQty = Math.floor(quantity * qtyFactor) / qtyFactor;
+      const priceFactor = Math.pow(10, tickSizeDecimals);
+      const adjustedTP = Math.round(takeProfitPrice * priceFactor) / priceFactor;
+      const adjustedSL = Math.round(stopLossPrice * priceFactor) / priceFactor;
+
+      // For Bybit spot, BOTH TP and SL must be StopOrders (trigger-based).
+      // Regular LIMIT SELL locks the balance, preventing the SL from being placed.
+      // StopOrders don't lock balance until triggered.
+      //
+      // Also: use actual wallet balance instead of executed qty, because Bybit
+      // deducts trading fees from the bought coin (e.g., buy 0.000089 BTC,
+      // fee = 0.000001 BTC, actual balance = 0.000088 BTC).
+      let sellQty = adjustedQty;
+      try {
+        const accountInfo = await this.getAccountInfo(apiKey, apiSecret);
+        const baseCoin = symbol.replace(/USDT$|USDC$|USD$/, '');
+        const coinBalance = accountInfo.coin.find((c) => c.coin === baseCoin);
+        if (coinBalance) {
+          const actualBalance = parseFloat(coinBalance.walletBalance || '0');
+          const truncatedBalance = Math.floor(actualBalance * qtyFactor) / qtyFactor;
+          if (truncatedBalance > 0 && truncatedBalance < sellQty) {
+            this.logger.debug(`Using actual balance ${truncatedBalance} instead of exec qty ${sellQty} for bracket order`);
+            sellQty = truncatedBalance;
+          }
+        }
+      } catch {
+        // Non-fatal — use original qty
+      }
+
+      const bybitSide = side === 'BUY' ? 'Buy' : 'Sell';
+
+      // TP: StopOrder that triggers when price RISES above TP price → MARKET SELL
       const tpParams: Record<string, any> = {
         category: 'spot',
         symbol,
-        side: side === 'BUY' ? 'Buy' : 'Sell',
-        orderType: 'Limit',
-        qty: quantity.toString(),
-        price: takeProfitPrice.toString(),
-        timeInForce: 'GTC',
+        side: bybitSide,
+        orderType: 'Market',
+        qty: sellQty.toString(),
+        triggerPrice: adjustedTP.toString(),
+        triggerDirection: side === 'SELL' ? 2 : 1, // TP for SELL side: trigger on rise (1)
+        triggerBy: 'LastPrice',
+        orderFilter: 'StopOrder',
       };
 
       const tpResult = await this.makeSignedRequest(
@@ -1076,16 +1229,15 @@ export class BybitService {
         'POST',
       );
 
-      // Place Stop Loss order using conditional trigger
-      // For Bybit spot, we use a trigger order that becomes a market order when stop price is hit
+      // SL: StopOrder that triggers when price FALLS below SL price → MARKET SELL
       const slParams: Record<string, any> = {
         category: 'spot',
         symbol,
-        side: side === 'BUY' ? 'Buy' : 'Sell',
+        side: bybitSide,
         orderType: 'Market',
-        qty: quantity.toString(),
-        triggerPrice: stopLossPrice.toString(),
-        triggerDirection: side === 'SELL' ? 2 : 1, // 1=rise above, 2=fall below
+        qty: sellQty.toString(),
+        triggerPrice: adjustedSL.toString(),
+        triggerDirection: side === 'SELL' ? 1 : 2, // SL for SELL side: trigger on fall (2)
         triggerBy: 'LastPrice',
         orderFilter: 'StopOrder',
       };
@@ -1107,9 +1259,10 @@ export class BybitService {
         stopLossOrderId: slResult.orderId || '',
         symbol,
         side,
-        quantity,
-        takeProfitPrice,
-        stopLossPrice,
+        quantity: adjustedQty,
+        takeProfitPrice: adjustedTP,
+        stopLossPrice: adjustedSL,
+        orderListId: 0, // Bybit doesn't have a single OCO orderListId — using 0 as placeholder
       };
     } catch (error: any) {
       this.logger.error(`Failed to place bracket order: ${error.message}`);

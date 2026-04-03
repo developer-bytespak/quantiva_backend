@@ -694,15 +694,23 @@ export class ExchangesController {
       const connection = await this.exchangesService.getConnectionById(connectionId);
       const exchangeName = (connection?.exchange?.name || '').toLowerCase();
       const isBinance = exchangeName === 'binance' || exchangeName === 'binance.us' || exchangeName === 'binanceus';
-      
+      const isBybit = exchangeName === 'bybit';
+      const supportsOco = isBinance || isBybit;
+
       // Determine if order is from Top Trade (auto-trading) or manual
       const isTopTrade = placeOrderDto.source === 'top_trade';
+
+      this.logger.log(
+        `[OCO CHECK] exchange=${exchangeName} isBybit=${isBybit} supportsOco=${supportsOco} ` +
+        `side=${placeOrderDto.side} status=${order.status} price=${order.price} qty=${order.quantity} ` +
+        `isTopTrade=${isTopTrade} autoOco=${placeOrderDto.autoOco}`
+      );
 
       // Place OCO if:
       // 1. Top Trade BUY order (always auto-place OCO)
       // 2. OR manual order with explicit autoOco=true flag
       if (
-        isBinance &&
+        supportsOco &&
         placeOrderDto.side === 'BUY' &&
         order.status === 'FILLED' &&
         order.quantity > 0 &&
