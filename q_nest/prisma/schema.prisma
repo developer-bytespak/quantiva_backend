@@ -246,6 +246,7 @@ model assets {
   display_name             String?                    @db.VarChar(255)
   logo_url                 String?
   market_cap_rank          Int?
+  available_exchanges      Json?                      @db.JsonB
   market_data              asset_market_data[]
   asset_metrics            asset_metrics[]
   market_rankings          market_rankings[]

@@ -1,9 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 
 @Injectable()
-export class ExchangesService {
+export class ExchangesService implements OnModuleInit {
   private readonly logger = new Logger(ExchangesService.name);
   private readonly apiKey: string | null;
   private readonly baseUrl: string;
@@ -43,6 +43,20 @@ export class ExchangesService {
     this.logger.log(
       `CoinGecko API initialized: ${this.isProApiKey ? 'Pro API' : 'Free API'}`,
     );
+  }
+
+  /**
+   * Warm the exchange coin caches on startup so user requests never trigger CoinGecko calls.
+   * Failures are non-fatal — the cache will be populated on the next cron cycle or user request.
+   */
+  async onModuleInit() {
+    try {
+      this.logger.log('Warming Binance coin cache on startup...');
+      await this.getBinanceCoinsWithUsdtPairs();
+      this.logger.log('Binance coin cache warmed successfully');
+    } catch (error: any) {
+      this.logger.warn(`Failed to warm Binance cache on startup: ${error.message}`);
+    }
   }
 
   /**
