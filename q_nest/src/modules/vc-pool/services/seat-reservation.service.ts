@@ -77,6 +77,8 @@ export class SeatReservationService {
           invested_amount_usdt: Number(pool.contribution_amount),
           share_percent: 0,  // Will be calculated after payment approval
           is_active: false,  // Will be set to true after payment is verified
+          user_wallet_address: dto.user_wallet_address || null,
+          user_binance_uid: dto.user_binance_uid || null,
         },
       });
       isRejoin = false;
@@ -86,12 +88,135 @@ export class SeatReservationService {
     const existingReservation = await this.prisma.vc_pool_seat_reservations.findUnique({
       where: { pool_id_user_id: { pool_id: poolId, user_id: userId } },
     });
+
+    // ✅ If active reservation exists and not expired → UPDATE wallet address instead of throwing error
     if (
       existingReservation &&
       existingReservation.status === RESERVATION_STATUS.reserved &&
       existingReservation.expires_at > new Date()
     ) {
-      throw new ConflictException('You already have an active reservation for this pool');
+      this.logger.log(
+        `User ${userId} updating wallet address for existing reservation in pool ${poolId}`,
+      );
+
+      // Update member record with new wallet address
+      const updatedMember = await this.prisma.vc_pool_members.update({
+        where: { member_id: memberToUse.member_id },
+        data: {
+          user_wallet_address: dto.user_wallet_address || memberToUse.user_wallet_address,
+          user_binance_uid: dto.user_binance_uid || memberToUse.user_binance_uid,
+        },
+      });
+
+      // Update payment submission with new wallet address
+      let submission = await this.prisma.vc_pool_payment_submissions.findFirst({
+        where: { reservation_id: existingReservation.reservation_id },
+      });
+
+      if (!submission) {
+        // If submission doesn't exist yet, create it
+        const submissionStatus =
+          dto.payment_method === 'stripe'
+            ? SUBMISSION_STATUS.processing
+            : SUBMISSION_STATUS.pending;
+
+        const investmentAmount = Number(pool.contribution_amount);
+        const poolFeeAmount = investmentAmount * Number(pool.pool_fee_percent) / 100;
+        const totalAmount = investmentAmount + poolFeeAmount;
+
+        submission = await this.prisma.vc_pool_payment_submissions.create({
+          data: {
+            pool_id: poolId,
+            user_id: userId,
+            reservation_id: existingReservation.reservation_id,
+            payment_method: dto.payment_method as any,
+            investment_amount: investmentAmount,
+            pool_fee_amount: poolFeeAmount,
+            total_amount: totalAmount,
+            payment_deadline: existingReservation.expires_at,
+            status: submissionStatus as any,
+            user_wallet_address: dto.user_wallet_address || null,
+          },
+        });
+      } else {
+        // Update existing submission with new wallet address
+        submission = await this.prisma.vc_pool_payment_submissions.update({
+          where: { submission_id: submission.submission_id },
+          data: {
+            user_wallet_address: dto.user_wallet_address || submission.user_wallet_address,
+          },
+        });
+      }
+
+      // Calculate remaining time on existing deadline
+      const minutesRemaining = Math.max(
+        0,
+        Math.floor((existingReservation.expires_at.getTime() - Date.now()) / 60000),
+      );
+
+      this.logger.log(
+        `Wallet address updated for user ${userId} in pool ${poolId} (${minutesRemaining} minutes remaining)`,
+      );
+
+      // Return updated reservation response
+      if (dto.payment_method === 'binance') {
+        const adminAddress = pool.admin?.wallet_address || pool.admin?.binance_uid;
+        const network = pool.admin?.payment_network || 'BSC';
+        const investmentAmount = Number(pool.contribution_amount);
+        const poolFeeAmount = investmentAmount * Number(pool.pool_fee_percent) / 100;
+        const totalAmount = investmentAmount + poolFeeAmount;
+
+        return {
+          member_id: updatedMember.member_id,
+          reservation_id: existingReservation.reservation_id,
+          submission_id: submission.submission_id,
+          is_rejoin: isRejoin,
+          wallet_updated: true,
+          total_amount: totalAmount,
+          investment_amount: investmentAmount,
+          pool_fee_amount: poolFeeAmount,
+          coin: pool.coin_type,
+          admin_binance_uid: pool.admin?.binance_uid,
+          admin_wallet_address: pool.admin?.wallet_address || null,
+          payment_network: network,
+          deposit_coin: 'USDT',
+          deposit_method: 'on_chain',
+          deadline: existingReservation.expires_at,
+          minutes_remaining: minutesRemaining,
+          payment_method: 'binance',
+          instructions: [
+            '1. Open Binance → Click Send → Withdraw Crypto',
+            '2. Select USDT as the coin',
+            `3. Paste the admin deposit address: ${adminAddress}`,
+            `4. Select Network: ${network} (BEP-20)`,
+            `5. Enter the exact amount: ${totalAmount} USDT`,
+            '6. Click Withdraw and confirm the transaction',
+            '7. Copy the TX Hash from the confirmation',
+            '8. Come back and paste the TX Hash to verify your payment',
+          ],
+        };
+      }
+
+      // Stripe
+      const investmentAmount = Number(pool.contribution_amount);
+      const poolFeeAmount = investmentAmount * Number(pool.pool_fee_percent) / 100;
+      const totalAmount = investmentAmount + poolFeeAmount;
+
+      return {
+        member_id: updatedMember.member_id,
+        reservation_id: existingReservation.reservation_id,
+        submission_id: submission.submission_id,
+        is_rejoin: isRejoin,
+        wallet_updated: true,
+        total_amount: totalAmount,
+        investment_amount: investmentAmount,
+        pool_fee_amount: poolFeeAmount,
+        coin: pool.coin_type,
+        deadline: existingReservation.expires_at,
+        minutes_remaining: minutesRemaining,
+        payment_method: 'stripe',
+        message: 'Wallet address updated. Ready for payment.',
+      };
     }
 
     // Check seat availability
@@ -156,6 +281,7 @@ export class SeatReservationService {
           total_amount: totalAmount,
           payment_deadline: expiresAt,
           status: submissionStatus as any,
+          user_wallet_address: dto.user_wallet_address || null,
         },
       });
 

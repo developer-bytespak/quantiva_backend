@@ -218,6 +218,7 @@ export class PoolPayoutService {
             full_name: p.member.user.full_name,
           },
           payment_method: p.member.payment_method,
+          user_wallet_address: p.member.user_wallet_address,
         },
         payout_type: p.payout_type,
         initial_investment: Number(p.initial_investment),

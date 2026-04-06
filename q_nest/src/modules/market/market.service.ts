@@ -3,7 +3,6 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import axios, { AxiosInstance } from 'axios';
 import { CoinDetailsCacheService } from './services/coin-details-cache.service';
-import { ExchangesService } from './services/exchanges.service';
 
 export interface CoinGeckoCoin {
   id: string;
@@ -51,7 +50,6 @@ export class MarketService {
     private configService: ConfigService,
     private prisma: PrismaService,
     private coinDetailsCacheService: CoinDetailsCacheService,
-    private exchangesService: ExchangesService,
   ) {
     this.apiKey = this.configService.get<string>('COINGECKO_API_KEY') || null;
     
@@ -349,51 +347,23 @@ export class MarketService {
     try {
       // Default to Binance for backward compatibility
       const exchange = (exchangeName || 'binance').toLowerCase();
-      
-      // Normalize exchange aliases first
+
+      // Normalize exchange aliases
       const normalizedExchange =
         exchange === 'binanceus' || exchange === 'binance-us' ? 'binance.us' : exchange;
 
-      // Fetch exchange-specific coin universe for the specified exchange
-      let coinsWithUsdt: string[] = [];
-      try {
-        if (normalizedExchange === 'bybit') {
-          coinsWithUsdt = await this.exchangesService.getBybitCoinsWithUsdtPairs();
-          this.logger.log(`Fetching market data for ${coinsWithUsdt.length} Bybit coins with USDT pairs`);
-        } else if (normalizedExchange === 'binance.us') {
-          coinsWithUsdt = await this.exchangesService.getBinanceUSCoinsWithPreferredQuotePairs();
-          this.logger.log(`Fetching market data for ${coinsWithUsdt.length} Binance US coins with USD/USDT pairs`);
-        } else {
-          // Default to Binance
-          coinsWithUsdt = await this.exchangesService.getBinanceCoinsWithUsdtPairs();
-          this.logger.log(`Fetching market data for ${coinsWithUsdt.length} Binance coins with USDT pairs`);
-        }
-      } catch (error) {
-        this.logger.error(`Failed to fetch ${normalizedExchange} filtered pairs, falling back to all ${normalizedExchange} coins`, error);
-        // Fallback: get all coins if filtered pair fetch fails
-        if (normalizedExchange === 'bybit') {
-          coinsWithUsdt = await this.exchangesService.getAllBybitCoins();
-        } else if (normalizedExchange === 'binance.us') {
-          coinsWithUsdt = await this.exchangesService.getAllBinanceUSCoins();
-        } else {
-          coinsWithUsdt = await this.exchangesService.getAllBinanceCoins();
-        }
-        this.logger.log(`Fallback: using all ${coinsWithUsdt.length} ${normalizedExchange} coins`);
-      }
-
-      if (coinsWithUsdt.length === 0) {
-        this.logger.warn(`No ${normalizedExchange} coins found`);
-        return { coins: [], lastSyncTime: null, exchange: normalizedExchange };
-      }
-
-      // Get latest market_rankings timestamp
+      // Get latest market_rankings timestamp for CRYPTO assets only
+      // (stocks also write to this table with different timestamps)
       const latestRanking = await this.prisma.market_rankings.findFirst({
+        where: {
+          asset: { asset_type: 'crypto' },
+        },
         orderBy: { rank_timestamp: 'desc' },
         select: { rank_timestamp: true },
       });
 
       if (!latestRanking) {
-        this.logger.warn('No market rankings found in database - waiting for first sync');
+        this.logger.warn('No crypto market rankings found in database - waiting for first sync');
         return { coins: [], lastSyncTime: null };
       }
 
@@ -409,13 +379,14 @@ export class MarketService {
           }
         : {};
 
-      // Fetch assets with latest market rankings - filtered by exchange coins with USDT pairs
+      // Filter by exchange using the available_exchanges JSON column in DB
+      // No external API calls — pure DB query
       const assets = await this.prisma.assets.findMany({
         where: {
           asset_type: 'crypto',
           is_active: true,
-          coingecko_id: {
-            in: coinsWithUsdt,
+          available_exchanges: {
+            array_contains: [normalizedExchange],
           },
           ...searchFilter,
         },
@@ -436,7 +407,7 @@ export class MarketService {
         take: limit,
       });
 
-      this.logger.log(`Found ${assets.length} ${normalizedExchange} coins in market rankings after exchange filtering`);
+      this.logger.log(`Found ${assets.length} ${normalizedExchange} coins from DB after exchange filtering`);
 
       // Transform to CoinGeckoCoin format
       const coins: CoinGeckoCoin[] = assets

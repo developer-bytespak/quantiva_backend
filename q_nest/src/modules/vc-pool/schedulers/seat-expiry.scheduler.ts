@@ -57,7 +57,29 @@ export class SeatExpiryScheduler {
             });
             this.logger.log(`  ✓ Deleted seat reservation`);
 
-            // 3. Delete member
+            // 3. Delete cancellation records (must go before member due to FK)
+            const member = await tx.vc_pool_members.findFirst({
+              where: {
+                pool_id: reservation.pool_id,
+                user_id: reservation.user_id,
+              },
+            });
+            if (member) {
+              await tx.vc_pool_cancellations.deleteMany({
+                where: { member_id: member.member_id },
+              });
+              // Delete any transaction records referencing this member
+              await tx.vc_pool_transactions.deleteMany({
+                where: { member_id: member.member_id },
+              });
+              // Delete any payout records referencing this member
+              await tx.vc_pool_payouts.deleteMany({
+                where: { member_id: member.member_id },
+              });
+              this.logger.log(`  ✓ Deleted related records`);
+            }
+
+            // 4. Delete member
             await tx.vc_pool_members.deleteMany({
               where: {
                 pool_id: reservation.pool_id,
@@ -66,7 +88,7 @@ export class SeatExpiryScheduler {
             });
             this.logger.log(`  ✓ Deleted member record`);
 
-            // 4. Decrement reserved seats
+            // 5. Decrement reserved seats
             await tx.vc_pools.update({
               where: { pool_id: reservation.pool_id },
               data: { reserved_seats_count: { decrement: 1 } },
