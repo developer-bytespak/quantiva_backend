@@ -44,10 +44,11 @@ class OptionsSignalEngine(BaseEngine):
         Generate options signals for a given underlying.
 
         Expected kwargs:
-            iv_rank: float | None — current IV percentile (0-1)
+            iv_rank: float | None — current IV rank (0-1)
             iv_value: float | None — raw IV value
             spot_price: float | None — current spot price
             price_data: list | None — recent price data for directional scoring
+            volume_data: list | None — recent volume data for weighting
         """
         try:
             if not self.validate_inputs(asset_id=asset_id, asset_type=asset_type):
@@ -57,9 +58,10 @@ class OptionsSignalEngine(BaseEngine):
             iv_value = kwargs.get("iv_value")
             spot_price = kwargs.get("spot_price")
             price_data = kwargs.get("price_data")
+            volume_data = kwargs.get("volume_data")
 
             # Derive direction and score from available data
-            direction, dir_score = self._compute_direction(iv_rank, price_data)
+            direction, dir_score = self._compute_direction(iv_rank, price_data, volume_data)
 
             # Determine default expiry
             expiry_dt = datetime.now(timezone.utc) + timedelta(days=DEFAULT_EXPIRY_DAYS)
@@ -110,28 +112,62 @@ class OptionsSignalEngine(BaseEngine):
         self,
         iv_rank: Optional[float],
         price_data: Optional[List[float]],
+        volume_data: Optional[List[float]] = None,
     ) -> tuple:
         """
-        Determine directional bias and score.
+        Determine directional bias and score using multi-timeframe momentum,
+        realized volatility regime detection, trend strength, and volume weighting.
         Returns (direction, score) where score is -1 to +1.
         """
         score = 0.0
 
-        # If we have price data, compute simple momentum
-        if price_data and len(price_data) >= 5:
-            arr = np.array(price_data[-20:], dtype=float)
+        if price_data and len(price_data) >= 10:
+            arr = np.array(price_data[-60:], dtype=float)
             returns = np.diff(arr) / arr[:-1]
 
-            # Short-term momentum (last 5 bars)
-            short_mom = float(np.mean(returns[-5:])) * 100
-            # Medium-term momentum
-            med_mom = float(np.mean(returns)) * 100 if len(returns) > 5 else short_mom
+            # 1. Multi-timeframe momentum
+            short_mom = float(np.mean(returns[-5:])) * 100 if len(returns) >= 5 else 0
+            med_mom = float(np.mean(returns[-20:])) * 100 if len(returns) >= 20 else short_mom
+            long_mom = float(np.mean(returns)) * 100
 
-            score = self.clamp_score(short_mom * 0.6 + med_mom * 0.4)
+            # 2. Realized volatility regime detection
+            rv = float(np.std(returns[-20:])) * np.sqrt(365) if len(returns) >= 20 else 0
+            vol_regime = "high" if rv > 0.8 else "low" if rv < 0.3 else "normal"
+
+            # 3. Trend strength via R-squared of linear regression
+            trend_strength = 0.0
+            if len(arr) >= 20:
+                window = arr[-20:]
+                x = np.arange(len(window))
+                coeffs = np.polyfit(x, window, 1)
+                predicted = np.polyval(coeffs, x)
+                ss_res = float(np.sum((window - predicted) ** 2))
+                ss_tot = float(np.sum((window - np.mean(window)) ** 2))
+                trend_strength = max(0, 1 - (ss_res / ss_tot)) if ss_tot > 0 else 0
+
+            # 4. Volume-weighted adjustment
+            vol_weight = 1.0
+            if volume_data and len(volume_data) >= 10:
+                vol_arr = np.array(volume_data[-20:], dtype=float)
+                recent_vol = float(np.mean(vol_arr[-5:])) if len(vol_arr) >= 5 else 0
+                avg_vol = float(np.mean(vol_arr))
+                vol_weight = min(1.5, max(0.5, recent_vol / avg_vol)) if avg_vol > 0 else 1.0
+
+            # Composite score: weighted multi-timeframe momentum
+            raw_score = (short_mom * 0.4 + med_mom * 0.35 + long_mom * 0.25) * vol_weight
+
+            # Dampen in high realized vol regime (chaotic, less predictable)
+            if vol_regime == "high":
+                raw_score *= 0.6
+
+            # Boost if strong trend (R² > 0.5 means clear linear trend)
+            raw_score *= (1 + trend_strength * 0.3)
+
+            score = self.clamp_score(raw_score)
 
         # IV-based adjustment: high IV favours neutral/selling
         if iv_rank is not None and iv_rank > 0.7:
-            score *= 0.5  # dampen directional bias in high IV
+            score *= 0.5
 
         if score > 0.1:
             direction = "bullish"
@@ -200,7 +236,6 @@ class OptionsSignalEngine(BaseEngine):
     ) -> tuple:
         """Rough risk/reward estimation based on strategy type."""
         if strat.name in ("long_call", "long_put"):
-            # Max loss = premium paid (approx 2-5% of spot)
             est_premium = spot_price * 0.03
             return "unlimited", "Unlimited", f"${est_premium:,.0f}"
 
@@ -221,6 +256,36 @@ class OptionsSignalEngine(BaseEngine):
                 ratio = f"1:{max_loss_val / est_credit:.1f}" if est_credit > 0 else "N/A"
                 return ratio, f"${est_credit:,.0f}", f"${max_loss_val:,.0f}"
             return "N/A", "N/A", "N/A"
+
+        if strat.name == "long_straddle":
+            # Max loss = both premiums (approx 6% of spot)
+            est_premium = spot_price * 0.06
+            return "unlimited", "Unlimited", f"${est_premium:,.0f}"
+
+        if strat.name == "long_strangle":
+            # Max loss = both premiums (cheaper than straddle, approx 4% of spot)
+            est_premium = spot_price * 0.04
+            return "unlimited", "Unlimited", f"${est_premium:,.0f}"
+
+        if strat.name == "long_butterfly":
+            if len(legs) >= 3:
+                wing_width = abs(legs[0]["strike"] - legs[1]["strike"])
+                est_debit = wing_width * 0.2  # cheap strategy
+                max_profit_val = wing_width - est_debit
+                ratio = f"{max_profit_val / est_debit:.1f}:1" if est_debit > 0 else "N/A"
+                return ratio, f"${max_profit_val:,.0f}", f"${est_debit:,.0f}"
+            return "N/A", "N/A", "N/A"
+
+        if strat.name == "calendar_spread":
+            est_debit = spot_price * 0.015
+            est_profit = est_debit * 0.5  # 50% return target
+            return f"{est_profit / est_debit:.1f}:1" if est_debit > 0 else "N/A", f"${est_profit:,.0f}", f"${est_debit:,.0f}"
+
+        if strat.name == "short_put":
+            est_credit = spot_price * 0.02
+            max_loss_val = legs[0]["strike"] - est_credit if legs else spot_price * 0.05
+            ratio = f"1:{max_loss_val / est_credit:.1f}" if est_credit > 0 else "N/A"
+            return ratio, f"${est_credit:,.0f}", f"${max_loss_val:,.0f}"
 
         return "N/A", "N/A", "N/A"
 

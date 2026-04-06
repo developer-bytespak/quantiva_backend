@@ -49,6 +49,7 @@ async def generate_signals(request_data: Dict[str, Any] = Body(...)):
             iv_value=request_data.get("iv_value"),
             spot_price=request_data.get("spot_price"),
             price_data=request_data.get("price_data"),
+            volume_data=request_data.get("volume_data"),
         )
 
         return {

@@ -7,11 +7,12 @@ import {
   ConnectedSocket,
   MessageBody,
 } from '@nestjs/websockets';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { OptionsBinanceService } from './services/options-binance.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { WsAuthService } from '../../gateways/ws-auth.service';
+import { OPTIONS_POLLING_CONFIG } from './options.config';
 
 interface OptionsSubscription {
   connectionId: string;
@@ -40,7 +41,7 @@ interface OptionsSubscription {
     credentials: true,
   },
 })
-export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   @WebSocketServer()
   server: Server;
 
@@ -57,11 +58,12 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect 
       tickerInterval: NodeJS.Timeout;
       subscribers: Set<string>; // socket IDs
       credentials: { apiKey: string; apiSecret: string };
+      userId: string;
     }
   >();
 
-  private readonly TICKER_INTERVAL_MS = 5_000;
-  private readonly CHAIN_INTERVAL_MS = 15_000;
+  private readonly TICKER_INTERVAL_MS = OPTIONS_POLLING_CONFIG.TICKER_INTERVAL_MS;
+  private readonly CHAIN_INTERVAL_MS = OPTIONS_POLLING_CONFIG.CHAIN_INTERVAL_MS;
 
   constructor(
     private readonly optionsBinance: OptionsBinanceService,
@@ -188,22 +190,25 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect 
 
     const subscribers = new Set<string>([socketId]);
 
-    // Chain update at 15s interval
-    const chainInterval = setInterval(async () => {
-      await this.pushChainUpdate(underlying, credentials, userId);
+    // Store shared state first so intervals can reference the latest credentials
+    const shared = {
+      chainInterval: null as unknown as NodeJS.Timeout,
+      tickerInterval: null as unknown as NodeJS.Timeout,
+      subscribers,
+      credentials,
+      userId,
+    };
+    this.sharedIntervals.set(key, shared);
+
+    // Chain update at 15s interval — reads from shared.credentials (rotated on disconnect)
+    shared.chainInterval = setInterval(async () => {
+      await this.pushChainUpdate(underlying, shared.credentials, shared.userId);
     }, this.CHAIN_INTERVAL_MS);
 
     // Underlying spot price at 5s interval
-    const tickerInterval = setInterval(async () => {
-      await this.pushTickerUpdate(underlying, credentials, userId);
+    shared.tickerInterval = setInterval(async () => {
+      await this.pushTickerUpdate(underlying, shared.credentials, shared.userId);
     }, this.TICKER_INTERVAL_MS);
-
-    this.sharedIntervals.set(key, {
-      chainInterval,
-      tickerInterval,
-      subscribers,
-      credentials,
-    });
   }
 
   private async pushChainUpdate(
@@ -236,20 +241,32 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect 
     userId: string,
   ): Promise<void> {
     try {
-      // Use eapi index endpoint for underlying price (public, reliable)
       const exchange = this.optionsBinance.getExchange(
         credentials,
         userId,
       );
-      const indexData = await (exchange as any).eapiPublicGetIndex({
-        underlying: `${underlying}USDT`,
-      });
+
+      // Fetch index price and 24h spot ticker in parallel
+      const [indexResult, tickerResult] = await Promise.allSettled([
+        (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` }),
+        (exchange as any).publicGetTicker24hr({ symbol: `${underlying}USDT` }),
+      ]);
+
+      const price = indexResult.status === 'fulfilled'
+        ? parseFloat(indexResult.value?.indexPrice || '0')
+        : 0;
+      const change24h = tickerResult.status === 'fulfilled'
+        ? parseFloat(tickerResult.value?.priceChange || '0')
+        : 0;
+      const changePercent24h = tickerResult.status === 'fulfilled'
+        ? parseFloat(tickerResult.value?.priceChangePercent || '0')
+        : 0;
 
       this.server.to(`options:${underlying}`).emit('ticker-update', {
         underlying,
-        price: parseFloat(indexData?.indexPrice || '0'),
-        change24h: 0,
-        changePercent24h: 0,
+        price,
+        change24h,
+        changePercent24h,
         timestamp: Date.now(),
       });
     } catch (error: any) {
@@ -269,15 +286,46 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect 
 
     const key = sub.underlying;
     const shared = this.sharedIntervals.get(key);
-    if (shared) {
-      shared.subscribers.delete(socketId);
+    if (!shared) return;
 
-      if (shared.subscribers.size === 0) {
-        clearInterval(shared.chainInterval);
-        clearInterval(shared.tickerInterval);
-        this.sharedIntervals.delete(key);
-        this.logger.debug(`Cleaned up shared options interval for ${key}`);
+    shared.subscribers.delete(socketId);
+
+    if (shared.subscribers.size === 0) {
+      // No subscribers left — tear down intervals
+      clearInterval(shared.chainInterval);
+      clearInterval(shared.tickerInterval);
+      this.sharedIntervals.delete(key);
+      this.logger.debug(`Cleaned up shared options interval for ${key}`);
+    } else {
+      // Rotate credentials to the next active subscriber to prevent stale creds
+      const nextSocketId = shared.subscribers.values().next().value;
+      const nextSub = this.subscriptions.get(nextSocketId);
+      if (nextSub) {
+        this.exchangesService
+          .getDecryptedCredentials(nextSub.connectionId)
+          .then((creds) => {
+            shared.credentials = creds;
+            shared.userId = nextSub.userId;
+            this.logger.debug(
+              `Rotated options credentials for ${key} to client ${nextSocketId}`,
+            );
+          })
+          .catch((err) =>
+            this.logger.warn(`Credential rotation failed for ${key}: ${err.message}`),
+          );
       }
     }
+  }
+
+  // ── Module destroy — clean up all intervals on shutdown ──
+
+  onModuleDestroy(): void {
+    for (const [key, shared] of this.sharedIntervals) {
+      clearInterval(shared.chainInterval);
+      clearInterval(shared.tickerInterval);
+      this.logger.debug(`Shutdown: cleared options intervals for ${key}`);
+    }
+    this.sharedIntervals.clear();
+    this.subscriptions.clear();
   }
 }

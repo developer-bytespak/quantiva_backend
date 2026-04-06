@@ -2,9 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { OptionsBinanceService } from './options-binance.service';
+import { FALLBACK_UNDERLYINGS } from '../options.config';
 import axios from 'axios';
-
-const TRACKED_UNDERLYINGS = ['BTC', 'ETH'];
 
 @Injectable()
 export class OptionsIvService {
@@ -22,7 +21,7 @@ export class OptionsIvService {
       return await this.optionsBinance.getAllUnderlyings();
     } catch {
       // Fallback to known coins if Binance unreachable
-      return TRACKED_UNDERLYINGS;
+      return FALLBACK_UNDERLYINGS;
     }
   }
 
@@ -38,11 +37,17 @@ export class OptionsIvService {
         const iv = await this.optionsBinance.getAtmIv(underlying);
         if (iv === null) continue;
 
+        const [ivRank, ivPercentile] = await Promise.all([
+          this.computeIvRank(underlying, iv),
+          this.computeIvPercentile(underlying, iv),
+        ]);
+
         await this.prisma.options_iv_history.create({
           data: {
             underlying,
             iv_value: iv,
-            iv_rank: await this.computeIvRank(underlying, iv),
+            iv_rank: ivRank,
+            iv_percentile: ivPercentile,
           },
         });
         this.logger.log(`IV snapshot ${underlying}: ${iv}`);
@@ -52,9 +57,9 @@ export class OptionsIvService {
     }
   }
 
-  // ── IV Rank (percentile vs 1-year history) ─────────────
+  // ── IV Rank & Percentile (vs 1-year history) ────────────
 
-  async computeIvRank(underlying: string, currentIv: number): Promise<number> {
+  private async getOneYearIvValues(underlying: string): Promise<number[]> {
     const oneYearAgo = new Date();
     oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
 
@@ -67,9 +72,32 @@ export class OptionsIvService {
       orderBy: { recorded_at: 'asc' },
     });
 
-    if (history.length < 2) return 0.5; // not enough data
+    return history.map((h) => Number(h.iv_value));
+  }
 
-    const values = history.map((h) => Number(h.iv_value));
+  /**
+   * IV Rank: (current - 52wk low) / (52wk high - 52wk low)
+   * Measures where current IV sits within its 1-year range.
+   */
+  async computeIvRank(underlying: string, currentIv: number): Promise<number> {
+    const values = await this.getOneYearIvValues(underlying);
+    if (values.length < 2) return 0.5;
+
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    if (max === min) return 0.5;
+
+    return Math.max(0, Math.min(1, (currentIv - min) / (max - min)));
+  }
+
+  /**
+   * IV Percentile: fraction of historical values below current IV.
+   * Measures how often IV has been lower than the current level.
+   */
+  async computeIvPercentile(underlying: string, currentIv: number): Promise<number> {
+    const values = await this.getOneYearIvValues(underlying);
+    if (values.length < 2) return 0.5;
+
     const below = values.filter((v) => v < currentIv).length;
     return below / values.length;
   }
@@ -104,6 +132,7 @@ export class OptionsIvService {
       underlying,
       currentIv: Number(latest.iv_value),
       ivRank: latest.iv_rank ? Number(latest.iv_rank) : null,
+      ivPercentile: latest.iv_percentile ? Number(latest.iv_percentile) : null,
       recordedAt: latest.recorded_at,
     };
   }
@@ -122,9 +151,9 @@ export class OptionsIvService {
     }
   }
 
-  // ── Recent daily closes for momentum scoring ────────────
+  // ── Recent daily klines for momentum and volume scoring ──
 
-  async getPriceData(underlying: string, limit = 20): Promise<number[] | null> {
+  async getPriceData(underlying: string, limit = 60): Promise<number[] | null> {
     try {
       const symbol = `${underlying}USDT`;
       const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1d&limit=${limit}`;
@@ -134,6 +163,20 @@ export class OptionsIvService {
       return data.map((k: any[]) => parseFloat(k[4]));
     } catch (err: any) {
       this.logger.warn(`getPriceData failed for ${underlying}: ${err.message}`);
+      return null;
+    }
+  }
+
+  async getVolumeData(underlying: string, limit = 60): Promise<number[] | null> {
+    try {
+      const symbol = `${underlying}USDT`;
+      const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1d&limit=${limit}`;
+      const { data } = await axios.get(url, { timeout: 5000 });
+      if (!Array.isArray(data) || data.length === 0) return null;
+      // kline[5] is the volume
+      return data.map((k: any[]) => parseFloat(k[5]));
+    } catch (err: any) {
+      this.logger.warn(`getVolumeData failed for ${underlying}: ${err.message}`);
       return null;
     }
   }

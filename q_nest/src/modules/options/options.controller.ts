@@ -16,6 +16,7 @@ import { TokenPayload } from '../auth/services/token.service';
 import { OptionsService } from './services/options.service';
 import { OptionsIvService } from './services/options-iv.service';
 import { OptionsSignalService } from './services/options-signal.service';
+import { OptionsRiskService } from './services/options-risk.service';
 import { PlaceOptionOrderDto, CancelOptionOrderDto } from './dto/options.dto';
 
 @Controller('options')
@@ -25,6 +26,7 @@ export class OptionsController {
     private readonly optionsService: OptionsService,
     private readonly ivService: OptionsIvService,
     private readonly signalService: OptionsSignalService,
+    private readonly riskService: OptionsRiskService,
   ) {}
 
   // ── Market Data ──────────────────────────────────────────
@@ -240,6 +242,18 @@ export class OptionsController {
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
     return this.ivService.getIvHistory(underlying.toUpperCase(), days ? parseInt(days, 10) : 90);
+  }
+
+  // ── Risk / Portfolio ─────────────────────────────────────
+
+  /**
+   * GET /options/portfolio-greeks
+   * Get aggregated Greeks across all open options positions.
+   */
+  @Get('portfolio-greeks')
+  async getPortfolioGreeks(@CurrentUser() user: TokenPayload) {
+    await this.optionsService.verifyEliteAccess(user.sub);
+    return this.riskService.getPortfolioGreeks(user.sub);
   }
 
   // ── AI Signals ──────────────────────────────────────────

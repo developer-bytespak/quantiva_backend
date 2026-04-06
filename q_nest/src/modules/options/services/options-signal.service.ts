@@ -3,9 +3,8 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { OptionsIvService } from './options-iv.service';
+import { FALLBACK_UNDERLYINGS } from '../options.config';
 import axios from 'axios';
-
-const FALLBACK_UNDERLYINGS = ['BTC', 'ETH'];
 
 @Injectable()
 export class OptionsSignalService {
@@ -38,11 +37,12 @@ export class OptionsSignalService {
   }
 
   private async generateForUnderlying(underlying: string) {
-    // 1. Gather IV context, spot price, and recent close prices in parallel
-    const [ivData, spotPrice, priceData] = await Promise.all([
+    // 1. Gather IV context, spot price, recent prices, and volume in parallel
+    const [ivData, spotPrice, priceData, volumeData] = await Promise.all([
       this.ivService.getIvRankData(underlying),
       this.ivService.getSpotPrice(underlying),
       this.ivService.getPriceData(underlying),
+      this.ivService.getVolumeData(underlying),
     ]);
 
     // 2. Call Python engine
@@ -54,6 +54,7 @@ export class OptionsSignalService {
         iv_value: ivData?.currentIv ?? null,
         spot_price: spotPrice ?? null,
         price_data: priceData ?? null,
+        volume_data: volumeData ?? null,
       },
       {
         timeout: 30_000,
@@ -88,6 +89,41 @@ export class OptionsSignalService {
     this.logger.log(
       `Generated ${data.signals.length} AI signals for ${underlying}`,
     );
+  }
+
+  // ── Cron: cleanup expired signals ───────────────────────
+
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  async cleanupExpiredSignals() {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const result = await this.prisma.options_signals_ai.deleteMany({
+      where: { expires_at: { lt: sevenDaysAgo } },
+    });
+    if (result.count > 0) {
+      this.logger.log(`Cleaned up ${result.count} expired AI signals (>7 days old)`);
+    }
+  }
+
+  /**
+   * Validate that a signal has not expired before allowing order placement.
+   * Called from OptionsService.placeOrder when signalId is provided.
+   */
+  async validateSignalNotExpired(signalId: string): Promise<void> {
+    const signal = await this.prisma.options_signals_ai.findUnique({
+      where: { id: signalId },
+      select: { expires_at: true, underlying: true, strategy: true },
+    });
+
+    if (!signal) {
+      // Could be a legacy signal from options_signals table — skip check
+      return;
+    }
+
+    if (signal.expires_at && signal.expires_at < new Date()) {
+      throw new Error(
+        `Signal for ${signal.underlying} (${signal.strategy}) expired at ${signal.expires_at.toISOString()}. Please use a fresh signal.`,
+      );
+    }
   }
 
   // ── Query helpers ──────────────────────────────────────

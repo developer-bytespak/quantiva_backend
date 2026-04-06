@@ -4,7 +4,10 @@ import {
   IsEnum,
   IsOptional,
   IsDateString,
+  IsNotEmpty,
   Min,
+  Max,
+  Matches,
 } from 'class-validator';
 
 // ── Enums ──────────────────────────────────────────────────
@@ -23,32 +26,45 @@ export enum OptionSide {
 
 export class PlaceOptionOrderDto {
   @IsString()
+  @IsNotEmpty()
   connectionId: string;
 
   @IsString()
+  @Matches(/^[A-Z]{2,10}-\d{6}-\d+-[CP]$/, {
+    message: 'contractSymbol must match format like BTC-260327-100000-C',
+  })
   contractSymbol: string; // e.g. BTC-260327-100000-C
 
   @IsString()
+  @IsNotEmpty()
+  @Matches(/^[A-Z]{2,10}$/, {
+    message: 'underlying must be uppercase letters (e.g. BTC, ETH)',
+  })
   underlying: string; // e.g. BTC
 
   @IsNumber()
+  @Min(0)
   strike: number;
 
   @IsDateString()
   expiry: string;
 
   @IsEnum(OptionTypeEnum)
+  @IsNotEmpty()
   optionType: OptionTypeEnum;
 
   @IsEnum(OptionSide)
+  @IsNotEmpty()
   side: OptionSide;
 
   @IsNumber()
-  @Min(0)
+  @Min(0.0001, { message: 'quantity must be at least 0.0001' })
+  @Max(10000, { message: 'quantity cannot exceed 10000' })
   quantity: number;
 
   @IsNumber()
-  @Min(0)
+  @Min(0.00000001, { message: 'price must be positive' })
+  @Max(1000000, { message: 'price cannot exceed 1000000' })
   price: number; // limit price (premium per contract)
 
   @IsOptional()

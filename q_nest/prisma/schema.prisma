@@ -1481,6 +1481,7 @@ enum OptionType {
 }
 
 enum OptionOrderStatus {
+  submitting
   pending
   filled
   partially_filled
@@ -1599,11 +1600,12 @@ model options_signals {
 // ── AI Options Signal Engine ─────────────────────────────────────────────────
 
 model options_iv_history {
-  id          String   @id @default(uuid()) @db.Uuid
-  underlying  String   @db.VarChar(20) // e.g. "BTC", "ETH"
-  iv_value    Decimal  @db.Decimal(10, 6)
-  iv_rank     Decimal? @db.Decimal(6, 4) // 0-1 percentile vs 1yr
-  recorded_at DateTime @default(now()) @db.Timestamp(6)
+  id            String   @id @default(uuid()) @db.Uuid
+  underlying    String   @db.VarChar(20) // e.g. "BTC", "ETH"
+  iv_value      Decimal  @db.Decimal(10, 6)
+  iv_rank       Decimal? @db.Decimal(6, 4) // 0-1 rank: (current-min)/(max-min)
+  iv_percentile Decimal? @db.Decimal(6, 4) // 0-1 percentile: fraction below current
+  recorded_at   DateTime @default(now()) @db.Timestamp(6)
 
   @@index([underlying, recorded_at])
   @@map("options_iv_history")
