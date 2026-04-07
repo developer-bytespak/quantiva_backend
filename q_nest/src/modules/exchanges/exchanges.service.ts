@@ -643,8 +643,8 @@ export class ExchangesService {
           this.bybitService.getOpenOrders(apiKey, apiSecret),
         ]);
 
-        // Portfolio is calculated from positions
-        portfolio = this.bybitService.calculatePortfolioFromPositions(positions);
+        // Portfolio is calculated from positions, using Bybit's totalEquity for accurate total
+        portfolio = this.bybitService.calculatePortfolioFromPositions(positions, accountInfo.totalEquity);
       } else if (isAlpaca) {
         // Alpaca: fetch account info, positions and orders
         const accountInfo = await this.alpacaService.getAccountInfo(apiKey, apiSecret);

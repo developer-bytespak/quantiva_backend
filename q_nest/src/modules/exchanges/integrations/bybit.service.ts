@@ -17,11 +17,13 @@ import {
 } from '../exceptions/bybit.exceptions';
 
 interface BybitAccountInfo {
+  totalEquity: string;
   coin: Array<{
     coin: string;
     walletBalance: string;
     availableToWithdraw: string;
     locked: string;
+    usdValue: string;
   }>;
 }
 
@@ -341,8 +343,10 @@ export class BybitService {
       accountType: 'UNIFIED',
     });
     
+    const account = result.list?.[0] || {};
     return {
-      coin: result.list?.[0]?.coin || [],
+      totalEquity: account.totalEquity || '0',
+      coin: account.coin || [],
     };
   }
 
@@ -370,7 +374,7 @@ export class BybitService {
 
     return {
       assets,
-      totalValueUSD: 0, // Calculated on frontend with prices
+      totalValueUSD: parseFloat(accountInfo.totalEquity || '0'),
     };
   }
 
@@ -453,7 +457,7 @@ export class BybitService {
         })
         .map((coin) => {
           const quantity = parseFloat(coin.walletBalance || '0');
-          const currentPrice = priceMap.get(coin.coin) || 0;
+          const currentPrice = priceMap.get(coin.coin) || (quantity > 0 ? parseFloat(coin.usdValue || '0') / quantity : 0);
           const entryPrice = currentPrice; // Simplified - would need trade history for accurate entry price
           const unrealizedPnl = (currentPrice - entryPrice) * quantity;
           const pnlPercent = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
@@ -493,10 +497,12 @@ export class BybitService {
   }
 
   /**
-   * Calculates portfolio value from positions (pure calculation, no API calls)
+   * Calculates portfolio value from positions.
+   * When totalEquity is provided (from Bybit API), it is used as the authoritative total value
+   * instead of summing position values (which misses USDT and coins without USDT pairs).
    */
-  calculatePortfolioFromPositions(positions: PositionDto[]): PortfolioDto {
-    let totalValue = 0;
+  calculatePortfolioFromPositions(positions: PositionDto[], totalEquity?: string): PortfolioDto {
+    let calculatedValue = 0;
     let totalCost = 0;
 
     const assets = positions.map((position) => {
@@ -505,7 +511,7 @@ export class BybitService {
       const pnl = value - cost;
       const pnlPercent = cost > 0 ? (pnl / cost) * 100 : 0;
 
-      totalValue += value;
+      calculatedValue += value;
       totalCost += cost;
 
       return {
@@ -518,6 +524,8 @@ export class BybitService {
       };
     });
 
+    // Use Bybit's totalEquity when available — it includes USDT and all account assets accurately
+    const totalValue = totalEquity ? parseFloat(totalEquity) : calculatedValue;
     const totalPnl = totalValue - totalCost;
     const pnlPercent = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
 
@@ -540,7 +548,7 @@ export class BybitService {
   ): Promise<PortfolioDto> {
     try {
       const positions = await this.getPositionsFromAccount(apiKey, apiSecret, accountInfo);
-      return this.calculatePortfolioFromPositions(positions);
+      return this.calculatePortfolioFromPositions(positions, accountInfo.totalEquity);
     } catch (error: any) {
       if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
         throw error;
