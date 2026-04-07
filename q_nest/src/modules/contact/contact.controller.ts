@@ -18,7 +18,7 @@ export class ContactController {
   }
 
   // Authenticated endpoint — help-support page contact form
-  @Post('authenticated')
+  @Post('submit-inquiry')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.CREATED)
   async submitAuthenticated(
