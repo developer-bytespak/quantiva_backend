@@ -70,6 +70,9 @@ model users {
   onboarding_emails_opted_out Boolean                      @default(false)
   onboarding_email_reminders  onboarding_email_reminders[]
 
+  // Contact submissions
+  contact_submissions contact_submissions[]
+
   @@index([current_tier])
   @@index([onboarding_state])
   @@map("users")
@@ -1837,4 +1840,24 @@ model qhq_subscription_discounts {
 
   @@index([user_id, applied])
   @@map("qhq_subscription_discounts")
+}
+
+/// Contact form submissions from homepage and help-support page
+model contact_submissions {
+  id         String   @id @default(uuid()) @db.Uuid
+  user_id    String?  @db.Uuid
+  name       String   @db.VarChar(100)
+  email      String   @db.VarChar(255)
+  company    String?  @db.VarChar(100)
+  phone      String?  @db.VarChar(20)
+  subject    String   @db.VarChar(50)
+  message    String   @db.Text
+  source     String   @default("homepage") @db.VarChar(20)
+  created_at DateTime @default(now()) @db.Timestamp(6)
+
+  user users? @relation(fields: [user_id], references: [user_id], onDelete: SetNull)
+
+  @@index([user_id])
+  @@index([created_at])
+  @@map("contact_submissions")
 }

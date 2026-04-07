@@ -288,9 +288,9 @@ export class OptionsBinanceService {
         this.withRetry(() => (exchange as any).eapiPublicGetMark(), 'getMark'),
         this.withRetry(() => (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` }), 'getIndex'),
       ]);
-      if (tickerResult.status === 'fulfilled') tickers = tickerResult.value || [];
-      if (markResult.status === 'fulfilled') markPrices = markResult.value || [];
-      if (indexResult.status === 'fulfilled') indexPrice = parseFloat(indexResult.value?.indexPrice || '0');
+      if (tickerResult.status === 'fulfilled') tickers = (tickerResult.value as any[]) || [];
+      if (markResult.status === 'fulfilled') markPrices = (markResult.value as any[]) || [];
+      if (indexResult.status === 'fulfilled') indexPrice = parseFloat((indexResult.value as any)?.indexPrice || '0');
     } catch (error: any) {
       this.logger.warn(`Options chain data fetch error: ${error.message}`);
     }
