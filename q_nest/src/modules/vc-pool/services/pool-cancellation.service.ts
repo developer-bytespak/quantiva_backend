@@ -683,6 +683,10 @@ export class PoolCancellationService {
           decrement: refundedAmount,
         };
       }
+      // Transition back to "open" if pool was "full" and now has available seats
+      if (pool.status === POOL_STATUS.full) {
+        poolUpdateData.status = POOL_STATUS.open;
+      }
       await tx.vc_pools.update({
         where: { pool_id: poolId },
         data: poolUpdateData,
