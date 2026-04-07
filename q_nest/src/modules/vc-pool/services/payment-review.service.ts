@@ -296,6 +296,37 @@ export class PaymentReviewService {
       rejection_reason: rejectionReason,
     });
 
+    // Send join rejected email + notification to user
+    const pool = await this.prisma.vc_pools.findUnique({
+      where: { pool_id: poolId },
+      select: { name: true, coin_type: true },
+    });
+    const rejectedUser = await this.prisma.users.findUnique({
+      where: { user_id: submission.user_id },
+      select: { email: true, full_name: true, username: true },
+    });
+    if (rejectedUser && pool) {
+      this.vcPoolEmailService.sendJoinRejectedToUser({
+        userEmail: rejectedUser.email,
+        userName: rejectedUser.full_name || rejectedUser.username || '',
+        poolName: pool.name,
+        contributionAmount: Number(submission.investment_amount),
+        coinType: pool.coin_type,
+        rejectionReason,
+      });
+
+      const notification = await this.notificationsService.createNotification({
+        user_id: submission.user_id,
+        type: 'vc_pool_join_rejected',
+        title: 'Pool Join Rejected',
+        message: `Your payment for ${pool.name} has been rejected. Reason: ${rejectionReason}`,
+        read: false,
+        metadata: { pool_id: poolId, pool_name: pool.name, reason: rejectionReason },
+      });
+      this.notificationsService.sendNotification(submission.user_id, 'Pool Join Rejected', `Your payment for ${pool.name} was rejected.`);
+      this.appGateway.emitNotificationCount(submission.user_id, 1, notification);
+    }
+
     return {
       message: 'Payment rejected. Seat has been released.',
       submission_id: submissionId,
