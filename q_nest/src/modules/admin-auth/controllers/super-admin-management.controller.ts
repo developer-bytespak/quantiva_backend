@@ -10,6 +10,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { PrismaService } from '../../../prisma/prisma.service';
 import { CurrentAdmin } from '../decorators/current-admin.decorator';
 import { DeleteVcPoolAdminDto } from '../dto/delete-vc-pool-admin.dto';
 import { CreateVcPoolAdminDto } from '../dto/create-vc-pool-admin.dto';
@@ -27,6 +28,7 @@ import { SuperAdminManagementService } from '../services/super-admin-management.
 export class SuperAdminManagementController {
   constructor(
     private readonly superAdminManagementService: SuperAdminManagementService,
+    private readonly prisma: PrismaService,
   ) {}
 
   @Get('users')
@@ -97,5 +99,54 @@ export class SuperAdminManagementController {
       admin.sub,
       dto,
     );
+  }
+
+  @Get('contact-submissions')
+  async listContactSubmissions(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('source') source?: string,
+    @Query('subject') subject?: string,
+    @Query('search') search?: string,
+  ) {
+    const pageNum = page ? parseInt(page, 10) : 1;
+    const limitNum = limit ? parseInt(limit, 10) : 20;
+    const skip = (pageNum - 1) * limitNum;
+
+    const where: any = {};
+    if (source && source !== 'all') where.source = source;
+    if (subject && subject !== 'all') where.subject = subject;
+    if (search) {
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { email: { contains: search, mode: 'insensitive' } },
+        { company: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
+    const [submissions, total] = await Promise.all([
+      this.prisma.contact_submissions.findMany({
+        where,
+        orderBy: { created_at: 'desc' },
+        skip,
+        take: limitNum,
+        include: {
+          user: {
+            select: { user_id: true, username: true, email: true },
+          },
+        },
+      }),
+      this.prisma.contact_submissions.count({ where }),
+    ]);
+
+    return {
+      submissions,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+      },
+    };
   }
 }
