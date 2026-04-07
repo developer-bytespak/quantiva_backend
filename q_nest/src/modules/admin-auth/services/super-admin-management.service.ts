@@ -5,6 +5,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { UpdateFeeSettingsDto } from '../dto/update-admin-settings.dto';
 import * as bcrypt from 'bcrypt';
 import sgMail from '@sendgrid/mail';
 import { SubscriptionStatus } from '@prisma/client';
@@ -1231,6 +1232,39 @@ export class SuperAdminManagementService {
       message: 'VC pool admin deleted successfully',
       admin_id: targetAdminId,
       email: target.email,
+    };
+  }
+
+  // ── Super Admin: Update global default fees for all VC pool admins ──
+
+  async updateGlobalDefaultFees(
+    superAdminId: string,
+    dto: UpdateFeeSettingsDto,
+  ) {
+    await this.verifySuperAdminPassword(superAdminId, dto.currentPassword);
+
+    // Update all non-super admins' default fees
+    const result = await this.prisma.admins.updateMany({
+      // where: { is_super_admin: false },
+      data: {
+        default_pool_fee_percent: dto.default_pool_fee_percent,
+        default_admin_profit_fee_percent: dto.default_admin_profit_fee_percent,
+        default_cancellation_fee_percent: dto.default_cancellation_fee_percent,
+        default_payment_window_minutes: dto.default_payment_window_minutes,
+      },
+    });
+
+    this.logger.log(
+      `Super admin ${superAdminId} updated global default fees for ${result.count} admins`,
+    );
+
+    return {
+      message: `Default fees updated for ${result.count} VC pool admin(s)`,
+      updated_count: result.count,
+      default_pool_fee_percent: dto.default_pool_fee_percent,
+      default_admin_profit_fee_percent: dto.default_admin_profit_fee_percent,
+      default_cancellation_fee_percent: dto.default_cancellation_fee_percent,
+      default_payment_window_minutes: dto.default_payment_window_minutes,
     };
   }
 }

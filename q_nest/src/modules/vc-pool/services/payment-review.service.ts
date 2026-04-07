@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AppGateway } from '../../../gateways/app.gateway';
+import { VcPoolEmailService } from './vc-pool-email.service';
 
 const POOL_STATUS = { open: 'open', full: 'full' } as const;
 
@@ -17,6 +18,7 @@ export class PaymentReviewService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly appGateway: AppGateway,
+    private readonly vcPoolEmailService: VcPoolEmailService,
   ) {}
 
   // ── List payment submissions for a pool ──
@@ -199,6 +201,21 @@ export class PaymentReviewService {
       submission_id: submissionId,
       member_id: result.member.member_id,
     });
+
+    // Send join accepted email to user
+    const acceptedUser = await this.prisma.users.findUnique({
+      where: { user_id: submission.user_id },
+      select: { email: true, full_name: true, username: true },
+    });
+    if (acceptedUser) {
+      this.vcPoolEmailService.sendJoinAcceptedToUser({
+        userEmail: acceptedUser.email,
+        userName: acceptedUser.full_name || acceptedUser.username || '',
+        poolName: pool.name,
+        contributionAmount: Number(submission.investment_amount),
+        coinType: pool.coin_type,
+      });
+    }
 
     return {
       message: 'Payment approved. User is now a pool member.',

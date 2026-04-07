@@ -68,7 +68,7 @@ export class AdminPoolController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdatePoolDto,
   ) {
-    return this.poolService.updatePool(admin.sub, id, dto);
+    return this.poolService.updatePool(admin.sub, id, dto, admin.is_super_admin);
   }
 
   @Put(':id/publish')
