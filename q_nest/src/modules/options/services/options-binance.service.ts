@@ -284,9 +284,9 @@ export class OptionsBinanceService {
 
     try {
       const [tickerResult, markResult, indexResult] = await Promise.allSettled([
-        this.withRetry(() => (exchange as any).eapiPublicGetTicker(), 'getTicker'),
-        this.withRetry(() => (exchange as any).eapiPublicGetMark(), 'getMark'),
-        this.withRetry(() => (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` }), 'getIndex'),
+        this.withRetry<any[]>(() => (exchange as any).eapiPublicGetTicker(), 'getTicker'),
+        this.withRetry<any[]>(() => (exchange as any).eapiPublicGetMark(), 'getMark'),
+        this.withRetry<any>(() => (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` }), 'getIndex'),
       ]);
       if (tickerResult.status === 'fulfilled') tickers = (tickerResult.value as any[]) || [];
       if (markResult.status === 'fulfilled') markPrices = (markResult.value as any[]) || [];
