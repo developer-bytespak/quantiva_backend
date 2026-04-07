@@ -35,6 +35,7 @@ import { MarketDetailGateway } from './gateways/market-detail.gateway';
 import { GatewaysModule } from './gateways/gateways.module';
 import { TradeFeesModule } from './modules/trade-fees/trade-fees.module';
 import { QhqTokenModule } from './modules/qhq-token/qhq-token.module';
+import { ContactModule } from './modules/contact/contact.module';
 
 @Module({
   imports: [
@@ -72,6 +73,7 @@ import { QhqTokenModule } from './modules/qhq-token/qhq-token.module';
     StripeModule,
     BinanceModule,
     QhqTokenModule,
+    ContactModule,
   ],
   controllers: [],
   providers: [
