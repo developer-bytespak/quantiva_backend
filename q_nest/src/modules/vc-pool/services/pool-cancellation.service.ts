@@ -651,6 +651,35 @@ export class PoolCancellationService {
       status: 'rejected',
     });
 
+    // Send exit rejected email + notification to user
+    const pool = await this.prisma.vc_pools.findUnique({
+      where: { pool_id: poolId },
+      select: { name: true, coin_type: true },
+    });
+    const rejectedUser = await this.prisma.users.findUnique({
+      where: { user_id: cancellation.member.user_id },
+      select: { email: true, full_name: true, username: true },
+    });
+    if (rejectedUser && pool) {
+      this.vcPoolEmailService.sendExitRejectedToUser({
+        userEmail: rejectedUser.email,
+        userName: rejectedUser.full_name || rejectedUser.username || '',
+        poolName: pool.name,
+        rejectionReason,
+      });
+
+      const notification = await this.notificationsService.createNotification({
+        user_id: cancellation.member.user_id,
+        type: 'vc_pool_exit_rejected',
+        title: 'Exit Request Rejected',
+        message: `Your exit request from ${pool.name} has been rejected. Reason: ${rejectionReason}`,
+        read: false,
+        metadata: { pool_id: poolId, pool_name: pool.name, reason: rejectionReason },
+      });
+      this.notificationsService.sendNotification(cancellation.member.user_id, 'Exit Request Rejected', `Your exit request from ${pool.name} was rejected.`);
+      this.appGateway.emitNotificationCount(cancellation.member.user_id, 1, notification);
+    }
+
     return {
       cancellation_id: updated.cancellation_id,
       status: updated.status,

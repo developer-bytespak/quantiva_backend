@@ -287,4 +287,69 @@ export class VcPoolEmailService {
       }
     }
   }
+
+  // ── 8. Join Rejected → User ──
+  async sendJoinRejectedToUser(data: {
+    userEmail: string;
+    userName: string;
+    poolName: string;
+    contributionAmount: number;
+    coinType: string;
+    rejectionReason: string;
+  }): Promise<void> {
+    if (!this.initialized) return;
+    try {
+      await sgMail.send({
+        to: data.userEmail,
+        from: { email: this.fromEmail, name: 'Quantiva' },
+        subject: `Payment Rejected – ${data.poolName}`,
+        html: this.wrapTemplate(`
+          <h2 style="color: #e53e3e; margin-top: 0;">Payment Rejected</h2>
+          <p style="color: #666; font-size: 16px;">Hello${data.userName ? ` ${data.userName}` : ''},</p>
+          <p style="color: #666; font-size: 16px;">Unfortunately, your payment for <strong>${data.poolName}</strong> has been rejected by the admin.</p>
+          ${this.infoBox(`
+            <p style="margin: 0 0 10px; color: #333;"><strong>Pool:</strong> ${data.poolName}</p>
+            <p style="margin: 0 0 10px; color: #333;"><strong>Amount:</strong> ${data.contributionAmount} ${data.coinType}</p>
+            <p style="margin: 0; color: #e53e3e;"><strong>Reason:</strong> ${data.rejectionReason}</p>
+          `)}
+          <p style="color: #666; font-size: 16px;">Your seat reservation has been released. You may try joining again with a valid payment.</p>
+          <p style="color: #999; font-size: 12px; margin-top: 30px;">If you believe this is a mistake, please contact the pool admin.</p>
+        `),
+      });
+      this.logger.log(`Join rejected email sent to user ${data.userEmail} for pool ${data.poolName}`);
+    } catch (error) {
+      this.logger.error(`Failed to send join rejected email: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  // ── 9. Exit Request Rejected → User ──
+  async sendExitRejectedToUser(data: {
+    userEmail: string;
+    userName: string;
+    poolName: string;
+    rejectionReason: string;
+  }): Promise<void> {
+    if (!this.initialized) return;
+    try {
+      await sgMail.send({
+        to: data.userEmail,
+        from: { email: this.fromEmail, name: 'Quantiva' },
+        subject: `Exit Request Rejected – ${data.poolName}`,
+        html: this.wrapTemplate(`
+          <h2 style="color: #e53e3e; margin-top: 0;">Exit Request Rejected</h2>
+          <p style="color: #666; font-size: 16px;">Hello${data.userName ? ` ${data.userName}` : ''},</p>
+          <p style="color: #666; font-size: 16px;">Your exit request from <strong>${data.poolName}</strong> has been rejected by the admin.</p>
+          ${this.infoBox(`
+            <p style="margin: 0 0 10px; color: #333;"><strong>Pool:</strong> ${data.poolName}</p>
+            <p style="margin: 0; color: #e53e3e;"><strong>Reason:</strong> ${data.rejectionReason}</p>
+          `)}
+          <p style="color: #666; font-size: 16px;">You remain an active member of the pool. If you have concerns, please reach out to the pool admin.</p>
+          <p style="color: #999; font-size: 12px; margin-top: 30px;">If you believe this is a mistake, please contact the pool admin.</p>
+        `),
+      });
+      this.logger.log(`Exit rejected email sent to user ${data.userEmail} for pool ${data.poolName}`);
+    } catch (error) {
+      this.logger.error(`Failed to send exit rejected email: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 }
