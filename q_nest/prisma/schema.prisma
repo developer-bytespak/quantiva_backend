@@ -65,7 +65,13 @@ model users {
   qhq_transactions qhq_transactions[]
   qhq_wallet_link  qhq_wallet_links?
 
+  // Onboarding email reminders
+  onboarding_state            OnboardingState              @default(SIGNED_UP)
+  onboarding_emails_opted_out Boolean                      @default(false)
+  onboarding_email_reminders  onboarding_email_reminders[]
+
   @@index([current_tier])
+  @@index([onboarding_state])
   @@map("users")
 }
 
@@ -1065,6 +1071,42 @@ enum BinancePaymentStatus {
   verified
   rejected
   refunded
+}
+
+// ── Onboarding Email Reminders ──
+
+enum OnboardingState {
+  SIGNED_UP
+  PERSONAL_INFO
+  KYC
+  PAID
+  CONNECT_EXCHANGE
+  COMPLETED
+}
+
+enum ReminderStatus {
+  QUEUED
+  SENT
+  CANCELLED
+}
+
+model onboarding_email_reminders {
+  id               String          @id @default(uuid()) @db.Uuid
+  user_id          String          @db.Uuid
+  onboarding_state OnboardingState
+  delay_label      String          @db.VarChar(10)
+  bull_job_id      String          @db.VarChar(255)
+  status           ReminderStatus  @default(QUEUED)
+  scheduled_at     DateTime        @db.Timestamp(6)
+  sent_at          DateTime?       @db.Timestamp(6)
+  cancelled_at     DateTime?       @db.Timestamp(6)
+  created_at       DateTime        @default(now()) @db.Timestamp(6)
+
+  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id, status])
+  @@index([user_id, onboarding_state])
+  @@map("onboarding_email_reminders")
 }
 
 // ── VC Pool Models ──
