@@ -1,5 +1,6 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import * as ccxt from 'ccxt';
+import { OPTIONS_RETRY_CONFIG } from '../options.config';
 import {
   OptionContractDto,
   OptionsChainResponseDto,
@@ -78,6 +79,32 @@ export class OptionsBinanceService {
     this.exchangeInfoCachedAt = now;
     this.logger.log(`Options exchange info loaded: ${info.optionSymbols?.length || 0} option symbols`);
     return info;
+  }
+
+  /**
+   * Retry wrapper with exponential backoff for Binance API calls.
+   * Retries on network errors and 429 (rate limit). Does not retry 4xx client errors.
+   */
+  private async withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+    const { MAX_RETRIES, BASE_DELAY_MS, MAX_DELAY_MS } = OPTIONS_RETRY_CONFIG;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        return await fn();
+      } catch (error: any) {
+        const status = error?.response?.status || error?.code;
+        const isRateLimit = status === 429 || error?.message?.includes('rate limit');
+        const isClientError = typeof status === 'number' && status >= 400 && status < 500;
+
+        // Don't retry client errors (except rate limits)
+        if (isClientError && !isRateLimit) throw error;
+        if (attempt === MAX_RETRIES) throw error;
+
+        const delay = Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1), MAX_DELAY_MS);
+        this.logger.warn(`Retry ${attempt}/${MAX_RETRIES} for ${label} after ${delay}ms`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+    throw new ServiceUnavailableException('Unreachable');
   }
 
   /**
@@ -257,9 +284,9 @@ export class OptionsBinanceService {
 
     try {
       const [tickerResult, markResult, indexResult] = await Promise.allSettled([
-        (exchange as any).eapiPublicGetTicker(),
-        (exchange as any).eapiPublicGetMark(),
-        (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` }),
+        this.withRetry(() => (exchange as any).eapiPublicGetTicker(), 'getTicker'),
+        this.withRetry(() => (exchange as any).eapiPublicGetMark(), 'getMark'),
+        this.withRetry(() => (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` }), 'getIndex'),
       ]);
       if (tickerResult.status === 'fulfilled') tickers = tickerResult.value || [];
       if (markResult.status === 'fulfilled') markPrices = markResult.value || [];
@@ -571,7 +598,10 @@ export class OptionsBinanceService {
     const exchange = this.getExchange(credentials, userId);
 
     try {
-      const rawPositions: any[] = await (exchange as any).eapiPrivateGetPosition();
+      const rawPositions: any[] = await this.withRetry(
+        () => (exchange as any).eapiPrivateGetPosition(),
+        'fetchPositions',
+      );
       const positions = Array.isArray(rawPositions) ? rawPositions : [];
 
       return positions
@@ -601,7 +631,7 @@ export class OptionsBinanceService {
           isOpen: true,
         }));
     } catch (error: any) {
-      this.logger.warn(`fetchPositions via eapi failed: ${error.message}`);
+      this.logger.warn(`fetchPositions via eapi failed after retries: ${error.message}`);
       // Return empty positions instead of crashing — user may not have options enabled
       return [];
     }
@@ -622,7 +652,10 @@ export class OptionsBinanceService {
 
     try {
       // Binance Options uses /eapi/v1/marginAccount (not /account)
-      const account: any = await (exchange as any).eapiPrivateGetMarginAccount();
+      const account: any = await this.withRetry(
+        () => (exchange as any).eapiPrivateGetMarginAccount(),
+        'fetchBalance',
+      );
       // Response: [{ asset, equity, maxWithdrawAmount, availableBalance, unrealizedPNL, marginBalance, ... }]
       const assets = Array.isArray(account) ? account : (account?.asset || []);
       const usdtAsset = assets.find((a: any) => a.asset === 'USDT');

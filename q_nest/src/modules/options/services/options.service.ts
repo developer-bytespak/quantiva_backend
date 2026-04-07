@@ -2,6 +2,7 @@ import { Injectable, Logger, ForbiddenException, NotFoundException, BadRequestEx
 import { PrismaService } from '../../../prisma/prisma.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { OptionsBinanceService } from './options-binance.service';
+import { OptionsSignalService } from './options-signal.service';
 import {
   PlaceOptionOrderDto,
   CancelOptionOrderDto,
@@ -15,20 +16,10 @@ import {
   OptionTypeEnum,
 } from '../dto/options.dto';
 import axios from 'axios';
+import { OPTIONS_RISK_CONFIG as RISK_CONFIG } from '../options.config';
 
 // Use string literals that match the Prisma OptionType enum values
 type OptionType = 'CALL' | 'PUT';
-
-// ── Risk config ────────────────────────────────────────────
-
-const RISK_CONFIG = {
-  MAX_OPEN_POSITIONS: 10,
-  MAX_PREMIUM_PERCENT: 0.05,        // 5% of account per trade
-  EXPIRY_WARNING_HOURS: 24,
-  MAX_IV_RANK_FOR_BUY: 0.80,        // reject buying when IV rank > 80%
-  MAX_BID_ASK_SPREAD_PERCENT: 0.10,  // 10% max spread
-  MIN_OPEN_INTEREST: 50,
-};
 
 @Injectable()
 export class OptionsService {
@@ -40,6 +31,7 @@ export class OptionsService {
     private readonly prisma: PrismaService,
     private readonly exchangesService: ExchangesService,
     private readonly optionsBinance: OptionsBinanceService,
+    private readonly signalService: OptionsSignalService,
   ) {}
 
   // ── Helpers ──────────────────────────────────────────────
@@ -198,74 +190,90 @@ export class OptionsService {
     });
   }
 
+  // Per-user mutex to prevent concurrent sync race conditions
+  private syncLocks = new Map<string, Promise<void>>();
+
   private async syncPositionsToDb(userId: string, positions: OptionsPositionDto[]) {
-    for (const pos of positions) {
-      const parts = pos.contractSymbol.split('-');
-      const optionType: OptionType = parts[3] === 'C' ? 'CALL' : 'PUT';
-      const expiryDate = this.parseExpiryToDate(parts[1]);
+    // Serialize sync calls per user to prevent race conditions
+    const existing = this.syncLocks.get(userId) || Promise.resolve();
+    const next = existing
+      .then(() => this._doPositionSync(userId, positions))
+      .catch((err) => this.logger.error(`Position sync failed for ${userId}: ${err.message}`));
+    this.syncLocks.set(userId, next);
+    return next;
+  }
 
-      // Find existing position by compound key (user + contract + open)
-      const existing = await this.prisma.options_positions.findFirst({
-        where: {
-          user_id: userId,
-          contract_symbol: pos.contractSymbol,
-          is_open: true,
-        },
-      });
+  private async _doPositionSync(userId: string, positions: OptionsPositionDto[]) {
+    const activeSymbols = positions.map((p) => p.contractSymbol);
 
-      if (existing) {
-        await this.prisma.options_positions.update({
-          where: { position_id: existing.position_id },
-          data: {
-            current_premium: pos.currentPremium,
-            unrealized_pnl: pos.unrealizedPnl,
-            realized_pnl: pos.realizedPnl || 0,
-            delta: pos.greeks.delta,
-            gamma: pos.greeks.gamma,
-            theta: pos.greeks.theta,
-            vega: pos.greeks.vega,
-            quantity: pos.quantity,
-          },
-        });
-      } else {
-        await this.prisma.options_positions.create({
-          data: {
+    await this.prisma.$transaction(async (tx) => {
+      // Upsert each position (batch within single transaction)
+      for (const pos of positions) {
+        const parts = pos.contractSymbol.split('-');
+        const optionType: OptionType = parts[3] === 'C' ? 'CALL' : 'PUT';
+        const expiryDate = this.parseExpiryToDate(parts[1]);
+
+        // Find existing open position for this user+contract
+        const existingPos = await tx.options_positions.findFirst({
+          where: {
             user_id: userId,
             contract_symbol: pos.contractSymbol,
-            underlying: pos.underlying,
-            strike: pos.strike,
-            expiry: expiryDate,
-            option_type: optionType,
-            quantity: pos.quantity,
-            avg_premium: pos.avgPremium,
-            current_premium: pos.currentPremium,
-            unrealized_pnl: pos.unrealizedPnl,
-            realized_pnl: pos.realizedPnl || 0,
-            delta: pos.greeks.delta,
-            gamma: pos.greeks.gamma,
-            theta: pos.greeks.theta,
-            vega: pos.greeks.vega,
             is_open: true,
           },
         });
-      }
-    }
 
-    // Mark positions as closed if they no longer exist on Binance
-    const activeSymbols = positions.map((p) => p.contractSymbol);
-    if (activeSymbols.length > 0) {
-      await this.prisma.options_positions.updateMany({
+        if (existingPos) {
+          await tx.options_positions.update({
+            where: { position_id: existingPos.position_id },
+            data: {
+              current_premium: pos.currentPremium,
+              unrealized_pnl: pos.unrealizedPnl,
+              realized_pnl: pos.realizedPnl || 0,
+              delta: pos.greeks.delta,
+              gamma: pos.greeks.gamma,
+              theta: pos.greeks.theta,
+              vega: pos.greeks.vega,
+              quantity: pos.quantity,
+            },
+          });
+        } else {
+          await tx.options_positions.create({
+            data: {
+              user_id: userId,
+              contract_symbol: pos.contractSymbol,
+              underlying: pos.underlying,
+              strike: pos.strike,
+              expiry: expiryDate,
+              option_type: optionType,
+              quantity: pos.quantity,
+              avg_premium: pos.avgPremium,
+              current_premium: pos.currentPremium,
+              unrealized_pnl: pos.unrealizedPnl,
+              realized_pnl: pos.realizedPnl || 0,
+              delta: pos.greeks.delta,
+              gamma: pos.greeks.gamma,
+              theta: pos.greeks.theta,
+              vega: pos.greeks.vega,
+              is_open: true,
+            },
+          });
+        }
+      }
+
+      // Mark positions as closed if no longer on Binance
+      // Works even when activeSymbols is empty (closes ALL open positions)
+      await tx.options_positions.updateMany({
         where: {
           user_id: userId,
           is_open: true,
-          contract_symbol: { notIn: activeSymbols },
+          ...(activeSymbols.length > 0 ? { contract_symbol: { notIn: activeSymbols } } : {}),
         },
         data: {
           is_open: false,
           closed_at: new Date(),
         },
       });
-    }
+    });
   }
 
   // ── Orders ───────────────────────────────────────────────
@@ -281,7 +289,16 @@ export class OptionsService {
     await this.verifyConnectionOwnership(dto.connectionId, userId);
     const credentials = await this.getCredentials(dto.connectionId);
 
-    // 2. Risk checks
+    // 2. Validate signal not expired (if order linked to a signal)
+    if (dto.signalId) {
+      try {
+        await this.signalService.validateSignalNotExpired(dto.signalId);
+      } catch (err: any) {
+        throw new BadRequestException(err.message);
+      }
+    }
+
+    // 3. Risk checks
     await this.performRiskChecks(userId, dto, credentials);
 
     // 3. Calculate max loss (premium × qty for buy side)
@@ -299,22 +316,12 @@ export class OptionsService {
       this.logger.warn('Could not fetch Greeks snapshot before order placement');
     }
 
-    // 5. Place on Binance (returns raw eapi response)
-    const binanceOrder = await this.optionsBinance.placeOptionOrder(
-      credentials,
-      dto.contractSymbol,
-      dto.side.toLowerCase() as 'buy' | 'sell',
-      dto.quantity,
-      dto.price,
-      userId,
-    );
-
-    // 6. Parse contract symbol parts
+    // 5. Parse contract symbol parts
     const parts = dto.contractSymbol.split('-');
     const optionType: OptionType = parts[3] === 'C' ? 'CALL' : 'PUT';
     const expiryDate = this.parseExpiryToDate(parts[1]);
 
-    // 7. Save to DB (eapi returns orderId/executedQty/avgPrice/fee/status)
+    // 6. Create DB record FIRST with 'submitting' status (ensures no orphaned exchange orders)
     const dbOrder = await this.prisma.options_orders.create({
       data: {
         user_id: userId,
@@ -327,19 +334,51 @@ export class OptionsService {
         side: dto.side,
         quantity: dto.quantity,
         price: dto.price,
-        filled_quantity: parseFloat(binanceOrder.executedQty || binanceOrder.filled || '0'),
-        avg_fill_price: parseFloat(binanceOrder.avgPrice || binanceOrder.average || '0') || null,
-        fee: parseFloat(binanceOrder.fee || '0') || null,
-        binance_order_id: (binanceOrder.orderId || binanceOrder.id)?.toString() || null,
-        status: this.mapOrderStatus(binanceOrder.status),
+        filled_quantity: 0,
+        avg_fill_price: null,
+        fee: null,
+        binance_order_id: null,
+        status: 'submitting',
         max_loss: maxLoss,
         greeks_at_entry: greeksSnapshot,
       },
     });
 
-    this.logger.log(`Options order created: ${dbOrder.order_id} binance=${binanceOrder.id}`);
+    // 7. Place on Binance — update DB regardless of outcome
+    let binanceOrder: any;
+    try {
+      binanceOrder = await this.optionsBinance.placeOptionOrder(
+        credentials,
+        dto.contractSymbol,
+        dto.side.toLowerCase() as 'buy' | 'sell',
+        dto.quantity,
+        dto.price,
+        userId,
+      );
+    } catch (exchangeError) {
+      // Exchange rejected — mark DB record as 'rejected' so it's tracked
+      await this.prisma.options_orders.update({
+        where: { order_id: dbOrder.order_id },
+        data: { status: 'rejected' },
+      });
+      throw exchangeError;
+    }
 
-    return this.mapDbOrderToDto(dbOrder);
+    // 8. Update DB with exchange response
+    const updatedOrder = await this.prisma.options_orders.update({
+      where: { order_id: dbOrder.order_id },
+      data: {
+        binance_order_id: (binanceOrder.orderId || binanceOrder.id)?.toString() || null,
+        status: this.mapOrderStatus(binanceOrder.status),
+        filled_quantity: parseFloat(binanceOrder.executedQty || binanceOrder.filled || '0'),
+        avg_fill_price: parseFloat(binanceOrder.avgPrice || binanceOrder.average || '0') || null,
+        fee: parseFloat(binanceOrder.fee || '0') || null,
+      },
+    });
+
+    this.logger.log(`Options order placed: ${dbOrder.order_id} binance=${binanceOrder.orderId || binanceOrder.id}`);
+
+    return this.mapDbOrderToDto(updatedOrder);
   }
 
   /**
@@ -602,7 +641,28 @@ export class OptionsService {
       }
     }
 
-    // 3. IV rank check for buy orders
+    // 3. Margin check for SELL orders (selling options requires margin)
+    if (dto.side === 'SELL') {
+      try {
+        const optionsBalance = await this.optionsBinance.fetchBalance(credentials, userId);
+        const availableBalance = optionsBalance.availableBalance;
+        if (availableBalance > 0) {
+          // Estimate margin as premium * quantity * 2 (conservative 2x margin heuristic)
+          const estimatedMargin = dto.price * dto.quantity * 2;
+          const maxMargin = availableBalance * RISK_CONFIG.MAX_SELL_MARGIN_PERCENT;
+          if (estimatedMargin > maxMargin) {
+            throw new BadRequestException(
+              `Estimated margin $${estimatedMargin.toFixed(2)} exceeds ${(RISK_CONFIG.MAX_SELL_MARGIN_PERCENT * 100).toFixed(0)}% of available balance ($${availableBalance.toFixed(2)})`,
+            );
+          }
+        }
+      } catch (err: any) {
+        if (err instanceof BadRequestException) throw err;
+        this.logger.warn(`Could not check margin for SELL order: ${err.message}`);
+      }
+    }
+
+    // 4. IV rank check for buy orders — warn at threshold, hard block at higher threshold
     if (dto.side === 'BUY') {
       try {
         const greeks = await this.optionsBinance.fetchGreeks(
@@ -610,16 +670,20 @@ export class OptionsService {
           dto.contractSymbol,
           userId,
         );
-        if (
-          greeks.impliedVolatility &&
-          greeks.impliedVolatility > RISK_CONFIG.MAX_IV_RANK_FOR_BUY
-        ) {
-          this.logger.warn(
-            `High IV warning for ${dto.contractSymbol}: IV=${greeks.impliedVolatility}`,
-          );
-          // Warn but don't block — user has final say
+        if (greeks.impliedVolatility) {
+          if (greeks.impliedVolatility > RISK_CONFIG.IV_RANK_HARD_BLOCK) {
+            throw new BadRequestException(
+              `IV too high (${(greeks.impliedVolatility * 100).toFixed(1)}%) — buying options when IV rank > ${(RISK_CONFIG.IV_RANK_HARD_BLOCK * 100).toFixed(0)}% is blocked. Consider selling premium instead.`,
+            );
+          }
+          if (greeks.impliedVolatility > RISK_CONFIG.MAX_IV_RANK_FOR_BUY) {
+            this.logger.warn(
+              `High IV warning for ${dto.contractSymbol}: IV=${greeks.impliedVolatility}`,
+            );
+          }
         }
-      } catch {
+      } catch (err: any) {
+        if (err instanceof BadRequestException) throw err;
         this.logger.warn('Could not check IV rank for risk validation');
       }
     }
