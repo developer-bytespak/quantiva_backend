@@ -9,6 +9,8 @@ import {
 import { PrismaService } from '../../../prisma/prisma.service';
 import { JoinPoolDto } from '../dto/join-pool.dto';
 import { VcPoolEmailService } from './vc-pool-email.service';
+import { NotificationsService } from '../../notifications/notifications.service';
+import { AppGateway } from '../../../gateways/app.gateway';
 
 const POOL_STATUS = { open: 'open', full: 'full' } as const;
 const RESERVATION_STATUS = { reserved: 'reserved', confirmed: 'confirmed' } as const;
@@ -21,6 +23,8 @@ export class SeatReservationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly vcPoolEmailService: VcPoolEmailService,
+    private readonly notificationsService: NotificationsService,
+    private readonly appGateway: AppGateway,
   ) {}
 
   async joinPool(userId: string, poolId: string, dto: JoinPoolDto) {
@@ -305,6 +309,17 @@ export class SeatReservationService {
       contributionAmount: totalAmount,
       coinType: pool.coin_type,
       paymentMethod: dto.payment_method,
+    });
+
+    // Notification #1: Join request → admin (WebSocket)
+    this.appGateway.emitPoolEvent(pool.admin_id, 'pool:join-request', {
+      pool_id: poolId,
+      pool_name: pool.name,
+      user_name: user.full_name || user.username || 'Unknown',
+      user_email: user.email,
+      amount: totalAmount,
+      coin_type: pool.coin_type,
+      payment_method: dto.payment_method,
     });
 
     const minutesRemaining = Math.max(

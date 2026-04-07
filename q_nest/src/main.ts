@@ -53,7 +53,7 @@ async function bootstrap() {
   if (process.env.NODE_ENV !== 'production') {
     allowedOrigins.add('http://localhost:3000');
     allowedOrigins.add('http://localhost:3001');
-    allowedOrigins.add('http://127.0.0.1:3001');  
+    allowedOrigins.add('http://localhost:3001');  
   }
   app.enableCors({
     origin: (origin, callback) => {
