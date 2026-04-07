@@ -8,6 +8,7 @@ import {
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AppGateway } from '../../../gateways/app.gateway';
 import { VcPoolEmailService } from './vc-pool-email.service';
+import { NotificationsService } from '../../notifications/notifications.service';
 
 const POOL_STATUS = { open: 'open', full: 'full' } as const;
 
@@ -19,6 +20,7 @@ export class PaymentReviewService {
     private readonly prisma: PrismaService,
     private readonly appGateway: AppGateway,
     private readonly vcPoolEmailService: VcPoolEmailService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   // ── List payment submissions for a pool ──
@@ -215,6 +217,18 @@ export class PaymentReviewService {
         contributionAmount: Number(submission.investment_amount),
         coinType: pool.coin_type,
       });
+
+      // Notification #2: Join accepted → user (DB + FCM + WebSocket)
+      const notification = await this.notificationsService.createNotification({
+        user_id: submission.user_id,
+        type: 'vc_pool_join_accepted',
+        title: 'Pool Join Accepted',
+        message: `You have been accepted to ${pool.name}. Your contribution of ${Number(submission.investment_amount)} ${pool.coin_type} has been verified.`,
+        read: false,
+        metadata: { pool_id: poolId, pool_name: pool.name },
+      });
+      this.notificationsService.sendNotification(submission.user_id, 'Pool Join Accepted', `You have been accepted to ${pool.name}!`);
+      this.appGateway.emitNotificationCount(submission.user_id, 1, notification);
     }
 
     return {

@@ -8,6 +8,7 @@ import {
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AppGateway } from '../../../gateways/app.gateway';
 import { VcPoolEmailService } from './vc-pool-email.service';
+import { NotificationsService } from '../../notifications/notifications.service';
 
 const POOL_STATUS = {
   active: 'active',
@@ -35,6 +36,7 @@ export class PoolPayoutService {
     private readonly prisma: PrismaService,
     private readonly appGateway: AppGateway,
     private readonly vcPoolEmailService: VcPoolEmailService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   // ── Admin: Complete Pool ──
@@ -191,6 +193,22 @@ export class PoolPayoutService {
       finalPoolValue,
       totalProfit,
     });
+
+    // Notification #5: Pool completed → each member (DB + FCM + WebSocket)
+    for (const m of memberUsers) {
+      const payout = payoutMap.get(m.member_id) as any;
+      const netPayout = payout ? Number(payout.net_payout) : 0;
+      const notification = await this.notificationsService.createNotification({
+        user_id: m.user_id,
+        type: 'vc_pool_completed',
+        title: 'Pool Completed',
+        message: `${pool.name} has been completed. Your net payout is ${netPayout} ${pool.coin_type}.`,
+        read: false,
+        metadata: { pool_id: poolId, pool_name: pool.name, net_payout: netPayout },
+      });
+      this.notificationsService.sendNotification(m.user_id, 'Pool Completed', `${pool.name} has been completed!`);
+      this.appGateway.emitNotificationCount(m.user_id, 1, notification);
+    }
 
     return {
       pool_id: poolId,

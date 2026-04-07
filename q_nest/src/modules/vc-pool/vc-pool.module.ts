@@ -5,6 +5,7 @@ import { StorageModule } from '../../storage/storage.module';
 import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 import { BinanceModule } from '../binance/binance.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { AdminPoolController } from './controllers/admin-pool.controller';
 import { AdminPoolPaymentsController } from './controllers/admin-pool-payments.controller';
 import { AdminPoolTradesController } from './controllers/admin-pool-trades.controller';
@@ -29,7 +30,7 @@ import { FeatureAccessService } from '../../common/feature-access.service';
 import { TierAccessGuard } from '../../common/guards/tier-access.guard';
 
 @Module({
-  imports: [PrismaModule, StorageModule, AdminAuthModule, BinanceModule, ExchangesModule, ScheduleModule],
+  imports: [PrismaModule, StorageModule, AdminAuthModule, BinanceModule, ExchangesModule, ScheduleModule, NotificationsModule],
   controllers: [
     AdminPoolController,
     AdminPoolPaymentsController,

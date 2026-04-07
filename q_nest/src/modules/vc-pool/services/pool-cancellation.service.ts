@@ -8,6 +8,7 @@ import {
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AppGateway } from '../../../gateways/app.gateway';
 import { VcPoolEmailService } from './vc-pool-email.service';
+import { NotificationsService } from '../../notifications/notifications.service';
 
 const POOL_STATUS = {
   open: 'open',
@@ -30,6 +31,7 @@ export class PoolCancellationService {
     private readonly prisma: PrismaService,
     private readonly appGateway: AppGateway,
     private readonly vcPoolEmailService: VcPoolEmailService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   // ── User: Request Cancellation ──
@@ -128,6 +130,17 @@ export class PoolCancellationService {
         coinType: pool.coin_type,
       });
     }
+
+    // Notification #3: Exit request → admin (WebSocket)
+    this.appGateway.emitPoolEvent(pool.admin_id, 'pool:exit-request', {
+      pool_id: poolId,
+      pool_name: pool.name,
+      user_name: exitUser?.full_name || exitUser?.username || 'Unknown',
+      user_email: exitUser?.email,
+      invested_amount: investedAmount,
+      refund_amount: refundAmount,
+      coin_type: pool.coin_type,
+    });
 
     return {
       cancellation_id: cancellation.cancellation_id,
@@ -556,6 +569,18 @@ export class PoolCancellationService {
         refundAmount: refundAmount,
         coinType: pool.coin_type,
       });
+
+      // Notification #4: Exit accepted → user (DB + FCM + WebSocket)
+      const notification = await this.notificationsService.createNotification({
+        user_id: cancellation.member.user_id,
+        type: 'vc_pool_exit_accepted',
+        title: 'Pool Exit Approved',
+        message: `Your exit from ${pool.name} has been approved. Refund of ${refundAmount} ${pool.coin_type} will be processed.`,
+        read: false,
+        metadata: { pool_id: poolId, pool_name: pool.name, refund_amount: refundAmount },
+      });
+      this.notificationsService.sendNotification(cancellation.member.user_id, 'Pool Exit Approved', `Your exit from ${pool.name} has been approved.`);
+      this.appGateway.emitNotificationCount(cancellation.member.user_id, 1, notification);
     }
 
     return {
@@ -758,6 +783,18 @@ export class PoolCancellationService {
         coinType: cancellation.pool.coin_type,
         txHash: binanceTxId,
       });
+
+      // Notification #6: Refund completed → user (DB + FCM + WebSocket)
+      const notification = await this.notificationsService.createNotification({
+        user_id: cancellation.member.user_id,
+        type: 'vc_pool_refund_completed',
+        title: 'Refund Completed',
+        message: `Your refund of ${Number(result.refund_amount)} ${cancellation.pool.coin_type} from ${cancellation.pool.name} has been processed.`,
+        read: false,
+        metadata: { pool_id: poolId, pool_name: cancellation.pool.name, refund_amount: Number(result.refund_amount), tx_hash: binanceTxId },
+      });
+      this.notificationsService.sendNotification(cancellation.member.user_id, 'Refund Completed', `Your refund from ${cancellation.pool.name} has been processed.`);
+      this.appGateway.emitNotificationCount(cancellation.member.user_id, 1, notification);
     }
 
     return {

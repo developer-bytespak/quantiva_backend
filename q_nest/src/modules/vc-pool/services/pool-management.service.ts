@@ -9,6 +9,8 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { CreatePoolDto } from '../dto/create-pool.dto';
 import { UpdatePoolDto } from '../dto/update-pool.dto';
 import { VcPoolEmailService } from './vc-pool-email.service';
+import { NotificationsService } from '../../notifications/notifications.service';
+import { AppGateway } from '../../../gateways/app.gateway';
 
 const POOL_STATUS = {
   draft: 'draft',
@@ -26,6 +28,8 @@ export class PoolManagementService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly vcPoolEmailService: VcPoolEmailService,
+    private readonly notificationsService: NotificationsService,
+    private readonly appGateway: AppGateway,
   ) {}
 
   // ── Admin: Create Draft Pool ──
@@ -81,6 +85,14 @@ export class PoolManagementService {
     });
 
     this.logger.log(`Pool ${pool.pool_id} created as draft by admin ${adminId}`);
+
+    // Notification #8: Pool created → admin (WebSocket)
+    this.appGateway.emitPoolEvent(adminId, 'pool:created', {
+      pool_id: pool.pool_id,
+      pool_name: pool.name,
+      status: 'draft',
+    });
+
     return pool;
   }
 
@@ -175,6 +187,14 @@ export class PoolManagementService {
     });
 
     this.logger.log(`Pool ${poolId} published (draft → open) by admin ${adminId}`);
+
+    // Notification #10: Pool published → admin (WebSocket)
+    this.appGateway.emitPoolEvent(adminId, 'pool:published', {
+      pool_id: poolId,
+      pool_name: updated.name,
+      status: 'open',
+    });
+
     return updated;
   }
 
@@ -231,6 +251,13 @@ export class PoolManagementService {
     });
 
     this.logger.log(`Pool ${poolId} deleted (archived) by admin ${adminId}`);
+
+    // Notification #9: Pool deleted → admin (WebSocket)
+    this.appGateway.emitPoolEvent(adminId, 'pool:deleted', {
+      pool_id: poolId,
+      pool_name: pool.name,
+    });
+
     return { message: 'Pool deleted successfully' };
   }
 
@@ -675,6 +702,20 @@ export class PoolManagementService {
       durationDays: pool.duration_days,
       endDate,
     });
+
+    // Notification #7: Pool started → each member (DB + FCM + WebSocket)
+    for (const m of memberUsers) {
+      const notification = await this.notificationsService.createNotification({
+        user_id: m.user_id,
+        type: 'vc_pool_started',
+        title: 'Pool Started',
+        message: `${pool.name} is now active! Trading has begun for ${pool.duration_days} days.`,
+        read: false,
+        metadata: { pool_id: poolId, pool_name: pool.name },
+      });
+      this.notificationsService.sendNotification(m.user_id, 'Pool Started', `${pool.name} is now active!`);
+      this.appGateway.emitNotificationCount(m.user_id, 1, notification);
+    }
 
     return updated;
   }
