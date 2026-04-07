@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AppGateway } from '../../../gateways/app.gateway';
+import { VcPoolEmailService } from './vc-pool-email.service';
 
 const POOL_STATUS = {
   active: 'active',
@@ -33,6 +34,7 @@ export class PoolPayoutService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly appGateway: AppGateway,
+    private readonly vcPoolEmailService: VcPoolEmailService,
   ) {}
 
   // ── Admin: Complete Pool ──
@@ -167,6 +169,28 @@ export class PoolPayoutService {
     this.logger.log(
       `Pool ${poolId} completed by admin ${adminId}. Created ${result.payouts.length} payouts.`,
     );
+
+    // Send pool completed email to all members
+    const memberUsers = await this.prisma.vc_pool_members.findMany({
+      where: { pool_id: poolId, is_active: true },
+      include: { user: { select: { email: true, full_name: true, username: true } } },
+    });
+    const payoutMap = new Map(result.payouts.map((p: any) => [p.member_id, p]));
+    this.vcPoolEmailService.sendPoolCompletedToMembers({
+      members: memberUsers.map((m) => {
+        const payout = payoutMap.get(m.member_id) as any;
+        return {
+          email: m.user.email,
+          name: m.user.full_name || m.user.username || '',
+          netPayout: payout ? Number(payout.net_payout) : 0,
+          profitLoss: payout ? Number(payout.profit_loss) : 0,
+        };
+      }),
+      poolName: pool.name,
+      coinType: pool.coin_type,
+      finalPoolValue,
+      totalProfit,
+    });
 
     return {
       pool_id: poolId,

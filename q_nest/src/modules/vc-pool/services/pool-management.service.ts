@@ -8,6 +8,7 @@ import {
 import { PrismaService } from '../../../prisma/prisma.service';
 import { CreatePoolDto } from '../dto/create-pool.dto';
 import { UpdatePoolDto } from '../dto/update-pool.dto';
+import { VcPoolEmailService } from './vc-pool-email.service';
 
 const POOL_STATUS = {
   draft: 'draft',
@@ -22,7 +23,10 @@ const POOL_STATUS = {
 export class PoolManagementService {
   private readonly logger = new Logger(PoolManagementService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly vcPoolEmailService: VcPoolEmailService,
+  ) {}
 
   // ── Admin: Create Draft Pool ──
 
@@ -82,7 +86,7 @@ export class PoolManagementService {
 
   // ── Admin: Update Draft Pool ──
 
-  async updatePool(adminId: string, poolId: string, dto: UpdatePoolDto) {
+  async updatePool(adminId: string, poolId: string, dto: UpdatePoolDto, isSuperAdmin?: boolean) {
     const pool = await this.findPoolOrFail(poolId);
 
     if (pool.admin_id !== adminId) {
@@ -115,13 +119,13 @@ export class PoolManagementService {
       data.contribution_amount = dto.contribution_amount;
     if (dto.max_members !== undefined) data.max_members = dto.max_members;
     if (dto.duration_days !== undefined) data.duration_days = dto.duration_days;
-    if (dto.pool_fee_percent !== undefined)
+    if (dto.pool_fee_percent !== undefined && isSuperAdmin)
       data.pool_fee_percent = dto.pool_fee_percent;
-    if (dto.admin_profit_fee_percent !== undefined)
+    if (dto.admin_profit_fee_percent !== undefined && isSuperAdmin)
       data.admin_profit_fee_percent = dto.admin_profit_fee_percent;
-    if (dto.cancellation_fee_percent !== undefined)
+    if (dto.cancellation_fee_percent !== undefined && isSuperAdmin)
       data.cancellation_fee_percent = dto.cancellation_fee_percent;
-    if (dto.payment_window_minutes !== undefined)
+    if (dto.payment_window_minutes !== undefined && isSuperAdmin)
       data.payment_window_minutes = dto.payment_window_minutes;
 
     return this.prisma.vc_pools.update({
@@ -654,6 +658,24 @@ export class PoolManagementService {
     });
 
     this.logger.log(`Pool ${poolId} started (full → active) by admin ${adminId}`);
+
+    // Send pool started email to all members
+    const memberUsers = await this.prisma.vc_pool_members.findMany({
+      where: { pool_id: poolId, is_active: true },
+      include: { user: { select: { email: true, full_name: true, username: true } } },
+    });
+    this.vcPoolEmailService.sendPoolStartedToMembers({
+      members: memberUsers.map((m) => ({
+        email: m.user.email,
+        name: m.user.full_name || m.user.username || '',
+      })),
+      poolName: pool.name,
+      coinType: pool.coin_type,
+      totalInvested,
+      durationDays: pool.duration_days,
+      endDate,
+    });
+
     return updated;
   }
 

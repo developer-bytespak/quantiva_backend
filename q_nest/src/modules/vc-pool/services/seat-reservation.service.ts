@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { JoinPoolDto } from '../dto/join-pool.dto';
+import { VcPoolEmailService } from './vc-pool-email.service';
 
 const POOL_STATUS = { open: 'open', full: 'full' } as const;
 const RESERVATION_STATUS = { reserved: 'reserved', confirmed: 'confirmed' } as const;
@@ -17,12 +18,15 @@ const SUBMISSION_STATUS = { pending: 'pending', processing: 'processing' } as co
 export class SeatReservationService {
   private readonly logger = new Logger(SeatReservationService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly vcPoolEmailService: VcPoolEmailService,
+  ) {}
 
   async joinPool(userId: string, poolId: string, dto: JoinPoolDto) {
     const pool = await this.prisma.vc_pools.findUnique({
       where: { pool_id: poolId },
-      include: { admin: { select: { binance_uid: true, wallet_address: true, payment_network: true } } },
+      include: { admin: { select: { binance_uid: true, wallet_address: true, payment_network: true, email: true } } },
     });
 
     if (!pool) throw new NotFoundException('Pool not found');
@@ -33,7 +37,7 @@ export class SeatReservationService {
     // Check KYC
     const user = await this.prisma.users.findUnique({
       where: { user_id: userId },
-      select: { kyc_status: true, current_tier: true },
+      select: { kyc_status: true, current_tier: true, email: true, username: true, full_name: true },
     });
     if (!user) throw new NotFoundException('User not found');
     if (user.kyc_status !== 'approved') {
@@ -291,6 +295,17 @@ export class SeatReservationService {
     this.logger.log(
       `User ${userId} reserved seat in pool ${poolId} (${dto.payment_method})`,
     );
+
+    // Send join request email to admin
+    this.vcPoolEmailService.sendJoinRequestToAdmin({
+      adminEmail: pool.admin?.email || '',
+      poolName: pool.name,
+      userName: user.full_name || user.username || 'Unknown',
+      userEmail: user.email,
+      contributionAmount: totalAmount,
+      coinType: pool.coin_type,
+      paymentMethod: dto.payment_method,
+    });
 
     const minutesRemaining = Math.max(
       0,

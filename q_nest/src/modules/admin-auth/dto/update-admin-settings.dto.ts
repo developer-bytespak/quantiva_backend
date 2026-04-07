@@ -5,6 +5,7 @@ import {
   Min,
   Max,
   IsInt,
+  IsNotEmpty,
 } from 'class-validator';
 
 export class UpdateBinanceSettingsDto {
@@ -41,4 +42,9 @@ export class UpdateFeeSettingsDto {
   @Min(1)
   @Max(1440)
   default_payment_window_minutes: number;
+
+  @IsString()
+  @IsNotEmpty()
+  @IsOptional()
+  currentPassword?: string;
 }

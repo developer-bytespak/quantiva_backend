@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AppGateway } from '../../../gateways/app.gateway';
+import { VcPoolEmailService } from './vc-pool-email.service';
 
 const POOL_STATUS = {
   open: 'open',
@@ -28,6 +29,7 @@ export class PoolCancellationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly appGateway: AppGateway,
+    private readonly vcPoolEmailService: VcPoolEmailService,
   ) {}
 
   // ── User: Request Cancellation ──
@@ -105,6 +107,27 @@ export class PoolCancellationService {
     this.logger.log(
       `Cancellation requested: member ${member.member_id} from pool ${poolId}, refund: ${refundAmount}`,
     );
+
+    // Send exit request email to admin
+    const admin = await this.prisma.admins.findUnique({
+      where: { admin_id: pool.admin_id },
+      select: { email: true },
+    });
+    const exitUser = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+      select: { email: true, full_name: true, username: true },
+    });
+    if (admin && exitUser) {
+      this.vcPoolEmailService.sendExitRequestToAdmin({
+        adminEmail: admin.email,
+        poolName: pool.name,
+        userName: exitUser.full_name || exitUser.username || 'Unknown',
+        userEmail: exitUser.email,
+        investedAmount: investedAmount,
+        refundAmount: refundAmount,
+        coinType: pool.coin_type,
+      });
+    }
 
     return {
       cancellation_id: cancellation.cancellation_id,
@@ -520,6 +543,21 @@ export class PoolCancellationService {
       refund_amount: refundAmount,
     });
 
+    // Send exit accepted email to user
+    const exitAcceptedUser = await this.prisma.users.findUnique({
+      where: { user_id: cancellation.member.user_id },
+      select: { email: true, full_name: true, username: true },
+    });
+    if (exitAcceptedUser) {
+      this.vcPoolEmailService.sendExitAcceptedToUser({
+        userEmail: exitAcceptedUser.email,
+        userName: exitAcceptedUser.full_name || exitAcceptedUser.username || '',
+        poolName: pool.name,
+        refundAmount: refundAmount,
+        coinType: pool.coin_type,
+      });
+    }
+
     return {
       cancellation_id: updated.cancellation_id,
       contribution_amount: Number(updated.invested_amount),
@@ -705,6 +743,22 @@ export class PoolCancellationService {
       cancellation_id: cancellationId,
       refund_amount: Number(result.refund_amount),
     });
+
+    // Send refund completed email to user
+    const refundUser = await this.prisma.users.findUnique({
+      where: { user_id: cancellation.member.user_id },
+      select: { email: true, full_name: true, username: true },
+    });
+    if (refundUser) {
+      this.vcPoolEmailService.sendRefundCompletedToUser({
+        userEmail: refundUser.email,
+        userName: refundUser.full_name || refundUser.username || '',
+        poolName: cancellation.pool.name,
+        refundAmount: Number(result.refund_amount),
+        coinType: cancellation.pool.coin_type,
+        txHash: binanceTxId,
+      });
+    }
 
     return {
       cancellation_id: cancellationId,

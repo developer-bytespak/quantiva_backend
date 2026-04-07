@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import {
   UpdateBinanceSettingsDto,
@@ -59,7 +59,11 @@ export class AdminSettingsService {
     };
   }
 
-  async updateFeeSettings(adminId: string, dto: UpdateFeeSettingsDto) {
+  async updateFeeSettings(adminId: string, dto: UpdateFeeSettingsDto, isSuperAdmin?: boolean) {
+    if (!isSuperAdmin) {
+      throw new ForbiddenException('Only super admin can update default fee settings');
+    }
+
     const admin = await this.prisma.admins.update({
       where: { admin_id: adminId },
       data: {

@@ -198,8 +198,8 @@ export class AdminAuthController {
     @CurrentAdmin() admin: AdminTokenPayload,
     @Body() dto: UpdateFeeSettingsDto,
   ) {
-    return this.adminSettingsService.updateFeeSettings(admin.sub, dto);
-  }
+    return this.adminSettingsService.updateFeeSettings(admin.sub, dto, admin.is_super_admin);
+  } 
 
   @UseGuards(AdminJwtAuthGuard)
   @Put('settings/password')

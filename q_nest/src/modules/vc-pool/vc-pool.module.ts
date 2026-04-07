@@ -21,6 +21,7 @@ import { PoolCancellationService } from './services/pool-cancellation.service';
 import { PoolPayoutService } from './services/pool-payout.service';
 import { VcPoolTransactionsAdminService } from './services/vc-pool-transactions-admin.service';
 import { UserPoolTransactionsService } from './services/user-pool-transactions.service';
+import { VcPoolEmailService } from './services/vc-pool-email.service';
 import { SeatExpiryScheduler } from './schedulers/seat-expiry.scheduler';
 import { PoolValueUpdateScheduler } from './schedulers/pool-value-update.scheduler';
 import { PaymentVerificationScheduler } from './schedulers/payment-verification.scheduler';
@@ -48,6 +49,7 @@ import { TierAccessGuard } from '../../common/guards/tier-access.guard';
     PoolPayoutService,
     VcPoolTransactionsAdminService,
     UserPoolTransactionsService,
+    VcPoolEmailService,
     SeatExpiryScheduler,
     PoolValueUpdateScheduler,
     PaymentVerificationScheduler,

@@ -6,6 +6,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -15,6 +16,7 @@ import { CreateVcPoolAdminDto } from '../dto/create-vc-pool-admin.dto';
 import { SuperAdminListUsersDto } from '../dto/super-admin-list-users.dto';
 import { SuperAdminUnifiedFinanceDto } from '../dto/super-admin-unified-finance.dto';
 import { SuperAdminUsersGrowthDto } from '../dto/super-admin-users-growth.dto';
+import { UpdateFeeSettingsDto } from '../dto/update-admin-settings.dto';
 import { AdminJwtAuthGuard } from '../guards/admin-jwt-auth.guard';
 import { SuperAdminGuard } from '../guards/super-admin.guard';
 import { AdminTokenPayload } from '../services/admin-token.service';
@@ -83,6 +85,17 @@ export class SuperAdminManagementController {
       admin.sub,
       adminId,
       dto.currentPassword,
+    );
+  }
+
+  @Put('default-fees')
+  async updateGlobalDefaultFees(
+    @CurrentAdmin() admin: AdminTokenPayload,
+    @Body() dto: UpdateFeeSettingsDto,
+  ) {
+    return this.superAdminManagementService.updateGlobalDefaultFees(
+      admin.sub,
+      dto,
     );
   }
 }
