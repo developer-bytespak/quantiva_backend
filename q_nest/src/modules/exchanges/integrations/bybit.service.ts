@@ -1012,6 +1012,63 @@ export class BybitService {
   }
 
   /**
+   * Fetches all order history for a symbol (all statuses)
+   * Bybit API: GET /v5/order/history
+   */
+  async getAllOrders(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    params?: { limit?: number },
+  ): Promise<any[]> {
+    try {
+      const queryParams: Record<string, any> = {
+        category: 'spot',
+        symbol: symbol.toUpperCase(),
+        limit: Math.min(params?.limit || 50, 100),
+      };
+
+      const result = await this.makeSignedRequest('/v5/order/history', apiKey, apiSecret, queryParams);
+      const orders = result.list || [];
+
+      return orders.map((o: any) => ({
+        orderId: o.orderId || '',
+        symbol: o.symbol || '',
+        side: o.side === 'Buy' ? 'BUY' : 'SELL',
+        type: o.orderType === 'Market' ? 'MARKET' : o.orderType === 'Limit' ? 'LIMIT' : o.orderType,
+        status: this.normalizeOrderStatus(o.orderStatus),
+        quantity: parseFloat(o.qty || '0'),
+        executedQty: parseFloat(o.cumExecQty || '0'),
+        price: parseFloat(o.price || '0'),
+        cummulativeQuoteQty: parseFloat(o.cumExecValue || '0'),
+        stopPrice: o.triggerPrice ? parseFloat(o.triggerPrice) : null,
+        timeInForce: o.timeInForce || '',
+        time: parseInt(o.createdTime || '0', 10),
+        updateTime: parseInt(o.updatedTime || '0', 10),
+      }));
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) throw error;
+      throw new BybitApiException(`Failed to fetch all orders for ${symbol}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Normalize Bybit order status to Binance-style uppercase
+   */
+  private normalizeOrderStatus(status: string): string {
+    const statusMap: Record<string, string> = {
+      'New': 'NEW',
+      'PartiallyFilled': 'PARTIALLY_FILLED',
+      'Filled': 'FILLED',
+      'Cancelled': 'CANCELED',
+      'PartiallyFilledCanceled': 'CANCELED',
+      'Rejected': 'REJECTED',
+      'Deactivated': 'EXPIRED',
+    };
+    return statusMap[status] || status;
+  }
+
+  /**
    * Fetches user's own trade/execution history for a symbol
    * Used for FIFO entry price calculation
    */
