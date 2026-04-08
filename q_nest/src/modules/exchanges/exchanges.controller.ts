@@ -23,6 +23,7 @@ import { TokenPayload } from '../auth/services/token.service';
 import { CreateConnectionDto } from './dto/create-connection.dto';
 import { UpdateConnectionDto } from './dto/update-connection.dto';
 import { PlaceOrderDto } from './dto/place-order.dto';
+import { PositionDto } from './dto/binance-data.dto';
 import { BinanceService } from './integrations/binance.service';
 import { BinanceUSService } from './integrations/binance-us.service';
 import { BybitService } from './integrations/bybit.service';
@@ -459,29 +460,41 @@ export class ExchangesController {
   @Get('connections/:connectionId/positions')
   @UseGuards(ConnectionOwnerGuard)
   async getPositions(@Param('connectionId') connectionId: string) {
-    // Get connection to determine exchange name for cache key
     const connection = await this.exchangesService.getConnectionById(connectionId);
     if (!connection || !connection.exchange) {
       throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
     }
-    
+
     const exchangeName = connection.exchange.name.toLowerCase();
-    const cacheKey = `${exchangeName}:${connectionId}:positions`;
-    const cached = this.cacheService.getCached(cacheKey);
-    
-    if (cached) {
+
+    // Check for enriched positions cache first
+    const enrichedCacheKey = `${exchangeName}:${connectionId}:positions:enriched`;
+    const cachedEnriched = this.cacheService.getCached(enrichedCacheKey);
+    if (cachedEnriched) {
       return {
         success: true,
-        data: cached,
+        data: cachedEnriched,
         last_updated: new Date().toISOString(),
         cached: true,
       };
     }
 
-    const positions = await this.exchangesService.getConnectionData(connectionId, 'positions');
+    // Get basic positions
+    const basicCacheKey = `${exchangeName}:${connectionId}:positions`;
+    let positions = this.cacheService.getCached(basicCacheKey) as PositionDto[];
+    if (!positions) {
+      positions = await this.exchangesService.getConnectionData(connectionId, 'positions') as PositionDto[];
+    }
+
+    // Enrich with FIFO entry prices and real P&L
+    const enriched = await this.exchangesService.enrichPositionsWithFIFO(connectionId, positions);
+
+    // Cache enriched positions (shorter TTL since it involves trade history)
+    this.cacheService.setCached(enrichedCacheKey, enriched, 60_000);
+
     return {
       success: true,
-      data: positions,
+      data: enriched,
       last_updated: new Date().toISOString(),
       cached: false,
     };
