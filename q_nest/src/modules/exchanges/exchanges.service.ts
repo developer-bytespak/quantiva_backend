@@ -1032,6 +1032,162 @@ export class ExchangesService {
   }
 
   /**
+   * Get trade history with FIFO-matched realized P&L.
+   * Works for both Binance and Bybit.
+   */
+  async getTradeHistoryEnriched(
+    connectionId: string,
+    params: { symbol?: string; limit?: number },
+  ): Promise<any[]> {
+    const connection = await this.getConnectionById(connectionId);
+    if (!connection?.exchange) return [];
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+    const { apiKey, apiSecret } = await this.getDecryptedCredentials(connectionId);
+
+    const isBinance = exchangeName === 'binance';
+    const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us';
+    const isBybit = exchangeName === 'bybit';
+
+    if (!isBinance && !isBinanceUS && !isBybit) return [];
+
+    // Get symbols to query
+    let symbols: string[];
+    if (params.symbol) {
+      symbols = [params.symbol.toUpperCase()];
+    } else {
+      symbols = await this.getTradedSymbols(connectionId);
+    }
+
+    if (symbols.length === 0) return [];
+
+    // Fetch all orders and trade fills in parallel for each symbol
+    const [allOrdersPerSymbol, allTradesPerSymbol] = await Promise.all([
+      Promise.all(
+        symbols.map((sym) => {
+          let promise: Promise<any[]>;
+          if (isBybit) {
+            promise = this.bybitService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 50 });
+          } else if (isBinanceUS) {
+            promise = this.binanceUSService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 500 });
+          } else {
+            promise = this.binanceService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 500 });
+          }
+          return promise.catch((err) => {
+            this.logger.warn(`getAllOrders failed for ${sym}: ${err.message}`);
+            return [];
+          });
+        }),
+      ),
+      Promise.all(
+        symbols.map((sym) => {
+          let promise: Promise<any[]>;
+          if (isBybit) {
+            promise = this.bybitService.getMyTrades(apiKey, apiSecret, sym, { limit: 100 });
+          } else if (isBinanceUS) {
+            promise = this.binanceUSService.getMyTrades(apiKey, apiSecret, sym, { limit: params.limit || 500 });
+          } else {
+            promise = this.binanceService.getMyTrades(apiKey, apiSecret, sym, { limit: params.limit || 500 });
+          }
+          return promise.catch((err) => {
+            this.logger.warn(`getMyTrades failed for ${sym}: ${err.message}`);
+            return [];
+          });
+        }),
+      ),
+    ]);
+
+    const allOrders = allOrdersPerSymbol.flat();
+    const allFills = allTradesPerSymbol.flat();
+
+    // Group fills by orderId for enrichment
+    const fillsByOrderId: Record<string, any[]> = {};
+    for (const fill of allFills) {
+      const oid = String(fill.orderId);
+      if (!fillsByOrderId[oid]) fillsByOrderId[oid] = [];
+      fillsByOrderId[oid].push(fill);
+    }
+
+    // Include all orders that have been executed (any amount filled)
+    const enrichedOrders = allOrders
+      .filter((o) => o.status === 'FILLED' || o.status === 'PARTIALLY_FILLED' || (Number(o.executedQty) || 0) > 0)
+      .map((order) => {
+        const fills = fillsByOrderId[String(order.orderId)] || [];
+        const totalFilledQty = fills.reduce((s: number, f: any) => s + (Number(f.qty) || 0), 0);
+        const totalQuoteQty = fills.reduce((s: number, f: any) => s + (Number(f.quoteQty) || 0), 0);
+        const totalFee = fills.reduce((s: number, f: any) => s + (Number(f.commission) || 0), 0);
+        const execQty = Number(order.executedQty) || 0;
+        const avgPrice = totalFilledQty > 0 ? totalQuoteQty / totalFilledQty
+          : (execQty > 0 && Number(order.cummulativeQuoteQty) > 0 ? Number(order.cummulativeQuoteQty) / execQty : Number(order.price) || 0);
+        const feeAsset = fills.length > 0 ? fills[0].commissionAsset : '';
+        const fillPercent = (Number(order.quantity) || 0) > 0
+          ? Math.round((execQty / Number(order.quantity)) * 100)
+          : 0;
+
+        return {
+          orderId: order.orderId,
+          symbol: order.symbol,
+          side: order.side,
+          type: order.type,
+          status: order.status,
+          fillPercent,
+          quantity: Number(order.quantity) || 0,
+          filledQuantity: execQty,
+          avgPrice: Math.round(avgPrice * 100000000) / 100000000,
+          orderPrice: order.type === 'MARKET' ? 'Market' : (order.price || order.stopPrice || 0),
+          totalValue: Math.round((totalQuoteQty || Number(order.cummulativeQuoteQty) || 0) * 100000000) / 100000000,
+          totalFee: Math.round(totalFee * 100000000) / 100000000,
+          feeAsset,
+          stopPrice: order.stopPrice,
+          time: order.time,
+          updateTime: order.updateTime,
+          profitLoss: 0,
+          profitLossPercent: 0,
+        };
+      });
+
+    // FIFO matching: attach P&L to SELL orders
+    const ordersBySymbol: Record<string, any[]> = {};
+    for (const o of enrichedOrders) {
+      if (!ordersBySymbol[o.symbol]) ordersBySymbol[o.symbol] = [];
+      ordersBySymbol[o.symbol].push(o);
+    }
+
+    for (const [, orders] of Object.entries(ordersBySymbol)) {
+      const sorted = [...orders].sort((a, b) => a.time - b.time);
+      const buyQueue: { avgPrice: number; remainingQty: number }[] = [];
+
+      for (const order of sorted) {
+        if (order.side === 'BUY') {
+          buyQueue.push({ avgPrice: order.avgPrice, remainingQty: order.filledQuantity });
+        } else if (order.side === 'SELL') {
+          let remainingQty = order.filledQuantity;
+          let totalPL = 0;
+          let totalEntryCost = 0;
+
+          while (remainingQty > 0 && buyQueue.length > 0) {
+            const oldest = buyQueue[0];
+            const matchedQty = Math.min(remainingQty, oldest.remainingQty);
+            totalPL += (order.avgPrice - oldest.avgPrice) * matchedQty;
+            totalEntryCost += oldest.avgPrice * matchedQty;
+
+            remainingQty -= matchedQty;
+            oldest.remainingQty -= matchedQty;
+            if (oldest.remainingQty <= 0) buyQueue.shift();
+          }
+
+          order.profitLoss = Math.round(totalPL * 1000) / 1000;
+          order.profitLossPercent = totalEntryCost > 0
+            ? Math.round(((totalPL / totalEntryCost) * 100) * 100) / 100
+            : 0;
+        }
+      }
+    }
+
+    return enrichedOrders.sort((a, b) => b.time - a.time);
+  }
+
+  /**
    * Enriches basic positions with real FIFO entry prices and P&L.
    * Works for both Binance and Bybit by fetching trade history and computing avg entry.
    */
