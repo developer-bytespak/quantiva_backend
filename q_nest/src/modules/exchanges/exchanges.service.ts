@@ -884,6 +884,154 @@ export class ExchangesService {
   private static readonly STABLECOINS = new Set(['USDT', 'BUSD', 'USDC', 'TUSD', 'USDP', 'DAI', 'FDUSD']);
 
   /**
+   * Get all symbols the user has traded (current holdings + open orders).
+   * Works for both Binance and Bybit.
+   */
+  private async getTradedSymbols(connectionId: string): Promise<string[]> {
+    const connection = await this.getConnectionById(connectionId);
+    if (!connection?.exchange) return [];
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+    const { apiKey, apiSecret } = await this.getDecryptedCredentials(connectionId);
+    const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us';
+    const isBybit = exchangeName === 'bybit';
+    const quote = isBinanceUS ? 'USD' : 'USDT';
+    const symbolSet = new Set<string>();
+
+    // 1. Current positions
+    const positions = await this.getConnectionData(connectionId, 'positions') as PositionDto[];
+    if (Array.isArray(positions)) {
+      for (const p of positions) {
+        if (!ExchangesService.STABLECOINS.has(p.symbol) && p.quantity > 0) {
+          symbolSet.add(`${p.symbol}${quote}`);
+        }
+      }
+    }
+
+    // 2. Account balances (includes dust)
+    try {
+      if (isBybit) {
+        const accountInfo = await this.bybitService.getAccountInfo(apiKey, apiSecret);
+        for (const c of accountInfo.coin || []) {
+          const total = parseFloat(c.walletBalance || '0');
+          if (total > 0 && !ExchangesService.STABLECOINS.has(c.coin)) {
+            symbolSet.add(`${c.coin}${quote}`);
+          }
+        }
+      } else {
+        const service = isBinanceUS ? this.binanceUSService : this.binanceService;
+        const accountInfo = await service.getAccountInfo(apiKey, apiSecret);
+        for (const b of (accountInfo as any).balances || []) {
+          const total = parseFloat(b.free || '0') + parseFloat(b.locked || '0');
+          if (total > 0 && !ExchangesService.STABLECOINS.has(b.asset)) {
+            symbolSet.add(`${b.asset}${quote}`);
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`getTradedSymbols: accountInfo failed: ${(err as any)?.message}`);
+    }
+
+    // 3. Open orders
+    try {
+      const orders = await this.getConnectionData(connectionId, 'orders') as OrderDto[];
+      if (Array.isArray(orders)) {
+        for (const o of orders) {
+          if (o.symbol && !symbolSet.has(o.symbol)) {
+            symbolSet.add(o.symbol);
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`getTradedSymbols: orders failed: ${(err as any)?.message}`);
+    }
+
+    return Array.from(symbolSet);
+  }
+
+  /**
+   * Get all orders (full history) enriched with avgFillPrice, totalValue, fillPercent.
+   * Works for both Binance and Bybit.
+   */
+  async getAllOrdersEnriched(
+    connectionId: string,
+    params: { symbol?: string; limit?: number },
+  ): Promise<any[]> {
+    const connection = await this.getConnectionById(connectionId);
+    if (!connection?.exchange) return [];
+
+    const exchangeName = connection.exchange.name.toLowerCase();
+    const { apiKey, apiSecret } = await this.getDecryptedCredentials(connectionId);
+
+    const isBinance = exchangeName === 'binance';
+    const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us';
+    const isBybit = exchangeName === 'bybit';
+
+    if (!isBinance && !isBinanceUS && !isBybit) return [];
+
+    // Get symbols to query
+    let symbols: string[];
+    if (params.symbol) {
+      symbols = [params.symbol.toUpperCase()];
+    } else {
+      symbols = await this.getTradedSymbols(connectionId);
+    }
+
+    if (symbols.length === 0) return [];
+
+    // Fetch all orders for each symbol
+    const results = await Promise.all(
+      symbols.map((sym) => {
+        let ordersPromise: Promise<any[]>;
+
+        if (isBybit) {
+          ordersPromise = this.bybitService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 50 });
+        } else if (isBinanceUS) {
+          ordersPromise = this.binanceUSService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 500 });
+        } else {
+          ordersPromise = this.binanceService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 500 });
+        }
+
+        return ordersPromise.catch((err) => {
+          this.logger.warn(`getAllOrders failed for ${sym}: ${err.message}`);
+          return [];
+        });
+      }),
+    );
+
+    const allOrders = results.flat();
+
+    // Enrich each order with calculated fields
+    return allOrders
+      .map((order) => {
+        const qty = Number(order.quantity) || 0;
+        const execQty = Number(order.executedQty) || 0;
+        const quoteQty = Number(order.cummulativeQuoteQty) || 0;
+        const avgFillPrice = execQty > 0 ? quoteQty / execQty : 0;
+        const fillPercent = qty > 0 ? Math.round((execQty / qty) * 100) : 0;
+
+        return {
+          orderId: order.orderId,
+          symbol: order.symbol,
+          side: order.side,
+          type: order.type,
+          status: order.status,
+          fillPercent,
+          quantity: qty,
+          filledQuantity: execQty,
+          avgFillPrice: Math.round(avgFillPrice * 100000000) / 100000000,
+          orderPrice: order.type === 'MARKET' ? 'Market' : (order.price || order.stopPrice || 0),
+          totalValue: Math.round(quoteQty * 100000000) / 100000000,
+          stopPrice: order.stopPrice,
+          timeInForce: order.timeInForce,
+          time: order.time,
+          updateTime: order.updateTime,
+        };
+      })
+      .sort((a, b) => (b.updateTime || b.time || 0) - (a.updateTime || a.time || 0));
+  }
+
+  /**
    * Enriches basic positions with real FIFO entry prices and P&L.
    * Works for both Binance and Bybit by fetching trade history and computing avg entry.
    */
