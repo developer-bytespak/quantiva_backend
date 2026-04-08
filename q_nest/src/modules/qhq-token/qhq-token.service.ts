@@ -247,6 +247,24 @@ export class QhqTokenService {
     return this.prisma.qhq_wallet_links.findUnique({ where: { user_id: userId } });
   }
 
+  async unlinkWallet(userId: string) {
+    const wallet = await this.getLinkedWallet(userId);
+    
+    if (!wallet) {
+      throw new NotFoundException('No wallet linked to this account');
+    }
+
+    await this.prisma.qhq_wallet_links.delete({
+      where: { user_id: userId },
+    });
+
+    return {
+      success: true,
+      message: 'Wallet disconnected successfully',
+      wallet_address: wallet.wallet_address,
+    };
+  }
+
   // ─── Merkle Proof ─────────────────────────────────────────────────────────
 
   /**
