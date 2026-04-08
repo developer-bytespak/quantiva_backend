@@ -1012,6 +1012,45 @@ export class BybitService {
   }
 
   /**
+   * Fetches user's own trade/execution history for a symbol
+   * Used for FIFO entry price calculation
+   */
+  async getMyTrades(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    params?: { limit?: number },
+  ): Promise<any[]> {
+    try {
+      const queryParams: Record<string, any> = {
+        category: 'spot',
+        symbol: symbol.toUpperCase(),
+        limit: Math.min(params?.limit || 500, 100),
+      };
+
+      const result = await this.makeSignedRequest('/v5/execution/list', apiKey, apiSecret, queryParams);
+      const executions = result.list || [];
+
+      return executions.map((t: any) => ({
+        id: t.execId || '',
+        orderId: t.orderId || '',
+        symbol: t.symbol || '',
+        price: parseFloat(t.execPrice || '0'),
+        qty: parseFloat(t.execQty || '0'),
+        quoteQty: parseFloat(t.execPrice || '0') * parseFloat(t.execQty || '0'),
+        commission: parseFloat(t.execFee || '0'),
+        commissionAsset: t.feeCurrency || '',
+        time: parseInt(t.execTime || '0', 10),
+        isBuyer: t.side === 'Buy',
+        isMaker: t.isMaker === 'true' || t.isMaker === true,
+      }));
+    } catch (error: any) {
+      if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) throw error;
+      throw new BybitApiException(`Failed to fetch trades for ${symbol}: ${error.message}`);
+    }
+  }
+
+  /**
    * Fetches recent trades for a symbol
    */
   async getRecentTrades(symbol: string, limit: number = 50): Promise<RecentTradeDto[]> {
