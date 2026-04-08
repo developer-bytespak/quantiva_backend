@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Delete,
   Body,
   UseGuards,
   Query,
@@ -51,6 +52,13 @@ export class QhqTokenController {
   @HttpCode(HttpStatus.OK)
   async linkWallet(@CurrentUser() user: any, @Body() dto: LinkWalletDto) {
     return this.qhqService.linkWallet(user.sub, dto.wallet_address);
+  }
+
+  /** DELETE /qhq/wallet — unlink and delete user's wallet address */
+  @Delete('wallet')
+  @HttpCode(HttpStatus.OK)
+  async deleteWallet(@CurrentUser() user: any) {
+    return this.qhqService.unlinkWallet(user.sub);
   }
 
   /**
