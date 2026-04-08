@@ -979,27 +979,64 @@ export class ExchangesService {
 
     if (symbols.length === 0) return [];
 
-    // Fetch all orders for each symbol
-    const results = await Promise.all(
-      symbols.map((sym) => {
-        let ordersPromise: Promise<any[]>;
-
-        if (isBybit) {
-          ordersPromise = this.bybitService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 50 });
-        } else if (isBinanceUS) {
-          ordersPromise = this.binanceUSService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 500 });
-        } else {
-          ordersPromise = this.binanceService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 500 });
-        }
-
-        return ordersPromise.catch((err) => {
-          this.logger.warn(`getAllOrders failed for ${sym}: ${err.message}`);
+    // Fetch historical orders + currently open/pending orders in parallel
+    const [historyResults, openOrders] = await Promise.all([
+      // Historical orders per symbol
+      Promise.all(
+        symbols.map((sym) => {
+          let ordersPromise: Promise<any[]>;
+          if (isBybit) {
+            ordersPromise = this.bybitService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 50 });
+          } else if (isBinanceUS) {
+            ordersPromise = this.binanceUSService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 500 });
+          } else {
+            ordersPromise = this.binanceService.getAllOrders(apiKey, apiSecret, sym, { limit: params.limit || 500 });
+          }
+          return ordersPromise.catch((err) => {
+            this.logger.warn(`getAllOrders failed for ${sym}: ${err.message}`);
+            return [];
+          });
+        }),
+      ),
+      // Currently open orders (includes untriggered stop orders for Bybit)
+      (async () => {
+        try {
+          if (isBybit) {
+            return await this.bybitService.getOpenOrders(apiKey, apiSecret);
+          } else if (isBinanceUS) {
+            return await this.binanceUSService.getOpenOrders(apiKey, apiSecret);
+          } else {
+            return await this.binanceService.getOpenOrders(apiKey, apiSecret);
+          }
+        } catch {
           return [];
-        });
-      }),
-    );
+        }
+      })(),
+    ]);
 
-    const allOrders = results.flat();
+    const historicalOrders = historyResults.flat();
+
+    // Merge: convert open orders to same format, deduplicate by orderId
+    const historicalOrderIds = new Set(historicalOrders.map((o) => String(o.orderId)));
+    const pendingOrders = (openOrders as any[])
+      .filter((o) => !historicalOrderIds.has(String(o.orderId)))
+      .map((o) => ({
+        orderId: o.orderId,
+        symbol: o.symbol,
+        side: o.side,
+        type: o.type,
+        status: o.status === 'NEW' || o.status === 'Untriggered' ? 'NEW' : o.status,
+        quantity: Number(o.quantity) || 0,
+        executedQty: 0,
+        price: Number(o.price) || 0,
+        cummulativeQuoteQty: 0,
+        stopPrice: null,
+        timeInForce: '',
+        time: o.time,
+        updateTime: o.time,
+      }));
+
+    const allOrders = [...historicalOrders, ...pendingOrders];
 
     // Enrich each order with calculated fields
     return allOrders

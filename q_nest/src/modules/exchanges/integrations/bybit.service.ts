@@ -34,6 +34,7 @@ interface BybitOrder {
   orderType: string;
   qty: string;
   price: string;
+  triggerPrice?: string;
   orderStatus: string;
   createdTime: string;
 }
@@ -398,28 +399,39 @@ export class BybitService {
    */
   async getOpenOrders(apiKey: string, apiSecret: string, symbol?: string): Promise<OrderDto[]> {
     try {
-      const params: any = {
+      const baseParams: any = {
         category: 'spot',
         limit: 50,
       };
-      
+
       if (symbol) {
-        params.symbol = symbol;
+        baseParams.symbol = symbol;
       }
 
-      const result = await this.makeSignedRequest('/v5/order/realtime', apiKey, apiSecret, params);
-      const orders = (result.list || []) as BybitOrder[];
+      // Fetch both regular orders and stop/conditional orders (TP/SL) in parallel
+      const [regularResult, stopResult] = await Promise.all([
+        this.makeSignedRequest('/v5/order/realtime', apiKey, apiSecret, { ...baseParams, orderFilter: 'Order' }),
+        this.makeSignedRequest('/v5/order/realtime', apiKey, apiSecret, { ...baseParams, orderFilter: 'StopOrder' }),
+      ]);
 
-      return orders.map((order) => ({
+      const regularOrders = (regularResult.list || []) as BybitOrder[];
+      const stopOrders = (stopResult.list || []) as BybitOrder[];
+
+      const mapOrder = (order: BybitOrder, isStopOrder: boolean) => ({
         orderId: order.orderId,
         symbol: order.symbol,
-        side: order.side === 'Buy' ? 'BUY' : 'SELL',
-        type: order.orderType,
+        side: order.side === 'Buy' ? 'BUY' as const : 'SELL' as const,
+        type: isStopOrder ? `STOP_${order.orderType?.toUpperCase() || 'MARKET'}` : order.orderType,
         quantity: parseFloat(order.qty || '0'),
-        price: parseFloat(order.price || '0'),
-        status: order.orderStatus,
+        price: parseFloat(order.price || order.triggerPrice || '0'),
+        status: order.orderStatus === 'Untriggered' ? 'NEW' : order.orderStatus,
         time: parseInt(order.createdTime || '0', 10),
-      }));
+      });
+
+      return [
+        ...regularOrders.map((o) => mapOrder(o, false)),
+        ...stopOrders.map((o) => mapOrder(o, true)),
+      ];
     } catch (error: any) {
       if (error instanceof BybitApiException || error instanceof BybitInvalidApiKeyException) {
         throw error;
