@@ -849,59 +849,87 @@ export class ExchangesController {
       placeOrderDto.price,
     );
 
-    // ⚠️ IMPORTANT: Manual orders do NOT auto-place OCO
-    // Only place OCO if explicitly requested via autoOco flag
-    // Top Trades (auto-trading) handle OCO separately in their execution flow
-    let ocoInfo: { orderListId: number; takeProfitPrice: number; stopLossPrice: number } | null = null;
+    // ⚠️ IMPORTANT: Manual orders do NOT auto-place TP/SL
+    // Only place TP/SL if explicitly requested via autoOco flag or source='top_trade'
+    let ocoInfo: { orderListId?: number; takeProfitOrderId?: string; stopLossOrderId?: string; takeProfitPrice: number; stopLossPrice: number } | null = null;
     let ocoError: string | null = null;
 
     try {
       const connection = await this.exchangesService.getConnectionById(connectionId);
       const exchangeName = (connection?.exchange?.name || '').toLowerCase();
       const isBinance = exchangeName === 'binance' || exchangeName === 'binance.us' || exchangeName === 'binanceus';
-      
-      // Determine if order is from Top Trade (auto-trading) or manual
+      const isBybit = exchangeName === 'bybit';
+
       const isTopTrade = placeOrderDto.source === 'top_trade';
 
-      // Place OCO if:
-      // 1. Top Trade BUY order (always auto-place OCO)
-      // 2. OR manual order with explicit autoOco=true flag
-      if (
-        isBinance &&
-        placeOrderDto.side === 'BUY' &&
-        order.status === 'FILLED' &&
+      // For Bybit market orders, price comes back as 0 — fetch current ticker price
+      let effectivePrice = order.price;
+      if (isBybit && (!effectivePrice || effectivePrice <= 0) && placeOrderDto.type === 'MARKET') {
+        try {
+          const tickers = await this.bybitService.getTickerPrices([placeOrderDto.symbol]);
+          effectivePrice = tickers[0]?.price || 0;
+        } catch {
+          effectivePrice = 0;
+        }
+      }
+
+      const shouldPlaceProtection = placeOrderDto.side === 'BUY' &&
         order.quantity > 0 &&
-        order.price > 0 &&
-        (isTopTrade || placeOrderDto.autoOco === true)
-      ) {
+        effectivePrice > 0 &&
+        (isTopTrade || placeOrderDto.autoOco === true);
+
+      if (shouldPlaceProtection) {
         const slPct = placeOrderDto.stopLoss ?? 0.05;
         const tpPct = placeOrderDto.takeProfit ?? 0.10;
-        const stopLossPrice = parseFloat((order.price * (1 - slPct)).toPrecision(8));
-        const takeProfitPrice = parseFloat((order.price * (1 + tpPct)).toPrecision(8));
-
+        const stopLossPrice = parseFloat((effectivePrice * (1 - slPct)).toPrecision(8));
+        const takeProfitPrice = parseFloat((effectivePrice * (1 + tpPct)).toPrecision(8));
         const orderSource = isTopTrade ? '[TOP TRADE]' : '[MANUAL]';
-        this.logger.log(
-          `${orderSource} AUTO-Placing OCO: ${order.symbol} qty=${order.quantity} TP=${takeProfitPrice} SL=${stopLossPrice}`
-        );
 
-        ocoInfo = await this.exchangesService.placeOcoOrder(
-          connectionId,
-          order.symbol,
-          'SELL',
-          order.quantity,
-          takeProfitPrice,
-          stopLossPrice,
-        );
-        
-        this.logger.log(`${orderSource} ✅ OCO placed!`);
-      } else if (placeOrderDto.side === 'BUY' && order.status === 'FILLED') {
+        if (isBinance && order.status === 'FILLED') {
+          // Binance: Place OCO (linked TP + SL)
+          this.logger.log(
+            `${orderSource} AUTO-Placing OCO: ${order.symbol} qty=${order.quantity} TP=${takeProfitPrice} SL=${stopLossPrice}`
+          );
+
+          const oco = await this.exchangesService.placeOcoOrder(
+            connectionId,
+            order.symbol,
+            'SELL',
+            order.quantity,
+            takeProfitPrice,
+            stopLossPrice,
+          );
+          ocoInfo = { orderListId: oco.orderListId, takeProfitPrice, stopLossPrice };
+          this.logger.log(`${orderSource} ✅ OCO placed!`);
+
+        } else if (isBybit) {
+          // Bybit: Place bracket order (separate TP limit + SL stop trigger)
+          // Bybit market orders return 'NEW' but fill almost instantly
+          this.logger.log(
+            `${orderSource} AUTO-Placing Bracket: ${order.symbol} qty=${order.quantity} TP=${takeProfitPrice} SL=${stopLossPrice}`
+          );
+
+          const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+          const bracket = await this.bybitService.placeBracketOrder(
+            apiKey,
+            apiSecret,
+            order.symbol || placeOrderDto.symbol,
+            'SELL',
+            order.quantity,
+            takeProfitPrice,
+            stopLossPrice,
+          );
+          ocoInfo = { takeProfitOrderId: bracket.takeProfitOrderId, stopLossOrderId: bracket.stopLossOrderId, takeProfitPrice, stopLossPrice };
+          this.logger.log(`${orderSource} ✅ Bracket placed! TP=${bracket.takeProfitOrderId} SL=${bracket.stopLossOrderId}`);
+        }
+      } else if (placeOrderDto.side === 'BUY' && !shouldPlaceProtection) {
         this.logger.log(
-          `[MANUAL] No OCO (send source='top_trade' or autoOco=true to enable)`
+          `[MANUAL] No TP/SL (send source='top_trade' or autoOco=true to enable)`
         );
       }
     } catch (err: any) {
-      ocoError = err?.message ?? 'OCO order failed';
-      this.logger.error(`OCO failed: ${err?.message}`);
+      ocoError = err?.message ?? 'TP/SL order failed';
+      this.logger.error(`TP/SL failed: ${err?.message}`);
     }
 
     // Record platform trade fee only for Top Trades BUY executions.
@@ -918,7 +946,9 @@ export class ExchangesController {
     }
 
     // Award QHQ for filled top trade only (fire-and-forget, daily cap enforced in service)
-    if (order.status === 'FILLED' && placeOrderDto.source === 'top_trade') {
+    // Bybit market orders return 'NEW' but fill instantly, so treat MARKET + NEW as filled for Bybit
+    const isEffectivelyFilled = order.status === 'FILLED' || (placeOrderDto.type === 'MARKET' && order.status === 'NEW');
+    if (isEffectivelyFilled && placeOrderDto.source === 'top_trade') {
       this.qhqService.earnTokens(
         user.sub, QhqTransactionType.EARN_TRADING, 0.1,
         `Live trade: ${placeOrderDto.side} ${placeOrderDto.symbol}`,
@@ -1018,8 +1048,8 @@ export class ExchangesController {
     const quoteBalance = (balance as any)?.assets?.find((a: any) => a.symbol === quoteCurrency) || null;
     const baseBalance = (balance as any)?.assets?.find((a: any) => a.symbol === baseCurrency) || null;
     const tradingPair = this.toTradingPair(symbol, quoteCurrency);
-    const availableQuoteBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
-    const availableBaseBalance = baseBalance ? parseFloat(baseBalance.free || '0') : 0;
+    const availableQuoteBalance = quoteBalance ? (parseFloat(quoteBalance.free || '0') || parseFloat(quoteBalance.total || '0')) : 0;
+    const availableBaseBalance = baseBalance ? (parseFloat(baseBalance.free || '0') || parseFloat(baseBalance.total || '0')) : 0;
     const lockedBaseBalance = baseBalance ? parseFloat(baseBalance.locked || '0') : 0;
 
     // Extract 24h stats from 1d candles if available

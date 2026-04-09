@@ -1020,21 +1020,31 @@ export class ExchangesService {
     const historicalOrderIds = new Set(historicalOrders.map((o) => String(o.orderId)));
     const pendingOrders = (openOrders as any[])
       .filter((o) => !historicalOrderIds.has(String(o.orderId)))
-      .map((o) => ({
-        orderId: o.orderId,
-        symbol: o.symbol,
-        side: o.side,
-        type: o.type,
-        status: o.status === 'NEW' || o.status === 'Untriggered' ? 'NEW' : o.status,
-        quantity: Number(o.quantity) || 0,
-        executedQty: 0,
-        price: Number(o.price) || 0,
-        cummulativeQuoteQty: 0,
-        stopPrice: null,
-        timeInForce: '',
-        time: o.time,
-        updateTime: o.time,
-      }));
+      .map((o) => {
+        const type = o.type || '';
+        const isStopMarket = type === 'STOP_MARKET';
+        const isStopLimit = type === 'STOP_LIMIT';
+        const triggerPrice = Number(o.triggerPrice) || 0;
+
+        return {
+          orderId: o.orderId,
+          symbol: o.symbol,
+          side: o.side,
+          type: o.type,
+          status: o.status === 'NEW' || o.status === 'Untriggered' ? 'NEW' : o.status,
+          quantity: Number(o.quantity) || 0,
+          executedQty: 0,
+          // For stop orders, use triggerPrice as the price (like Binance puts price in orderPrice for SL/TP)
+          price: (isStopMarket || isStopLimit) ? (triggerPrice || Number(o.price) || 0) : (Number(o.price) || 0),
+          cummulativeQuoteQty: 0,
+          // SL (STOP_MARKET): stopPrice = trigger price, like Binance STOP_LOSS_LIMIT
+          // TP (STOP_LIMIT): stopPrice = 0, like Binance LIMIT_MAKER
+          stopPrice: isStopMarket ? triggerPrice : 0,
+          timeInForce: isStopLimit ? 'GTC' : '',
+          time: o.time,
+          updateTime: o.time,
+        };
+      });
 
     const allOrders = [...historicalOrders, ...pendingOrders];
 
@@ -1057,9 +1067,9 @@ export class ExchangesService {
           quantity: qty,
           filledQuantity: execQty,
           avgFillPrice: Math.round(avgFillPrice * 100000000) / 100000000,
-          orderPrice: order.type === 'MARKET' ? 'Market' : (order.price || order.stopPrice || 0),
+          orderPrice: order.type === 'MARKET' ? (order.stopPrice || 'Market') : (order.price || order.stopPrice || 0),
           totalValue: Math.round(quoteQty * 100000000) / 100000000,
-          stopPrice: order.stopPrice,
+          stopPrice: order.type === 'STOP_MARKET' || order.type === 'STOP_LOSS_LIMIT' ? (order.stopPrice || order.price || 0) : (order.stopPrice || 0),
           timeInForce: order.timeInForce,
           time: order.time,
           updateTime: order.updateTime,
@@ -1171,7 +1181,7 @@ export class ExchangesService {
           quantity: Number(order.quantity) || 0,
           filledQuantity: execQty,
           avgPrice: Math.round(avgPrice * 100000000) / 100000000,
-          orderPrice: order.type === 'MARKET' ? 'Market' : (order.price || order.stopPrice || 0),
+          orderPrice: order.type === 'MARKET' ? (order.stopPrice || 'Market') : (order.price || order.stopPrice || 0),
           totalValue: Math.round((totalQuoteQty || Number(order.cummulativeQuoteQty) || 0) * 100000000) / 100000000,
           totalFee: Math.round(totalFee * 100000000) / 100000000,
           feeAsset,

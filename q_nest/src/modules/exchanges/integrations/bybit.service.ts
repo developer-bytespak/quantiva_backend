@@ -60,6 +60,7 @@ export class BybitService {
   private readonly apiClient: AxiosInstance;
   private readonly maxRetries = 3;
   private readonly retryDelay = 1000; // 1 second base delay
+  private readonly precisionCache = new Map<string, { decimals: number; expiresAt: number }>();
 
   constructor() {
     this.apiClient = axios.create({
@@ -361,9 +362,11 @@ export class BybitService {
         return walletBalance > 0;
       })
       .map((coin) => {
-        const free = parseFloat(coin.availableToWithdraw || '0');
+        const rawFree = parseFloat(coin.availableToWithdraw || '0');
         const locked = parseFloat(coin.locked || '0');
         const total = parseFloat(coin.walletBalance || '0');
+        // Bybit Unified Account may return empty availableToWithdraw — derive free from total
+        const free = rawFree > 0 ? rawFree : Math.max(0, total - locked);
 
         return {
           symbol: coin.coin,
@@ -423,7 +426,8 @@ export class BybitService {
         side: order.side === 'Buy' ? 'BUY' as const : 'SELL' as const,
         type: isStopOrder ? `STOP_${order.orderType?.toUpperCase() || 'MARKET'}` : order.orderType,
         quantity: parseFloat(order.qty || '0'),
-        price: parseFloat(order.price || order.triggerPrice || '0'),
+        price: parseFloat(order.price || '0'),
+        triggerPrice: isStopOrder ? parseFloat(order.triggerPrice || '0') : 0,
         status: order.orderStatus === 'Untriggered' ? 'NEW' : order.orderStatus,
         time: parseInt(order.createdTime || '0', 10),
       });
@@ -766,6 +770,33 @@ export class BybitService {
   }
 
   /**
+   * Get base asset decimal precision for a symbol from Bybit instrument info.
+   * Cached for 1 hour per symbol.
+   */
+  private async getBasePrecision(symbol: string): Promise<number> {
+    const cached = this.precisionCache.get(symbol);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.decimals;
+    }
+
+    try {
+      const result = await this.makePublicRequest('/v5/market/instruments-info', {
+        category: 'spot',
+        symbol: symbol.toUpperCase(),
+      });
+      const info = result.list?.[0];
+      const basePrecision = info?.lotSizeFilter?.basePrecision || '0.000001';
+      // Count decimal places: "0.0001" → 4, "0.1" → 1, "0.000001" → 6
+      const decimals = (basePrecision.split('.')[1] || '').length;
+
+      this.precisionCache.set(symbol, { decimals, expiresAt: Date.now() + 3600_000 });
+      return decimals;
+    } catch {
+      return 6; // Safe default
+    }
+  }
+
+  /**
    * Places an order on Bybit
    */
   async placeOrder(
@@ -782,13 +813,26 @@ export class BybitService {
         throw new BybitApiException('Price is required for LIMIT orders');
       }
 
+      // Fetch instrument info to get basePrecision for proper quantity rounding
+      const precision = await this.getBasePrecision(symbol);
+      const factor = Math.pow(10, precision);
+      const truncatedQty = Math.floor(quantity * factor) / factor;
+      if (truncatedQty <= 0) {
+        throw new BybitApiException('Order quantity is too small after rounding to exchange precision');
+      }
+
       const params: Record<string, any> = {
         category: 'spot',
         symbol,
         side: side === 'BUY' ? 'Buy' : 'Sell',
         orderType: type === 'MARKET' ? 'Market' : 'Limit',
-        qty: quantity.toString(),
+        qty: truncatedQty.toString(),
       };
+
+      // For market orders, tell Bybit the qty is in base coin (e.g. BTC), not quote (USDT)
+      if (type === 'MARKET') {
+        params.marketUnit = 'baseCoin';
+      }
 
       if (type === 'LIMIT') {
         params.price = price!.toString();
@@ -847,19 +891,29 @@ export class BybitService {
     stopLossPrice: number;
   }> {
     try {
+      // Truncate quantity to basePrecision
+      const precision = await this.getBasePrecision(symbol);
+      const factor = Math.pow(10, precision);
+      const truncatedQty = Math.floor(quantity * factor) / factor;
+
       this.logger.log(
-        `Placing bracket order: ${symbol} ${side} qty=${quantity} ` +
+        `Placing bracket order: ${symbol} ${side} qty=${truncatedQty} ` +
         `TP=${takeProfitPrice} SL=${stopLossPrice}`
       );
 
-      // Place Take Profit order (LIMIT order at TP price)
+      // Both TP and SL are conditional/untriggered StopOrders so neither locks the balance.
+      // TP: triggers when price rises to takeProfitPrice, then places a limit sell
       const tpParams: Record<string, any> = {
         category: 'spot',
         symbol,
         side: side === 'BUY' ? 'Buy' : 'Sell',
         orderType: 'Limit',
-        qty: quantity.toString(),
+        qty: truncatedQty.toString(),
         price: takeProfitPrice.toString(),
+        triggerPrice: takeProfitPrice.toString(),
+        triggerDirection: side === 'SELL' ? 1 : 2, // 1=rise above (TP for sell), 2=fall below
+        triggerBy: 'LastPrice',
+        orderFilter: 'StopOrder',
         timeInForce: 'GTC',
       };
 
@@ -871,16 +925,15 @@ export class BybitService {
         'POST',
       );
 
-      // Place Stop Loss order using conditional trigger
-      // For Bybit spot, we use a trigger order that becomes a market order when stop price is hit
+      // SL: triggers when price falls to stopLossPrice, then places a market sell
       const slParams: Record<string, any> = {
         category: 'spot',
         symbol,
         side: side === 'BUY' ? 'Buy' : 'Sell',
         orderType: 'Market',
-        qty: quantity.toString(),
+        qty: truncatedQty.toString(),
         triggerPrice: stopLossPrice.toString(),
-        triggerDirection: side === 'SELL' ? 2 : 1, // 1=rise above, 2=fall below
+        triggerDirection: side === 'SELL' ? 2 : 1, // 2=fall below (SL for sell), 1=rise above
         triggerBy: 'LastPrice',
         orderFilter: 'StopOrder',
       };
@@ -902,7 +955,7 @@ export class BybitService {
         stopLossOrderId: slResult.orderId || '',
         symbol,
         side,
-        quantity,
+        quantity: truncatedQty,
         takeProfitPrice,
         stopLossPrice,
       };

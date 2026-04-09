@@ -137,8 +137,8 @@ export class MarketDetailAggregatorService {
     const baseCurrency = this.resolveBaseCurrency(symbol, quoteCurrency);
     const quoteBalance = balanceData?.assets?.find((a: any) => a.symbol === quoteCurrency) || null;
     const baseBalance = balanceData?.assets?.find((a: any) => a.symbol === baseCurrency) || null;
-    const availableQuoteBalance = quoteBalance ? parseFloat(quoteBalance.free || '0') : 0;
-    const availableBaseBalance = baseBalance ? parseFloat(baseBalance.free || '0') : 0;
+    const availableQuoteBalance = quoteBalance ? (parseFloat(quoteBalance.free || '0') || parseFloat(quoteBalance.total || '0')) : 0;
+    const availableBaseBalance = baseBalance ? (parseFloat(baseBalance.free || '0') || parseFloat(baseBalance.total || '0')) : 0;
     const lockedBaseBalance = baseBalance ? parseFloat(baseBalance.locked || '0') : 0;
     const tradingPair = this.toTradingPair(symbol, quoteCurrency);
 
