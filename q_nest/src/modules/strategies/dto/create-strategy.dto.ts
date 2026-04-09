@@ -193,9 +193,10 @@ export class CreateStrategyDto {
   @IsString()
   schedule_cron?: string; // Cron expression, e.g., '0 */4 * * *' for every 4 hours
 
+  @IsOptional()
   @IsArray()
   @IsString({ each: true })
-  target_assets: string[]; // Array of asset symbols
+  target_assets?: string[] | null; // Array of asset symbols, null = all trending assets
 
   @IsOptional()
   @IsNumber()

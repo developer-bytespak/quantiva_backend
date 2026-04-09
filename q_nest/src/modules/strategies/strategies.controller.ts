@@ -869,10 +869,7 @@ export class StrategiesController {
     dto.type = 'user' as any; // Force type to 'user'
     dto.asset_type = 'stock' as any; // Force asset_type to 'stock'
 
-    // Validate stock symbols exist (basic validation)
-    if (!dto.target_assets || dto.target_assets.length === 0) {
-      throw new BadRequestException('At least one target stock symbol is required');
-    }
+    // target_assets can be null/empty to target all trending assets
 
     const canAccess = await this.featureAccessService.canAccessFeature(
     user.sub, 
@@ -943,10 +940,7 @@ export class StrategiesController {
     dto.type = 'user' as any; // Force type to 'user'
     dto.asset_type = 'crypto' as any; // Force asset_type to 'crypto'
 
-    // Validate crypto symbols exist (basic validation)
-    if (!dto.target_assets || dto.target_assets.length === 0) {
-      throw new BadRequestException('At least one target crypto symbol is required');
-    }
+    // target_assets can be null/empty to target all trending assets
 
     // Check feature access
     const canAccess = await this.featureAccessService.canAccessFeature(
