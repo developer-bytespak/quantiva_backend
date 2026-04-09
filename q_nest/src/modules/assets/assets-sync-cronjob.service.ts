@@ -37,14 +37,17 @@ export class AssetsSyncCronjobService implements OnModuleInit {
     this.isRunning = true;
     try {
       // Step 1: Fetch exchange coin lists from direct APIs (free, 1 call each)
-      const exchangeMap = await this.fetchExchangeAvailability();
+      const { symbolToExchanges, succeededExchanges } = await this.fetchExchangeAvailability();
 
-      // Step 2: Fetch top 500 coins from CoinGecko (1 API call)
+      // Step 2: Fetch top 500 coins from CoinGecko (Pro first, free fallback with pagination)
       const coins = await this.marketService.getTop500Coins();
 
       // Step 3: Sync to DB with exchange availability
-      const result = await this.syncCoins(coins, exchangeMap);
+      const result = await this.syncCoins(coins, symbolToExchanges, succeededExchanges);
       this.logger.log(`CoinGecko sync complete: created=${result.created}, updated=${result.updated}, errors=${result.errors}, rankings=${result.marketSnapshots}`);
+
+      // Step 4: Clean up duplicate/old market_rankings rows (keep only the latest per asset)
+      await this.cleanupOldRankings();
       this.lastSyncTime = new Date();
     } catch (error: any) {
       this.logger.error(`Fatal error in CoinGecko assets sync: ${error.message}`);
@@ -58,7 +61,7 @@ export class AssetsSyncCronjobService implements OnModuleInit {
    * Returns a Map of uppercase symbol -> list of exchanges it's available on.
    * Uses direct exchange APIs (free, no CoinGecko credits).
    */
-  private async fetchExchangeAvailability(): Promise<Map<string, string[]>> {
+  private async fetchExchangeAvailability(): Promise<{ symbolToExchanges: Map<string, string[]>; succeededExchanges: string[] }> {
     const symbolToExchanges = new Map<string, string[]>();
 
     const results = await Promise.allSettled([
@@ -68,6 +71,7 @@ export class AssetsSyncCronjobService implements OnModuleInit {
     ]);
 
     const exchangeNames = ['binance', 'bybit', 'binance.us'];
+    const succeededExchanges: string[] = [];
 
     for (let i = 0; i < results.length; i++) {
       const result = results[i];
@@ -75,6 +79,7 @@ export class AssetsSyncCronjobService implements OnModuleInit {
 
       if (result.status === 'fulfilled') {
         this.logger.log(`${exchangeName}: ${result.value.length} USDT symbols fetched`);
+        succeededExchanges.push(exchangeName);
         for (const symbol of result.value) {
           const upper = symbol.toUpperCase();
           const existing = symbolToExchanges.get(upper) || [];
@@ -86,8 +91,8 @@ export class AssetsSyncCronjobService implements OnModuleInit {
       }
     }
 
-    this.logger.log(`Exchange availability map built for ${symbolToExchanges.size} symbols`);
-    return symbolToExchanges;
+    this.logger.log(`Exchange availability map built for ${symbolToExchanges.size} symbols (succeeded: ${succeededExchanges.join(', ')})`);
+    return { symbolToExchanges, succeededExchanges };
   }
 
   /**
@@ -153,13 +158,23 @@ export class AssetsSyncCronjobService implements OnModuleInit {
   private async syncCoins(
     coins: any[],
     exchangeMap: Map<string, string[]>,
+    succeededExchanges: string[],
   ): Promise<{ created: number; updated: number; errors: number; total: number; marketSnapshots: number }> {
     const BATCH_SIZE = 50;
     let upsertedCount = 0;
     let errorCount = 0;
     let marketRankingsCount = 0;
-    const rankTimestamp = new Date();
     const now = new Date();
+
+    // Pre-fetch existing assets so we can merge exchange tags
+    const existingAssets = await this.prisma.assets.findMany({
+      where: { asset_type: 'crypto' },
+      select: { symbol: true, available_exchanges: true },
+    });
+    const existingTagsMap = new Map<string, string[]>();
+    for (const asset of existingAssets) {
+      existingTagsMap.set(asset.symbol, Array.isArray(asset.available_exchanges) ? asset.available_exchanges as string[] : []);
+    }
 
     for (let i = 0; i < coins.length; i += BATCH_SIZE) {
       const batch = coins.slice(i, i + BATCH_SIZE);
@@ -169,8 +184,15 @@ export class AssetsSyncCronjobService implements OnModuleInit {
       try {
         const assetUpserts = batch.map((coin) => {
           const symbol = coin.symbol.toUpperCase();
-          // Look up exchange availability by symbol
-          const exchanges = exchangeMap.get(symbol) || [];
+          const freshTags = exchangeMap.get(symbol) || [];
+          // Merge: keep old tags for exchanges that failed, use fresh data for exchanges that succeeded
+          const oldTags = existingTagsMap.get(symbol) || [];
+          const merged = [
+            ...oldTags.filter((tag) => !succeededExchanges.includes(tag)),
+            ...freshTags,
+          ];
+          const exchanges = [...new Set(merged)];
+
           return this.prisma.assets.upsert({
             where: { symbol_asset_type: { symbol, asset_type: 'crypto' } },
             create: {
@@ -196,48 +218,63 @@ export class AssetsSyncCronjobService implements OnModuleInit {
               is_active: true,
               available_exchanges: exchanges,
             },
-            select: { asset_id: true },
+            select: { asset_id: true, symbol: true },
           });
         });
 
         const results = await this.prisma.$transaction(assetUpserts);
         upsertedCount += results.length;
 
-        // Batch upsert market_rankings
-        const rankingUpserts = results.map((asset, idx) => {
+        // Update market_rankings: find latest row per asset and update it, or create if none exists
+        for (let idx = 0; idx < results.length; idx++) {
+          const asset = results[idx];
           const coin = batch[idx];
-          return this.prisma.market_rankings.upsert({
-            where: {
-              rank_timestamp_asset_id: {
-                rank_timestamp: rankTimestamp,
-                asset_id: asset.asset_id,
-              },
-            },
-            create: {
-              rank_timestamp: rankTimestamp,
-              asset_id: asset.asset_id,
-              rank: coin.market_cap_rank,
-              market_cap: coin.market_cap,
-              price_usd: coin.current_price,
-              volume_24h: coin.total_volume,
-              change_percent_24h: coin.price_change_percentage_24h || 0,
-              change_24h: coin.price_change_24h || 0,
-            },
-            update: {
-              rank: coin.market_cap_rank,
-              market_cap: coin.market_cap,
-              price_usd: coin.current_price,
-              volume_24h: coin.total_volume,
-              change_percent_24h: coin.price_change_percentage_24h || 0,
-              change_24h: coin.price_change_24h || 0,
-            },
-          });
-        });
+          try {
+            const existing = await this.prisma.market_rankings.findFirst({
+              where: { asset_id: asset.asset_id },
+              orderBy: { rank_timestamp: 'desc' },
+              select: { rank_timestamp: true, asset_id: true },
+            });
 
-        await this.prisma.$transaction(rankingUpserts);
-        marketRankingsCount += rankingUpserts.length;
+            if (existing) {
+              await this.prisma.market_rankings.update({
+                where: {
+                  rank_timestamp_asset_id: {
+                    rank_timestamp: existing.rank_timestamp,
+                    asset_id: existing.asset_id,
+                  },
+                },
+                data: {
+                  rank: coin.market_cap_rank,
+                  market_cap: coin.market_cap,
+                  price_usd: coin.current_price,
+                  volume_24h: coin.total_volume,
+                  change_percent_24h: coin.price_change_percentage_24h || 0,
+                  change_24h: coin.price_change_24h || 0,
+                  rank_timestamp: now,
+                },
+              });
+            } else {
+              await this.prisma.market_rankings.create({
+                data: {
+                  rank_timestamp: now,
+                  asset_id: asset.asset_id,
+                  rank: coin.market_cap_rank,
+                  market_cap: coin.market_cap,
+                  price_usd: coin.current_price,
+                  volume_24h: coin.total_volume,
+                  change_percent_24h: coin.price_change_percentage_24h || 0,
+                  change_24h: coin.price_change_24h || 0,
+                },
+              });
+            }
+            marketRankingsCount++;
+          } catch (error: any) {
+            this.logger.warn(`Failed to update ranking for ${asset.symbol}: ${error.message}`);
+          }
+        }
 
-        this.logger.log(`Batch ${batchNum}/${totalBatches}: upserted ${results.length} assets + ${rankingUpserts.length} rankings`);
+        this.logger.log(`Batch ${batchNum}/${totalBatches}: upserted ${results.length} assets + ${marketRankingsCount} rankings`);
       } catch (error: any) {
         this.logger.error(`Batch ${batchNum}/${totalBatches} failed: ${error.message}`);
         errorCount += batch.length;
@@ -267,11 +304,30 @@ export class AssetsSyncCronjobService implements OnModuleInit {
   }
 
   /**
+   * Remove duplicate market_rankings rows, keeping only the latest per asset.
+   */
+  private async cleanupOldRankings(): Promise<void> {
+    try {
+      const result = await this.prisma.$executeRawUnsafe(`
+        DELETE FROM market_rankings
+        WHERE ctid NOT IN (
+          SELECT DISTINCT ON (asset_id) ctid
+          FROM market_rankings
+          ORDER BY asset_id, rank_timestamp DESC
+        )
+      `);
+      this.logger.log(`Cleaned up ${result} old market_rankings rows`);
+    } catch (error: any) {
+      this.logger.warn(`Failed to cleanup old rankings: ${error.message}`);
+    }
+  }
+
+  /**
    * Manual sync method (can be called via API endpoint)
    */
   async manualSync(): Promise<{ created: number; updated: number; errors: number; total: number; marketSnapshots: number }> {
-    const exchangeMap = await this.fetchExchangeAvailability();
+    const { symbolToExchanges, succeededExchanges } = await this.fetchExchangeAvailability();
     const coins = await this.marketService.getTop500Coins();
-    return this.syncCoins(coins, exchangeMap);
+    return this.syncCoins(coins, symbolToExchanges, succeededExchanges);
   }
 }
