@@ -37,7 +37,7 @@ export const OPTIONS_POLLING_CONFIG = {
 // ── Underlyings ───────────────────────────────────────────────
 
 export const FALLBACK_UNDERLYINGS = (
-  process.env.OPTIONS_FALLBACK_UNDERLYINGS || 'BTC,ETH'
+  process.env.OPTIONS_FALLBACK_UNDERLYINGS || 'BTC,ETH,SOL,BNB,DOGE,XRP'
 ).split(',').map((s) => s.trim());
 
 // ── Binance Retry ─────────────────────────────────────────────
