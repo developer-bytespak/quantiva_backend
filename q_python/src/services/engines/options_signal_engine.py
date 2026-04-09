@@ -230,16 +230,32 @@ class OptionsSignalEngine(BaseEngine):
             self.logger.error(f"Failed to build signal for {strat.name}: {e}")
             return None
 
+    @staticmethod
+    def _fmt_usd(value: float) -> str:
+        """Format USD with appropriate precision based on magnitude."""
+        if abs(value) >= 100:
+            return f"${value:,.0f}"
+        elif abs(value) >= 1:
+            return f"${value:,.2f}"
+        else:
+            return f"${value:,.4f}"
+
     def _estimate_risk_reward(
         self,
         strat: StrategyTemplate,
         legs: List[Dict[str, Any]],
         spot_price: float,
     ) -> tuple:
-        """Rough risk/reward estimation based on strategy type."""
+        """Risk/reward estimation based on strategy type.
+        Uses 10% favorable price move as profit target for uncapped strategies."""
+        fmt = self._fmt_usd
+
         if strat.name in ("long_call", "long_put"):
             est_premium = spot_price * 0.03
-            return "unlimited", "Unlimited", f"${est_premium:,.0f}"
+            # Estimate profit on a 10% favorable move
+            target_profit = spot_price * 0.10 - est_premium
+            ratio = f"{target_profit / est_premium:.1f}:1" if est_premium > 0 else "N/A"
+            return ratio, fmt(target_profit), fmt(est_premium)
 
         if strat.name in ("bull_call_spread", "bear_put_spread"):
             if len(legs) >= 2:
@@ -247,7 +263,7 @@ class OptionsSignalEngine(BaseEngine):
                 est_debit = width * 0.4
                 est_profit = width - est_debit
                 ratio = f"{est_profit / est_debit:.1f}:1" if est_debit > 0 else "N/A"
-                return ratio, f"${est_profit:,.0f}", f"${est_debit:,.0f}"
+                return ratio, fmt(est_profit), fmt(est_debit)
             return "N/A", "N/A", "N/A"
 
         if strat.name == "iron_condor":
@@ -256,38 +272,41 @@ class OptionsSignalEngine(BaseEngine):
                 est_credit = wing_width * 0.3
                 max_loss_val = wing_width - est_credit
                 ratio = f"1:{max_loss_val / est_credit:.1f}" if est_credit > 0 else "N/A"
-                return ratio, f"${est_credit:,.0f}", f"${max_loss_val:,.0f}"
+                return ratio, fmt(est_credit), fmt(max_loss_val)
             return "N/A", "N/A", "N/A"
 
         if strat.name == "long_straddle":
-            # Max loss = both premiums (approx 6% of spot)
             est_premium = spot_price * 0.06
-            return "unlimited", "Unlimited", f"${est_premium:,.0f}"
+            target_profit = spot_price * 0.10 - est_premium
+            ratio = f"{target_profit / est_premium:.1f}:1" if est_premium > 0 else "N/A"
+            return ratio, fmt(target_profit), fmt(est_premium)
 
         if strat.name == "long_strangle":
-            # Max loss = both premiums (cheaper than straddle, approx 4% of spot)
             est_premium = spot_price * 0.04
-            return "unlimited", "Unlimited", f"${est_premium:,.0f}"
+            target_profit = spot_price * 0.10 - est_premium
+            ratio = f"{target_profit / est_premium:.1f}:1" if est_premium > 0 else "N/A"
+            return ratio, fmt(target_profit), fmt(est_premium)
 
         if strat.name == "long_butterfly":
             if len(legs) >= 3:
                 wing_width = abs(legs[0]["strike"] - legs[1]["strike"])
-                est_debit = wing_width * 0.2  # cheap strategy
+                est_debit = wing_width * 0.2
                 max_profit_val = wing_width - est_debit
                 ratio = f"{max_profit_val / est_debit:.1f}:1" if est_debit > 0 else "N/A"
-                return ratio, f"${max_profit_val:,.0f}", f"${est_debit:,.0f}"
+                return ratio, fmt(max_profit_val), fmt(est_debit)
             return "N/A", "N/A", "N/A"
 
         if strat.name == "calendar_spread":
             est_debit = spot_price * 0.015
-            est_profit = est_debit * 0.5  # 50% return target
-            return f"{est_profit / est_debit:.1f}:1" if est_debit > 0 else "N/A", f"${est_profit:,.0f}", f"${est_debit:,.0f}"
+            est_profit = est_debit * 0.5
+            ratio = f"{est_profit / est_debit:.1f}:1" if est_debit > 0 else "N/A"
+            return ratio, fmt(est_profit), fmt(est_debit)
 
         if strat.name == "short_put":
             est_credit = spot_price * 0.02
             max_loss_val = legs[0]["strike"] - est_credit if legs else spot_price * 0.05
             ratio = f"1:{max_loss_val / est_credit:.1f}" if est_credit > 0 else "N/A"
-            return ratio, f"${est_credit:,.0f}", f"${max_loss_val:,.0f}"
+            return ratio, fmt(est_credit), fmt(max_loss_val)
 
         return "N/A", "N/A", "N/A"
 
