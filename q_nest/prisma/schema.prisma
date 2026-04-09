@@ -1009,6 +1009,8 @@ enum MonthlyFeeStatus {
 enum TradeFeeSource {
   top_trade_crypto
   top_trade_stock
+  options_execution
+  options_performance
 }
 
 enum PaymentStatus {

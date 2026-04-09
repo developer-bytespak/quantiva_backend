@@ -10,9 +10,10 @@ import { OptionsGateway } from './options.gateway';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
+import { TradeFeesModule } from '../trade-fees/trade-fees.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, AuthModule, ExchangesModule],
+  imports: [ConfigModule, PrismaModule, AuthModule, ExchangesModule, TradeFeesModule],
   controllers: [OptionsController],
   providers: [OptionsService, OptionsBinanceService, OptionsGateway, OptionsIvService, OptionsSignalService, OptionsRiskService],
   exports: [OptionsService, OptionsBinanceService, OptionsIvService, OptionsSignalService, OptionsRiskService],

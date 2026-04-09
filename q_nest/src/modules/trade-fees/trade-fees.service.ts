@@ -34,9 +34,11 @@ export class TradeFeesService {
     assetSymbol: string;
     tradeSide: string;
     tradeValueUsd: number;
-    source?: 'top_trade_crypto' | 'top_trade_stock';
+    feePercent?: number;
+    source?: 'top_trade_crypto' | 'top_trade_stock' | 'options_execution' | 'options_performance';
   }): Promise<void> {
-    const feeAmount = params.tradeValueUsd * FEE_PERCENT;
+    const effectiveFeePercent = params.feePercent ?? FEE_PERCENT;
+    const feeAmount = params.tradeValueUsd * effectiveFeePercent;
     const billingMonth = this.currentBillingMonth();
 
     try {
@@ -49,7 +51,7 @@ export class TradeFeesService {
             asset_symbol: params.assetSymbol,
             trade_side: params.tradeSide,
             trade_value_usd: params.tradeValueUsd,
-            fee_percent: FEE_PERCENT,
+            fee_percent: effectiveFeePercent,
             fee_amount_usd: feeAmount,
             source: params.source ?? 'top_trade_crypto',
             billing_month: billingMonth,
