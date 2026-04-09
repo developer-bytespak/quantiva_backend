@@ -1,4 +1,5 @@
 import { Injectable, Logger, ForbiddenException, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { OptionsBinanceService } from './options-binance.service';
@@ -36,14 +37,31 @@ export class OptionsService {
 
   // ── Helpers ──────────────────────────────────────────────
 
+  // TTL cache for elite tier checks (30s) — avoids DB query on every request
+  private eliteTierCache = new Map<string, { tier: string; expiresAt: number }>();
+
   /**
-   * Verify user has ELITE subscription.
+   * Verify user has ELITE subscription (cached for 30s).
    */
   async verifyEliteAccess(userId: string): Promise<void> {
+    const cached = this.eliteTierCache.get(userId);
+    if (cached && cached.expiresAt > Date.now()) {
+      if (cached.tier !== 'ELITE') {
+        throw new ForbiddenException('Options trading is available for ELITE subscribers only');
+      }
+      return;
+    }
+
     const user = await this.prisma.users.findUnique({
       where: { user_id: userId },
       select: { current_tier: true },
     });
+
+    this.eliteTierCache.set(userId, {
+      tier: user?.current_tier || '',
+      expiresAt: Date.now() + 30_000,
+    });
+
     if (!user || user.current_tier !== 'ELITE') {
       throw new ForbiddenException('Options trading is available for ELITE subscribers only');
     }
@@ -73,68 +91,38 @@ export class OptionsService {
   // ── Market Data ──────────────────────────────────────────
 
   /**
-   * Get all available underlying assets for options trading.
+   * Get all available underlying assets (public data, no credentials needed).
    */
-  async getAvailableUnderlyings(
-    connectionId: string,
-    userId: string,
-  ): Promise<AvailableUnderlyingDto[]> {
-    await this.verifyConnectionOwnership(connectionId, userId);
-    const credentials = await this.getCredentials(connectionId);
-    return this.optionsBinance.getAvailableUnderlyings(credentials, userId);
+  async getAvailableUnderlyings(): Promise<AvailableUnderlyingDto[]> {
+    return this.optionsBinance.getAvailableUnderlyings();
   }
 
   /**
-   * Get options chain for an underlying.
+   * Get options chain for an underlying (public data).
    */
-  async getOptionsChain(
-    connectionId: string,
-    userId: string,
-    underlying: string,
-  ): Promise<OptionsChainResponseDto> {
-    await this.verifyConnectionOwnership(connectionId, userId);
-    const credentials = await this.getCredentials(connectionId);
-    return this.optionsBinance.fetchOptionsChain(credentials, underlying, userId);
+  async getOptionsChain(underlying: string): Promise<OptionsChainResponseDto> {
+    return this.optionsBinance.fetchOptionsChain(null, underlying);
   }
 
   /**
-   * Get Greeks for a specific contract.
+   * Get Greeks for a specific contract (public data).
    */
-  async getGreeks(
-    connectionId: string,
-    userId: string,
-    contractSymbol: string,
-  ): Promise<GreeksDto> {
-    await this.verifyConnectionOwnership(connectionId, userId);
-    const credentials = await this.getCredentials(connectionId);
-    return this.optionsBinance.fetchGreeks(credentials, contractSymbol, userId);
+  async getGreeks(contractSymbol: string): Promise<GreeksDto> {
+    return this.optionsBinance.fetchGreeks(null, contractSymbol);
   }
 
   /**
-   * Get ticker for a contract.
+   * Get ticker for a contract (public data).
    */
-  async getTicker(
-    connectionId: string,
-    userId: string,
-    contractSymbol: string,
-  ) {
-    await this.verifyConnectionOwnership(connectionId, userId);
-    const credentials = await this.getCredentials(connectionId);
-    return this.optionsBinance.fetchOptionTicker(credentials, contractSymbol, userId);
+  async getTicker(contractSymbol: string) {
+    return this.optionsBinance.fetchOptionTicker(null, contractSymbol);
   }
 
   /**
-   * Get order book depth.
+   * Get order book depth (public data).
    */
-  async getDepth(
-    connectionId: string,
-    userId: string,
-    contractSymbol: string,
-    limit?: number,
-  ) {
-    await this.verifyConnectionOwnership(connectionId, userId);
-    const credentials = await this.getCredentials(connectionId);
-    return this.optionsBinance.fetchOptionDepth(credentials, contractSymbol, limit, userId);
+  async getDepth(contractSymbol: string, limit?: number) {
+    return this.optionsBinance.fetchOptionDepth(null, contractSymbol, limit);
   }
 
   // ── Account ──────────────────────────────────────────────
@@ -198,7 +186,13 @@ export class OptionsService {
     const existing = this.syncLocks.get(userId) || Promise.resolve();
     const next = existing
       .then(() => this._doPositionSync(userId, positions))
-      .catch((err) => this.logger.error(`Position sync failed for ${userId}: ${err.message}`));
+      .catch((err) => this.logger.error(`Position sync failed for ${userId}: ${err.message}`))
+      .finally(() => {
+        // Clean up lock if this is still the latest promise for this user
+        if (this.syncLocks.get(userId) === next) {
+          this.syncLocks.delete(userId);
+        }
+      });
     this.syncLocks.set(userId, next);
     return next;
   }
@@ -229,10 +223,10 @@ export class OptionsService {
               current_premium: pos.currentPremium,
               unrealized_pnl: pos.unrealizedPnl,
               realized_pnl: pos.realizedPnl || 0,
-              delta: pos.greeks.delta,
-              gamma: pos.greeks.gamma,
-              theta: pos.greeks.theta,
-              vega: pos.greeks.vega,
+              delta: pos.greeks?.delta ?? 0,
+              gamma: pos.greeks?.gamma ?? 0,
+              theta: pos.greeks?.theta ?? 0,
+              vega: pos.greeks?.vega ?? 0,
               quantity: pos.quantity,
             },
           });
@@ -250,10 +244,10 @@ export class OptionsService {
               current_premium: pos.currentPremium,
               unrealized_pnl: pos.unrealizedPnl,
               realized_pnl: pos.realizedPnl || 0,
-              delta: pos.greeks.delta,
-              gamma: pos.greeks.gamma,
-              theta: pos.greeks.theta,
-              vega: pos.greeks.vega,
+              delta: pos.greeks?.delta ?? 0,
+              gamma: pos.greeks?.gamma ?? 0,
+              theta: pos.greeks?.theta ?? 0,
+              vega: pos.greeks?.vega ?? 0,
               is_open: true,
             },
           });
@@ -298,10 +292,35 @@ export class OptionsService {
       }
     }
 
-    // 3. Risk checks
+    // 3. Sell-to-close validation (no naked option writing)
+    if (dto.side === 'SELL') {
+      const openPosition = await this.prisma.options_positions.findFirst({
+        where: {
+          user_id: userId,
+          contract_symbol: dto.contractSymbol,
+          is_open: true,
+        },
+        select: { quantity: true },
+      });
+
+      if (!openPosition) {
+        throw new BadRequestException(
+          'Cannot sell — you have no open position for this contract. Only sell-to-close is allowed.',
+        );
+      }
+
+      const positionQty = Number(openPosition.quantity);
+      if (dto.quantity > positionQty) {
+        throw new BadRequestException(
+          `Cannot sell ${dto.quantity} contracts — you only hold ${positionQty}. Reduce quantity to close partially or fully.`,
+        );
+      }
+    }
+
+    // 4. Risk checks
     await this.performRiskChecks(userId, dto, credentials);
 
-    // 3. Calculate max loss (premium × qty for buy side)
+    // 5. Calculate max loss (premium × qty for buy side)
     const maxLoss = dto.side === 'BUY' ? dto.price * dto.quantity : null;
 
     // 4. Get current Greeks for snapshot
@@ -364,17 +383,28 @@ export class OptionsService {
       throw exchangeError;
     }
 
-    // 8. Update DB with exchange response
-    const updatedOrder = await this.prisma.options_orders.update({
-      where: { order_id: dbOrder.order_id },
-      data: {
-        binance_order_id: (binanceOrder.orderId || binanceOrder.id)?.toString() || null,
-        status: this.mapOrderStatus(binanceOrder.status),
-        filled_quantity: parseFloat(binanceOrder.executedQty || binanceOrder.filled || '0'),
-        avg_fill_price: parseFloat(binanceOrder.avgPrice || binanceOrder.average || '0') || null,
-        fee: parseFloat(binanceOrder.fee || '0') || null,
-      },
-    });
+    // 8. Update DB with exchange response — handle DB failure gracefully
+    let updatedOrder: any;
+    try {
+      updatedOrder = await this.prisma.options_orders.update({
+        where: { order_id: dbOrder.order_id },
+        data: {
+          binance_order_id: (binanceOrder.orderId || binanceOrder.id)?.toString() || null,
+          status: this.mapOrderStatus(binanceOrder.status),
+          filled_quantity: parseFloat(binanceOrder.executedQty || binanceOrder.filled || '0'),
+          avg_fill_price: parseFloat(binanceOrder.avgPrice || binanceOrder.average || '0') || null,
+          fee: parseFloat(binanceOrder.fee || '0') || null,
+        },
+      });
+    } catch (dbErr: any) {
+      this.logger.error(
+        `DB update failed for order ${dbOrder.order_id}, Binance ID: ${binanceOrder.orderId || binanceOrder.id}. Manual reconciliation needed: ${dbErr.message}`,
+      );
+      // Return the original DB order so the client knows the order was placed on Binance
+      const fallback = this.mapDbOrderToDto(dbOrder);
+      fallback.binanceOrderId = (binanceOrder.orderId || binanceOrder.id)?.toString() || '';
+      return fallback;
+    }
 
     this.logger.log(`Options order placed: ${dbOrder.order_id} binance=${binanceOrder.orderId || binanceOrder.id}`);
 
@@ -641,26 +671,7 @@ export class OptionsService {
       }
     }
 
-    // 3. Margin check for SELL orders (selling options requires margin)
-    if (dto.side === 'SELL') {
-      try {
-        const optionsBalance = await this.optionsBinance.fetchBalance(credentials, userId);
-        const availableBalance = optionsBalance.availableBalance;
-        if (availableBalance > 0) {
-          // Estimate margin as premium * quantity * 2 (conservative 2x margin heuristic)
-          const estimatedMargin = dto.price * dto.quantity * 2;
-          const maxMargin = availableBalance * RISK_CONFIG.MAX_SELL_MARGIN_PERCENT;
-          if (estimatedMargin > maxMargin) {
-            throw new BadRequestException(
-              `Estimated margin $${estimatedMargin.toFixed(2)} exceeds ${(RISK_CONFIG.MAX_SELL_MARGIN_PERCENT * 100).toFixed(0)}% of available balance ($${availableBalance.toFixed(2)})`,
-            );
-          }
-        }
-      } catch (err: any) {
-        if (err instanceof BadRequestException) throw err;
-        this.logger.warn(`Could not check margin for SELL order: ${err.message}`);
-      }
-    }
+    // Note: SELL margin check removed — sell-to-close only enforced in placeOrder() + Binance reduceOnly
 
     // 4. IV rank check for buy orders — warn at threshold, hard block at higher threshold
     if (dto.side === 'BUY') {
@@ -747,5 +758,22 @@ export class OptionsService {
       maxLoss: Number(order.max_loss || 0),
       createdAt: order.created_at?.toISOString() || '',
     };
+  }
+
+  // ── Cleanup: remove closed positions older than 90 days ──
+
+  @Cron(CronExpression.EVERY_DAY_AT_2AM)
+  async cleanupOldClosedPositions() {
+    const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+
+    const result = await this.prisma.options_positions.deleteMany({
+      where: {
+        is_open: false,
+        closed_at: { lt: ninetyDaysAgo },
+      },
+    });
+    if (result.count > 0) {
+      this.logger.log(`Cleaned up ${result.count} closed positions older than 90 days`);
+    }
   }
 }

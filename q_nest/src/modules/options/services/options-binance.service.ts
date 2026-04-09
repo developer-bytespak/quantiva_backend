@@ -30,13 +30,29 @@ interface OptionCredentials {
 export class OptionsBinanceService {
   private readonly logger = new Logger(OptionsBinanceService.name);
 
-  // Cache exchange instances per user to avoid re-creation overhead
+  // Shared public exchange instance — no API key, used for all public eapi endpoints
+  private readonly publicExchange: ccxt.binance;
+
+  // Cache authenticated exchange instances per user (LRU, max 500) — only for private endpoints
   private readonly exchangeInstances = new Map<string, ccxt.binance>();
+  private readonly MAX_EXCHANGE_CACHE_SIZE = 500;
 
   // Cache exchange info (shared across all users, refreshed periodically)
   private exchangeInfoCache: any = null;
   private exchangeInfoCachedAt = 0;
   private readonly EXCHANGE_INFO_TTL = 5 * 60 * 1000; // 5 minutes
+
+  constructor() {
+    this.publicExchange = new ccxt.binance({
+      options: { defaultType: 'option' },
+      enableRateLimit: true,
+    });
+  }
+
+  /** Get the shared public exchange instance (no auth, for public data only). */
+  getPublicExchange(): ccxt.binance {
+    return this.publicExchange;
+  }
 
   /**
    * Get or create a ccxt binance instance for the given credentials.
@@ -60,6 +76,12 @@ export class OptionsBinanceService {
       enableRateLimit: true,
     });
 
+    // Evict oldest entry if cache is full
+    if (this.exchangeInstances.size >= this.MAX_EXCHANGE_CACHE_SIZE) {
+      const oldestKey = this.exchangeInstances.keys().next().value;
+      if (oldestKey) this.exchangeInstances.delete(oldestKey);
+    }
+
     this.exchangeInstances.set(cacheKey, exchange);
     return exchange;
   }
@@ -68,13 +90,13 @@ export class OptionsBinanceService {
    * Fetch and cache the eapi exchange info (available contracts, underlyings).
    * This is a PUBLIC endpoint — no API key needed.
    */
-  private async getExchangeInfo(exchange: ccxt.binance): Promise<any> {
+  private async getExchangeInfo(): Promise<any> {
     const now = Date.now();
     if (this.exchangeInfoCache && now - this.exchangeInfoCachedAt < this.EXCHANGE_INFO_TTL) {
       return this.exchangeInfoCache;
     }
 
-    const info = await (exchange as any).eapiPublicGetExchangeInfo();
+    const info = await (this.publicExchange as any).eapiPublicGetExchangeInfo();
     this.exchangeInfoCache = info;
     this.exchangeInfoCachedAt = now;
     this.logger.log(`Options exchange info loaded: ${info.optionSymbols?.length || 0} option symbols`);
@@ -93,10 +115,11 @@ export class OptionsBinanceService {
       } catch (error: any) {
         const status = error?.response?.status || error?.code;
         const isRateLimit = status === 429 || error?.message?.includes('rate limit');
+        const isTimeout = status === 408 || error?.code === 'ETIMEDOUT' || error?.code === 'ECONNABORTED';
         const isClientError = typeof status === 'number' && status >= 400 && status < 500;
 
-        // Don't retry client errors (except rate limits)
-        if (isClientError && !isRateLimit) throw error;
+        // Don't retry client errors (except rate limits and timeouts)
+        if (isClientError && !isRateLimit && !isTimeout) throw error;
         if (attempt === MAX_RETRIES) throw error;
 
         const delay = Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1), MAX_DELAY_MS);
@@ -111,11 +134,9 @@ export class OptionsBinanceService {
    * Get all available underlying assets for options trading.
    * Uses direct eapi/v1/exchangeInfo (public, no auth needed).
    */
-  async getAvailableUnderlyings(credentials: OptionCredentials, userId?: string): Promise<AvailableUnderlyingDto[]> {
-    const exchange = this.getExchange(credentials, userId);
-
+  async getAvailableUnderlyings(): Promise<AvailableUnderlyingDto[]> {
     try {
-      const exchangeInfo = await this.getExchangeInfo(exchange);
+      const exchangeInfo = await this.getExchangeInfo();
       const optionSymbols: any[] = exchangeInfo.optionSymbols || [];
 
       // Extract unique underlyings from optionSymbols
@@ -133,7 +154,7 @@ export class OptionsBinanceService {
       for (const [symbol, contractCount] of underlyingMap) {
         let indexPrice = 0;
         try {
-          const indexData = await (exchange as any).eapiPublicGetIndex({ underlying: `${symbol}USDT` });
+          const indexData = await (this.publicExchange as any).eapiPublicGetIndex({ underlying: `${symbol}USDT` });
           indexPrice = parseFloat(indexData?.indexPrice || '0');
         } catch {
           this.logger.warn(`Could not fetch index price for ${symbol}`);
@@ -153,11 +174,7 @@ export class OptionsBinanceService {
    * e.g. ['BTC', 'ETH', 'SOL', ...]
    */
   async getAllUnderlyings(): Promise<string[]> {
-    const exchange = new ccxt.binance({
-      options: { defaultType: 'option' },
-      enableRateLimit: true,
-    });
-    const info = await this.getExchangeInfo(exchange);
+    const info = await this.getExchangeInfo();
     const optionSymbols: any[] = info.optionSymbols || [];
     const seen = new Set<string>();
     for (const sym of optionSymbols) {
@@ -173,11 +190,7 @@ export class OptionsBinanceService {
    */
   async getAtmIv(underlying: string): Promise<number | null> {
     try {
-      // Use a temporary exchange for public calls (no credentials required)
-      const exchange = new ccxt.binance({
-        options: { defaultType: 'option' },
-        enableRateLimit: true,
-      });
+      const exchange = this.publicExchange;
 
       // Get spot price
       const indexData = await (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` });
@@ -185,7 +198,7 @@ export class OptionsBinanceService {
       if (!spotPrice) return null;
 
       // Get exchange info to find ATM contracts
-      const exchangeInfo = await this.getExchangeInfo(exchange);
+      const exchangeInfo = await this.getExchangeInfo();
       const optionSymbols: any[] = exchangeInfo.optionSymbols || [];
 
       // Find nearest ATM call expiring in ~30 days
@@ -252,17 +265,17 @@ export class OptionsBinanceService {
    * Uses direct eapi endpoints: exchangeInfo + ticker + mark.
    */
   async fetchOptionsChain(
-    credentials: OptionCredentials,
+    credentials: OptionCredentials | null,
     underlying: string,
     userId?: string,
   ): Promise<OptionsChainResponseDto> {
-    const exchange = this.getExchange(credentials, userId);
-    const exchangeInfo = await this.getExchangeInfo(exchange);
+    const exchange = this.publicExchange;
+    const exchangeInfo = await this.getExchangeInfo();
 
     // Filter contracts for this underlying from exchangeInfo
     const optionSymbols: any[] = (exchangeInfo.optionSymbols || []).filter(
       (s: any) => {
-        const base = s.underlying?.replace(/USDT$/, '') || s.baseAsset || '';
+        const base = s.underlying?.replace(/USDT?$/, '') || s.baseAsset || s.symbol?.split('-')[0] || '';
         return base === underlying;
       },
     );
@@ -363,11 +376,11 @@ export class OptionsBinanceService {
    * Uses direct eapi/v1/mark endpoint (public).
    */
   async fetchGreeks(
-    credentials: OptionCredentials,
+    credentials: OptionCredentials | null,
     contractSymbol: string,
     userId?: string,
   ): Promise<GreeksDto> {
-    const exchange = this.getExchange(credentials, userId);
+    const exchange = this.publicExchange;
 
     try {
       const markData: any[] = await (exchange as any).eapiPublicGetMark({ symbol: contractSymbol });
@@ -391,11 +404,11 @@ export class OptionsBinanceService {
    * Uses direct eapi/v1/ticker endpoint (public).
    */
   async fetchOptionTicker(
-    credentials: OptionCredentials,
+    credentials: OptionCredentials | null,
     contractSymbol: string,
     userId?: string,
   ): Promise<any> {
-    const exchange = this.getExchange(credentials, userId);
+    const exchange = this.publicExchange;
 
     try {
       const tickers: any[] = await (exchange as any).eapiPublicGetTicker({ symbol: contractSymbol });
@@ -411,12 +424,12 @@ export class OptionsBinanceService {
    * Uses direct eapi/v1/depth endpoint (public).
    */
   async fetchOptionDepth(
-    credentials: OptionCredentials,
+    credentials: OptionCredentials | null,
     contractSymbol: string,
     limit: number = 20,
     userId?: string,
   ): Promise<any> {
-    const exchange = this.getExchange(credentials, userId);
+    const exchange = this.publicExchange;
 
     try {
       return await (exchange as any).eapiPublicGetDepth({
@@ -455,6 +468,8 @@ export class OptionsBinanceService {
         quantity: quantity.toString(),
         price: price.toString(),
         timeInForce: 'GTC',
+        // Sell-to-close only: reduceOnly prevents naked option writing
+        ...(side === 'sell' ? { reduceOnly: 'true' } : {}),
       });
 
       this.logger.log(`Options order placed: ${order.orderId} status=${order.status}`);

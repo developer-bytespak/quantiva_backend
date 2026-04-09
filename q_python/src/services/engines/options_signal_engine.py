@@ -206,7 +206,9 @@ class OptionsSignalEngine(BaseEngine):
             # Risk/reward estimation
             risk_reward, max_profit, max_loss = self._estimate_risk_reward(strat, legs, spot_price)
 
-            expires_at = datetime.now(timezone.utc) + timedelta(hours=SIGNAL_VALIDITY_HOURS)
+            # Use strategy-specific TTL, fallback to default
+            ttl_hours = strat.signal_ttl_hours if hasattr(strat, 'signal_ttl_hours') else SIGNAL_VALIDITY_HOURS
+            expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
 
             return {
                 "strategy": strat.name,

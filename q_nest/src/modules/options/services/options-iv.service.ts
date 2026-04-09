@@ -27,7 +27,8 @@ export class OptionsIvService {
 
   // ── Cron: snapshot IV every 4 hours ─────────────────────
 
-  @Cron(CronExpression.EVERY_4_HOURS)
+  // Snapshot IV every hour — crypto IV can move 5-15 points in an hour during events
+  @Cron('0 * * * *')
   async snapshotIv() {
     this.logger.log('Starting IV snapshot cron…');
     const underlyings = await this.getAllUnderlyings();
@@ -83,8 +84,8 @@ export class OptionsIvService {
     const values = await this.getOneYearIvValues(underlying);
     if (values.length < 2) return 0.5;
 
-    const min = Math.min(...values);
-    const max = Math.max(...values);
+    const min = values.reduce((m, v) => Math.min(m, v), Infinity);
+    const max = values.reduce((m, v) => Math.max(m, v), -Infinity);
     if (max === min) return 0.5;
 
     return Math.max(0, Math.min(1, (currentIv - min) / (max - min)));
@@ -178,6 +179,21 @@ export class OptionsIvService {
     } catch (err: any) {
       this.logger.warn(`getVolumeData failed for ${underlying}: ${err.message}`);
       return null;
+    }
+  }
+
+  // ── Cleanup: trim IV history older than 1 year ──────────
+
+  @Cron(CronExpression.EVERY_DAY_AT_1AM)
+  async cleanupOldIvHistory() {
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+
+    const result = await this.prisma.options_iv_history.deleteMany({
+      where: { recorded_at: { lt: oneYearAgo } },
+    });
+    if (result.count > 0) {
+      this.logger.log(`Cleaned up ${result.count} IV history records older than 1 year`);
     }
   }
 }
