@@ -71,6 +71,7 @@ import { ContactModule } from './modules/contact/contact.module';
     OptionsModule,
     SubscriptionsModule,
     StripeModule,
+    TradeFeesModule,
     BinanceModule,
     QhqTokenModule,
     ContactModule,

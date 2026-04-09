@@ -4,6 +4,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { OptionsBinanceService } from './options-binance.service';
 import { OptionsSignalService } from './options-signal.service';
+import { TradeFeesService } from '../../trade-fees/trade-fees.service';
 import {
   PlaceOptionOrderDto,
   CancelOptionOrderDto,
@@ -33,6 +34,7 @@ export class OptionsService {
     private readonly exchangesService: ExchangesService,
     private readonly optionsBinance: OptionsBinanceService,
     private readonly signalService: OptionsSignalService,
+    private readonly tradeFeesService: TradeFeesService,
   ) {}
 
   // ── Helpers ──────────────────────────────────────────────
@@ -268,6 +270,62 @@ export class OptionsService {
         },
       });
     });
+
+    // Check recently closed positions for performance fees (AI-driven profitable closes)
+    this.recordPerformanceFeesForClosedPositions(userId).catch((err) =>
+      this.logger.warn(`Performance fee recording failed: ${err.message}`),
+    );
+  }
+
+  /**
+   * Record performance fees for recently closed profitable AI-driven positions.
+   * Only charges if: position is profitable AND was triggered by an AI signal.
+   */
+  private async recordPerformanceFeesForClosedPositions(userId: string): Promise<void> {
+    const recentlyClosed = await this.prisma.options_positions.findMany({
+      where: {
+        user_id: userId,
+        is_open: false,
+        closed_at: { gte: new Date(Date.now() - 120_000) }, // closed in last 2 minutes
+      },
+      include: { originating_order: { select: { signal_id: true } } },
+    });
+
+    for (const pos of recentlyClosed) {
+      const realizedPnl = Number(pos.realized_pnl);
+      if (realizedPnl <= 0) continue; // No fee on loss/breakeven
+      if (!pos.originating_order?.signal_id) continue; // Only AI-driven trades
+
+      // Check if we already recorded a performance fee for this position
+      const existing = await this.prisma.trade_fees.findFirst({
+        where: {
+          trade_reference_id: pos.position_id,
+          source: 'options_performance',
+        },
+      });
+      if (existing) continue;
+
+      const feePercent = this.calculatePerformanceFeeRate(realizedPnl);
+      await this.tradeFeesService.recordTradeFee({
+        userId,
+        tradeReferenceId: pos.position_id,
+        assetSymbol: pos.underlying,
+        tradeSide: 'CLOSE',
+        tradeValueUsd: realizedPnl,
+        feePercent,
+        source: 'options_performance',
+      });
+      this.logger.log(
+        `Performance fee recorded: ${pos.underlying} PnL=$${realizedPnl.toFixed(2)} fee=${(feePercent * 100).toFixed(1)}%`,
+      );
+    }
+  }
+
+  private calculatePerformanceFeeRate(profit: number): number {
+    if (profit < 100) return 0.005;   // 0.5%
+    if (profit < 1000) return 0.01;   // 1%
+    if (profit < 10000) return 0.02;  // 2%
+    return 0.03;                       // 3%
   }
 
   // ── Orders ───────────────────────────────────────────────
@@ -408,7 +466,26 @@ export class OptionsService {
 
     this.logger.log(`Options order placed: ${dbOrder.order_id} binance=${binanceOrder.orderId || binanceOrder.id}`);
 
-    return this.mapDbOrderToDto(updatedOrder);
+    // 9. Record platform execution fee (0.03%) on filled orders
+    const orderStatus = updatedOrder?.status ?? dbOrder.status;
+    if (['filled', 'partially_filled'].includes(orderStatus)) {
+      const fillQty = Number(updatedOrder?.filled_quantity ?? 0);
+      const fillPrice = Number(updatedOrder?.avg_fill_price ?? 0);
+      const fillValue = fillQty * fillPrice;
+      if (fillValue > 0) {
+        this.tradeFeesService.recordTradeFee({
+          userId,
+          tradeReferenceId: dbOrder.order_id,
+          assetSymbol: dto.underlying,
+          tradeSide: dto.side,
+          tradeValueUsd: fillValue,
+          feePercent: 0.0003, // 0.03%
+          source: 'options_execution',
+        }).catch((err) => this.logger.warn(`Failed to record execution fee: ${err.message}`));
+      }
+    }
+
+    return this.mapDbOrderToDto(updatedOrder ?? dbOrder);
   }
 
   /**
