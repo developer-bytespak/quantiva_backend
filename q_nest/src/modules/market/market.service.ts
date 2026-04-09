@@ -120,6 +120,7 @@ export class MarketService {
    * Fetch top 500 cryptocurrencies by market cap
    */
   async getTop500Coins(): Promise<CoinGeckoCoin[]> {
+    // Try Pro API first (500 coins in 1 call)
     try {
       const response = await this.apiClient.get<CoinGeckoCoin[]>(
         '/coins/markets',
@@ -135,26 +136,66 @@ export class MarketService {
         },
       );
 
+      this.logger.log(`Pro API returned ${response.data.length} coins`);
       return response.data;
     } catch (error: any) {
-      this.logger.error('Failed to fetch top 500 coins from CoinGecko', {
-        message: error?.message,
-        status: error?.response?.status,
-        data: error?.response?.data,
-      });
-
-      if (error?.response?.status === 429) {
-        throw new Error('CoinGecko API rate limit exceeded. Please try again later.');
-      }
+      this.logger.warn(`Pro API failed (${error?.response?.status || error?.message}), falling back to free API with pagination`);
 
       if (error?.response?.status === 401) {
         throw new Error('CoinGecko API key is invalid or expired.');
       }
 
-      throw new Error(
-        `Failed to fetch top 500 coins: ${error?.message || 'Unknown error'}`,
-      );
+      // Fallback: free API with 5 pages × 100 coins = 500 coins
+      return this.fetchCoinsFromFreeApi();
     }
+  }
+
+  private async fetchCoinsFromFreeApi(): Promise<CoinGeckoCoin[]> {
+    const freeClient = axios.create({
+      baseURL: 'https://api.coingecko.com/api/v3',
+      timeout: 30000,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    const allCoins: CoinGeckoCoin[] = [];
+    const totalPages = 5;
+    const delayMs = 7000;
+
+    for (let page = 1; page <= totalPages; page++) {
+      try {
+        const response = await freeClient.get<CoinGeckoCoin[]>(
+          '/coins/markets',
+          {
+            params: {
+              vs_currency: 'usd',
+              order: 'market_cap_desc',
+              per_page: 100,
+              page,
+              sparkline: false,
+              price_change_percentage: '24h',
+            },
+          },
+        );
+
+        allCoins.push(...response.data);
+        this.logger.log(`Free API page ${page}/${totalPages}: ${response.data.length} coins (total: ${allCoins.length})`);
+
+        if (page < totalPages) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      } catch (error: any) {
+        this.logger.warn(`Free API page ${page} failed: ${error?.response?.status || error?.message}`);
+        // Continue with whatever we got so far
+        if (allCoins.length > 0) break;
+        // If even page 1 fails, throw
+        if (page === 1) {
+          throw new Error(`CoinGecko free API also failed: ${error?.message || 'Unknown error'}`);
+        }
+      }
+    }
+
+    this.logger.log(`Free API fallback returned ${allCoins.length} coins total`);
+    return allCoins;
   }
 
   /**
