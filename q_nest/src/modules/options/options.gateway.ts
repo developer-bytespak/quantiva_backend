@@ -57,8 +57,6 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
       chainInterval: NodeJS.Timeout;
       tickerInterval: NodeJS.Timeout;
       subscribers: Set<string>; // socket IDs
-      credentials: { apiKey: string; apiSecret: string };
-      userId: string;
     }
   >();
 
@@ -112,7 +110,7 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
     this.cleanupClient(client.id);
 
     try {
-      // Verify connection and derive userId from DB (not from client)
+      // Verify connection exists (but no need to decrypt credentials — public data only)
       const connection =
         await this.exchangesService.getConnectionById(connectionId);
       if (!connection) {
@@ -121,9 +119,6 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
       }
 
       const userId = connection.user_id;
-
-      const credentials =
-        await this.exchangesService.getDecryptedCredentials(connectionId);
 
       // Register subscription
       this.subscriptions.set(client.id, {
@@ -136,20 +131,11 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
       const room = `options:${underlying.toUpperCase()}`;
       client.join(room);
 
-      // Setup shared polling
-      this.setupSharedPolling(
-        underlying.toUpperCase(),
-        credentials,
-        client.id,
-        userId,
-      );
+      // Setup shared polling (uses public Binance instance, no user credentials)
+      this.setupSharedPolling(underlying.toUpperCase(), client.id);
 
       // Send initial data immediately
-      await this.pushChainUpdate(
-        underlying.toUpperCase(),
-        credentials,
-        userId,
-      );
+      await this.pushChainUpdate(underlying.toUpperCase());
 
       client.emit('subscribed', { underlying: underlying.toUpperCase() });
       this.logger.log(
@@ -174,12 +160,7 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
 
   // ── Internal polling ─────────────────────────────────────
 
-  private setupSharedPolling(
-    underlying: string,
-    credentials: { apiKey: string; apiSecret: string },
-    socketId: string,
-    userId: string,
-  ): void {
+  private setupSharedPolling(underlying: string, socketId: string): void {
     const key = underlying;
     const existing = this.sharedIntervals.get(key);
 
@@ -190,37 +171,33 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
 
     const subscribers = new Set<string>([socketId]);
 
-    // Store shared state first so intervals can reference the latest credentials
     const shared = {
       chainInterval: null as unknown as NodeJS.Timeout,
       tickerInterval: null as unknown as NodeJS.Timeout,
       subscribers,
-      credentials,
-      userId,
     };
     this.sharedIntervals.set(key, shared);
 
-    // Chain update at 15s interval — reads from shared.credentials (rotated on disconnect)
-    shared.chainInterval = setInterval(async () => {
-      await this.pushChainUpdate(underlying, shared.credentials, shared.userId);
+    // Chain update at 15s interval — uses public Binance instance (no user creds)
+    shared.chainInterval = setInterval(() => {
+      this.pushChainUpdate(underlying).catch((err) =>
+        this.logger.warn(`Chain interval error for ${underlying}: ${err.message}`),
+      );
     }, this.CHAIN_INTERVAL_MS);
 
     // Underlying spot price at 5s interval
-    shared.tickerInterval = setInterval(async () => {
-      await this.pushTickerUpdate(underlying, shared.credentials, shared.userId);
+    shared.tickerInterval = setInterval(() => {
+      this.pushTickerUpdate(underlying).catch((err) =>
+        this.logger.warn(`Ticker interval error for ${underlying}: ${err.message}`),
+      );
     }, this.TICKER_INTERVAL_MS);
   }
 
-  private async pushChainUpdate(
-    underlying: string,
-    credentials: { apiKey: string; apiSecret: string },
-    userId: string,
-  ): Promise<void> {
+  private async pushChainUpdate(underlying: string): Promise<void> {
     try {
       const chain = await this.optionsBinance.fetchOptionsChain(
-        credentials,
+        null,
         underlying,
-        userId,
       );
 
       this.server.to(`options:${underlying}`).emit('chain-update', {
@@ -235,16 +212,9 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
     }
   }
 
-  private async pushTickerUpdate(
-    underlying: string,
-    credentials: { apiKey: string; apiSecret: string },
-    userId: string,
-  ): Promise<void> {
+  private async pushTickerUpdate(underlying: string): Promise<void> {
     try {
-      const exchange = this.optionsBinance.getExchange(
-        credentials,
-        userId,
-      );
+      const exchange = this.optionsBinance.getPublicExchange();
 
       // Fetch index price and 24h spot ticker in parallel
       const [indexResult, tickerResult] = await Promise.allSettled([
@@ -296,25 +266,8 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
       clearInterval(shared.tickerInterval);
       this.sharedIntervals.delete(key);
       this.logger.debug(`Cleaned up shared options interval for ${key}`);
-    } else {
-      // Rotate credentials to the next active subscriber to prevent stale creds
-      const nextSocketId = shared.subscribers.values().next().value;
-      const nextSub = this.subscriptions.get(nextSocketId);
-      if (nextSub) {
-        this.exchangesService
-          .getDecryptedCredentials(nextSub.connectionId)
-          .then((creds) => {
-            shared.credentials = creds;
-            shared.userId = nextSub.userId;
-            this.logger.debug(
-              `Rotated options credentials for ${key} to client ${nextSocketId}`,
-            );
-          })
-          .catch((err) =>
-            this.logger.warn(`Credential rotation failed for ${key}: ${err.message}`),
-          );
-      }
     }
+    // No credential rotation needed — polling uses shared public Binance instance
   }
 
   // ── Module destroy — clean up all intervals on shutdown ──

@@ -20,19 +20,30 @@ export class OptionsSignalService {
       this.configService.get<string>('PYTHON_API_URL') || 'http://localhost:8000';
   }
 
-  // ── Cron: generate signals every 6 hours ───────────────
+  // ── Cron: generate signals every 2 hours (aligned to even UTC hours) ──
 
-  @Cron(CronExpression.EVERY_6_HOURS)
+  private isGenerating = false;
+
+  @Cron('0 */2 * * *')
   async generateSignals() {
-    this.logger.log('Starting AI options signal generation…');
-    const underlyings = await this.ivService.getAllUnderlyings();
-    this.logger.log(`Generating signals for: ${underlyings.join(', ')}`);
-    for (const underlying of underlyings) {
-      try {
-        await this.generateForUnderlying(underlying);
-      } catch (err) {
-        this.logger.error(`Signal generation failed for ${underlying}`, err);
+    if (this.isGenerating) {
+      this.logger.warn('Signal generation already in progress, skipping this run');
+      return;
+    }
+    this.isGenerating = true;
+    try {
+      this.logger.log('Starting AI options signal generation…');
+      const underlyings = await this.ivService.getAllUnderlyings();
+      this.logger.log(`Generating signals for: ${underlyings.join(', ')}`);
+      for (const underlying of underlyings) {
+        try {
+          await this.generateForUnderlying(underlying);
+        } catch (err) {
+          this.logger.error(`Signal generation failed for ${underlying}`, err);
+        }
       }
+    } finally {
+      this.isGenerating = false;
     }
   }
 

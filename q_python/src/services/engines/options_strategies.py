@@ -29,6 +29,7 @@ class StrategyTemplate:
     iv_rank_min: float = 0.0
     iv_rank_max: float = 1.0
     min_score: float = 0.0    # minimum directional score to trigger
+    signal_ttl_hours: int = 8  # how long the signal stays valid
     description: str = ""
 
     def matches(self, direction: str, iv_rank: Optional[float], score: float) -> bool:
@@ -51,6 +52,7 @@ class StrategyTemplate:
 
 STRATEGY_TEMPLATES: List[StrategyTemplate] = [
     # --- Single-leg ---
+    # --- Directional single-leg (6h TTL — short shelf-life) ---
     StrategyTemplate(
         name="long_call",
         display_name="Long Call",
@@ -58,7 +60,8 @@ STRATEGY_TEMPLATES: List[StrategyTemplate] = [
         legs=[StrategyLeg(type="CALL", side="BUY", strike_offset=0.0)],
         iv_rank_min=0.0,
         iv_rank_max=0.50,
-        min_score=0.3,
+        min_score=0.15,
+        signal_ttl_hours=6,
         description="Buy ATM call when IV is low and outlook is bullish",
     ),
     StrategyTemplate(
@@ -68,10 +71,11 @@ STRATEGY_TEMPLATES: List[StrategyTemplate] = [
         legs=[StrategyLeg(type="PUT", side="BUY", strike_offset=0.0)],
         iv_rank_min=0.0,
         iv_rank_max=0.50,
-        min_score=0.3,
+        min_score=0.15,
+        signal_ttl_hours=6,
         description="Buy ATM put when IV is low and outlook is bearish",
     ),
-    # --- Spreads ---
+    # --- Directional spreads (8h TTL) ---
     StrategyTemplate(
         name="bull_call_spread",
         display_name="Bull Call Spread",
@@ -82,7 +86,8 @@ STRATEGY_TEMPLATES: List[StrategyTemplate] = [
         ],
         iv_rank_min=0.30,
         iv_rank_max=0.70,
-        min_score=0.2,
+        min_score=0.10,
+        signal_ttl_hours=8,
         description="Debit spread: buy ATM call, sell OTM call. Lower cost than naked call.",
     ),
     StrategyTemplate(
@@ -95,9 +100,11 @@ STRATEGY_TEMPLATES: List[StrategyTemplate] = [
         ],
         iv_rank_min=0.30,
         iv_rank_max=0.70,
-        min_score=0.2,
+        min_score=0.10,
+        signal_ttl_hours=8,
         description="Debit spread: buy ATM put, sell OTM put. Defined risk bearish play.",
     ),
+    # --- Premium selling (12h TTL — vol mean-reversion is slower) ---
     StrategyTemplate(
         name="iron_condor",
         display_name="Iron Condor",
@@ -111,9 +118,10 @@ STRATEGY_TEMPLATES: List[StrategyTemplate] = [
         iv_rank_min=0.50,
         iv_rank_max=1.0,
         min_score=0.0,
+        signal_ttl_hours=12,
         description="Sell premium when IV is high and no strong directional bias.",
     ),
-    # --- Volatility plays ---
+    # --- Volatility plays (6h TTL — time-sensitive) ---
     StrategyTemplate(
         name="long_straddle",
         display_name="Long Straddle",
@@ -125,6 +133,7 @@ STRATEGY_TEMPLATES: List[StrategyTemplate] = [
         iv_rank_min=0.0,
         iv_rank_max=0.30,
         min_score=0.0,
+        signal_ttl_hours=6,
         description="Buy ATM call + put. Profits from large moves when IV is cheap.",
     ),
     StrategyTemplate(
@@ -138,9 +147,10 @@ STRATEGY_TEMPLATES: List[StrategyTemplate] = [
         iv_rank_min=0.0,
         iv_rank_max=0.30,
         min_score=0.0,
+        signal_ttl_hours=6,
         description="Buy OTM call + put. Cheaper than straddle, needs bigger move.",
     ),
-    # --- Advanced spreads ---
+    # --- Structural spreads (24h TTL — slow-moving trades) ---
     StrategyTemplate(
         name="long_butterfly",
         display_name="Long Call Butterfly",
@@ -153,6 +163,7 @@ STRATEGY_TEMPLATES: List[StrategyTemplate] = [
         iv_rank_min=0.50,
         iv_rank_max=1.0,
         min_score=0.0,
+        signal_ttl_hours=24,
         description="Low-cost bet that price stays near current level. High IV preferred.",
     ),
     StrategyTemplate(
@@ -166,9 +177,10 @@ STRATEGY_TEMPLATES: List[StrategyTemplate] = [
         iv_rank_min=0.30,
         iv_rank_max=0.70,
         min_score=0.0,
+        signal_ttl_hours=24,
         description="Sell near-dated, buy far-dated. Profits from time decay differential.",
     ),
-    # --- Premium selling ---
+    # --- Premium selling (12h TTL) ---
     StrategyTemplate(
         name="short_put",
         display_name="Short Put (Cash Secured)",
@@ -176,7 +188,8 @@ STRATEGY_TEMPLATES: List[StrategyTemplate] = [
         legs=[StrategyLeg(type="PUT", side="SELL", strike_offset=-0.05)],
         iv_rank_min=0.50,
         iv_rank_max=1.0,
-        min_score=0.2,
+        min_score=0.10,
+        signal_ttl_hours=12,
         description="Sell OTM put to collect premium. Bullish bias, high IV preferred.",
     ),
 ]

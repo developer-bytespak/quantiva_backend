@@ -32,75 +32,66 @@ export class OptionsController {
   // ── Market Data ──────────────────────────────────────────
 
   /**
-   * GET /options/underlyings?connectionId=xxx
-   * Get all available underlying assets for options (dynamic, not hardcoded).
+   * GET /options/underlyings
+   * Get all available underlying assets for options (public data).
    */
   @Get('underlyings')
-  async getAvailableUnderlyings(
-    @CurrentUser() user: TokenPayload,
-    @Query('connectionId') connectionId: string,
-  ) {
+  async getAvailableUnderlyings(@CurrentUser() user: TokenPayload) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.optionsService.getAvailableUnderlyings(connectionId, user.sub);
+    return this.optionsService.getAvailableUnderlyings();
   }
 
   /**
-   * GET /options/chain/:underlying?connectionId=xxx
-   * Fetch full options chain for an underlying (BTC, ETH, SOL, etc.)
+   * GET /options/chain/:underlying
+   * Fetch full options chain for an underlying (public data).
    */
   @Get('chain/:underlying')
   async getOptionsChain(
     @CurrentUser() user: TokenPayload,
     @Param('underlying') underlying: string,
-    @Query('connectionId') connectionId: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.optionsService.getOptionsChain(connectionId, user.sub, underlying.toUpperCase());
+    return this.optionsService.getOptionsChain(underlying.toUpperCase());
   }
 
   /**
-   * GET /options/greeks/:contractSymbol?connectionId=xxx
-   * Fetch Greeks for a specific option contract.
+   * GET /options/greeks/:contractSymbol
+   * Fetch Greeks for a specific option contract (public data).
    */
   @Get('greeks/:contractSymbol')
   async getGreeks(
     @CurrentUser() user: TokenPayload,
     @Param('contractSymbol') contractSymbol: string,
-    @Query('connectionId') connectionId: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.optionsService.getGreeks(connectionId, user.sub, contractSymbol);
+    return this.optionsService.getGreeks(contractSymbol);
   }
 
   /**
-   * GET /options/ticker/:contractSymbol?connectionId=xxx
-   * Fetch 24hr ticker for a specific option contract.
+   * GET /options/ticker/:contractSymbol
+   * Fetch 24hr ticker for a specific option contract (public data).
    */
   @Get('ticker/:contractSymbol')
   async getTicker(
     @CurrentUser() user: TokenPayload,
     @Param('contractSymbol') contractSymbol: string,
-    @Query('connectionId') connectionId: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.optionsService.getTicker(connectionId, user.sub, contractSymbol);
+    return this.optionsService.getTicker(contractSymbol);
   }
 
   /**
-   * GET /options/depth/:contractSymbol?connectionId=xxx&limit=20
-   * Fetch order book for an option contract.
+   * GET /options/depth/:contractSymbol?limit=20
+   * Fetch order book for an option contract (public data).
    */
   @Get('depth/:contractSymbol')
   async getDepth(
     @CurrentUser() user: TokenPayload,
     @Param('contractSymbol') contractSymbol: string,
-    @Query('connectionId') connectionId: string,
     @Query('limit') limit?: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
     return this.optionsService.getDepth(
-      connectionId,
-      user.sub,
       contractSymbol,
       limit ? parseInt(limit, 10) : undefined,
     );
