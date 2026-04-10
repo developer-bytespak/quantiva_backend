@@ -723,31 +723,7 @@ export class OptionsService {
       );
     }
 
-    // 2. Max premium per trade (only for buy side)
-    if (dto.side === 'BUY') {
-      // Check the options margin wallet (eapi) — this is the wallet Binance debits for options orders.
-      // If it is empty, skip our pre-check and let Binance return the real error, which now surfaces
-      // as a 400 with a clear message (e.g. "insufficient balance in Options Account").
-      try {
-        const optionsBalance = await this.optionsBinance.fetchBalance(credentials, userId);
-        const availableBalance = optionsBalance.availableBalance;
-        if (availableBalance > 0) {
-          const totalPremium = dto.price * dto.quantity;
-          const maxAllowed = availableBalance * RISK_CONFIG.MAX_PREMIUM_PERCENT;
-          if (totalPremium > maxAllowed) {
-            throw new BadRequestException(
-              `Premium $${totalPremium.toFixed(2)} exceeds ${RISK_CONFIG.MAX_PREMIUM_PERCENT * 100}% of Options account balance ($${availableBalance.toFixed(2)})`,
-            );
-          }
-        } else {
-          this.logger.warn(`Options margin account balance is 0 for user ${userId} — skipping 5% pre-check. Binance will validate funds.`);
-        }
-      } catch (err: any) {
-        if (err instanceof BadRequestException) throw err;
-        this.logger.warn(`Could not check options balance for risk check: ${err.message}`);
-      }
-    }
-
+    // Note: 5% premium cap removed — Binance will reject if insufficient balance
     // Note: SELL margin check removed — sell-to-close only enforced in placeOrder() + Binance reduceOnly
 
     // 4. IV rank check for buy orders — warn at threshold, hard block at higher threshold

@@ -69,6 +69,17 @@ LUNARCRUSH_API_KEY = os.getenv("LUNARCRUSH_API_KEY")
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 
+# LunarCrush quota & cache (defaults stay safely under the 10/min, 2000/day plan)
+LUNARCRUSH_RPM_LIMIT = int(os.getenv("LUNARCRUSH_RPM_LIMIT", "8"))
+LUNARCRUSH_DAILY_BUDGET = int(os.getenv("LUNARCRUSH_DAILY_BUDGET", "1600"))
+LUNARCRUSH_SOCIAL_TTL_SECS = int(os.getenv("LUNARCRUSH_SOCIAL_TTL_SECS", "21600"))  # 6h
+LUNARCRUSH_NEWS_TTL_SECS = int(os.getenv("LUNARCRUSH_NEWS_TTL_SECS", "3600"))  # 1h
+LUNARCRUSH_MAX_STALE_SECS = int(os.getenv("LUNARCRUSH_MAX_STALE_SECS", "86400"))  # 24h
+LUNARCRUSH_QUOTA_STATE_PATH = os.getenv(
+    "LUNARCRUSH_QUOTA_STATE_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "lunarcrush_quota.json"),
+)
+
 # NestJS Backend API Configuration
 NESTJS_API_URL = os.getenv("NESTJS_API_URL", "http://localhost:3000")
 NESTJS_API_TIMEOUT = int(os.getenv("NESTJS_API_TIMEOUT", "10"))
