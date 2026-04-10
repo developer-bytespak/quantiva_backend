@@ -121,24 +121,28 @@ export class MarketService {
    * Fetch top 500 cryptocurrencies by market cap
    */
   async getTop500Coins(): Promise<CoinGeckoCoin[]> {
-    // Try Pro API first (500 coins in 1 call)
+    // Try Pro API first: 2 pages × 250 coins = 500 coins (CoinGecko per_page max is 250)
     try {
-      const response = await this.apiClient.get<CoinGeckoCoin[]>(
-        '/coins/markets',
-        {
-          params: {
-            vs_currency: 'usd',
-            order: 'market_cap_desc',
-            per_page: 500,
-            page: 1,
-            sparkline: false,
-            price_change_percentage: '24h',
+      const allCoins: CoinGeckoCoin[] = [];
+      for (let page = 1; page <= 2; page++) {
+        const response = await this.apiClient.get<CoinGeckoCoin[]>(
+          '/coins/markets',
+          {
+            params: {
+              vs_currency: 'usd',
+              order: 'market_cap_desc',
+              per_page: 250,
+              page,
+              sparkline: false,
+              price_change_percentage: '24h',
+            },
           },
-        },
-      );
+        );
+        allCoins.push(...response.data);
+      }
 
-      this.logger.log(`Pro API returned ${response.data.length} coins`);
-      return response.data;
+      this.logger.log(`Pro API returned ${allCoins.length} coins (2 pages)`);
+      return allCoins;
     } catch (error: any) {
       this.logger.warn(`Pro API failed (${error?.response?.status || error?.message}), falling back to free API with pagination`);
 
@@ -155,7 +159,10 @@ export class MarketService {
     const freeClient = axios.create({
       baseURL: 'https://api.coingecko.com/api/v3',
       timeout: 30000,
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
     });
 
     const allCoins: CoinGeckoCoin[] = [];
