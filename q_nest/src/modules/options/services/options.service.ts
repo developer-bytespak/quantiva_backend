@@ -43,13 +43,13 @@ export class OptionsService {
   private eliteTierCache = new Map<string, { tier: string; expiresAt: number }>();
 
   /**
-   * Verify user has ELITE subscription (cached for 30s).
+   * Verify user has ELITE_PLUS subscription (cached for 30s).
    */
   async verifyEliteAccess(userId: string): Promise<void> {
     const cached = this.eliteTierCache.get(userId);
     if (cached && cached.expiresAt > Date.now()) {
-      if (cached.tier !== 'ELITE') {
-        throw new ForbiddenException('Options trading is available for ELITE subscribers only');
+      if (cached.tier !== 'ELITE_PLUS') {
+        throw new ForbiddenException('Options trading is available for ELITE Plus subscribers only');
       }
       return;
     }
@@ -64,8 +64,8 @@ export class OptionsService {
       expiresAt: Date.now() + 30_000,
     });
 
-    if (!user || user.current_tier !== 'ELITE') {
-      throw new ForbiddenException('Options trading is available for ELITE subscribers only');
+    if (!user || user.current_tier !== 'ELITE_PLUS') {
+      throw new ForbiddenException('Options trading is available for ELITE Plus subscribers only');
     }
   }
 
@@ -86,6 +86,13 @@ export class OptionsService {
     }
     if (connection.user_id !== userId) {
       throw new ForbiddenException('You do not own this connection');
+    }
+    // Options trading restricted to Binance crypto connections only
+    if ((connection as any).exchange?.type !== 'crypto') {
+      throw new ForbiddenException('Options trading is only available for crypto exchanges');
+    }
+    if ((connection as any).exchange?.name?.toLowerCase() !== 'binance') {
+      throw new ForbiddenException('Options trading is only supported on Binance');
     }
     return connection;
   }
