@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 from src.services.data.lunarcrush_service import (  # noqa: E402
     LunarCrushService,
     LunarCrushQuotaGate,
+    get_lunarcrush_service,
 )
 
 
@@ -209,6 +210,121 @@ def test_force_minute_drain() -> None:
     print("  PASS: force_minute_drain")
 
 
+def test_singleton_identity() -> None:
+    """get_lunarcrush_service() must return the same instance across calls."""
+    a = get_lunarcrush_service()
+    b = get_lunarcrush_service()
+    assert a is b, "singleton factory returned two different instances"
+    # And the engines must reach through the same factory, which would fail if
+    # any of them still does `LunarCrushService()` directly.
+    from src.services.engines.sentiment_engine import SentimentEngine
+    from src.services.engines.fundamental_engine import FundamentalEngine
+    from src.services.engines.event_risk_engine import EventRiskEngine
+    assert SentimentEngine().lunarcrush_service is a
+    assert FundamentalEngine().lunarcrush_service is a
+    assert EventRiskEngine().lunarcrush_service is a
+    print("  PASS: singleton identity across factory + engines")
+
+
+def test_bulk_general_news_single_call() -> None:
+    """fetch_general_crypto_news should make exactly 1 HTTP call on cache miss,
+    use cache on immediate second call, and use dedup for concurrent callers."""
+    state_path = os.path.join(HERE, "_tmp_quota_bulk_news.json")
+    if os.path.exists(state_path):
+        os.remove(state_path)
+    svc = _fresh_service(state_path, rpm=8, daily=100)
+
+    call_counter = {"n": 0}
+
+    def fake_http(limit: int):
+        call_counter["n"] += 1
+        time.sleep(0.2)
+        return [{"title": "t1", "text": "body", "source": "lunarcrush",
+                 "published_at": None, "url": "https://example.com/1"}] * limit
+
+    svc._fetch_general_news_http = fake_http  # type: ignore[assignment]
+
+    # First call: one HTTP
+    r1 = svc.fetch_general_crypto_news(limit=5)
+    assert len(r1) == 5
+    assert call_counter["n"] == 1
+
+    # Second call within TTL: cache hit, no extra HTTP
+    r2 = svc.fetch_general_crypto_news(limit=5)
+    assert len(r2) == 5
+    assert call_counter["n"] == 1
+
+    # 10 concurrent callers for a new limit: exactly 1 HTTP, rest deduped
+    call_counter["n"] = 0
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = [ex.submit(svc.fetch_general_crypto_news, 7) for _ in range(10)]
+        results = [f.result() for f in as_completed(futures)]
+    assert call_counter["n"] == 1, f"expected 1 HTTP call, got {call_counter['n']}"
+    assert all(len(r) == 7 for r in results)
+    print(f"  stats={svc.get_stats()['stats']}")
+    print("  PASS: bulk general news — 1 call + cache + dedup")
+
+
+def test_bulk_coins_list_warms_cache() -> None:
+    """fetch_coins_list_bulk should warm the per-symbol cache so subsequent
+    fetch_social_metrics(symbol) calls are free cache hits."""
+    state_path = os.path.join(HERE, "_tmp_quota_bulk_coins.json")
+    if os.path.exists(state_path):
+        os.remove(state_path)
+    svc = _fresh_service(state_path, rpm=8, daily=100)
+
+    bulk_calls = {"n": 0}
+    per_symbol_calls = {"n": 0}
+
+    def fake_per_symbol(symbol: str):
+        per_symbol_calls["n"] += 1
+        return {"symbol": symbol, "galaxy_score": 1.0}
+
+    svc._fetch_social_metrics_http = fake_per_symbol  # type: ignore[assignment]
+
+    # Monkey-patch the bulk fetch by replacing requests.get for the bulk URL
+    import requests as _req
+    original_get = _req.get
+
+    def fake_bulk_get(url, **kwargs):
+        if "/public/coins/list/v1" in url:
+            bulk_calls["n"] += 1
+
+            class FakeResp:
+                status_code = 200
+                def raise_for_status(self): pass
+                def json(self):
+                    return {"data": [
+                        {"symbol": "BTC", "galaxy_score": 80, "alt_rank": 1, "price": 100000,
+                         "volume_24h": 50000000000, "market_cap": 2000000000000,
+                         "sentiment": 0.7, "social_dominance": 30},
+                        {"symbol": "ETH", "galaxy_score": 70, "alt_rank": 2, "price": 3000,
+                         "volume_24h": 10000000000, "market_cap": 400000000000,
+                         "sentiment": 0.6, "social_dominance": 15},
+                    ]}
+            return FakeResp()
+        return original_get(url, **kwargs)
+    _req.get = fake_bulk_get  # type: ignore[assignment]
+
+    try:
+        result = svc.fetch_coins_list_bulk()
+        assert bulk_calls["n"] == 1
+        assert "BTC" in result and "ETH" in result
+        assert result["BTC"]["galaxy_score"] == 80.0
+
+        # Now per-symbol lookups should be cache hits, not trigger per-symbol HTTP
+        btc = svc.fetch_social_metrics("BTC")
+        eth = svc.fetch_social_metrics("ETH")
+        assert btc["galaxy_score"] == 80.0
+        assert eth["galaxy_score"] == 70.0
+        assert per_symbol_calls["n"] == 0, (
+            f"bulk pre-warm failed; per-symbol endpoint called {per_symbol_calls['n']} times"
+        )
+    finally:
+        _req.get = original_get  # type: ignore[assignment]
+    print("  PASS: bulk coins list warms per-symbol cache")
+
+
 def main() -> int:
     failures = []
     for test in [
@@ -218,6 +334,9 @@ def main() -> int:
         test_stale_served_when_quota_blocked,
         test_state_persists_across_restart,
         test_force_minute_drain,
+        test_singleton_identity,
+        test_bulk_general_news_single_call,
+        test_bulk_coins_list_warms_cache,
     ]:
         print(f"\n[{test.__name__}]")
         try:

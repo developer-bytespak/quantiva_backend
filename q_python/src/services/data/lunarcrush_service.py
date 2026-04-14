@@ -540,7 +540,189 @@ class LunarCrushService:
 
         self.logger.info(f"Fetched {len(news_items)} news items for {symbol}")
         return news_items
-    
+
+    # ------------------------------------------------------------------
+    # Bulk general crypto news
+    # ------------------------------------------------------------------
+
+    GENERAL_NEWS_CACHE_KEY = "__general_crypto__"
+
+    def fetch_general_crypto_news(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Fetch the platform-wide general crypto news feed.
+
+        Hits LunarCrush ``/public/topic/cryptocurrency/news/v1`` once and reuses
+        the same cache + in-flight dedup + quota gate machinery as
+        ``fetch_coin_news``. One call populates the news for the whole AI
+        insights feed — dramatically cheaper than looping per-coin.
+
+        Unlike ``fetch_coin_news``, this method does NOT invoke OpenAI to
+        regenerate article descriptions; the LunarCrush topic feed already
+        returns usable titles + body text, and we want to avoid the cost.
+        """
+        if not self.api_key:
+            self.logger.error("LUNARCRUSH_API_KEY not configured")
+            return []
+
+        cache_key = f"{self.GENERAL_NEWS_CACHE_KEY}_{limit}"
+
+        # 1. Fresh cache hit
+        fresh, stale = self._read_cache(self._news_cache, cache_key, self.NEWS_TTL)
+        if fresh is not None:
+            self._bump("cache_hits")
+            self.logger.debug("Returning fresh cached general crypto news")
+            return fresh
+
+        # 2. In-flight dedup
+        is_owner, event = self._acquire_inflight(self._inflight_news, cache_key)
+        if not is_owner:
+            event.wait(timeout=20)
+            fresh2, stale2 = self._read_cache(self._news_cache, cache_key, self.NEWS_TTL)
+            if fresh2 is not None:
+                self._bump("dedup_saves")
+                return fresh2
+            if stale2 is not None:
+                self._bump("served_stale")
+                return stale2
+            return []
+
+        try:
+            self._bump("cache_misses")
+
+            # 3. Quota gate
+            if not self._gate.try_acquire():
+                self._bump("blocked_by_quota")
+                if stale is not None:
+                    self._bump("served_stale")
+                    self.logger.warning(
+                        "LunarCrush quota exhausted; serving stale general crypto news"
+                    )
+                    return stale
+                self.logger.warning(
+                    "LunarCrush quota exhausted and no stale general crypto news; returning empty list"
+                )
+                return []
+
+            # 4. Network call
+            try:
+                news_items = self._fetch_general_news_http(limit)
+            except requests.exceptions.HTTPError as e:
+                status = getattr(e.response, "status_code", None) if hasattr(e, "response") else None
+                if status == 429:
+                    self._bump("http_429s")
+                    self._gate.force_minute_drain()
+                    self.logger.warning("LunarCrush returned 429 on general feed; draining minute bucket")
+                else:
+                    self.logger.error(f"HTTPError fetching general crypto news: {e}")
+                if stale is not None:
+                    self._bump("served_stale")
+                    return stale
+                return []
+            except requests.exceptions.RequestException as e:
+                self.logger.error(f"Network error fetching general crypto news: {e}")
+                if stale is not None:
+                    self._bump("served_stale")
+                    return stale
+                return []
+            except Exception as e:
+                self.logger.error(f"Unexpected error fetching general crypto news: {e}", exc_info=True)
+                if stale is not None:
+                    self._bump("served_stale")
+                    return stale
+                return []
+
+            self._bump("calls_made")
+            self._news_cache[cache_key] = (news_items, time.time())
+            if len(self._news_cache) > 50:
+                self._cleanup_cache()
+            return news_items
+
+        finally:
+            self._release_inflight(self._inflight_news, cache_key, event)
+
+    def _fetch_general_news_http(self, limit: int) -> List[Dict[str, Any]]:
+        """Raw HTTP + parse for the LunarCrush general-crypto-topic news endpoint.
+
+        No per-article OpenAI description regeneration — the feed's native body
+        text (``post_text`` / ``description``) is used directly.
+        """
+        url = f"{self.BASE_URL}/public/topic/cryptocurrency/news/v1"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        self.logger.info(f"Fetching general crypto news from LunarCrush API v4 (limit={limit})...")
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        if isinstance(data, dict):
+            articles = data.get("data", [])
+            if not isinstance(articles, list):
+                articles = []
+        elif isinstance(data, list):
+            articles = data
+        else:
+            articles = []
+
+        self.logger.info(f"LunarCrush returned {len(articles)} general crypto articles")
+
+        news_items: List[Dict[str, Any]] = []
+        for article in articles[:limit]:
+            try:
+                title = article.get("post_title", article.get("title", ""))
+                url_field = article.get(
+                    "post_link", article.get("url", article.get("link", ""))
+                )
+                source = article.get(
+                    "creator_display_name",
+                    article.get("creator_name", article.get("source", "unknown")),
+                )
+                # Body text directly from the feed — no OpenAI call
+                body_text = (
+                    article.get("post_text")
+                    or article.get("description")
+                    or article.get("text")
+                    or ""
+                )
+                date_raw = article.get(
+                    "date",
+                    article.get(
+                        "published_at",
+                        article.get("post_created", article.get("created_at", None)),
+                    ),
+                )
+                published_at: Optional[datetime] = None
+                if date_raw:
+                    if isinstance(date_raw, (int, float)):
+                        published_at = datetime.fromtimestamp(date_raw, tz=timezone.utc)
+                    elif isinstance(date_raw, str):
+                        try:
+                            if date_raw.isdigit():
+                                published_at = datetime.fromtimestamp(int(date_raw), tz=timezone.utc)
+                            else:
+                                from dateutil import parser
+                                published_at = parser.parse(date_raw)
+                        except (ValueError, TypeError):
+                            published_at = None
+                    elif isinstance(date_raw, datetime):
+                        published_at = date_raw
+
+                if not title:
+                    continue
+
+                news_items.append({
+                    "title": title,
+                    "text": body_text,
+                    "source": source,
+                    "published_at": published_at,
+                    "url": url_field,
+                })
+            except Exception as e:
+                self.logger.warning(f"Error parsing general news article: {e}")
+                continue
+
+        self.logger.info(f"Parsed {len(news_items)} general crypto news items")
+        return news_items
+
     def fetch_social_metrics(
         self,
         symbol: str
@@ -708,7 +890,150 @@ class LunarCrushService:
 
         self.logger.info(f"Fetched social metrics for {symbol}")
         return metrics
-    
+
+    # ------------------------------------------------------------------
+    # Bulk social metrics snapshot
+    # ------------------------------------------------------------------
+
+    BULK_COINS_CACHE_KEY = "__bulk_coins_list__"
+
+    def fetch_coins_list_bulk(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetch the whole LunarCrush coin universe in a single API call.
+
+        LunarCrush ``/public/coins/list/v1`` returns metrics for thousands of
+        coins in one payload. We parse each entry into the same shape as
+        ``fetch_social_metrics`` and pre-warm the ``_social_metrics_cache``
+        so subsequent per-symbol lookups are free cache hits for the next
+        ``SOCIAL_METRICS_TTL`` window.
+
+        Returns a ``{symbol_upper: metrics_dict}`` map so callers (e.g. the
+        NestJS bulk cron) can iterate directly.
+        """
+        if not self.api_key:
+            self.logger.error("LUNARCRUSH_API_KEY not configured")
+            return {}
+
+        # Single-flight guard on the bulk endpoint — if another worker is
+        # already fetching the list, wait for it to finish and read its cache.
+        is_owner, event = self._acquire_inflight(
+            self._inflight_social, self.BULK_COINS_CACHE_KEY
+        )
+        if not is_owner:
+            event.wait(timeout=30)
+            # Cache is populated per-symbol; we don't try to reconstruct the
+            # full map from it — return empty so the caller doesn't use stale
+            # partial data. This is acceptable because the cron runs every 6h.
+            return {}
+
+        try:
+            if not self._gate.try_acquire():
+                self._bump("blocked_by_quota")
+                self.logger.warning(
+                    "LunarCrush quota exhausted; skipping bulk coins list fetch"
+                )
+                return {}
+
+            try:
+                url = f"{self.BASE_URL}/public/coins/list/v1"
+                headers = {"Authorization": f"Bearer {self.api_key}"}
+                self.logger.info("Fetching bulk coins list from LunarCrush API v4...")
+                response = requests.get(url, headers=headers, timeout=60)
+                response.raise_for_status()
+                data = response.json()
+            except requests.exceptions.HTTPError as e:
+                status = getattr(e.response, "status_code", None) if hasattr(e, "response") else None
+                if status == 429:
+                    self._bump("http_429s")
+                    self._gate.force_minute_drain()
+                    self.logger.warning("LunarCrush 429 on bulk coins list; draining minute bucket")
+                else:
+                    self.logger.error(f"HTTPError fetching bulk coins list: {e}")
+                return {}
+            except requests.exceptions.RequestException as e:
+                self.logger.error(f"Network error fetching bulk coins list: {e}")
+                return {}
+            except Exception as e:
+                self.logger.error(f"Unexpected error fetching bulk coins list: {e}", exc_info=True)
+                return {}
+
+            self._bump("calls_made")
+
+            # Parse response. Expected shape: {"data": [ {symbol, galaxy_score, ...}, ... ]}
+            if isinstance(data, dict):
+                coins = data.get("data", [])
+            elif isinstance(data, list):
+                coins = data
+            else:
+                coins = []
+            if not isinstance(coins, list):
+                coins = []
+
+            result: Dict[str, Dict[str, Any]] = {}
+            cache_ts = time.time()
+            for coin in coins:
+                if not isinstance(coin, dict):
+                    continue
+                symbol = (coin.get("symbol") or coin.get("s") or "").upper()
+                if not symbol:
+                    continue
+
+                metrics = {
+                    "social_volume": coin.get(
+                        "social_volume_24h",
+                        coin.get("interactions_24h", coin.get("social_volume", 0)),
+                    ),
+                    "social_score": float(
+                        coin.get("sentiment", coin.get("sentiment_score", coin.get("social_score", 0)))
+                    ),
+                    "galaxy_score": float(
+                        coin.get("galaxy_score", coin.get("score", coin.get("galaxy", 0)))
+                    ),
+                    "alt_rank": int(
+                        coin.get("alt_rank", coin.get("altrank", coin.get("rank", 999999)))
+                    ),
+                    "social_dominance": float(
+                        coin.get(
+                            "social_dominance",
+                            coin.get("social_dominance_24h", coin.get("dominance", 0)),
+                        )
+                    ),
+                    "price_change_24h": float(
+                        coin.get(
+                            "percent_change_24h",
+                            coin.get(
+                                "price_change_24h",
+                                coin.get("change_24h", coin.get("price_change", 0)),
+                            ),
+                        )
+                    ),
+                    "volume_24h": float(
+                        coin.get(
+                            "volume_24h",
+                            coin.get("volume_24h_usd", coin.get("volume", 0)),
+                        )
+                    ),
+                    "interactions_24h": coin.get("interactions_24h", 0),
+                    "market_cap": float(coin.get("market_cap", 0)),
+                    "price": float(coin.get("price", coin.get("price_usd", 0))),
+                }
+                result[symbol] = metrics
+                # Pre-warm the per-symbol cache so downstream
+                # fetch_social_metrics(symbol) calls become cache hits.
+                self._social_metrics_cache[symbol] = (metrics, cache_ts)
+
+            # Keep the cache from growing without bound
+            if len(self._social_metrics_cache) > 5000:
+                self._cleanup_cache()
+
+            self.logger.info(f"Bulk coins list: parsed {len(result)} symbols, cache warmed")
+            return result
+
+        finally:
+            self._release_inflight(
+                self._inflight_social, self.BULK_COINS_CACHE_KEY, event
+            )
+
     def _parse_date(self, date_str: str) -> Optional[datetime]:
         """
         Parse date string to datetime object.
@@ -751,7 +1076,31 @@ class LunarCrushService:
             return datetime.fromtimestamp(timestamp)
         except (ValueError, TypeError):
             pass
-        
+
         self.logger.warning(f"Could not parse date: {date_str}")
         return None
 
+
+# --------------------------------------------------------------------------
+# Module-level singleton accessor.
+#
+# Every caller that needs a LunarCrushService must go through
+# `get_lunarcrush_service()`. Instantiating the class directly defeats the
+# per-minute token bucket inside `LunarCrushQuotaGate` — each instance gets a
+# fresh bucket, so separate request handlers can't enforce the shared 10/min
+# limit against each other. The singleton ensures one bucket across the whole
+# process.
+# --------------------------------------------------------------------------
+
+_singleton_lock = threading.Lock()
+_singleton: Optional["LunarCrushService"] = None
+
+
+def get_lunarcrush_service() -> "LunarCrushService":
+    """Return the process-wide LunarCrushService, creating it on first use."""
+    global _singleton
+    if _singleton is None:
+        with _singleton_lock:
+            if _singleton is None:
+                _singleton = LunarCrushService()
+    return _singleton

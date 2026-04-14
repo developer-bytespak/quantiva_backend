@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 import logging
 
-from src.services.data.lunarcrush_service import LunarCrushService
+from src.services.data.lunarcrush_service import LunarCrushService, get_lunarcrush_service
 from src.services.data.stock_news_service import StockNewsService
 from src.services.engines.sentiment_engine import SentimentEngine
 
@@ -69,8 +69,9 @@ async def get_crypto_news_with_sentiment(request_data: Dict[str, Any] = Body(...
         
         logger.info(f"Fetching crypto news for {symbol} with sentiment analysis (limit={limit})")
         
-        # Initialize services
-        lunarcrush_service = LunarCrushService()
+        # Initialize services (LunarCrush is a process-wide singleton so the
+        # per-minute quota bucket is shared across all request handlers)
+        lunarcrush_service = get_lunarcrush_service()
         sentiment_engine = SentimentEngine()
         
         # Fetch news from LunarCrush
@@ -184,6 +185,92 @@ async def get_crypto_news_with_sentiment(request_data: Dict[str, Any] = Body(...
         raise
     except Exception as e:
         logger.error(f"Error fetching crypto news: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.post("/crypto/general")
+async def get_general_crypto_news_with_sentiment(request_data: Dict[str, Any] = Body(default=None)):
+    """
+    Fetch the platform-wide general crypto news feed with sentiment.
+
+    Issues a SINGLE LunarCrush call against /public/topic/cryptocurrency/news/v1
+    and scores each article locally with FinBERT. Designed to be called by the
+    NestJS bulk cron (every 30 min) — replaces the old per-coin loop which
+    burned ~18,000 LunarCrush calls/day.
+
+    Request body (all optional):
+    {
+        "limit": 50     # max 50; default 30
+    }
+
+    Returns:
+    {
+        "items": [
+            {"title", "description", "url", "source", "published_at", "sentiment": {...}},
+            ...
+        ],
+        "count": N,
+        "fetched_at": "2026-04-14T22:30:00Z"
+    }
+    """
+    try:
+        payload = request_data or {}
+        limit = int(payload.get("limit", 30))
+        limit = max(1, min(limit, 50))
+
+        logger.info(f"Fetching general crypto news feed with sentiment (limit={limit})")
+
+        lunarcrush_service = get_lunarcrush_service()
+        sentiment_engine = SentimentEngine()
+
+        news_items = lunarcrush_service.fetch_general_crypto_news(limit=limit)
+
+        enriched: List[Dict[str, Any]] = []
+        for item in news_items:
+            title = item.get("title", "") or ""
+            text = item.get("text", "") or ""
+            source = item.get("source", "lunarcrush") or "lunarcrush"
+            combined = f"{title}. {text}" if title and text else (text or title)
+
+            # Fast, local-only sentiment scoring. analyze_text() uses FinBERT +
+            # keywords without any external API calls, which is what we want for
+            # a 50-item bulk feed.
+            sentiment: Dict[str, Any] = {"label": "neutral", "score": 0.0, "confidence": 0.0}
+            try:
+                s = sentiment_engine.analyze_text(combined, source=source)
+                sentiment = {
+                    "label": s.get("sentiment", "neutral"),
+                    "score": float(s.get("score", 0.0)),
+                    "confidence": float(s.get("confidence", 0.0)),
+                }
+            except Exception as e:
+                logger.warning(f"analyze_text failed for general news item: {e}")
+
+            published_at = item.get("published_at")
+            if isinstance(published_at, datetime):
+                published_at = published_at.isoformat()
+
+            enriched.append({
+                "title": title,
+                "description": text,
+                "url": item.get("url", ""),
+                "source": source,
+                "published_at": published_at,
+                "sentiment": sentiment,
+            })
+
+        response = {
+            "items": enriched,
+            "count": len(enriched),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        logger.info(f"General crypto news feed returned {len(enriched)} items")
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching general crypto news: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 

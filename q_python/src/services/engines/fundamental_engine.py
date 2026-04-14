@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional, List
 import logging
 
 from .base_engine import BaseEngine
-from src.services.data.lunarcrush_service import LunarCrushService
+from src.services.data.lunarcrush_service import get_lunarcrush_service
 from src.services.data.coingecko_service import CoinGeckoService
 from src.services.data.stock_news_service import StockNewsService
 from src.models.finbert import get_finbert_inference
@@ -28,7 +28,7 @@ class FundamentalEngine(BaseEngine):
     
     def __init__(self):
         super().__init__("FundamentalEngine")
-        self.lunarcrush_service = LunarCrushService()
+        self.lunarcrush_service = get_lunarcrush_service()
         self.coingecko_service = CoinGeckoService()
         self.stock_news_service = StockNewsService()
         self.finbert_inference = None  # Lazy initialization
