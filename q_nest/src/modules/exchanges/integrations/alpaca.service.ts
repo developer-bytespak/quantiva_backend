@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 
 const DATA_API_BASE = 'https://data.alpaca.markets';
@@ -214,15 +214,23 @@ export class AlpacaService {
   }
 
   /**
-   * Get orders with optional filters
+   * Get orders with optional filters. Alpaca's /v2/orders endpoint accepts
+   * status='open' | 'closed' | 'all' and a limit up to 500. Default limit
+   * stays at 100 for backwards compatibility with existing callers.
    */
-  async getOrders(apiKey?: string, apiSecret?: string, status = 'open'): Promise<any[]> {
+  async getOrders(
+    apiKey?: string,
+    apiSecret?: string,
+    status: 'open' | 'closed' | 'all' = 'open',
+    limit = 100,
+  ): Promise<any[]> {
     const client = this.getClientForKey(apiKey);
     const res = await client.get('/v2/orders', {
       headers: this.getAuthHeaders(apiKey, apiSecret),
       params: {
         status,
-        limit: 100,
+        limit: Math.min(Math.max(limit, 1), 500),
+        direction: 'desc',
       },
     });
     return res.data || [];
@@ -297,6 +305,134 @@ export class AlpacaService {
       };
     } catch (error: any) {
       this.logger.error(`Error placing order: ${error.message}`, error?.response?.data);
+
+      // Translate Alpaca API errors into clear HttpExceptions so the frontend
+      // gets actionable messages instead of opaque 500s. Match by message text
+      // rather than numeric codes — Alpaca's codes are not well-documented and
+      // may change. The fallback at the end re-throws the original error so
+      // unknown failures still bubble up unchanged.
+      const httpStatus = error?.response?.status;
+      const data = error?.response?.data;
+      if (httpStatus && data && typeof data === 'object') {
+        const alpacaMessage: string = (data.message || '').toString();
+        const lower = alpacaMessage.toLowerCase();
+
+        if (lower.includes('wash trade')) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'WASH_TRADE_BLOCKED',
+              message:
+                'An opposite-side order on this symbol is still active. Most often this means a previous buy has not finished filling yet. Wait for it to fill, or cancel the existing order, then retry.',
+              alpacaMessage,
+              existingOrderId: data.existing_order_id,
+            },
+            HttpStatus.CONFLICT,
+          );
+        }
+
+        // Sell rejected because Alpaca does not yet see a position to sell.
+        // Common cause: the buy that created the position has not finished
+        // filling, so the shares are not available to sell yet.
+        if (
+          lower.includes('position not found') ||
+          lower.includes('no position') ||
+          lower.includes('may only sell positions you currently hold') ||
+          lower.includes('you do not have any holdings')
+        ) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'POSITION_NOT_AVAILABLE',
+              message:
+                'You cannot sell this symbol yet. The buy that creates this position has not finished filling. Wait a few seconds and retry, or check the order status.',
+              alpacaMessage,
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+
+        if (lower.includes('insufficient qty') || lower.includes('insufficient quantity')) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'INSUFFICIENT_QUANTITY',
+              message:
+                'Not enough shares available to sell. Either the buy has not finished filling, the shares are held by an existing TP/SL order, or you do not own this many shares.',
+              alpacaMessage,
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+
+        if (
+          lower.includes('insufficient buying power') ||
+          lower.includes('insufficient day trading buying power')
+        ) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'INSUFFICIENT_BUYING_POWER',
+              message: 'Not enough buying power to place this order.',
+              alpacaMessage,
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+
+        if (lower.includes('pattern day') || lower.includes('pdt')) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'PDT_RESTRICTED',
+              message:
+                'Pattern Day Trader rules block this trade. Account equity is below $25,000.',
+              alpacaMessage,
+            },
+            HttpStatus.FORBIDDEN,
+          );
+        }
+
+        if (
+          lower.includes('market is closed') ||
+          lower.includes('market closed') ||
+          lower.includes('extended hours')
+        ) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'MARKET_CLOSED',
+              message:
+                'The market is currently closed for this symbol. Try again during regular trading hours.',
+              alpacaMessage,
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+
+        if (httpStatus === 422) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'INVALID_ORDER',
+              message: alpacaMessage || 'Order validation failed.',
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+
+        if (httpStatus === 403) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'ALPACA_FORBIDDEN',
+              message: alpacaMessage || 'Alpaca rejected the order.',
+            },
+            HttpStatus.FORBIDDEN,
+          );
+        }
+      }
+
       throw error;
     }
   }
