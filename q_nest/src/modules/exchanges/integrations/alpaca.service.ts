@@ -518,6 +518,213 @@ export class AlpacaService {
   }
 
   /**
+   * Cancel a single order by ID. Used for orphan cleanup and manual cancels.
+   * Returns silently on 404/422 ("order already finalized") — if the order is
+   * already filled or canceled, the cleanup is effectively a no-op.
+   */
+  async cancelOrder(apiKey: string, apiSecret: string, orderId: string): Promise<void> {
+    if (!orderId) return;
+    const client = this.getClientForKey(apiKey);
+    try {
+      await client.delete(`/v2/orders/${orderId}`, {
+        headers: this.getAuthHeaders(apiKey, apiSecret),
+      });
+      this.logger.log(`Alpaca order ${orderId} canceled`);
+    } catch (error: any) {
+      const status = error?.response?.status;
+      if (status === 404 || status === 422) {
+        this.logger.debug(
+          `Alpaca order ${orderId} cancel skipped (status ${status}): already finalized`,
+        );
+        return;
+      }
+      this.logger.warn(`Alpaca cancelOrder ${orderId} failed: ${error?.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Orphan cleanup helper: cancel every OPEN sell order on a given symbol.
+   * Used by the top-trade auto-protection flow to clear stale TP/SL legs
+   * before attaching new ones. If a user had a previous auto-trade where the
+   * Stop-Loss fired (closing the position) but the Take-Profit was never
+   * canceled, we'd otherwise reject the next buy with a wash-trade error.
+   * Returns the list of order IDs that were canceled.
+   */
+  async cancelOpenSellOrdersForSymbol(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+  ): Promise<string[]> {
+    const alpacaSymbol = this.convertToAlpacaSymbol(symbol);
+    const openOrders = await this.getOrders(apiKey, apiSecret, 'open', 500);
+    const matches = (openOrders || []).filter((o: any) => {
+      const sym = (o.symbol || '').toUpperCase();
+      const side = (o.side || '').toLowerCase();
+      return sym === alpacaSymbol.toUpperCase() && side === 'sell';
+    });
+    if (matches.length === 0) return [];
+
+    this.logger.log(
+      `Canceling ${matches.length} orphan sell order(s) on ${alpacaSymbol} before placing new protection`,
+    );
+
+    const canceledIds: string[] = [];
+    for (const o of matches) {
+      try {
+        await this.cancelOrder(apiKey, apiSecret, o.id);
+        canceledIds.push(o.id);
+      } catch (err: any) {
+        this.logger.warn(
+          `Failed to cancel orphan order ${o.id} on ${alpacaSymbol}: ${err?.message}`,
+        );
+      }
+    }
+    return canceledIds;
+  }
+
+  /**
+   * Attach TP/SL protection to an existing position by placing two independent
+   * sell orders: a LIMIT sell at takeProfitPrice and a STOP sell at
+   * stopLossPrice. Both are GTC.
+   *
+   * Why not use placeBracketOrder? Alpaca's order_class='bracket' is for
+   * atomic entry+TP+SL submission and cannot attach to an already-filled
+   * position. Bybit has the same constraint and uses two separate sells too.
+   *
+   * Stocks require whole-share quantities for LIMIT/STOP orders, so callers
+   * must floor fractional positions before invoking this method (or pass the
+   * exact quantity for crypto symbols, which support fractionals).
+   */
+  async placeProtectionOrders(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    quantity: number,
+    takeProfitPrice: number,
+    stopLossPrice: number,
+  ): Promise<{ takeProfitOrderId: string; stopLossOrderId: string }> {
+    const alpacaSymbol = this.convertToAlpacaSymbol(symbol);
+    const client = this.getClientForKey(apiKey);
+    const headers = this.getAuthHeaders(apiKey, apiSecret);
+
+    this.logger.log(
+      `Placing Alpaca protection: ${quantity} ${alpacaSymbol} TP=${takeProfitPrice} SL=${stopLossPrice}`,
+    );
+
+    try {
+      const tpRes = await client.post(
+        '/v2/orders',
+        {
+          symbol: alpacaSymbol,
+          qty: quantity.toString(),
+          side: 'sell',
+          type: 'limit',
+          limit_price: takeProfitPrice.toString(),
+          time_in_force: 'gtc',
+        },
+        { headers },
+      );
+
+      const slRes = await client.post(
+        '/v2/orders',
+        {
+          symbol: alpacaSymbol,
+          qty: quantity.toString(),
+          side: 'sell',
+          type: 'stop',
+          stop_price: stopLossPrice.toString(),
+          time_in_force: 'gtc',
+        },
+        { headers },
+      );
+
+      return {
+        takeProfitOrderId: tpRes.data?.id || '',
+        stopLossOrderId: slRes.data?.id || '',
+      };
+    } catch (error: any) {
+      this.logger.error(
+        `Error placing Alpaca protection: ${error.message}`,
+        error?.response?.data,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch recent trades for a stock symbol from Alpaca's Data API and map
+   * them to the RecentTradeDto shape used by the unified /trades/:symbol
+   * endpoint: { id, price, quantity, time, isBuyerMaker }. Alpaca doesn't
+   * expose which side was the maker on retail data, so isBuyerMaker is
+   * always false — frontends that use this for ticker-tape style display
+   * still get price/size/timestamp correctly.
+   */
+  async getRecentTrades(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    limit: number = 50,
+  ): Promise<
+    Array<{
+      id: string;
+      price: number;
+      quantity: number;
+      time: number;
+      isBuyerMaker: boolean;
+    }>
+  > {
+    const client = this.getDataApiClient(apiKey, apiSecret);
+    const sym = symbol.toUpperCase();
+    const requestLimit = Math.min(Math.max(limit, 1), 10000);
+    const res = await client.get<{
+      trades?: Array<{ t: string; x?: string; p: number; s: number; c?: string[]; i?: number; z?: string }>;
+    }>(`/v2/stocks/${sym}/trades`, { params: { limit: requestLimit, feed: 'iex' } });
+    const trades = res.data?.trades ?? [];
+    return trades.map((t, idx) => ({
+      id: String(t.i ?? idx),
+      price: Number(t.p) || 0,
+      quantity: Number(t.s) || 0,
+      time: t.t ? new Date(t.t).getTime() : Date.now(),
+      isBuyerMaker: false,
+    }));
+  }
+
+  /**
+   * True for any symbol that looks like a crypto trade on the Alpaca side.
+   * Used to block crypto orders on Alpaca connections in the user-initiated
+   * unified flow (ExchangesService.placeOrder). NOT applied inside this
+   * service's placeOrder so that the strategies paper-trading flow — which
+   * calls AlpacaService.placeOrder directly with env-configured keys — can
+   * still exercise Alpaca's supported cryptos on its shared paper account.
+   *
+   * Matches:
+   *  - Slash-separated symbols like "BTC/USD", "ETH/USDT"
+   *  - Binance-style crypto quotes: "BTCUSDT", "ETHUSDC"
+   *  - Bare base symbols in the ALPACA_SUPPORTED_CRYPTO list: "BTC", "ETH"
+   *  - Base/USD forms where base is in the crypto list: "BTCUSD"
+   *
+   * Does NOT match regular stock tickers like "AAPL", "KO", "MSFT", "BRK.B".
+   */
+  isAlpacaCryptoSymbol(symbol: string): boolean {
+    if (!symbol) return false;
+    const upper = symbol.toUpperCase().trim();
+
+    if (upper.includes('/')) return true;
+    if (upper.endsWith('USDT') || upper.endsWith('USDC')) return true;
+
+    const cryptoSet = new Set(ALPACA_SUPPORTED_CRYPTO);
+    if (cryptoSet.has(upper)) return true;
+
+    if (upper.endsWith('USD')) {
+      const base = upper.slice(0, -3);
+      if (cryptoSet.has(base)) return true;
+    }
+
+    return false;
+  }
+
+  /**
    * Convert Binance-style symbol to Alpaca format
    * BTCUSDT -> BTC/USD
    * ETHUSDT -> ETH/USD

@@ -870,6 +870,7 @@ export class ExchangesController {
       const exchangeName = (connection?.exchange?.name || '').toLowerCase();
       const isBinance = exchangeName === 'binance' || exchangeName === 'binance.us' || exchangeName === 'binanceus';
       const isBybit = exchangeName === 'bybit';
+      const isAlpaca = exchangeName === 'alpaca';
 
       const isTopTrade = placeOrderDto.source === 'top_trade';
 
@@ -881,6 +882,24 @@ export class ExchangesController {
           effectivePrice = tickers[0]?.price || 0;
         } catch {
           effectivePrice = 0;
+        }
+      }
+
+      // Alpaca market orders often return filled_avg_price=null for the first
+      // few moments after submission. Fetch the live stock snapshot to compute
+      // TP/SL strikes. Crypto symbols (containing /) are skipped because we
+      // don't have a public Alpaca crypto price helper yet — they fall through
+      // the shouldPlaceProtection guard and report no ocoInfo.
+      if (isAlpaca && (!effectivePrice || effectivePrice <= 0) && placeOrderDto.type === 'MARKET') {
+        const isCryptoSym = placeOrderDto.symbol.includes('/');
+        if (!isCryptoSym) {
+          try {
+            const { apiKey: ak, apiSecret: as } = await this.exchangesService.getDecryptedCredentials(connectionId);
+            const snapshot = await this.alpacaService.getStockSnapshot(ak, as, placeOrderDto.symbol);
+            effectivePrice = snapshot?.price || 0;
+          } catch {
+            effectivePrice = 0;
+          }
         }
       }
 
@@ -932,6 +951,63 @@ export class ExchangesController {
           );
           ocoInfo = { takeProfitOrderId: bracket.takeProfitOrderId, stopLossOrderId: bracket.stopLossOrderId, takeProfitPrice, stopLossPrice };
           this.logger.log(`${orderSource} ✅ Bracket placed! TP=${bracket.takeProfitOrderId} SL=${bracket.stopLossOrderId}`);
+        } else if (isAlpaca) {
+          // Alpaca protection: two independent sell orders (LIMIT TP + STOP SL).
+          // Alpaca's native bracket order is for atomic entry+TP+SL and cannot
+          // attach to an already-filled position, so we place two regular
+          // sell orders — same pattern as Bybit above.
+          this.logger.log(
+            `${orderSource} AUTO-Placing Alpaca protection: ${order.symbol} qty=${order.quantity} TP=${takeProfitPrice} SL=${stopLossPrice}`,
+          );
+
+          // Fractional quantities are guaranteed whole shares at this point
+          // because the frontend restricts Alpaca buys to integer share
+          // counts (product decision). Math.floor is a defensive belt-and-
+          // suspenders in case a future caller slips a fractional through.
+          const protectionQty = Math.floor(order.quantity);
+
+          if (protectionQty <= 0) {
+            throw new Error(
+              `Cannot place Alpaca protection: quantity ${order.quantity} floors to 0 whole shares ` +
+              `(Alpaca LIMIT/STOP orders require whole shares for stocks)`,
+            );
+          }
+
+          const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+
+          // Orphan cleanup: if the user's previous auto-trade on this symbol
+          // had the SL fire (closing the position) but the TP never canceled,
+          // that stale TP would otherwise block the new buy with a wash-trade
+          // error. Clear every open sell order on this symbol before placing
+          // new protection. Failures here are logged but don't block placement.
+          const canceledOrphans = await this.alpacaService.cancelOpenSellOrdersForSymbol(
+            apiKey,
+            apiSecret,
+            order.symbol || placeOrderDto.symbol,
+          );
+          if (canceledOrphans.length > 0) {
+            this.logger.log(
+              `${orderSource} Canceled ${canceledOrphans.length} orphan sell order(s) on ${order.symbol} before placing new protection`,
+            );
+          }
+
+          const protection = await this.alpacaService.placeProtectionOrders(
+            apiKey,
+            apiSecret,
+            order.symbol || placeOrderDto.symbol,
+            protectionQty,
+            takeProfitPrice,
+            stopLossPrice,
+          );
+          ocoInfo = {
+            takeProfitOrderId: protection.takeProfitOrderId,
+            stopLossOrderId: protection.stopLossOrderId,
+            takeProfitPrice,
+            stopLossPrice,
+          };
+          this.logger.log(
+            `${orderSource} ✅ Alpaca protection placed! TP=${protection.takeProfitOrderId} SL=${protection.stopLossOrderId}`,
+          );
         }
       } else if (placeOrderDto.side === 'BUY' && !shouldPlaceProtection) {
         this.logger.log(

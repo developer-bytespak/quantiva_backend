@@ -1786,6 +1786,22 @@ export class ExchangesService {
     } else if (exchangeService instanceof BybitService) {
       placedOrder = await this.bybitService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
     } else if (exchangeService instanceof AlpacaService) {
+      // Product decision: Alpaca crypto is not offered to end users on the
+      // unified user-initiated flow. Block here before dispatching so the
+      // guard applies to this entry point only — the strategies paper-trading
+      // flow calls AlpacaService.placeOrder directly and is untouched.
+      if (this.alpacaService.isAlpacaCryptoSymbol(symbol)) {
+        throw new HttpException(
+          {
+            success: false,
+            code: 'ALPACA_CRYPTO_NOT_SUPPORTED',
+            message:
+              'Crypto trading is not supported on your Alpaca connection. Use a Binance, Binance.US, or Bybit connection for crypto orders.',
+            symbol,
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
       placedOrder = await this.alpacaService.placeOrder(
         symbol,
         side,
@@ -1905,7 +1921,21 @@ export class ExchangesService {
     } else if (exchangeName === 'bybit') {
       return this.bybitService.getOrderBook(symbol, limit);
     } else {
-      throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
+      // Alpaca's retail Data API only exposes a 1-level quote (best bid/ask),
+      // which doesn't fit the multi-level depth shape this endpoint returns.
+      // Same 501 pattern as deposits/withdrawals — frontend can hide the
+      // order book widget on an "not supported" response instead of showing
+      // a 500 error toast.
+      throw new HttpException(
+        {
+          success: false,
+          code: 'FEATURE_NOT_SUPPORTED',
+          feature: 'orderbook',
+          exchange: connection.exchange.name,
+          message: `Order book is not available for ${connection.exchange.name} connections.`,
+        },
+        HttpStatus.NOT_IMPLEMENTED,
+      );
     }
   }
 
@@ -1928,8 +1958,23 @@ export class ExchangesService {
       return this.binanceService.getRecentTrades(symbol, limit);
     } else if (exchangeName === 'bybit') {
       return this.bybitService.getRecentTrades(symbol, limit);
+    } else if (exchangeName === 'alpaca') {
+      // Alpaca Data API requires credentials even for recent trades.
+      // The AlpacaService wrapper maps the response directly to RecentTradeDto
+      // so this endpoint stays uniform across all exchanges.
+      const { apiKey, apiSecret } = await this.getDecryptedCredentials(connectionId);
+      return this.alpacaService.getRecentTrades(apiKey, apiSecret, symbol, limit);
     } else {
-      throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
+      throw new HttpException(
+        {
+          success: false,
+          code: 'FEATURE_NOT_SUPPORTED',
+          feature: 'trades',
+          exchange: connection.exchange.name,
+          message: `Recent trades are not available for ${connection.exchange.name} connections.`,
+        },
+        HttpStatus.NOT_IMPLEMENTED,
+      );
     }
   }
 
