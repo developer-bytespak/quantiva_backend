@@ -974,6 +974,7 @@ enum PlanTier {
   FREE
   PRO
   ELITE
+  ELITE_PLUS
 }
 
 enum BillingPeriod {
