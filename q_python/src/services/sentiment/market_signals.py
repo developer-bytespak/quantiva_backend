@@ -64,10 +64,10 @@ class MarketSignalAnalyzer:
             # Fetch OHLCV data from NestJS API
             ohlcv_data = self._fetch_ohlcv(symbol, exchange, connection_id)
             
-            # Fetch LunarCrush social metrics (lazy import)
+            # Fetch LunarCrush social metrics (lazy import, shared singleton)
             if self._lunarcrush_service is None:
-                from src.services.data.lunarcrush_service import LunarCrushService
-                self._lunarcrush_service = LunarCrushService()
+                from src.services.data.lunarcrush_service import get_lunarcrush_service
+                self._lunarcrush_service = get_lunarcrush_service()
             social_metrics = self._lunarcrush_service.fetch_social_metrics(symbol)
             
             # Analyze price momentum

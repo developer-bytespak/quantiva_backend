@@ -10,7 +10,7 @@ import re
 
 from .base_engine import BaseEngine
 from src.services.data.stock_news_service import StockNewsService
-from src.services.data.lunarcrush_service import LunarCrushService
+from src.services.data.lunarcrush_service import get_lunarcrush_service
 from src.services.data.finnhub_service import FinnhubService
 from src.services.macro.fred_service import FredService
 
@@ -33,7 +33,7 @@ class EventRiskEngine(BaseEngine):
     def __init__(self):
         super().__init__("EventRiskEngine")
         self.stock_news_service = StockNewsService()
-        self.lunarcrush_service = LunarCrushService()
+        self.lunarcrush_service = get_lunarcrush_service()
         self.finnhub_service = FinnhubService()
         self.fred_service = FredService()
         self.event_impacts = {

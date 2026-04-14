@@ -9,7 +9,7 @@ import logging
 from .base_engine import BaseEngine
 # Defer importing the heavy FinBERT modules until needed (lazy import)
 from src.services.data.stock_news_service import StockNewsService
-from src.services.data.lunarcrush_service import LunarCrushService
+from src.services.data.lunarcrush_service import get_lunarcrush_service
 from src.services.data.ema_state_service import EMAStateService
 from src.services.sentiment import CryptoKeywordAnalyzer, SentimentAggregator, MarketSignalAnalyzer
 
@@ -27,7 +27,7 @@ class SentimentEngine(BaseEngine):
         super().__init__("SentimentEngine")
         self.finbert_inference = None
         self.stock_news_service = StockNewsService()
-        self.lunarcrush_service = LunarCrushService()
+        self.lunarcrush_service = get_lunarcrush_service()
         # Initialize sentiment analysis components (lightweight, no model loading)
         self.keyword_analyzer = CryptoKeywordAnalyzer()
         self.aggregator = SentimentAggregator()

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
@@ -7,6 +7,7 @@ import { NewsService } from './news.service';
 
 @Injectable()
 export class NewsCronjobService {
+  private readonly logger = new Logger(NewsCronjobService.name);
   private readonly BATCH_SIZE = 3; // Process 3 assets in parallel (reduced for rate limits)
   private readonly BATCH_DELAY_MS = 5000; // 5 seconds between batches (rate limit protection)
   private readonly MAX_ASSETS_PER_RUN = 15; // Process max 15 assets per run (rate limit: 15 assets × 2 calls = 30 API calls per 10min)
@@ -122,12 +123,13 @@ export class NewsCronjobService {
   }
 
   /**
-   * News Sentiment Aggregation Cronjob - OPTIMIZED FOR RATE LIMITS
-   * Runs every 10 minutes to fetch and aggregate news/sentiment
-   * Rate limit strategy: Max 15 assets/run = 30 API calls/10min = 4,320 calls/day (within 2000 limit with buffer)
-   * Prioritizes: Recently trending assets + assets with active users
+   * News Sentiment Aggregation Cronjob - DISABLED (was: every 10 min, 15 assets × 2 calls).
+   * The per-coin loop burned ~4,320 LunarCrush calls/day (plan cap is 2,000). Replaced by
+   * the bulk `aggregateGeneralCryptoNews` cron further down that calls
+   * LunarCrush /public/topic/cryptocurrency/news/v1 once per run.
+   * Method body kept so the manual trigger (`triggerManualAggregation`) still works.
    */
-  @Cron('*/10 * * * *') // Every 10 minutes
+  // @Cron('*/10 * * * *') // DISABLED - see comment above
   async aggregateNewsForTopSymbols(): Promise<void> {
     let processedCount = 0;
     let errorCount = 0;
@@ -211,12 +213,40 @@ export class NewsCronjobService {
   }
 
   /**
-   * OLD CRONJOB - Keep for legacy asset sentiment updates (CRYPTO ONLY)
-   * Runs every 10 minutes to fetch and aggregate sentiment for CRYPTO assets
-   * Stocks are handled by aggregateStockNews cronjob separately
-   * Optimized: Parallel processing (5 at a time) + Skip recently updated assets
+   * Bulk general-crypto news aggregation — every 30 minutes.
+   *
+   * Replaces the two disabled per-coin crons above. Makes a SINGLE LunarCrush
+   * call (via Python `/api/v1/news/crypto/general`, which internally hits
+   * `/public/topic/cryptocurrency/news/v1`) and upserts rows into
+   * `trending_news` linked to a synthetic "__GENERAL__" asset. The frontend
+   * AI-insights page reads this feed through `getAllNewsFromDB()` exactly
+   * as before.
+   *
+   * Budget impact: 1 LunarCrush call × 48 runs/day = 48 calls/day, vs. the
+   * ~18,700/day the two disabled crons consumed.
    */
-  @Cron('*/10 * * * *') // Every 10 minutes
+  @Cron('*/30 * * * *') // Every 30 minutes
+  async aggregateGeneralCryptoNews(): Promise<void> {
+    try {
+      const result = await this.newsService.refreshGeneralCryptoNewsFeed(50);
+      this.logger.log(
+        `[aggregateGeneralCryptoNews] fetched=${result.fetched} inserted=${result.inserted} skipped=${result.skipped}`,
+      );
+    } catch (error: any) {
+      this.logger.error(
+        `[aggregateGeneralCryptoNews] failed: ${error?.message || error}`,
+      );
+    }
+  }
+
+  /**
+   * Per-asset sentiment aggregation - DISABLED (was: every 10 min, ALL crypto assets).
+   * This cron iterated every active crypto asset and triggered a per-coin LunarCrush
+   * fetch inside the sentiment engine, burning ~14,400 calls/day on its own. Replaced
+   * by the bulk `snapshotSocialMetricsBulk` cron that hits /public/coins/list/v1 once
+   * every 6 hours. Method body kept for potential manual invocation.
+   */
+  // @Cron('*/10 * * * *') // DISABLED - see comment above
   async aggregateNewsSentiment(): Promise<void> {
     let processedCount = 0;
     let skippedCount = 0;
@@ -274,6 +304,90 @@ export class NewsCronjobService {
       }
     } catch (error: any) {
       // Fatal error - silent
+    }
+  }
+
+  /**
+   * Bulk social-metrics snapshot — every 6 hours.
+   *
+   * Fires ONE LunarCrush call (via Python `/api/v1/market/social-bulk`,
+   * which internally hits `/public/coins/list/v1`) that returns metrics for
+   * the whole coin universe. For each symbol we have locally as an active
+   * crypto asset, we write a `trending_assets` row with the fresh galaxy /
+   * alt_rank / price / market_cap numbers. Python also warms its per-symbol
+   * in-memory cache so the engines stop hitting LunarCrush for social data.
+   *
+   * Budget impact: 1 call × 4 runs/day = 4 LunarCrush calls/day. Replaces
+   * the per-asset `fetch_social_metrics` loop that burned hundreds/day.
+   */
+  @Cron('0 */6 * * *') // Every 6 hours on the hour
+  async snapshotSocialMetricsBulk(): Promise<void> {
+    try {
+      const response = await this.pythonApi.post<{
+        count: number;
+        fetched_at: string;
+        metrics?: Record<string, any>;
+      }>(
+        '/api/v1/market/social-bulk',
+        { include_metrics: true },
+        { timeout: 120000 },
+      );
+
+      const metricsMap = response.data?.metrics || {};
+      const symbols = Object.keys(metricsMap);
+      if (symbols.length === 0) {
+        this.logger.warn('[snapshotSocialMetricsBulk] empty metrics map; skipping');
+        return;
+      }
+
+      // Only snapshot for assets already in our DB
+      const assets = await this.prisma.assets.findMany({
+        where: {
+          asset_type: 'crypto',
+          is_active: true,
+          symbol: { in: symbols },
+        },
+        select: { asset_id: true, symbol: true },
+      });
+
+      const pollTimestamp = new Date();
+      let written = 0;
+      let errors = 0;
+
+      for (const asset of assets) {
+        if (!asset.symbol) continue;
+        const m = metricsMap[asset.symbol.toUpperCase()];
+        if (!m) continue;
+
+        try {
+          await this.prisma.trending_assets.create({
+            data: {
+              poll_timestamp: new Date(pollTimestamp.getTime() + written),
+              asset_id: asset.asset_id,
+              galaxy_score: m.galaxy_score ?? null,
+              alt_rank: m.alt_rank ?? null,
+              social_score: m.social_score ?? null,
+              market_volume: m.volume_24h ?? null,
+              price_usd: m.price ?? null,
+              price_change_24h: m.price_change_24h ?? null,
+              volume_24h: m.volume_24h ?? null,
+              market_cap: m.market_cap ?? null,
+            },
+          });
+          written++;
+        } catch (err: any) {
+          // Most likely a unique-key collision on (poll_timestamp, asset_id)
+          errors++;
+        }
+      }
+
+      this.logger.log(
+        `[snapshotSocialMetricsBulk] bulk=${response.data?.count ?? 0} matched=${assets.length} written=${written} errors=${errors}`,
+      );
+    } catch (error: any) {
+      this.logger.error(
+        `[snapshotSocialMetricsBulk] failed: ${error?.message || error}`,
+      );
     }
   }
 

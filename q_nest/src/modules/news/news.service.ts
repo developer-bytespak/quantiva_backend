@@ -365,6 +365,128 @@ export class NewsService {
   }
 
   /**
+   * Bulk-fetch the general crypto news feed from Python (one LunarCrush call
+   * upstream) and upsert rows into `trending_news`.
+   *
+   * All rows are linked to a synthetic "__GENERAL__" crypto asset, since the
+   * schema requires a non-null asset_id. Deduplicated by `article_url` within
+   * the last 7 days so re-runs of the same feed don't grow the table.
+   *
+   * Returns counters for the cron caller to log.
+   */
+  async refreshGeneralCryptoNewsFeed(
+    limit: number = 50,
+  ): Promise<{ inserted: number; skipped: number; fetched: number }> {
+    const response = await this.pythonApi.post<{
+      items: CryptoNewsItem[];
+      count: number;
+      fetched_at: string;
+    }>(
+      '/api/v1/news/crypto/general',
+      { limit },
+      { timeout: 120000 },
+    );
+
+    const items = response.data?.items ?? [];
+    if (items.length === 0) {
+      return { inserted: 0, skipped: 0, fetched: 0 };
+    }
+
+    // Find or create the synthetic "__GENERAL__" asset that all general-feed
+    // rows are attached to. This lets us respect the NOT NULL asset_id FK
+    // without inventing a schema migration.
+    let generalAsset = await this.prisma.assets.findFirst({
+      where: { symbol: '__GENERAL__', asset_type: 'crypto' },
+    });
+    if (!generalAsset) {
+      generalAsset = await this.prisma.assets.create({
+        data: {
+          symbol: '__GENERAL__',
+          name: 'General Crypto News',
+          display_name: 'General Crypto News',
+          asset_type: 'crypto',
+          is_active: true,
+          first_seen_at: new Date(),
+          last_seen_at: new Date(),
+        },
+      });
+      this.logger.log('Created synthetic __GENERAL__ asset for general news feed');
+    }
+    const assetId = generalAsset.asset_id;
+
+    // Dedupe against the last 7 days of rows on this asset keyed by article_url
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const recentRows = await this.prisma.trending_news.findMany({
+      where: {
+        asset_id: assetId,
+        poll_timestamp: { gte: sevenDaysAgo },
+        article_url: { not: '' },
+      },
+      select: { article_url: true },
+    });
+    const seenUrls = new Set(
+      recentRows.map((r) => r.article_url).filter((u): u is string => !!u),
+    );
+
+    let inserted = 0;
+    let skipped = 0;
+    const baseTs = Date.now();
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const url = item.url?.trim();
+      const title = item.title?.trim();
+      if (!url || !title) {
+        skipped++;
+        continue;
+      }
+      if (seenUrls.has(url)) {
+        skipped++;
+        continue;
+      }
+
+      // Unique poll_timestamp per row to satisfy composite PK
+      const pollTimestamp = new Date(baseTs + i);
+      const publishedAt = item.published_at ? new Date(item.published_at) : null;
+
+      try {
+        await this.prisma.trending_news.create({
+          data: {
+            poll_timestamp: pollTimestamp,
+            asset_id: assetId,
+            news_sentiment: item.sentiment?.score ?? 0,
+            news_score: item.sentiment?.score ?? 0,
+            news_volume: 1,
+            heading: title.length > 120 ? title.slice(0, 117) + '...' : title,
+            article_url: url,
+            published_at: publishedAt,
+            sentiment_label: (item.sentiment?.label as any) || null,
+            source: 'LunarCrush' as any,
+            news_detail: {
+              description: item.description,
+              source: item.source,
+            },
+            metadata: {
+              general_feed: true,
+              sentiment: item.sentiment || null,
+            },
+          } as any,
+        });
+        seenUrls.add(url);
+        inserted++;
+      } catch (err: any) {
+        // Likely a unique-key collision on (poll_timestamp, asset_id); treat as skipped
+        skipped++;
+        this.logger.debug(
+          `Skipping general news row for ${url}: ${err.message}`,
+        );
+      }
+    }
+
+    return { inserted, skipped, fetched: items.length };
+  }
+
+  /**
    * Store news articles and sentiment data in database
    */
   private async storeNewsAndSentiment(
