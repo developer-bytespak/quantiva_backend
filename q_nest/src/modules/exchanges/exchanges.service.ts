@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { ForbiddenException, HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ExchangeType, ConnectionStatus } from '@prisma/client';
 import { EncryptionService } from './services/encryption.service';
@@ -1970,7 +1970,20 @@ export class ExchangesService {
         endTime,
       );
     } else {
-      throw new Error(`Deposit history not supported for ${connection.exchange.name}`);
+      // Not a fatal error — just a feature gap. Return a structured 501 so
+      // the frontend can render a friendly "not available on this exchange"
+      // message instead of an opaque 500. Applies to Alpaca, Bybit, and
+      // Binance.US; only Binance currently exposes deposit history.
+      throw new HttpException(
+        {
+          success: false,
+          code: 'FEATURE_NOT_SUPPORTED',
+          feature: 'deposits',
+          exchange: connection.exchange.name,
+          message: `Deposit history is not available for ${connection.exchange.name} connections.`,
+        },
+        HttpStatus.NOT_IMPLEMENTED,
+      );
     }
   }
 
@@ -2011,7 +2024,19 @@ export class ExchangesService {
         endTime,
       );
     } else {
-      throw new Error(`Withdrawal history not supported for ${connection.exchange.name}`);
+      // Same rationale as getDepositHistory: return a structured 501 so the
+      // frontend can show a friendly "not available" message rather than an
+      // opaque 500. Only Binance currently exposes withdrawal history.
+      throw new HttpException(
+        {
+          success: false,
+          code: 'FEATURE_NOT_SUPPORTED',
+          feature: 'withdrawals',
+          exchange: connection.exchange.name,
+          message: `Withdrawal history is not available for ${connection.exchange.name} connections.`,
+        },
+        HttpStatus.NOT_IMPLEMENTED,
+      );
     }
   }
 

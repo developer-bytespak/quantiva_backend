@@ -678,10 +678,116 @@ export class AlpacaService {
     return bars.length <= limit ? bars : bars.slice(-limit);
   }
 
+  /**
+   * Fetch tickers for one or more stock symbols and map each to the same shape
+   * Binance and Bybit return: { symbol, price, change24h, changePercent24h, volume24h }.
+   * This lets the unified controller call this method from its Alpaca branch
+   * without any shape adaptation downstream. Alpaca's Data API requires
+   * credentials even for "public" market data, so apiKey/apiSecret are required.
+   */
+  async getTickerPrices(
+    apiKey: string,
+    apiSecret: string,
+    symbols: string[],
+  ): Promise<
+    Array<{
+      symbol: string;
+      price: number;
+      change24h: number;
+      changePercent24h: number;
+      volume24h: number;
+    }>
+  > {
+    if (!symbols || symbols.length === 0) return [];
+    const upperSymbols = symbols.map((s) => s.toUpperCase());
+    const client = this.getDataApiClient(apiKey, apiSecret);
+    const res = await client.get<Record<string, AlpacaSnapshot>>('/v2/stocks/snapshots', {
+      params: { symbols: upperSymbols.join(','), feed: 'iex' },
+    });
+    const out: Array<{
+      symbol: string;
+      price: number;
+      change24h: number;
+      changePercent24h: number;
+      volume24h: number;
+    }> = [];
+    for (const sym of upperSymbols) {
+      const snapshot = res.data?.[sym];
+      if (!snapshot) continue;
+      const price = toNumOrZero(snapshot.latestTrade?.p ?? snapshot.latestQuote?.ap);
+      const prevClose = toNumOrZero(snapshot.prevDailyBar?.c ?? snapshot.dailyBar?.c);
+      let change24h = 0;
+      let changePercent24h = 0;
+      if (prevClose > 0 && price > 0) {
+        change24h = price - prevClose;
+        changePercent24h = (change24h / prevClose) * 100;
+      }
+      out.push({
+        symbol: sym,
+        price,
+        change24h,
+        changePercent24h,
+        volume24h: snapshot.dailyBar?.v ?? 0,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Fetch historical candles for a stock symbol and map them to the same shape
+   * Binance/Bybit return: { openTime, open, high, low, close, volume, closeTime }.
+   * Alpaca bars only expose the bar's start timestamp; closeTime is left equal
+   * to openTime because charts read openTime and Alpaca's discrete bars don't
+   * carry a separate end timestamp. startTime/endTime params are accepted but
+   * ignored by this wrapper for now — getStockBars computes its own start
+   * window from the requested limit and timeframe.
+   */
+  async getCandlestickData(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    interval: string,
+    limit: number,
+    _startTime?: number,
+    _endTime?: number,
+  ): Promise<
+    Array<{
+      openTime: number;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+      closeTime: number;
+    }>
+  > {
+    const bars = await this.getStockBars(apiKey, apiSecret, symbol, interval, limit);
+    return bars.map((b) => {
+      const openTime = new Date(b.t).getTime();
+      return {
+        openTime,
+        open: b.o,
+        high: b.h,
+        low: b.l,
+        close: b.c,
+        volume: b.v,
+        closeTime: openTime,
+      };
+    });
+  }
+
   private mapDataApiTimeframe(tf: string): string {
+    // Map Binance/Bybit-style interval strings to Alpaca's CamelCase form.
+    // Covers the full set Alpaca supports so price-performance, market-detail,
+    // and candle endpoints can request any timeframe without a second mapping.
     const m: Record<string, string> = {
-      '1d': '1Day', '4h': '4Hour', '1h': '1Hour', '15m': '15Min', '5m': '5Min', '1m': '1Min',
-      '1Day': '1Day', '4Hour': '4Hour', '1Hour': '1Hour', '15Min': '15Min', '5Min': '5Min', '1Min': '1Min',
+      '1m': '1Min', '5m': '5Min', '15m': '15Min', '30m': '30Min',
+      '1h': '1Hour', '2h': '2Hour', '4h': '4Hour', '6h': '6Hour', '8h': '8Hour', '12h': '12Hour',
+      '1d': '1Day', '1w': '1Week', '1M': '1Month',
+      // Identity mappings so an already-Alpaca-formatted string passes through.
+      '1Min': '1Min', '5Min': '5Min', '15Min': '15Min', '30Min': '30Min',
+      '1Hour': '1Hour', '2Hour': '2Hour', '4Hour': '4Hour', '6Hour': '6Hour', '8Hour': '8Hour', '12Hour': '12Hour',
+      '1Day': '1Day', '1Week': '1Week', '1Month': '1Month',
     };
     return m[tf] ?? tf ?? '1Day';
   }

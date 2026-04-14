@@ -3,6 +3,7 @@ import { ExchangesService } from '../exchanges.service';
 import { BinanceService } from '../integrations/binance.service';
 import { BinanceUSService } from '../integrations/binance-us.service';
 import { BybitService } from '../integrations/bybit.service';
+import { AlpacaService } from '../integrations/alpaca.service';
 import { CacheService } from './cache.service';
 import { CacheKeyManager } from './cache-key-manager';
 import { MarketService } from '../../market/market.service';
@@ -29,6 +30,7 @@ export class MarketDetailAggregatorService {
     private readonly binanceService: BinanceService,
     private readonly binanceUSService: BinanceUSService,
     private readonly bybitService: BybitService,
+    private readonly alpacaService: AlpacaService,
     private readonly cacheService: CacheService,
     private readonly marketService: MarketService,
   ) {}
@@ -84,7 +86,7 @@ export class MarketDetailAggregatorService {
       recentTradesResult,
     ] = await Promise.allSettled([
       // 1. Ticker
-      this.fetchTicker(exchangeName, symbol),
+      this.fetchTicker(exchangeName, symbol, connectionId),
       // 2. Multi-interval candles
       this.fetchMultiIntervalCandles(exchangeName, connectionId, symbol, intervals),
       // 3. Balance
@@ -207,9 +209,14 @@ export class MarketDetailAggregatorService {
 
   // ── Private helpers ──────────────────────────────────────
 
-  private async fetchTicker(exchangeName: string, symbol: string) {
+  private async fetchTicker(exchangeName: string, symbol: string, connectionId?: string) {
     if (exchangeName === 'bybit') {
       const tickers = await this.bybitService.getTickerPrices([symbol]);
+      return tickers[0] || null;
+    }
+    if (exchangeName === 'alpaca' && connectionId) {
+      const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+      const tickers = await this.alpacaService.getTickerPrices(apiKey, apiSecret, [symbol]);
       return tickers[0] || null;
     }
     if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
@@ -239,6 +246,10 @@ export class MarketDetailAggregatorService {
           async () => {
             if (exchangeName === 'bybit') {
               return this.bybitService.getCandlestickData(symbol, normalizedInterval, 100);
+            }
+            if (exchangeName === 'alpaca') {
+              const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+              return this.alpacaService.getCandlestickData(apiKey, apiSecret, symbol, interval, 100);
             }
             if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
               return this.binanceUSService.getCandlestickData(symbol, interval, 100);

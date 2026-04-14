@@ -728,18 +728,22 @@ export class ExchangesController {
       throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
     }
 
-    // Ticker prices are public, no need for API keys
-    // Route to the correct exchange service
+    // Route to the correct exchange service. Bybit and Binance ticker prices
+    // are public (no auth required). Alpaca's Data API requires the user's
+    // credentials, so we decrypt them on demand for the Alpaca branch.
     const exchangeName = connection.exchange.name.toLowerCase();
     let prices;
-    
+
     if (exchangeName === 'bybit') {
       prices = await this.bybitService.getTickerPrices([symbol]);
+    } else if (exchangeName === 'alpaca') {
+      const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+      prices = await this.alpacaService.getTickerPrices(apiKey, apiSecret, [symbol]);
     } else {
-      // Default to Binance
+      // Default to Binance (covers 'binance', 'binance.us', etc.)
       prices = await this.binanceService.getTickerPrices([symbol]);
     }
-    
+
     const price = prices[0] || null;
 
     return {
@@ -784,6 +788,13 @@ export class ExchangesController {
       async () => {
         if (exchangeName === 'bybit') {
           return this.bybitService.getCandlestickData(symbol, normalizedInterval, limitNum, startTimeNum, endTimeNum);
+        } else if (exchangeName === 'alpaca') {
+          // Alpaca bars require credentials. startTime/endTime are accepted
+          // by the wrapper but getStockBars computes its own window from the
+          // limit, so they're effectively ignored for Alpaca (consistent with
+          // how the existing /stock/:symbol/bars endpoint behaves).
+          const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+          return this.alpacaService.getCandlestickData(apiKey, apiSecret, symbol, interval, limitNum, startTimeNum, endTimeNum);
         } else {
           return this.binanceService.getCandlestickData(symbol, interval, limitNum, startTimeNum, endTimeNum);
         }
@@ -1036,7 +1047,7 @@ export class ExchangesController {
     // Parallel fetch: ticker + multi-interval candles + balance
     const [ticker, candlesByInterval, balance] = await Promise.all([
       // Ticker
-      this.fetchTicker(exchangeName, symbol),
+      this.fetchTicker(exchangeName, symbol, connectionId),
       // Multi-interval candles (parallel)
       this.fetchMultiIntervalCandles(exchangeName, connectionId, symbol, requestedIntervals),
       // Balance
@@ -1197,12 +1208,18 @@ export class ExchangesController {
   }
 
   /**
-   * Fetch ticker price from correct exchange
+   * Fetch ticker price from correct exchange. connectionId is only required
+   * for Alpaca (whose Data API requires auth); crypto branches can use the
+   * public endpoints and ignore it.
    */
-  private async fetchTicker(exchangeName: string, symbol: string) {
+  private async fetchTicker(exchangeName: string, symbol: string, connectionId?: string) {
     try {
       if (exchangeName === 'bybit') {
         const tickers = await this.bybitService.getTickerPrices([symbol]);
+        return tickers[0] || null;
+      } else if (exchangeName === 'alpaca' && connectionId) {
+        const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+        const tickers = await this.alpacaService.getTickerPrices(apiKey, apiSecret, [symbol]);
         return tickers[0] || null;
       } else if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
         const tickers = await this.binanceUSService.getTickerPrices([symbol]);
@@ -1239,6 +1256,9 @@ export class ExchangesController {
           async () => {
             if (exchangeName === 'bybit') {
               return this.bybitService.getCandlestickData(symbol, normalizedInterval, 100);
+            } else if (exchangeName === 'alpaca') {
+              const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+              return this.alpacaService.getCandlestickData(apiKey, apiSecret, symbol, interval, 100);
             } else if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
               return this.binanceUSService.getCandlestickData(symbol, interval, 100);
             } else {

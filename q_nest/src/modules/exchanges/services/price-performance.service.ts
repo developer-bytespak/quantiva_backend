@@ -3,6 +3,7 @@ import { ExchangesService } from '../exchanges.service';
 import { BinanceService } from '../integrations/binance.service';
 import { BinanceUSService } from '../integrations/binance-us.service';
 import { BybitService } from '../integrations/bybit.service';
+import { AlpacaService } from '../integrations/alpaca.service';
 import { CacheService } from './cache.service';
 import { CacheKeyManager } from './cache-key-manager';
 
@@ -23,6 +24,7 @@ export class PricePerformanceService {
     private readonly binanceService: BinanceService,
     private readonly binanceUSService: BinanceUSService,
     private readonly bybitService: BybitService,
+    private readonly alpacaService: AlpacaService,
     private readonly cacheService: CacheService,
   ) {}
 
@@ -49,7 +51,7 @@ export class PricePerformanceService {
       const entries = await Promise.all(
         configs.map(async (config) => {
           try {
-            const candles = await this.fetchCandles(exchangeName, symbol, config.interval, config.limit);
+            const candles = await this.fetchCandles(exchangeName, symbol, config.interval, config.limit, connectionId);
             return [config.key, this.calculatePerformance(candles, config.candleCount)] as const;
           } catch (error: any) {
             this.logger.warn(`Failed to calculate ${config.key} price performance for ${symbol}: ${error?.message}`);
@@ -65,11 +67,22 @@ export class PricePerformanceService {
     }, ttl);
   }
 
-  private async fetchCandles(exchangeName: string, symbol: string, interval: string, limit: number) {
+  private async fetchCandles(
+    exchangeName: string,
+    symbol: string,
+    interval: string,
+    limit: number,
+    connectionId?: string,
+  ) {
     const normalizedInterval = this.normalizeIntervalForExchange(exchangeName, interval);
 
     if (exchangeName === 'bybit') {
       return this.bybitService.getCandlestickData(symbol, normalizedInterval, limit);
+    }
+
+    if (exchangeName === 'alpaca' && connectionId) {
+      const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+      return this.alpacaService.getCandlestickData(apiKey, apiSecret, symbol, interval, limit);
     }
 
     if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
