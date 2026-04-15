@@ -11,6 +11,7 @@ export enum PlanTier {
   FREE = 'FREE',
   PRO = 'PRO',
   ELITE = 'ELITE',
+  ELITE_PLUS = 'ELITE_PLUS',
 }
 
 export enum BillingPeriod {
