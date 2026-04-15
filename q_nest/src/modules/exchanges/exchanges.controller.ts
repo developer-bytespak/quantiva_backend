@@ -33,6 +33,7 @@ import { CacheKeyManager } from './services/cache-key-manager';
 import { CacheHeadersInterceptor, CacheControl } from '../../common/interceptors/cache-headers.interceptor';
 import { MarketDetailAggregatorService } from './services/market-detail-aggregator.service';
 import { PricePerformanceService } from './services/price-performance.service';
+import { QueuedTradeService } from './services/queued-trade.service';
 import { ExchangeType } from '@prisma/client';
 import { ForbiddenException } from '@nestjs/common';
 import { MarketService } from '../market/market.service';
@@ -77,6 +78,7 @@ export class ExchangesController {
     private readonly fmpService: FmpService,
     private readonly tradeFeesService: TradeFeesService,
     private readonly qhqService: QhqTokenService,
+    private readonly queuedTradeService: QueuedTradeService,
   ) {}
 
   @Get()
@@ -850,20 +852,78 @@ export class ExchangesController {
       throw new ForbiddenException(permissionCheck.reason || 'Trading is not allowed');
     }
 
-    // Place order through service
-    const order = await this.exchangesService.placeOrder(
-      connectionId,
-      placeOrderDto.symbol,
-      placeOrderDto.side,
-      placeOrderDto.type,
-      placeOrderDto.quantity,
-      placeOrderDto.price,
-    );
+    // Place order through service. If this is a top-trade on an Alpaca
+    // connection and the market is closed, we catch the MARKET_CLOSED
+    // error and queue the trade instead of failing the request.
+    let order: any;
+    try {
+      order = await this.exchangesService.placeOrder(
+        connectionId,
+        placeOrderDto.symbol,
+        placeOrderDto.side,
+        placeOrderDto.type,
+        placeOrderDto.quantity,
+        placeOrderDto.price,
+      );
+    } catch (err: any) {
+      const body = err?.response?.data ?? err?.response ?? err?.getResponse?.() ?? null;
+      const errorCode = (body && typeof body === 'object' ? body.code : null) ||
+        (body && typeof body === 'object' && typeof body.message === 'object' ? body.message?.code : null);
+      const isMarketClosed = errorCode === 'MARKET_CLOSED';
+      const isTopTradeRequest = placeOrderDto.source === 'top_trade';
+
+      if (isMarketClosed && isTopTradeRequest) {
+        // Look up the connection to confirm it's Alpaca (queueing is Alpaca-only).
+        const connection = await this.exchangesService.getConnectionById(connectionId);
+        const exchangeName = (connection?.exchange?.name || '').toLowerCase();
+
+        if (exchangeName === 'alpaca' && user?.sub) {
+          const queued = await this.queuedTradeService.enqueue({
+            userId: user.sub,
+            connectionId,
+            symbol: placeOrderDto.symbol,
+            side: placeOrderDto.side,
+            orderType: placeOrderDto.type,
+            quantity: placeOrderDto.quantity,
+            limitPrice: placeOrderDto.price,
+            takeProfitPct: placeOrderDto.takeProfit,
+            stopLossPct: placeOrderDto.stopLoss,
+            source: placeOrderDto.source,
+          });
+
+          return {
+            success: true,
+            queued: true,
+            data: {
+              queueId: queued.id,
+              symbol: queued.symbol,
+              side: queued.side,
+              quantity: placeOrderDto.quantity,
+              takeProfitPct: queued.take_profit_pct,
+              stopLossPct: queued.stop_loss_pct,
+              queuedAt: queued.queued_at,
+              expiresAt: queued.expires_at,
+            },
+            message:
+              'Market is closed. Your trade is queued and will submit automatically at the next market open. You can cancel it from the queued trades section before then.',
+          };
+        }
+      }
+
+      // Not queueable — let the error bubble up to NestJS.
+      throw err;
+    }
 
     // ⚠️ IMPORTANT: Manual orders do NOT auto-place TP/SL
     // Only place TP/SL if explicitly requested via autoOco flag or source='top_trade'
     let ocoInfo: { orderListId?: number; takeProfitOrderId?: string; stopLossOrderId?: string; takeProfitPrice: number; stopLossPrice: number } | null = null;
     let ocoError: string | null = null;
+    // When set, the buy was accepted by Alpaca but hasn't filled yet
+    // (e.g. pre/post-market hours) — the race-retry loop exhausted before
+    // TP/SL could be placed. We persist the row in the queued-trades table
+    // with status='submitted' so the fill-watcher cron attaches TP/SL when
+    // the buy actually fills (hours later, at market open).
+    let delayedProtectionQueueId: string | null = null;
 
     try {
       const connection = await this.exchangesService.getConnectionById(connectionId);
@@ -1017,6 +1077,82 @@ export class ExchangesController {
     } catch (err: any) {
       ocoError = err?.message ?? 'TP/SL order failed';
       this.logger.error(`TP/SL failed: ${err?.message}`);
+
+      // If this was a top-trade on Alpaca and the buy is accepted-but-not-yet-filled,
+      // persist the row so the fill-watcher cron attaches TP/SL when the buy fills.
+      // This closes the pre/post-market gap where Alpaca accepts the buy but holds
+      // it until market open — hours beyond what our in-controller race retry can wait for.
+      try {
+        const isTopTradeForAlpacaBuy =
+          placeOrderDto.source === 'top_trade' &&
+          placeOrderDto.side === 'BUY' &&
+          order?.orderId;
+
+        if (isTopTradeForAlpacaBuy) {
+          const connection = await this.exchangesService.getConnectionById(connectionId);
+          const exchangeName = (connection?.exchange?.name || '').toLowerCase();
+          const buyStatus = String(order?.status || '').toUpperCase();
+          const buyIsPending = !['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED'].includes(buyStatus);
+
+          // For axios errors, err.message is generic ("Request failed with status
+          // code 403"). The actual Alpaca error text lives at err.response.data.message
+          // or err.response.data.reject_reason. Check all likely fields so the race
+          // detection is robust regardless of where Alpaca surfaced the error.
+          const alpacaMsg =
+            err?.response?.data?.message ??
+            err?.response?.data?.reject_reason ??
+            err?.message ??
+            '';
+          const errMsgLower = String(alpacaMsg).toLowerCase();
+          const status = err?.response?.status;
+          const isRaceExhausted =
+            // Explicit message-based race detection
+            errMsgLower.includes('insufficient qty') ||
+            errMsgLower.includes('insufficient quantity') ||
+            errMsgLower.includes('position not found') ||
+            errMsgLower.includes('no position') ||
+            errMsgLower.includes('may only sell positions') ||
+            errMsgLower.includes('you do not have any holdings') ||
+            // Defensive fallback: if the buy is still pending and the error
+            // is a 403/422 from Alpaca, treat as a race. The cron's fill-watcher
+            // will verify the actual buy state before placing protection, so a
+            // slightly over-eager persist here is safe — worst case the row
+            // gets marked 'failed' with a reason if the buy never fills.
+            ((status === 403 || status === 422) && buyIsPending);
+
+          this.logger.debug(
+            `[TP/SL catch] exchange=${exchangeName} orderId=${order?.orderId} ` +
+              `buyStatus=${buyStatus} buyIsPending=${buyIsPending} ` +
+              `status=${status} alpacaMsg="${alpacaMsg}" isRaceExhausted=${isRaceExhausted}`,
+          );
+
+          if (exchangeName === 'alpaca' && buyIsPending && isRaceExhausted && user?.sub) {
+            const tracked = await this.queuedTradeService.trackForDelayedProtection({
+              userId: user.sub,
+              connectionId,
+              symbol: placeOrderDto.symbol,
+              side: placeOrderDto.side,
+              orderType: placeOrderDto.type,
+              quantity: placeOrderDto.quantity,
+              limitPrice: placeOrderDto.price,
+              takeProfitPct: placeOrderDto.takeProfit,
+              stopLossPct: placeOrderDto.stopLoss,
+              source: placeOrderDto.source,
+              alpacaBuyOrderId: String(order.orderId),
+            });
+            delayedProtectionQueueId = tracked.id;
+            this.logger.log(
+              `Buy ${order.orderId} accepted but not filled; tracking for delayed TP/SL (queueId=${tracked.id})`,
+            );
+          }
+        }
+      } catch (trackErr: any) {
+        // Don't let tracking failures propagate — the user's buy is still placed.
+        // The ocoError already surfaces the original problem.
+        this.logger.warn(
+          `Failed to track delayed protection for buy ${order?.orderId}: ${trackErr?.message}`,
+        );
+      }
     }
 
     // Record platform trade fee only for Top Trades BUY executions.
@@ -1043,20 +1179,35 @@ export class ExchangesController {
       ).catch((err) => this.logger.warn(`QHQ trade reward failed: ${err.message}`));
     }
 
+    // When we tracked the row for delayed protection, tell the caller so the
+    // frontend can show "protection will be attached when your buy fills"
+    // instead of a scary "TP/SL failed" error. ocoError is preserved in the
+    // response for debugging but the UI should prefer the delayedProtection flag.
+    const hasDelayedProtection = !!delayedProtectionQueueId;
+
     return {
       success: true,
       data: order,
       ...(ocoInfo && { oco: ocoInfo }),
       ...(ocoError && { ocoError }),
+      ...(hasDelayedProtection && {
+        delayedProtection: {
+          queueId: delayedProtectionQueueId,
+          message:
+            'Your buy is accepted but has not filled yet (market pre/post-hours). Take-Profit and Stop-Loss will be attached automatically when the buy fills at market open.',
+        },
+      }),
       fee_preview: {
         fee_percent: 0.1,
         fee_amount_usd: order.status === 'FILLED' && order.price > 0
           ? (order.price * order.quantity * 0.001)
           : 0,
       },
-      message: ocoError
-        ? `Order placed successfully, but OCO order failed: ${ocoError}`
-        : 'Order placed successfully',
+      message: hasDelayedProtection
+        ? 'Order placed. Take-Profit and Stop-Loss will be attached automatically when the buy fills at market open.'
+        : ocoError
+          ? `Order placed successfully, but OCO order failed: ${ocoError}`
+          : 'Order placed successfully',
       last_updated: new Date().toISOString(),
     };
   }
@@ -1820,6 +1971,46 @@ export class ExchangesController {
       data: withdrawals,
       count: withdrawals.length,
       last_updated: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * List the current user's queued trades (trades that were clicked while
+   * the market was closed and are waiting for the next open). Populated by
+   * the MARKET_CLOSED handler in placeOrder above.
+   */
+  @Get('queued-trades')
+  async listQueuedTrades(@CurrentUser() user: TokenPayload) {
+    if (!user?.sub) {
+      throw new HttpException('User not authenticated', HttpStatus.UNAUTHORIZED);
+    }
+    const rows = await this.queuedTradeService.listForUser(user.sub);
+    return {
+      success: true,
+      data: rows,
+      count: rows.length,
+      last_updated: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Cancel a queued trade before it submits at market open. Only works
+   * while the row is still in `queued` status — once the buy has been
+   * submitted to Alpaca the user must cancel the live order instead.
+   */
+  @Delete('queued-trades/:queueId')
+  async cancelQueuedTrade(
+    @Param('queueId') queueId: string,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    if (!user?.sub) {
+      throw new HttpException('User not authenticated', HttpStatus.UNAUTHORIZED);
+    }
+    const canceled = await this.queuedTradeService.cancelByUser(queueId, user.sub);
+    return {
+      success: true,
+      data: canceled,
+      message: 'Queued trade canceled. It will not submit at market open.',
     };
   }
 }

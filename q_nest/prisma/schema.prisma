@@ -1864,3 +1864,47 @@ model contact_submissions {
   @@index([created_at])
   @@map("contact_submissions")
 }
+
+// Queue of top-trade orders that were clicked while the market was closed.
+// Populated when ExchangesController.placeOrder catches a MARKET_CLOSED
+// error on an Alpaca connection. A cron picks these up shortly after the
+// next market open, submits the buy via AlpacaService, polls until it fills,
+// then attaches the TP/SL using the stored percentages.
+model pending_queued_trades {
+  id                  String            @id @default(uuid()) @db.Uuid
+  user_id             String            @db.Uuid
+  connection_id       String            @db.Uuid
+  symbol              String            @db.VarChar(50)
+  side                String            @db.VarChar(10) // 'BUY' | 'SELL'
+  order_type          String            @default("MARKET") @db.VarChar(10)
+  quantity            Decimal           @db.Decimal(20, 8)
+  limit_price         Decimal?          @db.Decimal(20, 8)
+  take_profit_pct     Decimal?          @db.Decimal(10, 6) // e.g. 0.10 = 10%
+  stop_loss_pct       Decimal?          @db.Decimal(10, 6)
+  source              String            @default("top_trade") @db.VarChar(30)
+  status              QueuedTradeStatus @default(queued)
+  alpaca_buy_order_id String?           @db.VarChar(100)
+  tp_order_id         String?           @db.VarChar(100)
+  sl_order_id         String?           @db.VarChar(100)
+  failure_reason      String?           @db.Text
+  queued_at           DateTime          @default(now()) @db.Timestamp(6)
+  submitted_at        DateTime?         @db.Timestamp(6)
+  filled_at           DateTime?         @db.Timestamp(6)
+  canceled_at         DateTime?         @db.Timestamp(6)
+  expires_at          DateTime?         @db.Timestamp(6) // auto-expire stale queues
+
+  @@index([user_id])
+  @@index([connection_id])
+  @@index([status])
+  @@index([user_id, status])
+  @@map("pending_queued_trades")
+}
+
+enum QueuedTradeStatus {
+  queued // waiting for market open
+  submitted // buy posted to Alpaca, awaiting fill
+  filled // buy filled and TP/SL attached
+  canceled // user canceled before submission
+  expired // cron aged out (> expires_at)
+  failed // Alpaca rejected at submission or fill-watch
+}

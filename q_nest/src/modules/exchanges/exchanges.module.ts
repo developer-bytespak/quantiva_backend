@@ -11,6 +11,9 @@ import { AlpacaService } from './integrations/alpaca.service';
 import { CacheService } from './services/cache.service';
 import { MarketDetailAggregatorService } from './services/market-detail-aggregator.service';
 import { PricePerformanceService } from './services/price-performance.service';
+import { AlpacaOrphanCleanupService } from './services/alpaca-orphan-cleanup.service';
+import { QueuedTradeService } from './services/queued-trade.service';
+import { QueuedTradeCronService } from './services/queued-trade-cron.service';
 import { ConnectionOwnerGuard } from './guards/connection-owner.guard';
 import { BinanceUserWsService } from './services/binance-user-ws.service';
 import { PrismaModule } from '../../prisma/prisma.module';
@@ -45,6 +48,9 @@ import { QhqTokenModule } from '../qhq-token/qhq-token.module';
     CacheService,
     MarketDetailAggregatorService,
     PricePerformanceService,
+    AlpacaOrphanCleanupService,
+    QueuedTradeService,
+    QueuedTradeCronService,
     ConnectionOwnerGuard,
     BinanceUserWsService,
   ],

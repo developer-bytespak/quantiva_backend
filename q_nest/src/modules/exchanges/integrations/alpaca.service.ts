@@ -1,5 +1,17 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
+import { randomUUID } from 'crypto';
+
+/**
+ * client_order_id prefixes used to identify orders our backend placed
+ * automatically on behalf of the user (as opposed to manual orders the
+ * user placed themselves directly in Alpaca). The orphan-cleanup cron
+ * only cancels orders whose client_order_id starts with one of these
+ * prefixes — never touches user-placed orders.
+ */
+export const ALPACA_CLIENT_ID_TP_PREFIX = 'ta-tp-';
+export const ALPACA_CLIENT_ID_SL_PREFIX = 'ta-sl-';
+export const ALPACA_CLIENT_ID_TA_PREFIX = 'ta-';
 
 const DATA_API_BASE = 'https://data.alpaca.markets';
 
@@ -558,15 +570,23 @@ export class AlpacaService {
   ): Promise<string[]> {
     const alpacaSymbol = this.convertToAlpacaSymbol(symbol);
     const openOrders = await this.getOrders(apiKey, apiSecret, 'open', 500);
+    // Only cancel orders we placed (identified by the `ta-` client_order_id
+    // prefix). Orders the user placed directly in Alpaca lack this prefix
+    // and are never touched by our cleanup logic.
     const matches = (openOrders || []).filter((o: any) => {
       const sym = (o.symbol || '').toUpperCase();
       const side = (o.side || '').toLowerCase();
-      return sym === alpacaSymbol.toUpperCase() && side === 'sell';
+      const clientId = (o.client_order_id || '') as string;
+      return (
+        sym === alpacaSymbol.toUpperCase() &&
+        side === 'sell' &&
+        clientId.startsWith(ALPACA_CLIENT_ID_TA_PREFIX)
+      );
     });
     if (matches.length === 0) return [];
 
     this.logger.log(
-      `Canceling ${matches.length} orphan sell order(s) on ${alpacaSymbol} before placing new protection`,
+      `Canceling ${matches.length} auto-placed sell order(s) on ${alpacaSymbol} before placing new protection`,
     );
 
     const canceledIds: string[] = [];
@@ -612,36 +632,43 @@ export class AlpacaService {
       `Placing Alpaca protection: ${quantity} ${alpacaSymbol} TP=${takeProfitPrice} SL=${stopLossPrice}`,
     );
 
-    try {
-      const tpRes = await client.post(
-        '/v2/orders',
-        {
-          symbol: alpacaSymbol,
-          qty: quantity.toString(),
-          side: 'sell',
-          type: 'limit',
-          limit_price: takeProfitPrice.toString(),
-          time_in_force: 'gtc',
-        },
-        { headers },
-      );
+    // Tag each order with a client_order_id prefixed by `ta-tp-` / `ta-sl-`
+    // so the orphan-cleanup cron can identify orders we placed and avoid
+    // cancelling orders the user placed themselves directly in Alpaca.
+    const tpClientId = `${ALPACA_CLIENT_ID_TP_PREFIX}${randomUUID()}`;
+    const slClientId = `${ALPACA_CLIENT_ID_SL_PREFIX}${randomUUID()}`;
 
-      const slRes = await client.post(
-        '/v2/orders',
-        {
-          symbol: alpacaSymbol,
-          qty: quantity.toString(),
-          side: 'sell',
-          type: 'stop',
-          stop_price: stopLossPrice.toString(),
-          time_in_force: 'gtc',
-        },
-        { headers },
-      );
+    const tpBody = {
+      symbol: alpacaSymbol,
+      qty: quantity.toString(),
+      side: 'sell',
+      type: 'limit',
+      limit_price: takeProfitPrice.toString(),
+      time_in_force: 'gtc',
+      client_order_id: tpClientId,
+    };
+
+    const slBody = {
+      symbol: alpacaSymbol,
+      qty: quantity.toString(),
+      side: 'sell',
+      type: 'stop',
+      stop_price: stopLossPrice.toString(),
+      time_in_force: 'gtc',
+      client_order_id: slClientId,
+    };
+
+    try {
+      // Each leg retries independently on race errors ("insufficient qty",
+      // "position not found") so that if TP succeeds on the first attempt
+      // and SL hits the race, we retry only SL — we don't re-place TP and
+      // end up with a duplicate. See Issue 3 in ALPACA_TP_SL_ISSUES.md.
+      const tpRes = await this.postOrderWithRaceRetry(client, headers, tpBody, 'TP');
+      const slRes = await this.postOrderWithRaceRetry(client, headers, slBody, 'SL');
 
       return {
-        takeProfitOrderId: tpRes.data?.id || '',
-        stopLossOrderId: slRes.data?.id || '',
+        takeProfitOrderId: tpRes?.id || '',
+        stopLossOrderId: slRes?.id || '',
       };
     } catch (error: any) {
       this.logger.error(
@@ -650,6 +677,63 @@ export class AlpacaService {
       );
       throw error;
     }
+  }
+
+  /**
+   * POST an order with built-in retry for Alpaca's sub-second race condition
+   * where TP/SL placement arrives before the buy has fully settled. Retries
+   * only on known race-error phrases; real errors (insufficient buying power,
+   * market closed, etc.) bubble up immediately without retry so the user
+   * sees them fast. Max 3 attempts, 500ms backoff between attempts.
+   */
+  private async postOrderWithRaceRetry(
+    client: AxiosInstance,
+    headers: Record<string, string | undefined>,
+    body: Record<string, any>,
+    leg: 'TP' | 'SL',
+  ): Promise<any> {
+    const maxAttempts = 3;
+    const backoffMs = 500;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const res = await client.post('/v2/orders', body, { headers });
+        if (attempt > 1) {
+          this.logger.log(
+            `Alpaca protection ${leg} placed on retry attempt ${attempt} (race condition resolved)`,
+          );
+        }
+        return res.data;
+      } catch (err: any) {
+        const status = err?.response?.status;
+        const msg = ((err?.response?.data?.message ?? '') + '').toLowerCase();
+        const isRaceError =
+          (status === 403 || status === 422) &&
+          (msg.includes('insufficient qty') ||
+            msg.includes('insufficient quantity') ||
+            msg.includes('position not found') ||
+            msg.includes('no position') ||
+            msg.includes('may only sell positions you currently hold') ||
+            msg.includes('you do not have any holdings'));
+
+        if (isRaceError && attempt < maxAttempts) {
+          this.logger.warn(
+            `Alpaca protection ${leg} hit race condition (attempt ${attempt}/${maxAttempts}): ${msg}. Retrying in ${backoffMs}ms.`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+
+        // Either a non-race error (bubble up immediately so caller sees the
+        // real reason), or we've exhausted retries on a persistent race
+        // (caller's existing error-translation + ocoError fallback handles it).
+        throw err;
+      }
+    }
+
+    // Unreachable: either we returned on success or threw above. Included for
+    // TypeScript's control-flow analysis.
+    throw new Error(`Alpaca protection ${leg}: exhausted ${maxAttempts} attempts`);
   }
 
   /**
