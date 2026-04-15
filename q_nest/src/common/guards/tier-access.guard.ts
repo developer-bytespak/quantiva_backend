@@ -47,7 +47,12 @@ export class TierAccessGuard implements CanActivate {
       `Tier check: User ${userId} has ${userTier}, allowed: ${allowedTiers}`,
     );
 
-    if (!allowedTiers.includes(userTier)) {
+    // ELITE_PLUS is a superset of ELITE — if ELITE is allowed, ELITE_PLUS is too
+    const effectiveAllowed = allowedTiers.includes('ELITE')
+      ? [...allowedTiers, 'ELITE_PLUS']
+      : allowedTiers;
+
+    if (!effectiveAllowed.includes(userTier)) {
       throw new ForbiddenException(
         `This feature requires one of: ${allowedTiers.join(', ')}. You have ${userTier}.`,
       );
