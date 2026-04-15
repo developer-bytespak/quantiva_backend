@@ -47,6 +47,14 @@ export class SuperAdminManagementController {
     return this.superAdminManagementService.usersGrowthByMonth(query);
   }
 
+  @Get('users/lookup')
+  async lookupUser(@Query('email') email: string) {
+    if (!email?.trim()) {
+      return { found: false, is_us_user: false };
+    }
+    return this.superAdminManagementService.lookupUserByEmail(email.trim());
+  }
+
   @Get('vc-pool-admins')
   async listVcPoolAdmins() {
     return this.superAdminManagementService.listVcPoolAdmins();

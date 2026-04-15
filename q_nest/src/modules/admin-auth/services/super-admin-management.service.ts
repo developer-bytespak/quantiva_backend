@@ -1274,6 +1274,36 @@ export class SuperAdminManagementService {
 
   // ── Super Admin: Upgrade any user's subscription by email ──
 
+  async lookupUserByEmail(email: string) {
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const user = await this.prisma.users.findFirst({
+      where: { email: normalizedEmail },
+      select: {
+        user_id: true,
+        email: true,
+        username: true,
+        current_tier: true,
+        nationality: true,
+      },
+    });
+
+    if (!user) {
+      return { found: false, is_us_user: false };
+    }
+
+    const normalized = (user.nationality ?? '').toLowerCase().trim();
+    const isUsUser = ['us', 'usa', 'united states', 'united states of america'].includes(normalized);
+
+    return {
+      found: true,
+      is_us_user: isUsUser,
+      email: user.email,
+      username: user.username,
+      current_tier: user.current_tier,
+    };
+  }
+
   async adminUpgradeUserSubscription(data: {
     email: string;
     tier: PlanTier;
