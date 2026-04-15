@@ -14,6 +14,7 @@ import { SuperAdminListUsersDto } from '../dto/super-admin-list-users.dto';
 import { CreateVcPoolAdminDto } from '../dto/create-vc-pool-admin.dto';
 import { SuperAdminUnifiedFinanceDto } from '../dto/super-admin-unified-finance.dto';
 import { SuperAdminUsersGrowthDto } from '../dto/super-admin-users-growth.dto';
+import { SubscriptionsService, PlanTier, BillingPeriod } from '../../subscriptions/subscriptions.service';
 
 @Injectable()
 export class SuperAdminManagementService {
@@ -27,7 +28,10 @@ export class SuperAdminManagementService {
     'cancelled',
   ] as const;
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly subscriptionsService: SubscriptionsService,
+  ) {
     const apiKey = process.env.SENDGRID_API_KEY;
 
     if (apiKey) {
@@ -1265,6 +1269,123 @@ export class SuperAdminManagementService {
       default_admin_profit_fee_percent: dto.default_admin_profit_fee_percent,
       default_cancellation_fee_percent: dto.default_cancellation_fee_percent,
       default_payment_window_minutes: dto.default_payment_window_minutes,
+    };
+  }
+
+  // ── Super Admin: Upgrade any user's subscription by email ──
+
+  async lookupUserByEmail(email: string) {
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const user = await this.prisma.users.findFirst({
+      where: { email: normalizedEmail },
+      select: {
+        user_id: true,
+        email: true,
+        username: true,
+        current_tier: true,
+        nationality: true,
+      },
+    });
+
+    if (!user) {
+      return { found: false, is_us_user: false };
+    }
+
+    const normalized = (user.nationality ?? '').toLowerCase().trim();
+    const isUsUser = ['us', 'usa', 'united states', 'united states of america'].includes(normalized);
+
+    return {
+      found: true,
+      is_us_user: isUsUser,
+      email: user.email,
+      username: user.username,
+      current_tier: user.current_tier,
+    };
+  }
+
+  async adminUpgradeUserSubscription(data: {
+    email: string;
+    tier: PlanTier;
+    billing_period: BillingPeriod;
+  }) {
+    const normalizedEmail = data.email.toLowerCase().trim();
+
+    // 1. Find user by email
+    const user = await this.prisma.users.findFirst({
+      where: { email: normalizedEmail },
+      select: {
+        user_id: true,
+        email: true,
+        username: true,
+        full_name: true,
+        current_tier: true,
+      },
+    });
+
+    if (!user) {
+      throw new NotFoundException(`User with email "${normalizedEmail}" not found`);
+    }
+
+    // 2. Find the plan
+    const plan = await this.prisma.subscription_plans.findFirst({
+      where: { tier: data.tier, billing_period: data.billing_period },
+    });
+
+    if (!plan) {
+      throw new NotFoundException(
+        `Plan ${data.tier} (${data.billing_period}) not found in the database`,
+      );
+    }
+
+    // 3. Cancel any existing active subscriptions
+    const existingActive = await this.prisma.user_subscriptions.findMany({
+      where: { user_id: user.user_id, status: 'active' },
+    });
+
+    if (existingActive.length > 0) {
+      await this.prisma.user_subscriptions.updateMany({
+        where: { user_id: user.user_id, status: 'active' },
+        data: {
+          status: 'cancelled',
+          cancelled_at: new Date(),
+          auto_renew: false,
+        },
+      });
+    }
+
+    // 4. Create new subscription via SubscriptionsService (handles all logic)
+    const newSubscription = await this.subscriptionsService.createSubscription({
+      user_id: user.user_id,
+      plan_id: plan.plan_id,
+      status: 'active',
+      billing_provider: 'admin_override',
+      auto_renew: false,
+    });
+
+    this.logger.log(
+      `Super admin upgraded user ${user.email} to ${data.tier} (${data.billing_period}). Subscription ID: ${newSubscription.subscription_id}`,
+    );
+
+    return {
+      message: `User ${user.email} successfully upgraded to ${data.tier} (${data.billing_period})`,
+      user: {
+        user_id: user.user_id,
+        email: user.email,
+        username: user.username,
+        full_name: user.full_name,
+        previous_tier: user.current_tier,
+        new_tier: data.tier,
+      },
+      subscription: {
+        subscription_id: newSubscription.subscription_id,
+        tier: newSubscription.tier,
+        billing_period: newSubscription.billing_period,
+        status: newSubscription.status,
+        current_period_start: newSubscription.current_period_start,
+        current_period_end: newSubscription.current_period_end,
+        billing_provider: newSubscription.billing_provider,
+      },
     };
   }
 }
