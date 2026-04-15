@@ -33,6 +33,7 @@ import { CacheKeyManager } from './services/cache-key-manager';
 import { CacheHeadersInterceptor, CacheControl } from '../../common/interceptors/cache-headers.interceptor';
 import { MarketDetailAggregatorService } from './services/market-detail-aggregator.service';
 import { PricePerformanceService } from './services/price-performance.service';
+import { QueuedTradeService } from './services/queued-trade.service';
 import { ExchangeType } from '@prisma/client';
 import { ForbiddenException } from '@nestjs/common';
 import { MarketService } from '../market/market.service';
@@ -77,6 +78,7 @@ export class ExchangesController {
     private readonly fmpService: FmpService,
     private readonly tradeFeesService: TradeFeesService,
     private readonly qhqService: QhqTokenService,
+    private readonly queuedTradeService: QueuedTradeService,
   ) {}
 
   @Get()
@@ -850,15 +852,67 @@ export class ExchangesController {
       throw new ForbiddenException(permissionCheck.reason || 'Trading is not allowed');
     }
 
-    // Place order through service
-    const order = await this.exchangesService.placeOrder(
-      connectionId,
-      placeOrderDto.symbol,
-      placeOrderDto.side,
-      placeOrderDto.type,
-      placeOrderDto.quantity,
-      placeOrderDto.price,
-    );
+    // Place order through service. If this is a top-trade on an Alpaca
+    // connection and the market is closed, we catch the MARKET_CLOSED
+    // error and queue the trade instead of failing the request.
+    let order: any;
+    try {
+      order = await this.exchangesService.placeOrder(
+        connectionId,
+        placeOrderDto.symbol,
+        placeOrderDto.side,
+        placeOrderDto.type,
+        placeOrderDto.quantity,
+        placeOrderDto.price,
+      );
+    } catch (err: any) {
+      const body = err?.response?.data ?? err?.response ?? err?.getResponse?.() ?? null;
+      const errorCode = (body && typeof body === 'object' ? body.code : null) ||
+        (body && typeof body === 'object' && typeof body.message === 'object' ? body.message?.code : null);
+      const isMarketClosed = errorCode === 'MARKET_CLOSED';
+      const isTopTradeRequest = placeOrderDto.source === 'top_trade';
+
+      if (isMarketClosed && isTopTradeRequest) {
+        // Look up the connection to confirm it's Alpaca (queueing is Alpaca-only).
+        const connection = await this.exchangesService.getConnectionById(connectionId);
+        const exchangeName = (connection?.exchange?.name || '').toLowerCase();
+
+        if (exchangeName === 'alpaca' && user?.sub) {
+          const queued = await this.queuedTradeService.enqueue({
+            userId: user.sub,
+            connectionId,
+            symbol: placeOrderDto.symbol,
+            side: placeOrderDto.side,
+            orderType: placeOrderDto.type,
+            quantity: placeOrderDto.quantity,
+            limitPrice: placeOrderDto.price,
+            takeProfitPct: placeOrderDto.takeProfit,
+            stopLossPct: placeOrderDto.stopLoss,
+            source: placeOrderDto.source,
+          });
+
+          return {
+            success: true,
+            queued: true,
+            data: {
+              queueId: queued.id,
+              symbol: queued.symbol,
+              side: queued.side,
+              quantity: placeOrderDto.quantity,
+              takeProfitPct: queued.take_profit_pct,
+              stopLossPct: queued.stop_loss_pct,
+              queuedAt: queued.queued_at,
+              expiresAt: queued.expires_at,
+            },
+            message:
+              'Market is closed. Your trade is queued and will submit automatically at the next market open. You can cancel it from the queued trades section before then.',
+          };
+        }
+      }
+
+      // Not queueable — let the error bubble up to NestJS.
+      throw err;
+    }
 
     // ⚠️ IMPORTANT: Manual orders do NOT auto-place TP/SL
     // Only place TP/SL if explicitly requested via autoOco flag or source='top_trade'
@@ -1820,6 +1874,46 @@ export class ExchangesController {
       data: withdrawals,
       count: withdrawals.length,
       last_updated: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * List the current user's queued trades (trades that were clicked while
+   * the market was closed and are waiting for the next open). Populated by
+   * the MARKET_CLOSED handler in placeOrder above.
+   */
+  @Get('queued-trades')
+  async listQueuedTrades(@CurrentUser() user: TokenPayload) {
+    if (!user?.sub) {
+      throw new HttpException('User not authenticated', HttpStatus.UNAUTHORIZED);
+    }
+    const rows = await this.queuedTradeService.listForUser(user.sub);
+    return {
+      success: true,
+      data: rows,
+      count: rows.length,
+      last_updated: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Cancel a queued trade before it submits at market open. Only works
+   * while the row is still in `queued` status — once the buy has been
+   * submitted to Alpaca the user must cancel the live order instead.
+   */
+  @Delete('queued-trades/:queueId')
+  async cancelQueuedTrade(
+    @Param('queueId') queueId: string,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    if (!user?.sub) {
+      throw new HttpException('User not authenticated', HttpStatus.UNAUTHORIZED);
+    }
+    const canceled = await this.queuedTradeService.cancelByUser(queueId, user.sub);
+    return {
+      success: true,
+      data: canceled,
+      message: 'Queued trade canceled. It will not submit at market open.',
     };
   }
 }
