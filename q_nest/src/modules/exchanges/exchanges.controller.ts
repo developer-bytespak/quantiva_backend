@@ -728,18 +728,22 @@ export class ExchangesController {
       throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
     }
 
-    // Ticker prices are public, no need for API keys
-    // Route to the correct exchange service
+    // Route to the correct exchange service. Bybit and Binance ticker prices
+    // are public (no auth required). Alpaca's Data API requires the user's
+    // credentials, so we decrypt them on demand for the Alpaca branch.
     const exchangeName = connection.exchange.name.toLowerCase();
     let prices;
-    
+
     if (exchangeName === 'bybit') {
       prices = await this.bybitService.getTickerPrices([symbol]);
+    } else if (exchangeName === 'alpaca') {
+      const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+      prices = await this.alpacaService.getTickerPrices(apiKey, apiSecret, [symbol]);
     } else {
-      // Default to Binance
+      // Default to Binance (covers 'binance', 'binance.us', etc.)
       prices = await this.binanceService.getTickerPrices([symbol]);
     }
-    
+
     const price = prices[0] || null;
 
     return {
@@ -784,6 +788,13 @@ export class ExchangesController {
       async () => {
         if (exchangeName === 'bybit') {
           return this.bybitService.getCandlestickData(symbol, normalizedInterval, limitNum, startTimeNum, endTimeNum);
+        } else if (exchangeName === 'alpaca') {
+          // Alpaca bars require credentials. startTime/endTime are accepted
+          // by the wrapper but getStockBars computes its own window from the
+          // limit, so they're effectively ignored for Alpaca (consistent with
+          // how the existing /stock/:symbol/bars endpoint behaves).
+          const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+          return this.alpacaService.getCandlestickData(apiKey, apiSecret, symbol, interval, limitNum, startTimeNum, endTimeNum);
         } else {
           return this.binanceService.getCandlestickData(symbol, interval, limitNum, startTimeNum, endTimeNum);
         }
@@ -859,6 +870,7 @@ export class ExchangesController {
       const exchangeName = (connection?.exchange?.name || '').toLowerCase();
       const isBinance = exchangeName === 'binance' || exchangeName === 'binance.us' || exchangeName === 'binanceus';
       const isBybit = exchangeName === 'bybit';
+      const isAlpaca = exchangeName === 'alpaca';
 
       const isTopTrade = placeOrderDto.source === 'top_trade';
 
@@ -870,6 +882,24 @@ export class ExchangesController {
           effectivePrice = tickers[0]?.price || 0;
         } catch {
           effectivePrice = 0;
+        }
+      }
+
+      // Alpaca market orders often return filled_avg_price=null for the first
+      // few moments after submission. Fetch the live stock snapshot to compute
+      // TP/SL strikes. Crypto symbols (containing /) are skipped because we
+      // don't have a public Alpaca crypto price helper yet — they fall through
+      // the shouldPlaceProtection guard and report no ocoInfo.
+      if (isAlpaca && (!effectivePrice || effectivePrice <= 0) && placeOrderDto.type === 'MARKET') {
+        const isCryptoSym = placeOrderDto.symbol.includes('/');
+        if (!isCryptoSym) {
+          try {
+            const { apiKey: ak, apiSecret: as } = await this.exchangesService.getDecryptedCredentials(connectionId);
+            const snapshot = await this.alpacaService.getStockSnapshot(ak, as, placeOrderDto.symbol);
+            effectivePrice = snapshot?.price || 0;
+          } catch {
+            effectivePrice = 0;
+          }
         }
       }
 
@@ -921,6 +951,63 @@ export class ExchangesController {
           );
           ocoInfo = { takeProfitOrderId: bracket.takeProfitOrderId, stopLossOrderId: bracket.stopLossOrderId, takeProfitPrice, stopLossPrice };
           this.logger.log(`${orderSource} ✅ Bracket placed! TP=${bracket.takeProfitOrderId} SL=${bracket.stopLossOrderId}`);
+        } else if (isAlpaca) {
+          // Alpaca protection: two independent sell orders (LIMIT TP + STOP SL).
+          // Alpaca's native bracket order is for atomic entry+TP+SL and cannot
+          // attach to an already-filled position, so we place two regular
+          // sell orders — same pattern as Bybit above.
+          this.logger.log(
+            `${orderSource} AUTO-Placing Alpaca protection: ${order.symbol} qty=${order.quantity} TP=${takeProfitPrice} SL=${stopLossPrice}`,
+          );
+
+          // Fractional quantities are guaranteed whole shares at this point
+          // because the frontend restricts Alpaca buys to integer share
+          // counts (product decision). Math.floor is a defensive belt-and-
+          // suspenders in case a future caller slips a fractional through.
+          const protectionQty = Math.floor(order.quantity);
+
+          if (protectionQty <= 0) {
+            throw new Error(
+              `Cannot place Alpaca protection: quantity ${order.quantity} floors to 0 whole shares ` +
+              `(Alpaca LIMIT/STOP orders require whole shares for stocks)`,
+            );
+          }
+
+          const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+
+          // Orphan cleanup: if the user's previous auto-trade on this symbol
+          // had the SL fire (closing the position) but the TP never canceled,
+          // that stale TP would otherwise block the new buy with a wash-trade
+          // error. Clear every open sell order on this symbol before placing
+          // new protection. Failures here are logged but don't block placement.
+          const canceledOrphans = await this.alpacaService.cancelOpenSellOrdersForSymbol(
+            apiKey,
+            apiSecret,
+            order.symbol || placeOrderDto.symbol,
+          );
+          if (canceledOrphans.length > 0) {
+            this.logger.log(
+              `${orderSource} Canceled ${canceledOrphans.length} orphan sell order(s) on ${order.symbol} before placing new protection`,
+            );
+          }
+
+          const protection = await this.alpacaService.placeProtectionOrders(
+            apiKey,
+            apiSecret,
+            order.symbol || placeOrderDto.symbol,
+            protectionQty,
+            takeProfitPrice,
+            stopLossPrice,
+          );
+          ocoInfo = {
+            takeProfitOrderId: protection.takeProfitOrderId,
+            stopLossOrderId: protection.stopLossOrderId,
+            takeProfitPrice,
+            stopLossPrice,
+          };
+          this.logger.log(
+            `${orderSource} ✅ Alpaca protection placed! TP=${protection.takeProfitOrderId} SL=${protection.stopLossOrderId}`,
+          );
         }
       } else if (placeOrderDto.side === 'BUY' && !shouldPlaceProtection) {
         this.logger.log(
@@ -1036,7 +1123,7 @@ export class ExchangesController {
     // Parallel fetch: ticker + multi-interval candles + balance
     const [ticker, candlesByInterval, balance] = await Promise.all([
       // Ticker
-      this.fetchTicker(exchangeName, symbol),
+      this.fetchTicker(exchangeName, symbol, connectionId),
       // Multi-interval candles (parallel)
       this.fetchMultiIntervalCandles(exchangeName, connectionId, symbol, requestedIntervals),
       // Balance
@@ -1197,12 +1284,18 @@ export class ExchangesController {
   }
 
   /**
-   * Fetch ticker price from correct exchange
+   * Fetch ticker price from correct exchange. connectionId is only required
+   * for Alpaca (whose Data API requires auth); crypto branches can use the
+   * public endpoints and ignore it.
    */
-  private async fetchTicker(exchangeName: string, symbol: string) {
+  private async fetchTicker(exchangeName: string, symbol: string, connectionId?: string) {
     try {
       if (exchangeName === 'bybit') {
         const tickers = await this.bybitService.getTickerPrices([symbol]);
+        return tickers[0] || null;
+      } else if (exchangeName === 'alpaca' && connectionId) {
+        const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+        const tickers = await this.alpacaService.getTickerPrices(apiKey, apiSecret, [symbol]);
         return tickers[0] || null;
       } else if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
         const tickers = await this.binanceUSService.getTickerPrices([symbol]);
@@ -1239,6 +1332,9 @@ export class ExchangesController {
           async () => {
             if (exchangeName === 'bybit') {
               return this.bybitService.getCandlestickData(symbol, normalizedInterval, 100);
+            } else if (exchangeName === 'alpaca') {
+              const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+              return this.alpacaService.getCandlestickData(apiKey, apiSecret, symbol, interval, 100);
             } else if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
               return this.binanceUSService.getCandlestickData(symbol, interval, 100);
             } else {

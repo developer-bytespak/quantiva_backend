@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 
 const DATA_API_BASE = 'https://data.alpaca.markets';
@@ -214,15 +214,23 @@ export class AlpacaService {
   }
 
   /**
-   * Get orders with optional filters
+   * Get orders with optional filters. Alpaca's /v2/orders endpoint accepts
+   * status='open' | 'closed' | 'all' and a limit up to 500. Default limit
+   * stays at 100 for backwards compatibility with existing callers.
    */
-  async getOrders(apiKey?: string, apiSecret?: string, status = 'open'): Promise<any[]> {
+  async getOrders(
+    apiKey?: string,
+    apiSecret?: string,
+    status: 'open' | 'closed' | 'all' = 'open',
+    limit = 100,
+  ): Promise<any[]> {
     const client = this.getClientForKey(apiKey);
     const res = await client.get('/v2/orders', {
       headers: this.getAuthHeaders(apiKey, apiSecret),
       params: {
         status,
-        limit: 100,
+        limit: Math.min(Math.max(limit, 1), 500),
+        direction: 'desc',
       },
     });
     return res.data || [];
@@ -297,6 +305,134 @@ export class AlpacaService {
       };
     } catch (error: any) {
       this.logger.error(`Error placing order: ${error.message}`, error?.response?.data);
+
+      // Translate Alpaca API errors into clear HttpExceptions so the frontend
+      // gets actionable messages instead of opaque 500s. Match by message text
+      // rather than numeric codes — Alpaca's codes are not well-documented and
+      // may change. The fallback at the end re-throws the original error so
+      // unknown failures still bubble up unchanged.
+      const httpStatus = error?.response?.status;
+      const data = error?.response?.data;
+      if (httpStatus && data && typeof data === 'object') {
+        const alpacaMessage: string = (data.message || '').toString();
+        const lower = alpacaMessage.toLowerCase();
+
+        if (lower.includes('wash trade')) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'WASH_TRADE_BLOCKED',
+              message:
+                'An opposite-side order on this symbol is still active. Most often this means a previous buy has not finished filling yet. Wait for it to fill, or cancel the existing order, then retry.',
+              alpacaMessage,
+              existingOrderId: data.existing_order_id,
+            },
+            HttpStatus.CONFLICT,
+          );
+        }
+
+        // Sell rejected because Alpaca does not yet see a position to sell.
+        // Common cause: the buy that created the position has not finished
+        // filling, so the shares are not available to sell yet.
+        if (
+          lower.includes('position not found') ||
+          lower.includes('no position') ||
+          lower.includes('may only sell positions you currently hold') ||
+          lower.includes('you do not have any holdings')
+        ) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'POSITION_NOT_AVAILABLE',
+              message:
+                'You cannot sell this symbol yet. The buy that creates this position has not finished filling. Wait a few seconds and retry, or check the order status.',
+              alpacaMessage,
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+
+        if (lower.includes('insufficient qty') || lower.includes('insufficient quantity')) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'INSUFFICIENT_QUANTITY',
+              message:
+                'Not enough shares available to sell. Either the buy has not finished filling, the shares are held by an existing TP/SL order, or you do not own this many shares.',
+              alpacaMessage,
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+
+        if (
+          lower.includes('insufficient buying power') ||
+          lower.includes('insufficient day trading buying power')
+        ) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'INSUFFICIENT_BUYING_POWER',
+              message: 'Not enough buying power to place this order.',
+              alpacaMessage,
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+
+        if (lower.includes('pattern day') || lower.includes('pdt')) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'PDT_RESTRICTED',
+              message:
+                'Pattern Day Trader rules block this trade. Account equity is below $25,000.',
+              alpacaMessage,
+            },
+            HttpStatus.FORBIDDEN,
+          );
+        }
+
+        if (
+          lower.includes('market is closed') ||
+          lower.includes('market closed') ||
+          lower.includes('extended hours')
+        ) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'MARKET_CLOSED',
+              message:
+                'The market is currently closed for this symbol. Try again during regular trading hours.',
+              alpacaMessage,
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+
+        if (httpStatus === 422) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'INVALID_ORDER',
+              message: alpacaMessage || 'Order validation failed.',
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+
+        if (httpStatus === 403) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'ALPACA_FORBIDDEN',
+              message: alpacaMessage || 'Alpaca rejected the order.',
+            },
+            HttpStatus.FORBIDDEN,
+          );
+        }
+      }
+
       throw error;
     }
   }
@@ -379,6 +515,213 @@ export class AlpacaService {
     stopLossPrice: number,
   ): Promise<any> {
     return this.placeBracketOrder(symbol, side, quantity, takeProfitPrice, stopLossPrice);
+  }
+
+  /**
+   * Cancel a single order by ID. Used for orphan cleanup and manual cancels.
+   * Returns silently on 404/422 ("order already finalized") — if the order is
+   * already filled or canceled, the cleanup is effectively a no-op.
+   */
+  async cancelOrder(apiKey: string, apiSecret: string, orderId: string): Promise<void> {
+    if (!orderId) return;
+    const client = this.getClientForKey(apiKey);
+    try {
+      await client.delete(`/v2/orders/${orderId}`, {
+        headers: this.getAuthHeaders(apiKey, apiSecret),
+      });
+      this.logger.log(`Alpaca order ${orderId} canceled`);
+    } catch (error: any) {
+      const status = error?.response?.status;
+      if (status === 404 || status === 422) {
+        this.logger.debug(
+          `Alpaca order ${orderId} cancel skipped (status ${status}): already finalized`,
+        );
+        return;
+      }
+      this.logger.warn(`Alpaca cancelOrder ${orderId} failed: ${error?.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Orphan cleanup helper: cancel every OPEN sell order on a given symbol.
+   * Used by the top-trade auto-protection flow to clear stale TP/SL legs
+   * before attaching new ones. If a user had a previous auto-trade where the
+   * Stop-Loss fired (closing the position) but the Take-Profit was never
+   * canceled, we'd otherwise reject the next buy with a wash-trade error.
+   * Returns the list of order IDs that were canceled.
+   */
+  async cancelOpenSellOrdersForSymbol(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+  ): Promise<string[]> {
+    const alpacaSymbol = this.convertToAlpacaSymbol(symbol);
+    const openOrders = await this.getOrders(apiKey, apiSecret, 'open', 500);
+    const matches = (openOrders || []).filter((o: any) => {
+      const sym = (o.symbol || '').toUpperCase();
+      const side = (o.side || '').toLowerCase();
+      return sym === alpacaSymbol.toUpperCase() && side === 'sell';
+    });
+    if (matches.length === 0) return [];
+
+    this.logger.log(
+      `Canceling ${matches.length} orphan sell order(s) on ${alpacaSymbol} before placing new protection`,
+    );
+
+    const canceledIds: string[] = [];
+    for (const o of matches) {
+      try {
+        await this.cancelOrder(apiKey, apiSecret, o.id);
+        canceledIds.push(o.id);
+      } catch (err: any) {
+        this.logger.warn(
+          `Failed to cancel orphan order ${o.id} on ${alpacaSymbol}: ${err?.message}`,
+        );
+      }
+    }
+    return canceledIds;
+  }
+
+  /**
+   * Attach TP/SL protection to an existing position by placing two independent
+   * sell orders: a LIMIT sell at takeProfitPrice and a STOP sell at
+   * stopLossPrice. Both are GTC.
+   *
+   * Why not use placeBracketOrder? Alpaca's order_class='bracket' is for
+   * atomic entry+TP+SL submission and cannot attach to an already-filled
+   * position. Bybit has the same constraint and uses two separate sells too.
+   *
+   * Stocks require whole-share quantities for LIMIT/STOP orders, so callers
+   * must floor fractional positions before invoking this method (or pass the
+   * exact quantity for crypto symbols, which support fractionals).
+   */
+  async placeProtectionOrders(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    quantity: number,
+    takeProfitPrice: number,
+    stopLossPrice: number,
+  ): Promise<{ takeProfitOrderId: string; stopLossOrderId: string }> {
+    const alpacaSymbol = this.convertToAlpacaSymbol(symbol);
+    const client = this.getClientForKey(apiKey);
+    const headers = this.getAuthHeaders(apiKey, apiSecret);
+
+    this.logger.log(
+      `Placing Alpaca protection: ${quantity} ${alpacaSymbol} TP=${takeProfitPrice} SL=${stopLossPrice}`,
+    );
+
+    try {
+      const tpRes = await client.post(
+        '/v2/orders',
+        {
+          symbol: alpacaSymbol,
+          qty: quantity.toString(),
+          side: 'sell',
+          type: 'limit',
+          limit_price: takeProfitPrice.toString(),
+          time_in_force: 'gtc',
+        },
+        { headers },
+      );
+
+      const slRes = await client.post(
+        '/v2/orders',
+        {
+          symbol: alpacaSymbol,
+          qty: quantity.toString(),
+          side: 'sell',
+          type: 'stop',
+          stop_price: stopLossPrice.toString(),
+          time_in_force: 'gtc',
+        },
+        { headers },
+      );
+
+      return {
+        takeProfitOrderId: tpRes.data?.id || '',
+        stopLossOrderId: slRes.data?.id || '',
+      };
+    } catch (error: any) {
+      this.logger.error(
+        `Error placing Alpaca protection: ${error.message}`,
+        error?.response?.data,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Fetch recent trades for a stock symbol from Alpaca's Data API and map
+   * them to the RecentTradeDto shape used by the unified /trades/:symbol
+   * endpoint: { id, price, quantity, time, isBuyerMaker }. Alpaca doesn't
+   * expose which side was the maker on retail data, so isBuyerMaker is
+   * always false — frontends that use this for ticker-tape style display
+   * still get price/size/timestamp correctly.
+   */
+  async getRecentTrades(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    limit: number = 50,
+  ): Promise<
+    Array<{
+      id: string;
+      price: number;
+      quantity: number;
+      time: number;
+      isBuyerMaker: boolean;
+    }>
+  > {
+    const client = this.getDataApiClient(apiKey, apiSecret);
+    const sym = symbol.toUpperCase();
+    const requestLimit = Math.min(Math.max(limit, 1), 10000);
+    const res = await client.get<{
+      trades?: Array<{ t: string; x?: string; p: number; s: number; c?: string[]; i?: number; z?: string }>;
+    }>(`/v2/stocks/${sym}/trades`, { params: { limit: requestLimit, feed: 'iex' } });
+    const trades = res.data?.trades ?? [];
+    return trades.map((t, idx) => ({
+      id: String(t.i ?? idx),
+      price: Number(t.p) || 0,
+      quantity: Number(t.s) || 0,
+      time: t.t ? new Date(t.t).getTime() : Date.now(),
+      isBuyerMaker: false,
+    }));
+  }
+
+  /**
+   * True for any symbol that looks like a crypto trade on the Alpaca side.
+   * Used to block crypto orders on Alpaca connections in the user-initiated
+   * unified flow (ExchangesService.placeOrder). NOT applied inside this
+   * service's placeOrder so that the strategies paper-trading flow — which
+   * calls AlpacaService.placeOrder directly with env-configured keys — can
+   * still exercise Alpaca's supported cryptos on its shared paper account.
+   *
+   * Matches:
+   *  - Slash-separated symbols like "BTC/USD", "ETH/USDT"
+   *  - Binance-style crypto quotes: "BTCUSDT", "ETHUSDC"
+   *  - Bare base symbols in the ALPACA_SUPPORTED_CRYPTO list: "BTC", "ETH"
+   *  - Base/USD forms where base is in the crypto list: "BTCUSD"
+   *
+   * Does NOT match regular stock tickers like "AAPL", "KO", "MSFT", "BRK.B".
+   */
+  isAlpacaCryptoSymbol(symbol: string): boolean {
+    if (!symbol) return false;
+    const upper = symbol.toUpperCase().trim();
+
+    if (upper.includes('/')) return true;
+    if (upper.endsWith('USDT') || upper.endsWith('USDC')) return true;
+
+    const cryptoSet = new Set(ALPACA_SUPPORTED_CRYPTO);
+    if (cryptoSet.has(upper)) return true;
+
+    if (upper.endsWith('USD')) {
+      const base = upper.slice(0, -3);
+      if (cryptoSet.has(base)) return true;
+    }
+
+    return false;
   }
 
   /**
@@ -542,10 +885,116 @@ export class AlpacaService {
     return bars.length <= limit ? bars : bars.slice(-limit);
   }
 
+  /**
+   * Fetch tickers for one or more stock symbols and map each to the same shape
+   * Binance and Bybit return: { symbol, price, change24h, changePercent24h, volume24h }.
+   * This lets the unified controller call this method from its Alpaca branch
+   * without any shape adaptation downstream. Alpaca's Data API requires
+   * credentials even for "public" market data, so apiKey/apiSecret are required.
+   */
+  async getTickerPrices(
+    apiKey: string,
+    apiSecret: string,
+    symbols: string[],
+  ): Promise<
+    Array<{
+      symbol: string;
+      price: number;
+      change24h: number;
+      changePercent24h: number;
+      volume24h: number;
+    }>
+  > {
+    if (!symbols || symbols.length === 0) return [];
+    const upperSymbols = symbols.map((s) => s.toUpperCase());
+    const client = this.getDataApiClient(apiKey, apiSecret);
+    const res = await client.get<Record<string, AlpacaSnapshot>>('/v2/stocks/snapshots', {
+      params: { symbols: upperSymbols.join(','), feed: 'iex' },
+    });
+    const out: Array<{
+      symbol: string;
+      price: number;
+      change24h: number;
+      changePercent24h: number;
+      volume24h: number;
+    }> = [];
+    for (const sym of upperSymbols) {
+      const snapshot = res.data?.[sym];
+      if (!snapshot) continue;
+      const price = toNumOrZero(snapshot.latestTrade?.p ?? snapshot.latestQuote?.ap);
+      const prevClose = toNumOrZero(snapshot.prevDailyBar?.c ?? snapshot.dailyBar?.c);
+      let change24h = 0;
+      let changePercent24h = 0;
+      if (prevClose > 0 && price > 0) {
+        change24h = price - prevClose;
+        changePercent24h = (change24h / prevClose) * 100;
+      }
+      out.push({
+        symbol: sym,
+        price,
+        change24h,
+        changePercent24h,
+        volume24h: snapshot.dailyBar?.v ?? 0,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Fetch historical candles for a stock symbol and map them to the same shape
+   * Binance/Bybit return: { openTime, open, high, low, close, volume, closeTime }.
+   * Alpaca bars only expose the bar's start timestamp; closeTime is left equal
+   * to openTime because charts read openTime and Alpaca's discrete bars don't
+   * carry a separate end timestamp. startTime/endTime params are accepted but
+   * ignored by this wrapper for now — getStockBars computes its own start
+   * window from the requested limit and timeframe.
+   */
+  async getCandlestickData(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+    interval: string,
+    limit: number,
+    _startTime?: number,
+    _endTime?: number,
+  ): Promise<
+    Array<{
+      openTime: number;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+      closeTime: number;
+    }>
+  > {
+    const bars = await this.getStockBars(apiKey, apiSecret, symbol, interval, limit);
+    return bars.map((b) => {
+      const openTime = new Date(b.t).getTime();
+      return {
+        openTime,
+        open: b.o,
+        high: b.h,
+        low: b.l,
+        close: b.c,
+        volume: b.v,
+        closeTime: openTime,
+      };
+    });
+  }
+
   private mapDataApiTimeframe(tf: string): string {
+    // Map Binance/Bybit-style interval strings to Alpaca's CamelCase form.
+    // Covers the full set Alpaca supports so price-performance, market-detail,
+    // and candle endpoints can request any timeframe without a second mapping.
     const m: Record<string, string> = {
-      '1d': '1Day', '4h': '4Hour', '1h': '1Hour', '15m': '15Min', '5m': '5Min', '1m': '1Min',
-      '1Day': '1Day', '4Hour': '4Hour', '1Hour': '1Hour', '15Min': '15Min', '5Min': '5Min', '1Min': '1Min',
+      '1m': '1Min', '5m': '5Min', '15m': '15Min', '30m': '30Min',
+      '1h': '1Hour', '2h': '2Hour', '4h': '4Hour', '6h': '6Hour', '8h': '8Hour', '12h': '12Hour',
+      '1d': '1Day', '1w': '1Week', '1M': '1Month',
+      // Identity mappings so an already-Alpaca-formatted string passes through.
+      '1Min': '1Min', '5Min': '5Min', '15Min': '15Min', '30Min': '30Min',
+      '1Hour': '1Hour', '2Hour': '2Hour', '4Hour': '4Hour', '6Hour': '6Hour', '8Hour': '8Hour', '12Hour': '12Hour',
+      '1Day': '1Day', '1Week': '1Week', '1Month': '1Month',
     };
     return m[tf] ?? tf ?? '1Day';
   }

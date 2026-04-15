@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { ForbiddenException, HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ExchangeType, ConnectionStatus } from '@prisma/client';
 import { EncryptionService } from './services/encryption.service';
@@ -473,7 +473,7 @@ export class ExchangesService {
         status: verification.valid ? ConnectionStatus.active : ConnectionStatus.invalid,
         permissions: verification.permissions,
       };
-    } catch (error) {
+    } catch (error: any) {
       // Update connection status to invalid on error
       await this.prisma.user_exchange_connections.update({
         where: { connection_id: connectionId },
@@ -646,31 +646,40 @@ export class ExchangesService {
         // Portfolio is calculated from positions, using Bybit's totalEquity for accurate total
         portfolio = this.bybitService.calculatePortfolioFromPositions(positions, accountInfo.totalEquity);
       } else if (isAlpaca) {
-        // Alpaca: fetch account info, positions and orders
-        const accountInfo = await this.alpacaService.getAccountInfo(apiKey, apiSecret);
-        const positionsRaw = await this.alpacaService.getPositions(apiKey, apiSecret);
-        const ordersRaw = await this.alpacaService.getOrders(apiKey, apiSecret);
+        // Fetch account info, positions and orders in parallel.
+        const [accountInfo, positionsRaw, ordersRaw] = await Promise.all([
+          this.alpacaService.getAccountInfo(apiKey, apiSecret),
+          this.alpacaService.getPositions(apiKey, apiSecret),
+          this.alpacaService.getOrders(apiKey, apiSecret),
+        ]);
 
-        // Map positions
+        // Map positions. pnlPercent / unrealizedPnl mirror Binance's basic
+        // dashboard semantics: the *24h* move on the holding, sourced from
+        // Alpaca's intraday fields. Lifetime P&L is recoverable from
+        // (currentPrice - entryPrice) * quantity if the caller needs it.
         positions = (positionsRaw || []).map((p: any) => {
-          const qty = parseFloat(p.qty || p.quantity || '0');
-          const entryPrice = parseFloat(p.avg_entry_price || p.avg_entry_value || '0');
-          const currentPrice = parseFloat(p.current_price || (p.market_value && qty ? (parseFloat(p.market_value) / qty).toString() : '0')) || 0;
-          const unrealizedPnl = (currentPrice - entryPrice) * qty;
-          const pnlPercent = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
+          const qty = parseFloat(p.qty || p.quantity || '0') || 0;
+          const entryPrice = parseFloat(p.avg_entry_price || p.avg_entry_value || '0') || 0;
+          const currentPrice = parseFloat(
+            p.current_price || (p.market_value && qty ? (parseFloat(p.market_value) / qty).toString() : '0'),
+          ) || 0;
+          const intradayPnl = parseFloat(p.unrealized_intraday_pl || '0') || 0;
+          const intradayPnlPct = (parseFloat(p.unrealized_intraday_plpc || '0') || 0) * 100;
 
           return {
             symbol: p.symbol,
             quantity: qty,
             entryPrice,
             currentPrice,
-            unrealizedPnl,
-            pnlPercent,
+            unrealizedPnl: intradayPnl,
+            pnlPercent: intradayPnlPct,
           } as PositionDto;
         });
 
-        // Map balance: portfolio_value, cash, buying_power; include USD for buying power (e.g. stock panel)
-        const totalValueUSD = parseFloat(accountInfo.portfolio_value || accountInfo.equity || '0') || 0;
+        // Map balance. The USD asset row uses cash for both free and total so
+        // the free <= total invariant holds; buying power is exposed at the
+        // top level (balance.buyingPower) for the trading panel.
+        const totalValueUSD = parseFloat(accountInfo.equity || accountInfo.portfolio_value || '0') || 0;
         const buyingPower = parseFloat(accountInfo.buying_power || accountInfo.cash || '0') || 0;
         const cash = parseFloat(accountInfo.cash || '0') || 0;
         const assets = (positions || []).map((pos) => ({
@@ -679,10 +688,9 @@ export class ExchangesService {
           locked: '0',
           total: pos.quantity.toString(),
         }));
-        // Add USD so frontend can show buying power (e.g. StockTradingPanel)
         assets.unshift({
           symbol: 'USD',
-          free: buyingPower.toString(),
+          free: cash.toString(),
           locked: '0',
           total: cash.toString(),
         });
@@ -693,21 +701,46 @@ export class ExchangesService {
           buyingPower,
         } as AccountBalanceDto;
 
-        // Map orders
-        orders = (ordersRaw || []).map((o: any) => ({
-          orderId: o.id || o.client_order_id || '',
-          symbol: o.symbol || o.asset_symbol || '',
-          side: (o.side || '').toUpperCase() === 'BUY' ? 'BUY' : 'SELL',
-          type: o.type || o.order_type || '',
-          quantity: parseFloat(o.qty || o.quantity || '0'),
-          price: parseFloat(o.limit_price || o.price || '0') || 0,
-          status: o.status || '',
-          time: o.created_at ? new Date(o.created_at).getTime() : Date.now(),
-        })) as OrderDto[];
+        // Map orders. Alpaca returns lowercase status/type; normalize to the
+        // Binance-style uppercase shape so downstream filters work uniformly.
+        const ALPACA_ORDER_STATUS_MAP: Record<string, string> = {
+          new: 'NEW',
+          partially_filled: 'PARTIALLY_FILLED',
+          filled: 'FILLED',
+          done_for_day: 'FILLED',
+          canceled: 'CANCELED',
+          expired: 'EXPIRED',
+          replaced: 'CANCELED',
+          pending_cancel: 'NEW',
+          pending_replace: 'NEW',
+          accepted: 'NEW',
+          pending_new: 'NEW',
+          accepted_for_bidding: 'NEW',
+          stopped: 'NEW',
+          rejected: 'REJECTED',
+          suspended: 'NEW',
+          calculated: 'NEW',
+        };
 
-        // Portfolio: simple aggregation from positions
+        orders = (ordersRaw || []).map((o: any) => {
+          const rawStatus = (o.status || '').toLowerCase();
+          return {
+            orderId: o.id || o.client_order_id || '',
+            symbol: o.symbol || o.asset_symbol || '',
+            side: (o.side || '').toUpperCase() === 'BUY' ? 'BUY' : 'SELL',
+            type: (o.type || o.order_type || '').toUpperCase(),
+            quantity: parseFloat(o.qty || o.quantity || '0') || 0,
+            price: parseFloat(o.limit_price || o.filled_avg_price || o.price || '0') || 0,
+            status: ALPACA_ORDER_STATUS_MAP[rawStatus] ?? rawStatus.toUpperCase(),
+            time: o.created_at ? new Date(o.created_at).getTime() : Date.now(),
+          };
+        }) as OrderDto[];
+
+        // Portfolio. Use Alpaca's equity directly so portfolio.totalValue
+        // matches balance.totalValueUSD and matches what the user sees in
+        // their Alpaca account. Cost basis comes from real avg entry prices.
         const totalCost = positions.reduce((acc, p) => acc + (p.entryPrice || 0) * (p.quantity || 0), 0);
-        const totalValue = positions.reduce((acc, p) => acc + (p.currentPrice || 0) * (p.quantity || 0), 0) + (parseFloat(accountInfo.cash || '0') || 0);
+        const totalValue = parseFloat(accountInfo.equity || accountInfo.portfolio_value || '0') || 0;
         const totalPnl = totalValue - totalCost;
         const pnlPercent = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
 
@@ -753,22 +786,29 @@ export class ExchangesService {
           last_synced_at: new Date(),
         },
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error(`[SYNC] Failed to sync connection data for ${connectionId}:`, error?.message);
       this.logger.error(`Failed to sync connection data for ${connectionId}`, error);
-      
-      // Check if it's an authentication error - log but don't mark as invalid for now
+
+      // Check if it's an authentication error - log but don't mark as invalid for now.
+      // The exchange name is already available from earlier in the function, so
+      // surface it in the error message instead of hardcoding "Alpaca". This runs
+      // for Binance, Binance.US, Bybit, and Alpaca, so a generic/correct message
+      // matters — a Binance user shouldn't be told to check their Alpaca keys.
       if (error?.response?.status === 401 || error?.status === 401) {
-        console.error(`[SYNC] 401 Unauthorized error - API credentials may be invalid`);
+        const exchangeLabel = connection.exchange?.name || 'exchange';
+        console.error(`[SYNC] 401 Unauthorized error - ${exchangeLabel} API credentials may be invalid`);
         // Temporarily disabled: Don't mark as invalid to allow retry
         // await this.prisma.user_exchange_connections.update({
         //   where: { connection_id: connectionId },
         //   data: { status: ConnectionStatus.invalid },
         // }).catch(err => this.logger.error('Failed to update connection status', err));
-        
-        throw new Error('API credentials are invalid or expired. Please check your Alpaca API keys.');
+
+        throw new Error(
+          `API credentials are invalid or expired. Please check your ${exchangeLabel} API keys.`,
+        );
       }
-      
+
       throw error;
     }
   }
@@ -950,6 +990,64 @@ export class ExchangesService {
   }
 
   /**
+   * Map an Alpaca raw order object to the enriched order shape that
+   * /orders/all and /trade-history return for crypto exchanges. Centralized
+   * here so both enriched-order methods produce identical Alpaca shapes.
+   */
+  private mapAlpacaOrderToEnriched(o: any): any {
+    const ALPACA_STATUS_MAP: Record<string, string> = {
+      new: 'NEW',
+      partially_filled: 'PARTIALLY_FILLED',
+      filled: 'FILLED',
+      done_for_day: 'FILLED',
+      canceled: 'CANCELED',
+      expired: 'EXPIRED',
+      replaced: 'CANCELED',
+      pending_cancel: 'NEW',
+      pending_replace: 'NEW',
+      accepted: 'NEW',
+      pending_new: 'NEW',
+      accepted_for_bidding: 'NEW',
+      stopped: 'NEW',
+      rejected: 'REJECTED',
+      suspended: 'NEW',
+      calculated: 'NEW',
+    };
+
+    const rawStatus = (o.status || '').toLowerCase();
+    const rawType = (o.type || '').toLowerCase();
+    const qty = parseFloat(o.qty || '0') || 0;
+    const filledQty = parseFloat(o.filled_qty || '0') || 0;
+    const filledAvgPrice = parseFloat(o.filled_avg_price || '0') || 0;
+    const limitPrice = parseFloat(o.limit_price || '0') || 0;
+    const stopPrice = parseFloat(o.stop_price || '0') || 0;
+    const fillPercent = qty > 0 ? Math.round((filledQty / qty) * 100) : 0;
+    const totalValue = filledQty * filledAvgPrice;
+    const createdMs = o.created_at ? new Date(o.created_at).getTime() : Date.now();
+    const updatedMs = o.updated_at ? new Date(o.updated_at).getTime() : createdMs;
+
+    return {
+      orderId: o.id || '',
+      symbol: o.symbol || '',
+      side: (o.side || '').toUpperCase(),
+      type: rawType.toUpperCase(),
+      status: ALPACA_STATUS_MAP[rawStatus] ?? rawStatus.toUpperCase(),
+      fillPercent,
+      quantity: qty,
+      filledQuantity: filledQty,
+      avgFillPrice: Math.round(filledAvgPrice * 100000000) / 100000000,
+      orderPrice: rawType === 'market' ? 'Market' : (limitPrice || stopPrice || 0),
+      totalValue: Math.round(totalValue * 100000000) / 100000000,
+      stopPrice,
+      timeInForce: (o.time_in_force || '').toUpperCase(),
+      time: createdMs,
+      updateTime: updatedMs,
+      profitLoss: 0,
+      profitLossPercent: 0,
+    };
+  }
+
+  /**
    * Get all orders (full history) enriched with avgFillPrice, totalValue, fillPercent.
    * Works for both Binance and Bybit.
    */
@@ -966,8 +1064,32 @@ export class ExchangesService {
     const isBinance = exchangeName === 'binance';
     const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us';
     const isBybit = exchangeName === 'bybit';
+    const isAlpaca = exchangeName === 'alpaca';
 
-    if (!isBinance && !isBinanceUS && !isBybit) return [];
+    if (!isBinance && !isBinanceUS && !isBybit && !isAlpaca) return [];
+
+    // Alpaca: fetch all orders (open + closed) in one call, map to the
+    // enriched shape, apply optional symbol filter, sort newest first.
+    // Crypto exchanges fall through to the per-symbol FIFO logic below.
+    if (isAlpaca) {
+      const limit = Math.min(params.limit || 500, 500);
+      const allOrdersRaw = await this.alpacaService.getOrders(
+        apiKey,
+        apiSecret,
+        'all',
+        limit,
+      );
+      let mapped = (allOrdersRaw || []).map((o: any) => this.mapAlpacaOrderToEnriched(o));
+
+      if (params.symbol) {
+        const upper = params.symbol.toUpperCase();
+        mapped = mapped.filter((o: any) => (o.symbol || '').toUpperCase() === upper);
+      }
+
+      return mapped.sort(
+        (a: any, b: any) => (b.updateTime || b.time || 0) - (a.updateTime || a.time || 0),
+      );
+    }
 
     // Get symbols to query
     let symbols: string[];
@@ -1095,8 +1217,72 @@ export class ExchangesService {
     const isBinance = exchangeName === 'binance';
     const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us';
     const isBybit = exchangeName === 'bybit';
+    const isAlpaca = exchangeName === 'alpaca';
 
-    if (!isBinance && !isBinanceUS && !isBybit) return [];
+    if (!isBinance && !isBinanceUS && !isBybit && !isAlpaca) return [];
+
+    // Alpaca: pull all orders, keep only those with executed quantity, then
+    // run FIFO matching per symbol to compute realized P&L on SELL orders.
+    // Same FIFO logic as the crypto branch below — just sourced from Alpaca's
+    // single /v2/orders endpoint instead of per-symbol myTrades calls.
+    if (isAlpaca) {
+      const limit = Math.min(params.limit || 500, 500);
+      const allOrdersRaw = await this.alpacaService.getOrders(
+        apiKey,
+        apiSecret,
+        'all',
+        limit,
+      );
+
+      let mapped = (allOrdersRaw || [])
+        .map((o: any) => this.mapAlpacaOrderToEnriched(o))
+        .filter((o: any) => o.filledQuantity > 0);
+
+      if (params.symbol) {
+        const upper = params.symbol.toUpperCase();
+        mapped = mapped.filter((o: any) => (o.symbol || '').toUpperCase() === upper);
+      }
+
+      // FIFO matching per symbol: attach realized P&L to SELL orders
+      const ordersBySymbol: Record<string, any[]> = {};
+      for (const o of mapped) {
+        if (!ordersBySymbol[o.symbol]) ordersBySymbol[o.symbol] = [];
+        ordersBySymbol[o.symbol].push(o);
+      }
+
+      for (const [, orders] of Object.entries(ordersBySymbol)) {
+        const sorted = [...orders].sort((a: any, b: any) => a.time - b.time);
+        const buyQueue: { avgPrice: number; remainingQty: number }[] = [];
+
+        for (const order of sorted) {
+          if (order.side === 'BUY') {
+            buyQueue.push({ avgPrice: order.avgFillPrice, remainingQty: order.filledQuantity });
+          } else if (order.side === 'SELL') {
+            let remainingQty = order.filledQuantity;
+            let totalPL = 0;
+            let totalEntryCost = 0;
+
+            while (remainingQty > 0 && buyQueue.length > 0) {
+              const oldest = buyQueue[0];
+              const matchedQty = Math.min(remainingQty, oldest.remainingQty);
+              totalPL += (order.avgFillPrice - oldest.avgPrice) * matchedQty;
+              totalEntryCost += oldest.avgPrice * matchedQty;
+
+              remainingQty -= matchedQty;
+              oldest.remainingQty -= matchedQty;
+              if (oldest.remainingQty <= 0) buyQueue.shift();
+            }
+
+            order.profitLoss = Math.round(totalPL * 1000) / 1000;
+            order.profitLossPercent = totalEntryCost > 0
+              ? Math.round(((totalPL / totalEntryCost) * 100) * 100) / 100
+              : 0;
+          }
+        }
+      }
+
+      return mapped.sort((a: any, b: any) => b.time - a.time);
+    }
 
     // Get symbols to query
     let symbols: string[];
@@ -1253,8 +1439,43 @@ export class ExchangesService {
     const isBinance = exchangeName === 'binance';
     const isBinanceUS = exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us';
     const isBybit = exchangeName === 'bybit';
+    const isAlpaca = exchangeName === 'alpaca';
 
-    if (!isBinance && !isBinanceUS && !isBybit) return positions;
+    if (!isBinance && !isBinanceUS && !isBybit && !isAlpaca) return positions;
+
+    // Alpaca already provides the real avg entry price on each position from
+    // /v2/positions, so no FIFO trade-fill fetch is needed. Map directly to
+    // the enriched shape using the same field set as the crypto path below.
+    // Lifetime P&L = marketValue - totalCost; intraday P&L is carried on the
+    // basic position as unrealizedPnl/pnlPercent (from the dashboard mapper).
+    if (isAlpaca) {
+      return positions.map((p) => {
+        const qty = Number(p.quantity) || 0;
+        const curPrice = Number(p.currentPrice) || 0;
+        const avgEntryPrice = Number(p.entryPrice) || 0;
+        const hasRealEntry = avgEntryPrice > 0;
+        const totalCost = avgEntryPrice * qty;
+        const marketValue = curPrice * qty;
+        const totalPnl = hasRealEntry ? marketValue - totalCost : 0;
+        const totalPnlPercent = hasRealEntry && totalCost > 0
+          ? ((marketValue - totalCost) / totalCost) * 100
+          : 0;
+
+        return {
+          symbol: p.symbol,
+          quantity: qty,
+          avgEntryPrice: Math.round(avgEntryPrice * 100000000) / 100000000,
+          currentPrice: curPrice,
+          marketValue: Math.round(marketValue * 100000000) / 100000000,
+          totalCost: Math.round(totalCost * 100000000) / 100000000,
+          unrealizedPnl: Math.round(totalPnl * 1000) / 1000,
+          unrealizedPnlPercent: Math.round(totalPnlPercent * 100) / 100,
+          dailyChangePnl: Math.round((Number(p.unrealizedPnl) || 0) * 1000) / 1000,
+          dailyChangePercent: Math.round((Number(p.pnlPercent) || 0) * 100) / 100,
+          hasRealEntry,
+        };
+      });
+    }
 
     const quote = isBinanceUS ? 'USD' : 'USDT';
 
@@ -1422,7 +1643,7 @@ export class ExchangesService {
 
           return balance;
         }
-      } catch (error) {
+      } catch (error: any) {
         // If balance-only fetch fails for any reason, fall back to full sync
         this.logger.warn(`Balance-only fetch failed for ${connectionId}, falling back to full sync: ${error?.message ?? error}`);
       }
@@ -1565,6 +1786,22 @@ export class ExchangesService {
     } else if (exchangeService instanceof BybitService) {
       placedOrder = await this.bybitService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
     } else if (exchangeService instanceof AlpacaService) {
+      // Product decision: Alpaca crypto is not offered to end users on the
+      // unified user-initiated flow. Block here before dispatching so the
+      // guard applies to this entry point only — the strategies paper-trading
+      // flow calls AlpacaService.placeOrder directly and is untouched.
+      if (this.alpacaService.isAlpacaCryptoSymbol(symbol)) {
+        throw new HttpException(
+          {
+            success: false,
+            code: 'ALPACA_CRYPTO_NOT_SUPPORTED',
+            message:
+              'Crypto trading is not supported on your Alpaca connection. Use a Binance, Binance.US, or Bybit connection for crypto orders.',
+            symbol,
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
       placedOrder = await this.alpacaService.placeOrder(
         symbol,
         side,
@@ -1684,7 +1921,21 @@ export class ExchangesService {
     } else if (exchangeName === 'bybit') {
       return this.bybitService.getOrderBook(symbol, limit);
     } else {
-      throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
+      // Alpaca's retail Data API only exposes a 1-level quote (best bid/ask),
+      // which doesn't fit the multi-level depth shape this endpoint returns.
+      // Same 501 pattern as deposits/withdrawals — frontend can hide the
+      // order book widget on an "not supported" response instead of showing
+      // a 500 error toast.
+      throw new HttpException(
+        {
+          success: false,
+          code: 'FEATURE_NOT_SUPPORTED',
+          feature: 'orderbook',
+          exchange: connection.exchange.name,
+          message: `Order book is not available for ${connection.exchange.name} connections.`,
+        },
+        HttpStatus.NOT_IMPLEMENTED,
+      );
     }
   }
 
@@ -1707,8 +1958,23 @@ export class ExchangesService {
       return this.binanceService.getRecentTrades(symbol, limit);
     } else if (exchangeName === 'bybit') {
       return this.bybitService.getRecentTrades(symbol, limit);
+    } else if (exchangeName === 'alpaca') {
+      // Alpaca Data API requires credentials even for recent trades.
+      // The AlpacaService wrapper maps the response directly to RecentTradeDto
+      // so this endpoint stays uniform across all exchanges.
+      const { apiKey, apiSecret } = await this.getDecryptedCredentials(connectionId);
+      return this.alpacaService.getRecentTrades(apiKey, apiSecret, symbol, limit);
     } else {
-      throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
+      throw new HttpException(
+        {
+          success: false,
+          code: 'FEATURE_NOT_SUPPORTED',
+          feature: 'trades',
+          exchange: connection.exchange.name,
+          message: `Recent trades are not available for ${connection.exchange.name} connections.`,
+        },
+        HttpStatus.NOT_IMPLEMENTED,
+      );
     }
   }
 
@@ -1749,7 +2015,20 @@ export class ExchangesService {
         endTime,
       );
     } else {
-      throw new Error(`Deposit history not supported for ${connection.exchange.name}`);
+      // Not a fatal error — just a feature gap. Return a structured 501 so
+      // the frontend can render a friendly "not available on this exchange"
+      // message instead of an opaque 500. Applies to Alpaca, Bybit, and
+      // Binance.US; only Binance currently exposes deposit history.
+      throw new HttpException(
+        {
+          success: false,
+          code: 'FEATURE_NOT_SUPPORTED',
+          feature: 'deposits',
+          exchange: connection.exchange.name,
+          message: `Deposit history is not available for ${connection.exchange.name} connections.`,
+        },
+        HttpStatus.NOT_IMPLEMENTED,
+      );
     }
   }
 
@@ -1790,7 +2069,19 @@ export class ExchangesService {
         endTime,
       );
     } else {
-      throw new Error(`Withdrawal history not supported for ${connection.exchange.name}`);
+      // Same rationale as getDepositHistory: return a structured 501 so the
+      // frontend can show a friendly "not available" message rather than an
+      // opaque 500. Only Binance currently exposes withdrawal history.
+      throw new HttpException(
+        {
+          success: false,
+          code: 'FEATURE_NOT_SUPPORTED',
+          feature: 'withdrawals',
+          exchange: connection.exchange.name,
+          message: `Withdrawal history is not available for ${connection.exchange.name} connections.`,
+        },
+        HttpStatus.NOT_IMPLEMENTED,
+      );
     }
   }
 
