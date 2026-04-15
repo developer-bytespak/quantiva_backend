@@ -80,6 +80,16 @@ LUNARCRUSH_QUOTA_STATE_PATH = os.getenv(
     os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "lunarcrush_quota.json"),
 )
 
+# CoinGecko quota & cache (defaults stay safely under the 500/min, 500k/month Analyst plan)
+COINGECKO_RPM_LIMIT = int(os.getenv("COINGECKO_RPM_LIMIT", "400"))
+COINGECKO_MONTHLY_BUDGET = int(os.getenv("COINGECKO_MONTHLY_BUDGET", "400000"))
+COINGECKO_DETAILS_TTL_SECS = int(os.getenv("COINGECKO_DETAILS_TTL_SECS", "1800"))  # 30m
+COINGECKO_MAX_STALE_SECS = int(os.getenv("COINGECKO_MAX_STALE_SECS", "86400"))  # 24h
+COINGECKO_QUOTA_STATE_PATH = os.getenv(
+    "COINGECKO_QUOTA_STATE_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "coingecko_quota.json"),
+)
+
 # NestJS Backend API Configuration
 NESTJS_API_URL = os.getenv("NESTJS_API_URL", "http://localhost:3000")
 NESTJS_API_TIMEOUT = int(os.getenv("NESTJS_API_TIMEOUT", "10"))

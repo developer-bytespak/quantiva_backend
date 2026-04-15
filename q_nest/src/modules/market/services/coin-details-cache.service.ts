@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import axios, { AxiosInstance } from 'axios';
 import { ConfigService } from '@nestjs/config';
+import { CoinGeckoMeterService } from './coingecko-meter.service';
 
 export interface CoinDetailResponse {
   id: string;
@@ -44,17 +45,21 @@ export class CoinDetailsCacheService {
   private readonly logger = new Logger(CoinDetailsCacheService.name);
   private readonly apiClient: AxiosInstance;
   private readonly apiKey: string | null;
-  private readonly STALE_THRESHOLD = 6 * 60 * 60 * 1000; // 6 hours
+  private readonly STALE_THRESHOLD = 12 * 60 * 60 * 1000; // 12 hours
   /** Coins that returned 404 from CoinGecko — skip for 1 hour to stop log spam */
   private readonly notFoundCache = new Map<string, number>(); // coinId → expiry ms
   private readonly NOT_FOUND_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+  /** Max ids per `/coins/markets?ids=...` batch — CoinGecko allows up to 250. */
+  private readonly MARKETS_BATCH_SIZE = 200;
+
   constructor(
     private prisma: PrismaService,
     private configService: ConfigService,
+    private cgMeter: CoinGeckoMeterService,
   ) {
     this.apiKey = this.configService.get<string>('COINGECKO_API_KEY') || null;
-    
+
     const isProApiKey = this.apiKey && this.apiKey.startsWith('CG-');
     const baseUrl = isProApiKey
       ? 'https://pro-api.coingecko.com/api/v3'
@@ -69,6 +74,12 @@ export class CoinDetailsCacheService {
           ? { 'x-cg-pro-api-key': this.apiKey }
           : {}),
       },
+    });
+
+    // Count every outbound CoinGecko request automatically.
+    this.apiClient.interceptors.request.use((config) => {
+      this.cgMeter.bump();
+      return config;
     });
   }
 
@@ -121,9 +132,16 @@ export class CoinDetailsCacheService {
   }
 
   /**
-   * Fetch coin details from CoinGecko API and save to database
+   * Fetch coin details from CoinGecko API and save to database.
+   *
+   * @param coinId      The CoinGecko id (e.g. "bitcoin").
+   * @param marketData  Optional pre-fetched market row (from a batched
+   *                    /coins/markets call). When supplied, we SKIP the
+   *                    per-coin /coins/markets call — saving 1 request per
+   *                    coin in bulk syncs. When omitted, falls back to the
+   *                    legacy per-coin fetch so on-demand callers still work.
    */
-  async syncCoinDetails(coinId: string): Promise<any> {
+  async syncCoinDetails(coinId: string, marketData?: any): Promise<any> {
     try {
       // Skip coins known to be missing from CoinGecko
       const notFoundUntil = this.notFoundCache.get(coinId);
@@ -132,7 +150,7 @@ export class CoinDetailsCacheService {
       }
 
       this.logger.log(`Fetching coin details from CoinGecko API: ${coinId}`);
-      
+
       // Fetch detailed coin info
       const detailsResponse = await this.apiClient.get<CoinDetailResponse>(
         `/coins/${coinId}`,
@@ -148,49 +166,56 @@ export class CoinDetailsCacheService {
         },
       );
 
-      // Also fetch market data which includes all price change percentages
-      let marketData = null;
-      try {
-        const marketResponse = await this.apiClient.get('/coins/markets', {
-          params: {
-            vs_currency: 'usd',
-            ids: coinId,
-            order: 'market_cap_desc',
-            per_page: 1,
-            page: 1,
-            sparkline: false,
-            price_change_percentage: '1h,24h,7d,30d,1y',
-          },
-        });
-        marketData = marketResponse.data?.[0];
-      } catch (error) {
-        this.logger.warn(`Failed to fetch market data for ${coinId}, continuing with details only`);
+      // If caller didn't pre-fetch the market row, fall back to legacy
+      // per-coin lookup. Bulk syncs always supply this and so save 1 request
+      // per coin (50% cost reduction on syncTopCoins / refreshStaleCoins).
+      let resolvedMarketData = marketData;
+      if (resolvedMarketData === undefined) {
+        try {
+          const marketResponse = await this.apiClient.get('/coins/markets', {
+            params: {
+              vs_currency: 'usd',
+              ids: coinId,
+              order: 'market_cap_desc',
+              per_page: 1,
+              page: 1,
+              sparkline: false,
+              price_change_percentage: '1h,24h,7d,30d,1y',
+            },
+          });
+          resolvedMarketData = marketResponse.data?.[0];
+        } catch (error) {
+          this.logger.warn(`Failed to fetch market data for ${coinId}, continuing with details only`);
+        }
       }
 
       // Merge data
       const data = detailsResponse.data;
-      if (marketData && data.market_data) {
+      if (resolvedMarketData && data.market_data) {
         // Map the market endpoint fields to the detail endpoint format
-        data.market_data.price_change_percentage_1h_in_currency = { 
-          usd: marketData.price_change_percentage_1h_in_currency || null 
+        data.market_data.price_change_percentage_1h_in_currency = {
+          usd: resolvedMarketData.price_change_percentage_1h_in_currency || null,
         };
-        data.market_data.price_change_percentage_24h_in_currency = { 
-          usd: marketData.price_change_percentage_24h_in_currency || marketData.price_change_percentage_24h || null 
+        data.market_data.price_change_percentage_24h_in_currency = {
+          usd:
+            resolvedMarketData.price_change_percentage_24h_in_currency ||
+            resolvedMarketData.price_change_percentage_24h ||
+            null,
         };
-        data.market_data.price_change_percentage_7d_in_currency = { 
-          usd: marketData.price_change_percentage_7d_in_currency || null 
+        data.market_data.price_change_percentage_7d_in_currency = {
+          usd: resolvedMarketData.price_change_percentage_7d_in_currency || null,
         };
-        data.market_data.price_change_percentage_30d_in_currency = { 
-          usd: marketData.price_change_percentage_30d_in_currency || null 
+        data.market_data.price_change_percentage_30d_in_currency = {
+          usd: resolvedMarketData.price_change_percentage_30d_in_currency || null,
         };
-        data.market_data.price_change_percentage_1y_in_currency = { 
-          usd: marketData.price_change_percentage_1y_in_currency || null 
+        data.market_data.price_change_percentage_1y_in_currency = {
+          usd: resolvedMarketData.price_change_percentage_1y_in_currency || null,
         };
       }
-      
+
       // Save to database
       await this.saveCoinDetailsToDatabase(data);
-      
+
       return data;
     } catch (error: any) {
       // Cache 404s to prevent repeated failed requests until the coin appears on CoinGecko
@@ -206,6 +231,47 @@ export class CoinDetailsCacheService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Fetch market data (with all price-change percentages) for a list of coin
+   * ids in BATCHED requests. CoinGecko's /coins/markets endpoint accepts up
+   * to 250 ids per request; we chunk at MARKETS_BATCH_SIZE to be safe.
+   *
+   * Returns a Map keyed by coin id. Failed batches log a warning and yield
+   * an empty entry — callers should treat a missing entry as "no market data
+   * available, fall back gracefully" (the legacy behavior already tolerated
+   * this since the per-coin fetch was wrapped in try/catch).
+   */
+  private async fetchMarketsBulk(coinIds: string[]): Promise<Map<string, any>> {
+    const result = new Map<string, any>();
+    if (coinIds.length === 0) return result;
+
+    for (let i = 0; i < coinIds.length; i += this.MARKETS_BATCH_SIZE) {
+      const chunk = coinIds.slice(i, i + this.MARKETS_BATCH_SIZE);
+      try {
+        const response = await this.apiClient.get('/coins/markets', {
+          params: {
+            vs_currency: 'usd',
+            ids: chunk.join(','),
+            order: 'market_cap_desc',
+            per_page: chunk.length,
+            page: 1,
+            sparkline: false,
+            price_change_percentage: '1h,24h,7d,30d,1y',
+          },
+        });
+        const rows: any[] = Array.isArray(response.data) ? response.data : [];
+        for (const row of rows) {
+          if (row?.id) result.set(row.id, row);
+        }
+      } catch (error: any) {
+        this.logger.warn(
+          `[fetchMarketsBulk] batch ${i}-${i + chunk.length} failed: ${error?.message || error}`,
+        );
+      }
+    }
+    return result;
   }
 
   /**
@@ -278,13 +344,17 @@ export class CoinDetailsCacheService {
   }
 
   /**
-   * Sync top N coins by market cap
+   * Sync top N coins by market cap.
+   *
+   * Cost: 1 (top list) + 1 (batched markets, per ≤200 ids) + N (per-coin
+   * details). For limit=200 that is 1 + 1 + 200 = **202** CoinGecko calls,
+   * down from the previous 1 + 200 + 200 = 401.
    */
-  async syncTopCoins(limit: number = 200): Promise<{ success: number; failed: number }> {
+  async syncTopCoins(limit: number = 200): Promise<{ success: number; failed: number; cgCalls: number }> {
     try {
       this.logger.log(`Starting sync of top ${limit} coins...`);
-      
-      // Get list of top coins
+
+      // 1. Top-N list (1 call)
       const response = await this.apiClient.get('/coins/markets', {
         params: {
           vs_currency: 'usd',
@@ -295,74 +365,85 @@ export class CoinDetailsCacheService {
         },
       });
 
-      const coins = response.data;
+      const coins: any[] = response.data || [];
+      const coinIds = coins.map((c) => c.id).filter(Boolean);
+
+      // 2. Batched markets (≤ ceil(N/200) calls, typically 1)
+      const marketsBefore = this.cgMeter.snapshot().count;
+      const marketsMap = await this.fetchMarketsBulk(coinIds);
+      const marketsCalls = this.cgMeter.snapshot().count - marketsBefore;
+
+      // 3. Per-coin details (N calls)
       let success = 0;
       let failed = 0;
-
-      // Sync each coin with delay to avoid rate limits
       for (const coin of coins) {
         try {
-          await this.syncCoinDetails(coin.id);
+          await this.syncCoinDetails(coin.id, marketsMap.get(coin.id));
           success++;
-          
-          // Reduced delay between requests (200ms instead of 500ms)
-          await new Promise(resolve => setTimeout(resolve, 200));
+          await new Promise((resolve) => setTimeout(resolve, 200));
         } catch (error) {
           failed++;
           this.logger.warn(`Failed to sync coin: ${coin.id}`);
         }
       }
 
-      this.logger.log(`Coin sync completed: ${success} success, ${failed} failed`);
-      return { success, failed };
+      // Approximate CG call count: 1 list + N batches + N details
+      const cgCalls = 1 + marketsCalls + success + failed;
+      this.logger.log(
+        `[syncTopCoins] success=${success} failed=${failed} cgCalls=${cgCalls} (1 list + ${marketsCalls} batched-markets + ${success + failed} details)`,
+      );
+      return { success, failed, cgCalls };
     } catch (error: any) {
-      this.logger.error('Failed to sync top coins', {
-        error: error.message,
-      });
+      this.logger.error('Failed to sync top coins', { error: error.message });
       throw error;
     }
   }
 
   /**
-   * Refresh stale coins (older than 6 hours)
+   * Refresh coins whose `last_updated` is older than STALE_THRESHOLD.
+   *
+   * Cost: 1 (batched markets per ≤200 ids) + N (per-coin details). For
+   * maxCoins=50 that is 1 + 50 = **51** CoinGecko calls, down from 100.
    */
-  async refreshStaleCoins(maxCoins: number = 50): Promise<{ success: number; failed: number }> {
+  async refreshStaleCoins(maxCoins: number = 50): Promise<{ success: number; failed: number; cgCalls: number }> {
     try {
-      const sixHoursAgo = new Date(Date.now() - this.STALE_THRESHOLD);
-      
+      const cutoff = new Date(Date.now() - this.STALE_THRESHOLD);
+
       const staleCoins = await this.prisma.coin_details.findMany({
-        where: {
-          last_updated: {
-            lt: sixHoursAgo,
-          },
-        },
-        orderBy: {
-          market_cap_rank: 'asc',
-        },
+        where: { last_updated: { lt: cutoff } },
+        orderBy: { market_cap_rank: 'asc' },
         take: maxCoins,
       });
 
       this.logger.log(`Found ${staleCoins.length} stale coins to refresh`);
 
+      const coinIds = staleCoins.map((c) => c.coingecko_id).filter(Boolean);
+
+      // 1. Batched markets up-front
+      const marketsBefore = this.cgMeter.snapshot().count;
+      const marketsMap = await this.fetchMarketsBulk(coinIds);
+      const marketsCalls = this.cgMeter.snapshot().count - marketsBefore;
+
+      // 2. Per-coin details
       let success = 0;
       let failed = 0;
-
       for (const coin of staleCoins) {
         try {
-          await this.syncCoinDetails(coin.coingecko_id);
+          await this.syncCoinDetails(coin.coingecko_id, marketsMap.get(coin.coingecko_id));
           success++;
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await new Promise((resolve) => setTimeout(resolve, 500));
         } catch (error) {
           failed++;
         }
       }
 
-      this.logger.log(`Stale coin refresh completed: ${success} success, ${failed} failed`);
-      return { success, failed };
+      const cgCalls = marketsCalls + success + failed;
+      this.logger.log(
+        `[refreshStaleCoins] success=${success} failed=${failed} cgCalls=${cgCalls} (${marketsCalls} batched-markets + ${success + failed} details)`,
+      );
+      return { success, failed, cgCalls };
     } catch (error: any) {
-      this.logger.error('Failed to refresh stale coins', {
-        error: error.message,
-      });
+      this.logger.error('Failed to refresh stale coins', { error: error.message });
       throw error;
     }
   }

@@ -4,6 +4,7 @@ Admin endpoints for operational tasks (model load/unload, metrics).
 import logging
 from fastapi import APIRouter, HTTPException
 
+from src.services.data.coingecko_service import get_coingecko_service
 from src.services.data.lunarcrush_service import get_lunarcrush_service
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,24 @@ async def lunarcrush_stats():
         return get_lunarcrush_service().get_stats()
     except Exception as e:
         logger.error(f"Failed to read LunarCrush stats: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Stats read failed: {str(e)}")
+
+
+@router.get("/coingecko-stats")
+async def coingecko_stats():
+    """
+    Live diagnostics for the CoinGecko quota shield.
+
+    Returns per-minute / per-month counters, cache sizes, and cumulative
+    counters (calls_made, blocked_by_quota, cache_hits, served_stale,
+    http_429s, search_calls, search_cache_hits). Pair with the NestJS-side
+    `GET /api/market/admin/coingecko-stats` to attribute usage between the
+    two services that share the CoinGecko key.
+    """
+    try:
+        return get_coingecko_service().get_stats()
+    except Exception as e:
+        logger.error(f"Failed to read CoinGecko stats: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Stats read failed: {str(e)}")
 
 
