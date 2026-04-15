@@ -67,6 +67,67 @@ export class QueuedTradeService {
     return row;
   }
 
+  /**
+   * Track an already-placed Alpaca buy for delayed TP/SL attachment.
+   *
+   * Used when the user clicks a top-trade during pre/post-market hours and
+   * Alpaca ACCEPTS the buy order (unlike the MARKET_CLOSED case where Alpaca
+   * rejects outright). The buy sits on Alpaca with status='new' waiting for
+   * the market to open to fill — which can be hours away. Our in-controller
+   * race-retry loop only waits 1.5s and can't cover that gap, so we persist
+   * the buy here with status='submitted' and let the fill-watcher cron
+   * attach TP/SL once the buy actually fills.
+   *
+   * The row starts in 'submitted' (not 'queued') because the buy is already
+   * on Alpaca — we don't need to submit it again. The cron's watchSubmittedRows
+   * logic will poll the buy's fill status and place protection when it fills.
+   */
+  async trackForDelayedProtection(params: {
+    userId: string;
+    connectionId: string;
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    orderType?: 'MARKET' | 'LIMIT';
+    quantity: number;
+    limitPrice?: number;
+    takeProfitPct?: number;
+    stopLossPct?: number;
+    source?: string;
+    alpacaBuyOrderId: string;
+  }) {
+    const expiresAt = new Date();
+    expiresAt.setDate(
+      expiresAt.getDate() + QueuedTradeService.DEFAULT_LIFETIME_DAYS,
+    );
+
+    const row = await this.prisma.pending_queued_trades.create({
+      data: {
+        user_id: params.userId,
+        connection_id: params.connectionId,
+        symbol: params.symbol,
+        side: params.side,
+        order_type: params.orderType ?? 'MARKET',
+        quantity: params.quantity,
+        limit_price: params.limitPrice ?? null,
+        take_profit_pct: params.takeProfitPct ?? null,
+        stop_loss_pct: params.stopLossPct ?? null,
+        source: params.source ?? 'top_trade',
+        status: QueuedTradeStatus.submitted,
+        alpaca_buy_order_id: params.alpacaBuyOrderId,
+        submitted_at: new Date(),
+        expires_at: expiresAt,
+      },
+    });
+
+    this.logger.log(
+      `Tracking delayed protection: ${params.side} ${params.quantity} ${params.symbol} ` +
+        `(buy=${params.alpacaBuyOrderId}, user=${params.userId}, rowId=${row.id}). ` +
+        `Fill-watcher cron will attach TP/SL when the buy fills.`,
+    );
+
+    return row;
+  }
+
   /** List a user's queued trades, most recent first. Used by the UI. */
   async listForUser(userId: string, limit = 50) {
     return this.prisma.pending_queued_trades.findMany({
