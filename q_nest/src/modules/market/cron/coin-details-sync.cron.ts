@@ -48,10 +48,14 @@ export class CoinDetailsSyncCron {
   }
 
   /**
-   * Refresh stale coins every 3 hours
-   * Runs at: 01:00, 04:00, 07:00, 10:00, 13:00, 16:00, 19:00, 22:00
+   * Refresh stale coins every 6 hours.
+   * Runs at: 03:00, 09:00, 15:00, 21:00 UTC.
+   *
+   * Combined with the 12-hour STALE_THRESHOLD in CoinDetailsCacheService,
+   * this gives each coin at most 6 hours between going stale and being
+   * refreshed, while halving the previous (every-3-hour) call rate.
    */
-  @Cron('0 1,4,7,10,13,16,19,22 * * *', {
+  @Cron('0 3,9,15,21 * * *', {
     name: 'refresh-stale-coins',
     timeZone: 'UTC',
   })

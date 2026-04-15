@@ -24,11 +24,12 @@ export class AssetsSyncCronjobService implements OnModuleInit {
   }
 
   /**
-   * Sync top 500 coins from CoinGecko to assets and market_rankings tables
-   * Also fetches exchange availability from Binance/Bybit/Binance US direct APIs (free)
-   * Runs every 15 minutes
+   * Sync top 500 coins from CoinGecko to assets and market_rankings tables.
+   * Also fetches exchange availability from Binance/Bybit/Binance US direct APIs (free).
+   * Runs every 30 minutes — top-500 market-cap rankings move slowly enough
+   * that 15-min cadence was wasted CoinGecko calls.
    */
-  @Cron('*/15 * * * *')
+  @Cron('*/30 * * * *')
   async syncAssetsFromCoinGecko(): Promise<void> {
     if (this.isRunning) {
       return;

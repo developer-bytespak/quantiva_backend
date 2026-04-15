@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import axios, { AxiosInstance } from 'axios';
 import { CoinDetailsCacheService } from './services/coin-details-cache.service';
+import { CoinGeckoMeterService } from './services/coingecko-meter.service';
 
 export interface CoinGeckoCoin {
   id: string;
@@ -50,9 +51,10 @@ export class MarketService {
     private configService: ConfigService,
     private prisma: PrismaService,
     private coinDetailsCacheService: CoinDetailsCacheService,
+    private cgMeter: CoinGeckoMeterService,
   ) {
     this.apiKey = this.configService.get<string>('COINGECKO_API_KEY') || null;
-    
+
     // Determine base URL based on API key type
     const isProApiKey = this.apiKey && this.apiKey.startsWith('CG-');
     this.baseUrl = isProApiKey
@@ -69,6 +71,12 @@ export class MarketService {
           ? { 'x-cg-pro-api-key': this.apiKey }
           : {}),
       },
+    });
+
+    // Count every outbound CoinGecko request automatically (Pro client).
+    this.apiClient.interceptors.request.use((config) => {
+      this.cgMeter.bump();
+      return config;
     });
 
     this.logger.log(
@@ -163,6 +171,10 @@ export class MarketService {
         'Content-Type': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       },
+    });
+    freeClient.interceptors.request.use((config) => {
+      this.cgMeter.bump();
+      return config;
     });
 
     const allCoins: CoinGeckoCoin[] = [];

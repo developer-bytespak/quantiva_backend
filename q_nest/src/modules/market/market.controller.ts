@@ -1,6 +1,7 @@
 import { Controller, Get, Query, Param, HttpException, HttpStatus, Post, UseGuards, Logger, Req } from '@nestjs/common';
 import { MarketService } from './market.service';
 import { CoinDetailsCacheService } from './services/coin-details-cache.service';
+import { CoinGeckoMeterService } from './services/coingecko-meter.service';
 import { ExchangesService as MarketExchangesService } from './services/exchanges.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -14,9 +15,21 @@ export class MarketController {
   constructor(
     private readonly marketService: MarketService,
     private readonly coinDetailsCacheService: CoinDetailsCacheService,
+    private readonly cgMeter: CoinGeckoMeterService,
     private readonly exchangesService: MarketExchangesService,
     private readonly exchangesConnectionService: ExchangesService,
   ) {}
+
+  /**
+   * GET /api/market/admin/coingecko-stats
+   * Returns the NestJS-side daily CoinGecko call counter. Useful for
+   * diagnosing whether unexpected monthly burn comes from the Python side
+   * (`/api/v1/admin/coingecko-stats`) or the NestJS side.
+   */
+  @Get('admin/coingecko-stats')
+  getCoingeckoStats() {
+    return this.cgMeter.snapshot();
+  }
 
   /**
    * GET /api/market/coins/top
