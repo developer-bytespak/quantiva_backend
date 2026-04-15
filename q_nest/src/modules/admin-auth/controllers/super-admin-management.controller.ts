@@ -18,6 +18,7 @@ import { SuperAdminListUsersDto } from '../dto/super-admin-list-users.dto';
 import { SuperAdminUnifiedFinanceDto } from '../dto/super-admin-unified-finance.dto';
 import { SuperAdminUsersGrowthDto } from '../dto/super-admin-users-growth.dto';
 import { UpdateFeeSettingsDto } from '../dto/update-admin-settings.dto';
+import { PlanTier, BillingPeriod } from '../../subscriptions/subscriptions.service';
 import { AdminJwtAuthGuard } from '../guards/admin-jwt-auth.guard';
 import { SuperAdminGuard } from '../guards/super-admin.guard';
 import { AdminTokenPayload } from '../services/admin-token.service';
@@ -148,5 +149,29 @@ export class SuperAdminManagementController {
         totalPages: Math.ceil(total / limitNum),
       },
     };
+  }
+
+  @Post('users/upgrade-subscription')
+  async upgradeUserSubscription(
+    @Body() body: { email: string; tier: string; billing_period: string },
+  ) {
+    const validTiers = Object.values(PlanTier);
+    const validPeriods = Object.values(BillingPeriod);
+
+    if (!body.email?.trim()) {
+      throw new Error('email is required');
+    }
+    if (!validTiers.includes(body.tier as PlanTier)) {
+      throw new Error(`tier must be one of: ${validTiers.join(', ')}`);
+    }
+    if (!validPeriods.includes(body.billing_period as BillingPeriod)) {
+      throw new Error(`billing_period must be one of: ${validPeriods.join(', ')}`);
+    }
+
+    return this.superAdminManagementService.adminUpgradeUserSubscription({
+      email: body.email.trim(),
+      tier: body.tier as PlanTier,
+      billing_period: body.billing_period as BillingPeriod,
+    });
   }
 }
