@@ -22,6 +22,7 @@ import { OPTIONS_RISK_CONFIG as RISK_CONFIG } from '../options.config';
 
 // Use string literals that match the Prisma OptionType enum values
 type OptionType = 'CALL' | 'PUT';
+type OptionOrderStatus = 'submitting' | 'pending' | 'filled' | 'partially_filled' | 'cancelled' | 'rejected' | 'expired';
 
 @Injectable()
 export class OptionsService {
@@ -144,16 +145,10 @@ export class OptionsService {
     userId: string,
   ): Promise<OptionsAccountDto> {
     await this.verifyConnectionOwnership(connectionId, userId);
-    // Use spot wallet (same source as exchanges service / top trades)
-    const balanceData = await this.exchangesService.getConnectionData(connectionId, 'balance') as any;
-    const assets: any[] = balanceData?.assets ?? [];
-    const usdtAsset = assets.find((a: any) => a.symbol === 'USDT');
-    return {
-      availableBalance: usdtAsset ? parseFloat(usdtAsset.free || '0') : 0,
-      totalBalance: usdtAsset ? parseFloat(usdtAsset.total || usdtAsset.free || '0') : 0,
-      unrealizedPnl: 0,
-      marginBalance: 0,
-    };
+    // Use the Options margin wallet (eapi/marginAccount) — this is the wallet Binance
+    // actually debits for options orders, not the spot wallet.
+    const credentials = await this.getCredentials(connectionId);
+    return this.optionsBinance.fetchBalance(credentials, userId);
   }
 
   // ── Positions ────────────────────────────────────────────
@@ -179,12 +174,35 @@ export class OptionsService {
 
   /**
    * Get positions from DB (for history / offline).
+   * Maps raw snake_case Prisma rows to camelCase OptionsPositionDto shape
+   * expected by the frontend.
    */
-  async getPositionsFromDb(userId: string) {
-    return this.prisma.options_positions.findMany({
+  async getPositionsFromDb(userId: string): Promise<OptionsPositionDto[]> {
+    const rows = await this.prisma.options_positions.findMany({
       where: { user_id: userId },
       orderBy: { opened_at: 'desc' },
     });
+
+    return rows.map((p) => ({
+      positionId: p.position_id,
+      contractSymbol: p.contract_symbol,
+      underlying: p.underlying,
+      strike: Number(p.strike),
+      expiry: p.expiry?.toISOString() ?? '',
+      optionType: p.option_type as unknown as OptionTypeEnum,
+      quantity: Number(p.quantity),
+      avgPremium: Number(p.avg_premium),
+      currentPremium: Number(p.current_premium) || 0,
+      unrealizedPnl: Number(p.unrealized_pnl) || 0,
+      realizedPnl: Number(p.realized_pnl) || 0,
+      greeks: {
+        delta: Number(p.delta) || 0,
+        gamma: Number(p.gamma) || 0,
+        theta: Number(p.theta) || 0,
+        vega: Number(p.vega) || 0,
+      },
+      isOpen: p.is_open,
+    }));
   }
 
   // Per-user mutex to prevent concurrent sync race conditions
@@ -264,18 +282,29 @@ export class OptionsService {
       }
 
       // Mark positions as closed if no longer on Binance
-      // Works even when activeSymbols is empty (closes ALL open positions)
-      await tx.options_positions.updateMany({
+      // Capture final P&L before marking positions closed
+      // Promote last-known unrealized_pnl into realized_pnl so history shows meaningful values
+      const closingPositions = await tx.options_positions.findMany({
         where: {
           user_id: userId,
           is_open: true,
           ...(activeSymbols.length > 0 ? { contract_symbol: { notIn: activeSymbols } } : {}),
         },
-        data: {
-          is_open: false,
-          closed_at: new Date(),
-        },
+        select: { position_id: true, unrealized_pnl: true, realized_pnl: true },
       });
+
+      const closedAt = new Date();
+      for (const pos of closingPositions) {
+        await tx.options_positions.update({
+          where: { position_id: pos.position_id },
+          data: {
+            is_open: false,
+            closed_at: closedAt,
+            realized_pnl: pos.realized_pnl ?? pos.unrealized_pnl ?? 0,
+            unrealized_pnl: 0,
+          },
+        });
+      }
     });
 
     // Check recently closed positions for performance fees (AI-driven profitable closes)
@@ -818,6 +847,78 @@ export class OptionsService {
       maxLoss: Number(order.max_loss || 0),
       createdAt: order.created_at?.toISOString() || '',
     };
+  }
+
+  // ── Sync pending order statuses from Binance (runs every 10 min) ──
+
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async syncPendingOrderStatuses(): Promise<void> {
+    const pendingStatuses: OptionOrderStatus[] = ['submitting', 'pending', 'partially_filled'];
+    const pendingOrders = await this.prisma.options_orders.findMany({
+      where: { status: { in: pendingStatuses } },
+      select: {
+        order_id: true,
+        user_id: true,
+        contract_symbol: true,
+        binance_order_id: true,
+        expiry: true,
+      },
+    });
+
+    if (pendingOrders.length === 0) return;
+
+    const now = new Date();
+    let expiredCount = 0;
+    let syncedCount = 0;
+
+    for (const order of pendingOrders) {
+      // 1. If the contract has already expired, mark order expired (Binance auto-cancels at settlement)
+      if (order.expiry && order.expiry < now) {
+        await this.prisma.options_orders.update({
+          where: { order_id: order.order_id },
+          data: { status: 'expired' },
+        });
+        expiredCount++;
+        continue;
+      }
+
+      // 2. Live sync status from Binance — requires a valid binance_order_id + active connection
+      if (!order.binance_order_id) continue;
+      try {
+        const connection = await this.prisma.user_exchange_connections.findFirst({
+          where: { user_id: order.user_id, status: 'active' },
+          include: { exchange: true },
+        });
+        if (!connection || connection.exchange?.name?.toLowerCase() !== 'binance') continue;
+
+        const credentials = await this.exchangesService.getDecryptedCredentials(connection.connection_id);
+        const binanceOrder = await this.optionsBinance.fetchOrder(
+          credentials,
+          order.contract_symbol,
+          order.binance_order_id,
+          order.user_id,
+        );
+
+        const newStatus = this.mapOrderStatus(binanceOrder.status);
+        if (newStatus !== 'pending' && newStatus !== 'submitting') {
+          await this.prisma.options_orders.update({
+            where: { order_id: order.order_id },
+            data: {
+              status: newStatus,
+              filled_quantity: parseFloat(binanceOrder.executedQty || binanceOrder.filled || '0'),
+              avg_fill_price: parseFloat(binanceOrder.avgPrice || binanceOrder.average || '0') || null,
+            },
+          });
+          syncedCount++;
+        }
+      } catch (err: any) {
+        this.logger.warn(`Order status sync failed for ${order.order_id}: ${err.message}`);
+      }
+    }
+
+    if (expiredCount + syncedCount > 0) {
+      this.logger.log(`Order sync: ${expiredCount} expired, ${syncedCount} status-synced`);
+    }
   }
 
   // ── Cleanup: remove closed positions older than 90 days ──
