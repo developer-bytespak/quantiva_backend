@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { ConnectionStatus } from '@prisma/client';
-import { QueuedTradeStatus } from '.prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AlpacaService } from '../integrations/alpaca.service';
 import { EncryptionService } from './encryption.service';
@@ -161,10 +160,32 @@ export class QueuedTradeCronService {
     }
   }
 
+  /**
+   * Maximum time a row can sit in `submitted` after the buy fills before we
+   * give up on attaching TP/SL. 48h covers long holiday weekends and the
+   * usual PDT-lift window (a same-day-buy becomes an overnight position
+   * after midnight ET, so PDT stops blocking the sell).
+   */
+  private static readonly PROTECTION_GIVE_UP_MS = 48 * 60 * 60 * 1000;
+
   private async watchOne(row: any): Promise<void> {
     if (!row.alpaca_buy_order_id) {
       await this.queuedTradeService.markFailed(row.id, 'Missing alpaca_buy_order_id after submission');
       return;
+    }
+
+    // Give-up deadline: if the buy filled long ago and TP/SL still won't
+    // place, stop retrying so we don't hammer Alpaca forever. The row
+    // transitions to `failed` with the accumulated reason, and the user
+    // can add protection manually from the positions UI.
+    if (row.buy_filled_at) {
+      const ageMs = Date.now() - new Date(row.buy_filled_at).getTime();
+      if (ageMs > QueuedTradeCronService.PROTECTION_GIVE_UP_MS) {
+        const reason = `Gave up attaching TP/SL after 48h (attempts=${row.protection_attempts ?? 0}). Last error: ${row.failure_reason ?? 'unknown'}`;
+        await this.queuedTradeService.markFailed(row.id, reason);
+        this.logger.warn(`Queue ${row.id}: ${reason}`);
+        return;
+      }
     }
 
     const connection = await this.prisma.user_exchange_connections.findUnique({
@@ -209,15 +230,36 @@ export class QueuedTradeCronService {
       return;
     }
 
+    // Buy is filled. Record that moment if we haven't already, so the
+    // give-up deadline has a stable anchor even if protection takes many
+    // ticks to succeed.
+    if (!row.buy_filled_at) {
+      await this.queuedTradeService.markBuyFilled(row.id);
+    }
+
     // Fill detected — place TP/SL using the stored percentages
     const tpPct = row.take_profit_pct ? Number(row.take_profit_pct) : null;
     const slPct = row.stop_loss_pct ? Number(row.stop_loss_pct) : null;
 
-    // If percentages weren't provided, mark filled without protection
+    // If percentages weren't provided, the trade is truly done — no
+    // protection was ever requested. Mark fully filled so the cron stops
+    // picking up this row.
     if (!tpPct && !slPct) {
-      await this.queuedTradeService.markFilled(row.id, null, null);
+      await this.queuedTradeService.markFullyFilled(row.id, null, null);
       this.logger.log(
         `Queue ${row.id}: buy filled, no TP/SL configured (skipping protection)`,
+      );
+      return;
+    }
+
+    // Floor to whole shares for LIMIT/STOP compatibility on stocks
+    const protectionQty = Math.floor(filledQty);
+    if (protectionQty <= 0) {
+      // Fractional-only fill — no whole-share protection possible. Mark
+      // fully filled so the cron stops retrying.
+      await this.queuedTradeService.markFullyFilled(row.id, null, null);
+      this.logger.warn(
+        `Queue ${row.id}: buy filled ${filledQty} shares, floors to 0 whole shares — no protection placed`,
       );
       return;
     }
@@ -225,16 +267,6 @@ export class QueuedTradeCronService {
     try {
       const tpPrice = tpPct ? filledAvgPrice * (1 + tpPct) : filledAvgPrice * 1.1;
       const slPrice = slPct ? filledAvgPrice * (1 - slPct) : filledAvgPrice * 0.95;
-
-      // Floor to whole shares for LIMIT/STOP compatibility on stocks
-      const protectionQty = Math.floor(filledQty);
-      if (protectionQty <= 0) {
-        await this.queuedTradeService.markFilled(row.id, null, null);
-        this.logger.warn(
-          `Queue ${row.id}: buy filled ${filledQty} shares, floors to 0 whole shares — no protection placed`,
-        );
-        return;
-      }
 
       const protection = await this.alpacaService.placeProtectionOrders(
         apiKey,
@@ -245,7 +277,7 @@ export class QueuedTradeCronService {
         parseFloat(slPrice.toPrecision(8)),
       );
 
-      await this.queuedTradeService.markFilled(
+      await this.queuedTradeService.markFullyFilled(
         row.id,
         protection.takeProfitOrderId,
         protection.stopLossOrderId,
@@ -255,18 +287,24 @@ export class QueuedTradeCronService {
           `TP=${protection.takeProfitOrderId}, SL=${protection.stopLossOrderId}`,
       );
     } catch (err: any) {
-      // Buy is filled but protection failed — mark filled with null TP/SL and
-      // surface the reason. User or a separate recovery flow can add protection.
-      await this.prisma.pending_queued_trades.update({
-        where: { id: row.id },
-        data: {
-          status: QueuedTradeStatus.filled,
-          filled_at: new Date(),
-          failure_reason: `Buy filled but protection failed: ${err?.message ?? err}`,
-        },
-      });
-      this.logger.error(
-        `Queue ${row.id}: buy filled but protection failed — ${err?.message ?? err}`,
+      // Buy is filled but protection failed. Do NOT mark the row filled —
+      // that would stop the cron from ever retrying. Instead record the
+      // failure reason, bump the attempts counter, and leave the row in
+      // `submitted` so the next tick tries again. Transient failures
+      // (rate limits, network blips) recover quickly; PDT blocks recover
+      // overnight once the position becomes an overnight hold.
+      const alpacaMsg =
+        err?.response?.data?.message ??
+        err?.response?.data?.reject_reason ??
+        err?.message ??
+        String(err);
+      const errStatus = err?.response?.status;
+      const reason = `Buy filled but protection failed: ${alpacaMsg}${errStatus ? ` (status ${errStatus})` : ''}`;
+
+      await this.queuedTradeService.recordProtectionFailure(row.id, reason);
+      const nextAttempt = Number(row.protection_attempts ?? 0) + 1;
+      this.logger.warn(
+        `Queue ${row.id}: protection failed (attempt ${nextAttempt}) — ${alpacaMsg}. Will retry next tick.`,
       );
     }
   }
