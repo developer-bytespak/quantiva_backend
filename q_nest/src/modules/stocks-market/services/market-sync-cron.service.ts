@@ -30,12 +30,11 @@ export class MarketSyncCronService implements OnModuleInit {
         const activeSymbolsCount =
           await this.stocksMarketService.getActiveStockSymbolsCount();
 
-        // If we have fewer stocks than expected (< 400), automatically load from hardcoded list
-        // S&P 500 should have ~500+ stocks, so trigger refresh if significantly below
-        // We use hardcoded list directly to avoid FMP rate limits
-        if (activeSymbolsCount < 400) {
+        // Only load S&P 500 list on a completely empty database (fresh deployment).
+        // On restarts the DB already has data — skip to avoid hammering RDS on every restart.
+        if (activeSymbolsCount === 0) {
           this.logger.log(
-            `Found only ${activeSymbolsCount} stocks in database (expected ~500+). Loading S&P 500 from hardcoded list...`,
+            `Empty database detected. Loading S&P 500 from hardcoded list...`,
           );
 
           try {
@@ -65,12 +64,13 @@ export class MarketSyncCronService implements OnModuleInit {
           }
         } else {
           this.logger.log(
-            `Found ${activeSymbolsCount} stocks in database. Sync will use these stocks.`,
+            `Found ${activeSymbolsCount} stocks in database. Skipping startup sync — daily cron at 2 AM UTC will handle it.`,
           );
+          return; // Skip the heavy syncMarketData() on restart
         }
 
-        // Run initial sync after refresh (or if refresh wasn't needed)
-        this.logger.log('Running initial market data sync...');
+        // Only reached on fresh empty database
+        this.logger.log('Running initial market data sync (fresh database)...');
         await this.syncMarketData();
       } catch (error: any) {
         this.logger.error('Error during module initialization', {

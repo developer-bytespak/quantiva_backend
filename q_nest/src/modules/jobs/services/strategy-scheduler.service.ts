@@ -3,7 +3,6 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { PrismaModule } from '../../../prisma/prisma.module';
 
 @Injectable()
 export class StrategySchedulerService implements OnModuleInit {
@@ -15,12 +14,17 @@ export class StrategySchedulerService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    // Schedule all active strategies on module initialization
-    await this.scheduleAllActiveStrategies();
+    // Delay by 30 seconds so PrismaService has time to connect and other
+    // OnModuleInit hooks finish before we start querying strategies.
+    setTimeout(async () => {
+      this.logger.log('Rescheduling active strategies after startup delay...');
+      await this.scheduleAllActiveStrategies();
+    }, 30000);
   }
 
   /**
    * Schedule a strategy based on its cron expression.
+   * Skips silently if the BullMQ repeatable job already exists (idempotent on restart).
    */
   async scheduleStrategy(strategyId: string): Promise<void> {
     try {
@@ -40,6 +44,10 @@ export class StrategySchedulerService implements OnModuleInit {
         return;
       }
 
+      // Fetch existing repeatable jobs once to avoid duplicate adds on restart
+      const existingRepeatableJobs = await this.strategyQueue.getRepeatableJobs();
+      const existingJobNames = new Set(existingRepeatableJobs.map((j) => j.name));
+
       // Schedule job for each target asset
       for (const assetSymbol of targetAssets) {
         // Find asset by symbol
@@ -52,7 +60,16 @@ export class StrategySchedulerService implements OnModuleInit {
           continue;
         }
 
-        // Create job record in database
+        const jobName = `strategy-${strategyId}-asset-${asset.asset_id}`;
+
+        // Skip if this repeatable job already exists in Redis — prevents duplicate
+        // DB records and duplicate queue entries on every NestJS restart.
+        if (existingJobNames.has(jobName)) {
+          this.logger.debug(`Repeatable job already exists, skipping: ${jobName}`);
+          continue;
+        }
+
+        // Create job record in database only for genuinely new jobs
         const jobRecord = await this.prisma.strategy_execution_jobs.create({
           data: {
             strategy_id: strategyId,
@@ -63,7 +80,7 @@ export class StrategySchedulerService implements OnModuleInit {
 
         // Add job to queue with cron schedule
         await this.strategyQueue.add(
-          `strategy-${strategyId}-asset-${asset.asset_id}`,
+          jobName,
           {
             strategy_id: strategyId,
             asset_id: asset.asset_id,

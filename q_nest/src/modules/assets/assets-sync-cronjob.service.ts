@@ -1,11 +1,11 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MarketService } from '../market/market.service';
 import axios from 'axios';
 
 @Injectable()
-export class AssetsSyncCronjobService implements OnModuleInit {
+export class AssetsSyncCronjobService {
   private readonly logger = new Logger(AssetsSyncCronjobService.name);
   private lastSyncTime: Date | null = null;
   private isRunning = false;
@@ -14,14 +14,6 @@ export class AssetsSyncCronjobService implements OnModuleInit {
     private prisma: PrismaService,
     private marketService: MarketService,
   ) {}
-
-  async onModuleInit() {
-    // Sync assets on startup so market data is available immediately
-    // Runs in background to not block server startup
-    this.syncAssetsFromCoinGecko().catch((err) =>
-      this.logger.error(`Startup sync failed: ${err.message}`),
-    );
-  }
 
   /**
    * Sync top 500 coins from CoinGecko to assets and market_rankings tables.
