@@ -19,13 +19,21 @@ export class CryptoAutoTradingCronService implements OnModuleInit {
     try {
       this.logger.log('🚀 Crypto Auto Trading Cron Service initialized');
       this.logger.log('📅 Scheduled to run every 6 hours: 30 */6 * * * (offset from stocks)');
-      
-      // Load trade history from database first
+
+      // Load trade history from database (lightweight read, always safe)
       this.logger.log('📖 Loading trade history from database...');
       await this.sessionService.loadHistoryFromDatabase();
       this.logger.log('✓ Trade history loaded');
-      
-      // Auto-start trading session on module init with retry
+
+      // In production, skip auto-starting the session on every restart to avoid
+      // hammering the DB and external APIs. The 6h cron will start trading on its
+      // first tick. In development, auto-start immediately for convenience.
+      if (process.env.NODE_ENV === 'production') {
+        this.logger.log('Production mode — skipping session auto-start on startup. Trading resumes on next 6h cron tick.');
+        return;
+      }
+
+      // Auto-start trading session on module init with retry (dev only)
       this.logger.log('🔄 Attempting to auto-start trading session...');
       await this.autoStartSessionWithRetry();
     } catch (error: any) {

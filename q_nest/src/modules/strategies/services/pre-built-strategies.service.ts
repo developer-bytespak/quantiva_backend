@@ -25,8 +25,13 @@ export class PreBuiltStrategiesService implements OnModuleInit {
   ) { }
 
   async onModuleInit() {
-    // Seed pre-built strategies on module initialization
-    await this.seedPreBuiltStrategies();
+    // Delay seeding by 5 seconds to let PrismaService connect first and avoid
+    // racing with other OnModuleInit hooks that also query the database at t=0.
+    setTimeout(() => {
+      this.seedPreBuiltStrategies().catch((err) =>
+        this.logger.error(`Failed to seed pre-built strategies: ${err.message}`),
+      );
+    }, 5000);
   }
 
   /**

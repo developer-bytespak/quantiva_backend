@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { ScheduleModule } from '@nestjs/schedule';
 import { AlpacaPaperTradingService } from './alpaca-paper-trading.service';
 import { AlpacaPaperTradingController } from './alpaca-paper-trading.controller';
 import { PrismaModule } from '../../prisma/prisma.module';
@@ -15,7 +14,6 @@ import { AutoTradingController } from './services/auto-trading.controller';
 @Module({
   imports: [
     ConfigModule,
-    ScheduleModule.forRoot(),
     PrismaModule,
   ],
   controllers: [
