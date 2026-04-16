@@ -9,7 +9,7 @@ export class SeatExpiryScheduler {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  @Cron('*/30 * * * * *') // Every 30 seconds
+  @Cron('*/5 * * * *') // Every 5 minutes
   async handleSeatExpiry() {
     if (this.isRunning) return;
     this.isRunning = true;
