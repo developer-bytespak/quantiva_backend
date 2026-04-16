@@ -203,8 +203,33 @@ export class QueuedTradeService {
     });
   }
 
-  /** Mark a row as filled and record the TP/SL order ids. */
-  async markFilled(
+  /**
+   * Mark the BUY as filled on Alpaca, while keeping the row in `submitted`
+   * status so the fill-watcher cron keeps retrying TP/SL placement. The
+   * `filled_at` column is deliberately NOT set here — that column is
+   * reserved for the truly-done state when TP/SL are also placed. The
+   * `buy_filled_at` column records the moment the buy actually filled so
+   * we can compute a give-up deadline (e.g. 48h since fill).
+   *
+   * Idempotent: only writes `buy_filled_at` if it's currently null.
+   */
+  async markBuyFilled(id: string) {
+    return this.prisma.pending_queued_trades.update({
+      where: { id },
+      data: {
+        buy_filled_at: new Date(), // overwrites is fine — the first set wins via the watcher's guard
+      },
+    });
+  }
+
+  /**
+   * Mark the row as fully done: BUY filled AND TP/SL both placed. This is
+   * the terminal "success" state — the cron will no longer pick the row up
+   * (watch query filters on status='submitted'). `filled_at` is populated
+   * here so the UI can show a completion timestamp; `buy_filled_at` was
+   * set earlier when the BUY first filled.
+   */
+  async markFullyFilled(
     id: string,
     tpOrderId: string | null,
     slOrderId: string | null,
@@ -218,6 +243,39 @@ export class QueuedTradeService {
         filled_at: new Date(),
       },
     });
+  }
+
+  /**
+   * Record that a TP/SL placement attempt failed but the row should remain
+   * in `submitted` status so the cron retries on the next tick. Bumps
+   * `protection_attempts` so we can spot stuck rows and (separately) apply
+   * a give-up deadline. `failure_reason` is overwritten each call with the
+   * latest Alpaca message — if you want full history, inspect the logs.
+   */
+  async recordProtectionFailure(id: string, reason: string) {
+    return this.prisma.pending_queued_trades.update({
+      where: { id },
+      data: {
+        failure_reason: reason,
+        protection_attempts: { increment: 1 },
+      },
+    });
+  }
+
+  /**
+   * Legacy compatibility: previously the cron/controller called `markFilled`
+   * at the fill-detection point. The new split is `markBuyFilled` +
+   * `markFullyFilled`. Kept as a thin alias so any lingering caller still
+   * compiles; prefer the explicit names.
+   *
+   * @deprecated Use markBuyFilled + markFullyFilled instead.
+   */
+  async markFilled(
+    id: string,
+    tpOrderId: string | null,
+    slOrderId: string | null,
+  ) {
+    return this.markFullyFilled(id, tpOrderId, slOrderId);
   }
 
   /** Mark a row as failed with a human-readable reason. */

@@ -1887,9 +1887,11 @@ model pending_queued_trades {
   tp_order_id         String?           @db.VarChar(100)
   sl_order_id         String?           @db.VarChar(100)
   failure_reason      String?           @db.Text
+  protection_attempts Int               @default(0) // number of TP/SL placement attempts by the fill-watcher cron
   queued_at           DateTime          @default(now()) @db.Timestamp(6)
   submitted_at        DateTime?         @db.Timestamp(6)
-  filled_at           DateTime?         @db.Timestamp(6)
+  buy_filled_at       DateTime?         @db.Timestamp(6) // when Alpaca reported the buy filled (independent of TP/SL placement)
+  filled_at           DateTime?         @db.Timestamp(6) // set only when BUY filled AND TP/SL both placed (truly done)
   canceled_at         DateTime?         @db.Timestamp(6)
   expires_at          DateTime?         @db.Timestamp(6) // auto-expire stale queues
 
