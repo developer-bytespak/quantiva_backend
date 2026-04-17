@@ -375,6 +375,10 @@ export class SumsubService implements OnModuleInit {
       'spam': 'Irrelevant images were uploaded. Please provide valid ID and selfie.',
       'fraudulentPatterns_selfieMismatch': 'Selfie does not match the photo on your ID document.',
       'fraudulentPatterns_fake': 'Verification could not be completed. Please provide valid documents.',
+      'fraudulentPatterns': 'Potentially fraudulent activity was detected in your submission.',
+      // Regulations / compliance
+      'regulationsViolations': 'We are unable to verify your identity due to regulatory requirements.',
+      'regulationsViolations_duplicate': 'This document has already been used on another account.',
     };
     if (labels[buttonId]) return labels[buttonId];
     return buttonId ? `Verification issue: ${buttonId.replace(/_/g, ' ')}` : 'Verification could not be completed.';
@@ -565,6 +569,21 @@ export class SumsubService implements OnModuleInit {
   async resetApplicant(applicantId: string): Promise<any> {
     this.logger.log(`Resetting applicant: ${applicantId}`);
     return this.makeRequest<any>('POST', `/resources/applicants/${applicantId}/reset`);
+  }
+
+  /**
+   * Permanently delete applicant from Sumsub — used on voluntary account deletion
+   * so a legitimate user who leaves can sign up again later with the same ID.
+   * DO NOT call this for FINAL-rejection deletions (fraud must stay blocked).
+   */
+  async deleteApplicant(applicantId: string): Promise<void> {
+    this.logger.log(`Deleting applicant from Sumsub: ${applicantId}`);
+    try {
+      await this.makeRequest<void>('DELETE', `/resources/applicants/${applicantId}`);
+      this.logger.log(`Applicant deleted: ${applicantId}`);
+    } catch (error) {
+      this.logger.warn(`Failed to delete applicant ${applicantId}: ${error.message}`);
+    }
   }
 
   /**

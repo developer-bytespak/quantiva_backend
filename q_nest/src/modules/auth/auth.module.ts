@@ -17,6 +17,7 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { StorageModule } from '../../storage/storage.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { KycModule } from '../../kyc/kyc.module';
 import { AppGateway } from 'src/gateways/app.gateway';
 import { FirebaseService } from 'src/firebase/firebase.service';
 
@@ -26,6 +27,7 @@ import { FirebaseService } from 'src/firebase/firebase.service';
     StorageModule,
     SubscriptionsModule,
     NotificationsModule,
+    KycModule,
     PassportModule,
     ConfigModule,
     ScheduleModule,

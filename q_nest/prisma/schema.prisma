@@ -155,6 +155,7 @@ model kyc_verifications {
   sumsub_external_user_id String?            @db.VarChar(255)
   sumsub_review_result    Json?              @db.Json
   sumsub_review_status    String?            @db.VarChar(50)
+  review_reject_type      String?            @db.VarChar(10)
   verification_provider   String             @default("sumsub") @db.VarChar(20)
   documents               kyc_documents[]
   face_matches            kyc_face_matches[]

@@ -514,12 +514,21 @@ export class KycService {
       };
     }
 
-    // If status is still pending and we have a Sumsub applicant, poll Sumsub for latest status.
-    // Throttled: only call Sumsub if we haven't polled this applicant within SUMSUB_POLL_TTL_MS.
-    if (
+    // Poll Sumsub for the latest state when:
+    //   • our local status is still pending or under manual review, OR
+    //   • Sumsub hasn't finalised yet (reviewStatus != "completed") — this
+    //     covers the "prechecked RED but review still in progress" race where
+    //     Sumsub may later flip the verdict to GREEN after human review.
+    // Throttled by SUMSUB_POLL_TTL_MS either way.
+    const sumsubNotFinalised =
+      verification.sumsub_review_status !== 'completed';
+    const shouldPollSumsub =
       verification.sumsub_applicant_id &&
-      (verification.status === 'pending' || verification.status === 'review')
-    ) {
+      (verification.status === 'pending' ||
+        verification.status === 'review' ||
+        sumsubNotFinalised);
+
+    if (shouldPollSumsub) {
       const cacheKey = verification.sumsub_applicant_id;
       const cached = this.sumsubStatusCache.get(cacheKey);
       const now = Date.now();
@@ -567,13 +576,28 @@ export class KycService {
 
           // Map Sumsub status to our status.
           // Sumsub reviewStatus values: init, pending, prechecked, completed, onHold.
-          // A reviewAnswer (GREEN/RED/YELLOW) can appear at "prechecked" (automated check done)
-          // or "completed" (full review done). Both are actionable.
+          //
+          // • GREEN at "prechecked" OR "completed" → safe to treat as approved.
+          //   A GREEN from the automated check (prechecked) is stable; Sumsub
+          //   doesn't walk back a GREEN to a RED.
+          //
+          // • RED at "prechecked" → wait for "completed" before persisting
+          //   as rejected. Sumsub may still escalate to human review, during
+          //   which the applicant is effectively "still processing" on their
+          //   SDK. If we mark the DB rejected here, the user sees our retry
+          //   UI while the Sumsub side hasn't finalised — then clicking Retry
+          //   fails with "review is already in progress".
+          //
+          // • Any reviewAnswer at "completed" → final, persist verbatim.
           let newStatus = verification.status;
           let decisionReason = verification.decision_reason;
           let newReviewResult = verification.sumsub_review_result;
 
-          const hasActionableAnswer = reviewAnswer && (reviewStatus === 'completed' || reviewStatus === 'prechecked');
+          const isFinalised = reviewStatus === 'completed';
+          const isPrecheckedGreen =
+            reviewStatus === 'prechecked' && reviewAnswer === 'GREEN';
+          const hasActionableAnswer =
+            reviewAnswer && (isFinalised || isPrecheckedGreen);
 
           if (hasActionableAnswer) {
             newStatus = this.sumsubService.parseReviewResult(reviewAnswer);
@@ -596,10 +620,23 @@ export class KycService {
           } else if (reviewStatus === 'onHold') {
             newStatus = 'review';
             decisionReason = 'Verification on hold - additional information may be required';
+          } else if (reviewStatus === 'prechecked' && reviewAnswer === 'RED') {
+            // Automated check said RED but Sumsub may still escalate to a
+            // human. Keep our state as pending so the frontend stays inside
+            // the SDK waiting UI until Sumsub finalises.
+            this.logger.log(
+              `   ⏳ Sumsub prechecked RED — waiting for "completed" before marking rejected`,
+            );
           }
 
           // Update DB if status changed
           if (newStatus !== verification.status) {
+            // Capture reject type (RETRY/FINAL) from the Sumsub response so the
+            // UI can distinguish retry-able rejections from permanent ones
+            // without having to parse the review_result JSON every time.
+            const polledRejectType =
+              (applicant.review?.reviewResult as any)?.reviewRejectType ?? null;
+
             verification = await this.prisma.kyc_verifications.update({
               where: { kyc_id: verification.kyc_id },
               data: {
@@ -607,6 +644,7 @@ export class KycService {
                 decision_reason: decisionReason,
                 sumsub_review_status: reviewStatus,
                 sumsub_review_result: newReviewResult as any,
+                review_reject_type: polledRejectType,
               },
               include: {
                 documents: true,
@@ -614,19 +652,13 @@ export class KycService {
               },
             });
 
-            // Update user kyc_status if approved
-            if (newStatus === 'approved') {
-              await this.prisma.users.update({
-                where: { user_id: userId },
-                data: { kyc_status: 'approved' },
-              });
-              this.logger.log('   ✅ User KYC status updated to APPROVED');
-            } else if (newStatus === 'rejected') {
-              await this.prisma.users.update({
-                where: { user_id: userId },
-                data: { kyc_status: 'rejected' },
-              });
-            }
+            // Mirror onto users.kyc_status for ALL outcomes so flow-router,
+            // dashboard banner, and action-button gating all see the truth.
+            await this.prisma.users.update({
+              where: { user_id: userId },
+              data: { kyc_status: newStatus as any },
+            });
+            this.logger.log(`   ✅ User KYC status updated to ${newStatus.toUpperCase()}`);
           }
         }
       } catch (error) {
@@ -636,9 +668,12 @@ export class KycService {
       } // end: if cache stale
     }
 
-    // Extract reviewRejectType from the stored Sumsub review result JSON
+    // Prefer the dedicated column; fall back to parsing the stored review JSON
     const reviewResult = verification.sumsub_review_result as Record<string, any> | null;
-    const reviewRejectType = reviewResult?.reviewRejectType as string | undefined;
+    const reviewRejectType =
+      verification.review_reject_type ??
+      (reviewResult?.reviewRejectType as string | undefined) ??
+      null;
 
     // Fetch human-readable rejection reasons when status is rejected
     let rejectionReasons: string[] = [];
@@ -666,7 +701,7 @@ export class KycService {
           reviewResult.buttonIds.forEach((id: string) => buttonIds.add(id));
         }
 
-        rejectionReasons = [...buttonIds]
+        rejectionReasons = Array.from(buttonIds)
           .map((bid) => this.sumsubService.getRejectionReasonLabel(bid))
           .filter(Boolean);
 
@@ -694,6 +729,17 @@ export class KycService {
       }
     }
 
+    // `has_submission` tells the frontend whether Sumsub actually received
+    // any docs on this applicant yet. When the SDK token endpoint is called
+    // it creates a kyc_verifications row + a Sumsub applicant, but if the
+    // user never actually finishes the SDK (closes the tab, navigates away),
+    // the applicant sits in `reviewStatus: init` forever. We don't want to
+    // trap those users on the pending spinner — the frontend uses this flag
+    // to redirect them back to the SDK page.
+    const sumsubReviewStatus = verification.sumsub_review_status || null;
+    const hasSubmission =
+      sumsubReviewStatus !== null && sumsubReviewStatus !== 'init';
+
     return {
       status: verification.status,
       kyc_id: verification.kyc_id,
@@ -710,6 +756,8 @@ export class KycService {
         : null,
       review_reject_type: reviewRejectType || null,
       rejection_reasons: rejectionReasons.length > 0 ? rejectionReasons : undefined,
+      sumsub_review_status: sumsubReviewStatus,
+      has_submission: hasSubmission,
     };
   }
 

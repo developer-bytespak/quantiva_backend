@@ -21,6 +21,7 @@ import { DeleteAccountDto } from '../dto/delete-account.dto';
 import { StorageService } from '../../../storage/storage.service';
 import { CloudinaryService } from '../../../storage/cloudinary.service';
 import { SubscriptionsService } from '../../subscriptions/subscriptions.service';
+import { SumsubService } from '../../../kyc/integrations/sumsub.service';
 
 @Injectable()
 export class AuthService {
@@ -34,6 +35,7 @@ export class AuthService {
     private storageService: StorageService,
     private cloudinaryService: CloudinaryService,
     private subscriptionsService: SubscriptionsService,
+    private sumsubService: SumsubService,
   ) {}
 
   private getGoogleClient() {
@@ -45,21 +47,9 @@ export class AuthService {
     const { email, username, password } = registerDto;
 
     // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const emailRegex = /^[^\s@]+@[^\s@]+\..+$/;
     if (!emailRegex.test(email)) {
       throw new BadRequestException('Please enter a valid email address');
-    }
-
-    // Validate email domain has MX records (can actually receive email)
-    try {
-      const domain = email.split('@')[1];
-      const mxRecords = await dns.resolveMx(domain);
-      if (!mxRecords || mxRecords.length === 0) {
-        throw new BadRequestException('This email domain cannot receive emails. Please use a valid email address.');
-      }
-    } catch (error) {
-      if (error instanceof BadRequestException) throw error;
-      throw new BadRequestException('Invalid email domain. Please use a valid email address.');
     }
 
     // Check if user already exists
@@ -1050,7 +1040,35 @@ export class AuthService {
       throw txError;
     }
 
-    // Step 8: Delete cloud storage files AFTER database transaction succeeds
+    // Step 8a: Clean up Sumsub applicant(s) so the user's CNIC/selfie are
+    // freed from Sumsub's global duplicate detection. If we don't do this,
+    // a user who legitimately deletes their account from settings can never
+    // sign up again with the same ID — Sumsub would block them with
+    // "documents already submitted on another profile".
+    //
+    // This is VOLUNTARY deletion (user chose to leave), so applicant removal
+    // is the correct behavior. Sumsub cleanup for FINAL rejections (fraud)
+    // lives in usersService.deleteSelf() with reason: "final_rejection" and
+    // intentionally SKIPS this step so bad actors stay blocked forever.
+    for (const kyc of kycVerifications) {
+      if (kyc.sumsub_applicant_id) {
+        try {
+          await this.sumsubService.deleteApplicant(kyc.sumsub_applicant_id);
+          console.log(
+            `[ACCOUNT_DELETION] Sumsub applicant ${kyc.sumsub_applicant_id} deleted`,
+          );
+        } catch (err) {
+          // Non-fatal — local DB is already gone. Log and continue so the
+          // user's cloud-file cleanup still runs.
+          console.error(
+            `[ACCOUNT_DELETION] Failed to delete Sumsub applicant ${kyc.sumsub_applicant_id}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+    }
+
+    // Step 8b: Delete cloud storage files AFTER database transaction succeeds
     // This ensures files are only deleted if all database operations succeed
     let cloudFilesDeleted = 0;
     let cloudFilesFailed = 0;
