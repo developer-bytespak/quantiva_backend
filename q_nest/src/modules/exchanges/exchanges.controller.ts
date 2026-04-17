@@ -13,7 +13,10 @@ import {
   HttpStatus,
   HttpException,
   Logger,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
+import { OptionsBinanceService } from '../options/services/options-binance.service';
 import { ExchangesService } from './exchanges.service';
 import { AdminOrUserJwtGuard } from '../admin-auth/guards/admin-or-user-jwt.guard';
 import { KycVerifiedGuard } from '../../common/guards/kyc-verified.guard';
@@ -79,6 +82,8 @@ export class ExchangesController {
     private readonly tradeFeesService: TradeFeesService,
     private readonly qhqService: QhqTokenService,
     private readonly queuedTradeService: QueuedTradeService,
+    @Inject(forwardRef(() => OptionsBinanceService))
+    private readonly optionsBinanceService: OptionsBinanceService,
   ) {}
 
   @Get()
@@ -1750,11 +1755,26 @@ export class ExchangesController {
         await this.exchangesService.syncConnectionData(connectionId);
       }
 
-      const [balance, positions, orders, portfolio] = await Promise.all([
+      const [balance, positions, orders, portfolio, optionsAccount] = await Promise.all([
         this.exchangesService.getConnectionData(connectionId, 'balance'),
         this.exchangesService.getConnectionData(connectionId, 'positions'),
         this.exchangesService.getConnectionData(connectionId, 'orders'),
         this.exchangesService.getConnectionData(connectionId, 'portfolio'),
+        // Binance options margin wallet — silently null for non-Binance connections
+        // or users without options enabled.
+        exchangeName === 'binance'
+          ? this.exchangesService
+              .getDecryptedCredentials(connectionId)
+              .then((credentials) =>
+                this.optionsBinanceService.fetchBalance(credentials as any),
+              )
+              .catch((err) => {
+                this.logger.debug(
+                  `Dashboard: skipping options balance for ${connectionId}: ${err?.message ?? err}`,
+                );
+                return null;
+              })
+          : Promise.resolve(null),
       ]);
 
       // OPTIMIZATION: Reuse prices from positions (already fetched during sync)
@@ -1849,6 +1869,31 @@ export class ExchangesController {
 
       const logos = await this.getLogosForSymbols(allSymbols, assetTypeMap);
 
+      // Aggregated totals so clients don't need to redo this arithmetic.
+      // Spot total: prefer balance.totalValueUSD (Alpaca/Bybit populate it);
+      //   fall back to portfolio.totalValue (Binance, which sets balance.totalValueUSD=0).
+      const balanceTotalUSD = Number((balance as any)?.totalValueUSD ?? 0) || 0;
+      const portfolioTotalValue = Number((portfolio as any)?.totalValue ?? 0) || 0;
+      const spotTotal = balanceTotalUSD > 0 ? balanceTotalUSD : portfolioTotalValue;
+      const marginTotal = Number(optionsAccount?.totalBalance ?? 0) || 0;
+      // Available spot: Alpaca exposes buyingPower; Binance exposes free USD/USDT/BUSD.
+      const buyingPower = Number((balance as any)?.buyingPower ?? 0) || 0;
+      const usdAsset = Array.isArray((balance as any)?.assets)
+        ? (balance as any).assets.find((a: any) => /^(USD|USDT|BUSD)$/i.test(a?.symbol ?? ''))
+        : null;
+      const usdFree = Number(usdAsset?.total ?? usdAsset?.free ?? 0) || 0;
+      const availableSpot = buyingPower > 0 ? buyingPower : usdFree;
+      const availableMargin = Number(optionsAccount?.availableBalance ?? 0) || 0;
+      const portfolioTotal = spotTotal + marginTotal;
+      const totals = {
+        portfolio: portfolioTotal,
+        spot: spotTotal,
+        margin: marginTotal,
+        availableSpot,
+        availableMargin,
+        invested: Math.max(0, portfolioTotal - availableSpot - availableMargin),
+      };
+
       return {
         success: true,
         data: {
@@ -1859,6 +1904,8 @@ export class ExchangesController {
           prices,
           logos, // All symbol -> logo URL mappings
           asset_types: assetTypeMap, // All symbol -> asset type mappings
+          optionsAccount, // Binance options margin wallet (null when unavailable)
+          totals, // { portfolio, spot, margin } — ready-to-render aggregates
         },
         last_updated: new Date().toISOString(),
         cached: isCached, // Indicate if data came from cache

@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { OptionsController } from './options.controller';
 import { OptionsService } from './services/options.service';
@@ -13,7 +13,7 @@ import { ExchangesModule } from '../exchanges/exchanges.module';
 import { TradeFeesModule } from '../trade-fees/trade-fees.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, AuthModule, ExchangesModule, TradeFeesModule],
+  imports: [ConfigModule, PrismaModule, AuthModule, forwardRef(() => ExchangesModule), TradeFeesModule],
   controllers: [OptionsController],
   providers: [OptionsService, OptionsBinanceService, OptionsGateway, OptionsIvService, OptionsSignalService, OptionsRiskService],
   exports: [OptionsService, OptionsBinanceService, OptionsIvService, OptionsSignalService, OptionsRiskService],
