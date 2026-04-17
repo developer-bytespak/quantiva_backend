@@ -9,7 +9,7 @@ import logging
 
 from src.services.engines.sentiment_engine import SentimentEngine
 from src.services.data.lunarcrush_service import LunarCrushService
-from src.services.data.stock_news_service import StockNewsService
+from src.services.data.stock_news_service import get_stock_news_service
 
 logger = logging.getLogger(__name__)
 

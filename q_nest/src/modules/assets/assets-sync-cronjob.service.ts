@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MarketService } from '../market/market.service';
@@ -13,6 +14,7 @@ export class AssetsSyncCronjobService {
   constructor(
     private prisma: PrismaService,
     private marketService: MarketService,
+    private config: ConfigService,
   ) {}
 
   /**
@@ -23,6 +25,7 @@ export class AssetsSyncCronjobService {
    */
   @Cron('*/30 * * * *')
   async syncAssetsFromCoinGecko(): Promise<void> {
+    if (this.config.get('ENABLE_CRONS') === 'false') return;
     if (this.isRunning) {
       return;
     }
