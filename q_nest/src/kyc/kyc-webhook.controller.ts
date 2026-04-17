@@ -12,6 +12,7 @@ import {
 import { Request } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { SumsubService } from './integrations/sumsub.service';
+import { KycEmailService } from './services/kyc-email.service';
 
 interface RawBodyRequest extends Request {
   rawBody?: Buffer;
@@ -45,6 +46,7 @@ export class KycWebhookController {
   constructor(
     private prisma: PrismaService,
     private sumsubService: SumsubService,
+    private kycEmailService: KycEmailService,
   ) {}
 
   @Post('sumsub')
@@ -144,8 +146,12 @@ export class KycWebhookController {
 
     const reviewAnswer = payload.reviewResult.reviewAnswer;
     const kycStatus = this.sumsubService.parseReviewResult(reviewAnswer);
+    const reviewRejectType = payload.reviewResult.reviewRejectType || null;
 
     this.logger.log(`   Review Answer: ${reviewAnswer} → KYC Status: ${kycStatus}`);
+    if (reviewRejectType) {
+      this.logger.log(`   Reject Type: ${reviewRejectType}`);
+    }
 
     let decisionReason = `Sumsub review completed: ${reviewAnswer}`;
     if (payload.reviewResult.moderationComment) {
@@ -155,30 +161,42 @@ export class KycWebhookController {
       decisionReason += ` (Reject labels: ${payload.reviewResult.rejectLabels.join(', ')})`;
     }
 
-    // Update verification
-    await this.prisma.kyc_verifications.update({
+    // Update verification (including review_reject_type for RETRY/FINAL distinction)
+    const verification = await this.prisma.kyc_verifications.update({
       where: { kyc_id: kycId },
       data: {
         status: kycStatus as any,
         decision_reason: decisionReason,
         sumsub_review_result: payload.reviewResult as any,
         sumsub_review_status: payload.reviewStatus,
+        review_reject_type: reviewRejectType,
       },
+      include: { user: true },
     });
 
-    // Update user KYC status if approved
-    if (kycStatus === 'approved') {
-      const verification = await this.prisma.kyc_verifications.findUnique({
-        where: { kyc_id: kycId },
-      });
+    // Update user KYC status for ALL outcomes so flow-router and dashboard see the truth
+    await this.prisma.users.update({
+      where: { user_id: verification.user_id },
+      data: { kyc_status: kycStatus as any },
+    });
+    this.logger.log(`   ✅ User KYC status updated to ${kycStatus.toUpperCase()}`);
 
-      if (verification) {
-        await this.prisma.users.update({
-          where: { user_id: verification.user_id },
-          data: { kyc_status: 'approved' },
-        });
-        this.logger.log('   ✅ User KYC status updated to APPROVED');
+    // Fire email notification based on final outcome
+    try {
+      const user = verification.user;
+      if (kycStatus === 'approved') {
+        await this.kycEmailService.sendApprovedEmail(user.email, user.username);
+      } else if (kycStatus === 'rejected') {
+        const buttonIds = payload.reviewResult.buttonIds || [];
+        const humanReasons = buttonIds.map((b) => this.sumsubService.getRejectionReasonLabel(b));
+        if (reviewRejectType === 'FINAL') {
+          await this.kycEmailService.sendFinalRejectionEmail(user.email, user.username, humanReasons);
+        } else {
+          await this.kycEmailService.sendRetryRejectionEmail(user.email, user.username, humanReasons);
+        }
       }
+    } catch (emailError) {
+      this.logger.warn(`Failed to send KYC email notification: ${emailError.message}`);
     }
 
     this.logger.log(`   ✅ Verification updated to: ${kycStatus.toUpperCase()}`);

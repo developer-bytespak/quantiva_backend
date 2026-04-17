@@ -636,9 +636,12 @@ export class KycService {
       } // end: if cache stale
     }
 
-    // Extract reviewRejectType from the stored Sumsub review result JSON
+    // Prefer the dedicated column; fall back to parsing the stored review JSON
     const reviewResult = verification.sumsub_review_result as Record<string, any> | null;
-    const reviewRejectType = reviewResult?.reviewRejectType as string | undefined;
+    const reviewRejectType =
+      verification.review_reject_type ??
+      (reviewResult?.reviewRejectType as string | undefined) ??
+      null;
 
     // Fetch human-readable rejection reasons when status is rejected
     let rejectionReasons: string[] = [];

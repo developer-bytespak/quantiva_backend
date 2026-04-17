@@ -6,6 +6,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
 import { UpdatePersonalInfoDto } from './dto/update-personal-info.dto';
+import { DeleteSelfDto } from './dto/delete-self.dto';
 import { CloudinaryService } from './services/cloudinary.service';
 
 @Controller('users')
@@ -74,6 +75,16 @@ export class UsersController {
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
+  }
+
+  @Delete('me')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async deleteCurrentUser(
+    @Body() dto: DeleteSelfDto,
+    @CurrentUser() user: TokenPayload,
+  ) {
+    return this.usersService.deleteSelf(user.sub, dto.reason);
   }
 
   @Delete('me/profile-picture')

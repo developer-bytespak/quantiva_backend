@@ -10,6 +10,7 @@ import { DecisionEngineService } from './services/decision-engine.service';
 import { ReviewService } from './services/review.service';
 import { PythonApiService } from './integrations/python-api.service';
 import { SumsubService } from './integrations/sumsub.service';
+import { KycEmailService } from './services/kyc-email.service';
 
 @Module({
   imports: [PrismaModule, StorageModule, ConfigModule],
@@ -21,8 +22,9 @@ import { SumsubService } from './integrations/sumsub.service';
     ReviewService,
     PythonApiService,
     SumsubService,
+    KycEmailService,
   ],
-  exports: [KycService, PythonApiService, SumsubService],
+  exports: [KycService, PythonApiService, SumsubService, KycEmailService],
 })
 export class KycModule {}
 

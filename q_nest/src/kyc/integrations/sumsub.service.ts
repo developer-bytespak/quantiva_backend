@@ -568,6 +568,21 @@ export class SumsubService implements OnModuleInit {
   }
 
   /**
+   * Permanently delete applicant from Sumsub — used on voluntary account deletion
+   * so a legitimate user who leaves can sign up again later with the same ID.
+   * DO NOT call this for FINAL-rejection deletions (fraud must stay blocked).
+   */
+  async deleteApplicant(applicantId: string): Promise<void> {
+    this.logger.log(`Deleting applicant from Sumsub: ${applicantId}`);
+    try {
+      await this.makeRequest<void>('DELETE', `/resources/applicants/${applicantId}`);
+      this.logger.log(`Applicant deleted: ${applicantId}`);
+    } catch (error) {
+      this.logger.warn(`Failed to delete applicant ${applicantId}: ${error.message}`);
+    }
+  }
+
+  /**
    * Verify webhook signature using the raw request body.
    * Sumsub computes HMAC-SHA256 of the raw payload bytes with the webhook secret key
    * and sends the result in the x-payload-digest header.
