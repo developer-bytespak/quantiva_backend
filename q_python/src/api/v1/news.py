@@ -544,18 +544,33 @@ async def get_general_stock_news_with_sentiment(request_data: Dict[str, Any] = B
     """
     try:
         limit = request_data.get('limit', 30)
-        
+
         if limit < 1 or limit > 100:
             raise HTTPException(status_code=400, detail="Limit must be between 1 and 100")
-        
-        logger.info(f"Fetching general stock news with sentiment analysis (limit={limit})")
-        
+
+        # Optional: caller can pass an explicit ticker list (CSV passed to
+        # StockNewsAPI; Finnhub fallback ignores it and returns general
+        # market news). Validate if present.
+        tickers = request_data.get('tickers')
+        if tickers is not None:
+            if not isinstance(tickers, list) or not all(isinstance(t, str) for t in tickers):
+                raise HTTPException(
+                    status_code=400,
+                    detail="tickers must be a list of strings if provided",
+                )
+            if len(tickers) == 0:
+                tickers = None  # treat empty list as "use default"
+
+        logger.info(
+            f"Fetching general stock news (limit={limit}, tickers={len(tickers) if tickers else 'default'})"
+        )
+
         # Initialize services
         stock_news_service = get_stock_news_service()
         sentiment_engine = SentimentEngine()
-        
+
         # Fetch general news (for multiple popular stocks)
-        news_items = stock_news_service.fetch_general_news(limit=limit)
+        news_items = stock_news_service.fetch_general_news(limit=limit, tickers=tickers)
         
         if not news_items:
             logger.warning("No general stock news items found")

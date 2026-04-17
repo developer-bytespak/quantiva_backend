@@ -5,6 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
 import { BinanceService } from '../binance/binance.service';
 import { NewsService } from './news.service';
+import { STOCK_TICKERS_100 } from './stock-tickers';
 
 @Injectable()
 export class NewsCronjobService {
@@ -618,16 +619,40 @@ export class NewsCronjobService {
   // ============== STOCK NEWS CRONJOB ==============
 
   /**
-   * Stock News Aggregation Cronjob — every 30 minutes, 30 symbols.
+   * Bulk general stock news aggregation — every 30 minutes.
    *
-   * Combined with the Python-side 2-hour cache, only symbols whose cache
-   * has expired actually hit StockNewsAPI. In steady state: ~2-3 symbols
-   * per run × 48 runs/day = ~100-150 real API calls/day.
+   * One Python call → one upstream API call (StockNewsAPI primary with
+   * the 100-ticker CSV, Finnhub fallback returning general US market news
+   * when StockNewsAPI is unavailable). Articles are stored linked to real
+   * per-ticker asset rows (AAPL, TSLA, ...) created on demand. Replaces
+   * the per-symbol `aggregateStockNews` loop below (kept for manual
+   * trigger only).
    *
-   * Expanded from 10 → 30 popular US stocks to give the AI insights and
-   * sentiment engines broader stock market coverage.
+   * Budget: ~48 API calls/day, vs. the 1,440/day of the old per-symbol cron.
    */
   @Cron('*/30 * * * *')
+  async aggregateGeneralStockNews(): Promise<void> {
+    if (!this.cronsEnabled) return;
+    try {
+      const result = await this.newsService.fetchAndStoreGeneralStockNewsFromPython(
+        50,
+        STOCK_TICKERS_100,
+      );
+      this.logger.log(
+        `[aggregateGeneralStockNews] fetched=${result.total_fetched} stored=${result.total_stored} tickers=${result.symbols.length}`,
+      );
+    } catch (error: any) {
+      this.logger.error(`[aggregateGeneralStockNews] failed: ${error?.message || error}`);
+    }
+  }
+
+  /**
+   * Per-symbol stock news aggregation — DISABLED on schedule.
+   * Superseded by `aggregateGeneralStockNews` (bulk pattern) above.
+   * Method body kept intact so `triggerStockNewsAggregation` (the manual
+   * trigger at news.controller.ts:378) still works for debugging.
+   */
+  // @Cron('*/30 * * * *') // DISABLED - replaced by aggregateGeneralStockNews
   async aggregateStockNews(): Promise<void> {
     if (!this.cronsEnabled) return;
 
@@ -656,7 +681,7 @@ export class NewsCronjobService {
 
         for (const symbol of batch) {
           try {
-            await this.newsService.fetchAndStoreStockNewsFromPython(symbol, 10);
+            await this.newsService.fetchAndStoreStockNewsFromPython(symbol, 3);
             processedCount++;
           } catch (error: any) {
             errorCount++;
@@ -693,7 +718,7 @@ export class NewsCronjobService {
     try {
       for (const symbol of stockSymbols) {
         try {
-          await this.newsService.fetchAndStoreStockNewsFromPython(symbol, 10);
+          await this.newsService.fetchAndStoreStockNewsFromPython(symbol, 3);
           processedCount++;
           if (stockSymbols.indexOf(symbol) < stockSymbols.length - 1) {
             await this.sleep(5000);
