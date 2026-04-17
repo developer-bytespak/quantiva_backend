@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AssetsService } from '../assets/assets.service';
+import { detectCoin } from './crypto-coin-detector';
 
 export interface CryptoNewsItem {
   title: string;
@@ -127,11 +128,19 @@ export class NewsService {
       const news_items = newsRecords.map((record) => {
         const metadata = record.metadata as any;
         const newsDetail = record.news_detail as any;
-        
+
         let description = newsDetail?.description || '';
-        
+
+        // Prefer the per-article detected ticker (set by the general-feed
+        // cron via detectCoin()) over the synthetic asset's symbol. Falls back
+        // to the asset relation, then to "CRYPTO" as a final default.
+        const symbol =
+          metadata?.detected_symbol ||
+          record.asset?.symbol ||
+          'CRYPTO';
+
         return {
-          symbol: record.asset?.symbol || 'Unknown',
+          symbol,
           title: record.heading,
           description: description,
           url: record.article_url,
@@ -368,9 +377,12 @@ export class NewsService {
    * Bulk-fetch the general crypto news feed from Python (one LunarCrush call
    * upstream) and upsert rows into `trending_news`.
    *
-   * All rows are linked to a synthetic "__GENERAL__" crypto asset, since the
-   * schema requires a non-null asset_id. Deduplicated by `article_url` within
-   * the last 7 days so re-runs of the same feed don't grow the table.
+   * All rows are linked to a synthetic "CRYPTO" crypto asset, since the
+   * schema requires a non-null asset_id. Each row ALSO stores a
+   * `metadata.detected_symbol` field that carries the actual coin ticker
+   * parsed from the article title (BTC, ETH, ...), or "CRYPTO" as fallback.
+   * Deduplicated by `article_url` within the last 7 days so re-runs of the
+   * same feed don't grow the table.
    *
    * Returns counters for the cron caller to log.
    */
@@ -392,16 +404,17 @@ export class NewsService {
       return { inserted: 0, skipped: 0, fetched: 0 };
     }
 
-    // Find or create the synthetic "__GENERAL__" asset that all general-feed
+    // Find or create the synthetic "CRYPTO" asset that all general-feed
     // rows are attached to. This lets us respect the NOT NULL asset_id FK
-    // without inventing a schema migration.
+    // without inventing a schema migration. The per-article detected ticker
+    // (BTC/ETH/...) is stored separately on the row in `metadata.detected_symbol`.
     let generalAsset = await this.prisma.assets.findFirst({
-      where: { symbol: '__GENERAL__', asset_type: 'crypto' },
+      where: { symbol: 'CRYPTO', asset_type: 'crypto' },
     });
     if (!generalAsset) {
       generalAsset = await this.prisma.assets.create({
         data: {
-          symbol: '__GENERAL__',
+          symbol: 'CRYPTO',
           name: 'General Crypto News',
           display_name: 'General Crypto News',
           asset_type: 'crypto',
@@ -410,7 +423,7 @@ export class NewsService {
           last_seen_at: new Date(),
         },
       });
-      this.logger.log('Created synthetic __GENERAL__ asset for general news feed');
+      this.logger.log('Created synthetic CRYPTO asset for general news feed');
     }
     const assetId = generalAsset.asset_id;
 
@@ -449,6 +462,12 @@ export class NewsService {
       const pollTimestamp = new Date(baseTs + i);
       const publishedAt = item.published_at ? new Date(item.published_at) : null;
 
+      // Parse the article title for a specific coin mention. Falls back to
+      // "CRYPTO" (the synthetic asset's symbol) when no known coin matches.
+      // This is used as a display hint on the frontend; the row itself still
+      // links to the CRYPTO asset regardless.
+      const detectedSymbol = detectCoin(title) ?? 'CRYPTO';
+
       try {
         await this.prisma.trending_news.create({
           data: {
@@ -468,6 +487,7 @@ export class NewsService {
             },
             metadata: {
               general_feed: true,
+              detected_symbol: detectedSymbol,
               sentiment: item.sentiment || null,
             },
           } as any,
