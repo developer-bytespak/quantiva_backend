@@ -97,7 +97,7 @@ export class KycEmailService {
             <p style="margin: 0 0 10px; color: #333; font-weight: 600;">Reason${reasons.length > 1 ? 's' : ''}:</p>
             ${this.formatReasons(reasons)}
           `)}
-          ${this.ctaButton(`${this.dashboardUrl}/onboarding/verification-status`, 'Retry Verification')}
+          ${this.ctaButton(`${this.dashboardUrl}/onboarding/kyc-verification`, 'Retry Verification')}
         `),
       });
       this.logger.log(`KYC retry email sent to ${userEmail}`);
