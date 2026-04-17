@@ -23,6 +23,7 @@ from src.services.data.stock_news_service import (  # noqa: E402
 def _fresh_service(tmp_state_path: str, rpm: int, monthly: int) -> StockNewsService:
     svc = StockNewsService()
     svc.api_key = "test-key"
+    svc.finnhub_api_key = "finnhub-test-key"  # enable fallback in tests
     svc.CACHE_TTL = 60
     svc.MAX_STALE_SECS = 24 * 3600
     svc._gate = StockNewsQuotaGate(rpm=rpm, monthly=monthly, state_path=tmp_state_path)
@@ -234,15 +235,141 @@ def test_http_403_handling() -> None:
         cached_data, _ = svc._news_cache[cache_key]
         svc._news_cache[cache_key] = (cached_data, time.time() - (svc.CACHE_TTL + 10))
 
-        # Second call gets 403 → should serve stale
+        # Second call gets 403 from StockNewsAPI; Finnhub fallback ALSO gets
+        # a 403 (same fake_get regardless of URL), so we fall through to stale.
         second = svc.fetch_news("MSFT", limit=2)
-        assert len(second) == 2, f"should serve stale on 403, got {second}"
+        assert len(second) == 2, f"should serve stale, got {second}"
         snap = svc.get_stats()
         assert snap["stats"]["http_403s"] == 1
         assert snap["stats"]["served_stale"] == 1
+        # Finnhub was attempted but failed (same mocked error)
+        assert snap["stats"]["finnhub_errors"] >= 1
     finally:
         _req.get = original_get  # type: ignore
-    print("  PASS: HTTP 403 -> drain + serve stale")
+    print("  PASS: HTTP 403 + Finnhub also fails -> drain + serve stale")
+
+
+def test_finnhub_fallback_on_stocknews_403() -> None:
+    """StockNewsAPI returns 403; Finnhub fallback serves fresh items."""
+    state_path = os.path.join(HERE, "_tmp_sn_fallback_403.json")
+    if os.path.exists(state_path):
+        os.remove(state_path)
+    svc = _fresh_service(state_path, rpm=20, monthly=100)
+
+    import requests as _req
+    original_get = _req.get
+
+    sn_calls = {"n": 0}
+    fh_calls = {"n": 0}
+
+    def fake_get(url, **kwargs):
+        if "stocknewsapi.com" in url:
+            sn_calls["n"] += 1
+            resp = _req.models.Response()
+            resp.status_code = 403
+            resp._content = b'{"message":"API calls limit reached"}'
+            raise _req.exceptions.HTTPError(response=resp)
+        elif "finnhub.io" in url:
+            fh_calls["n"] += 1
+
+            class FhResp:
+                status_code = 200
+                def raise_for_status(self): pass
+                def json(self):
+                    return [
+                        {
+                            "headline": f"AAPL earnings article {i}",
+                            "summary": f"summary text {i}",
+                            "source": "Reuters",
+                            "datetime": int(time.time()) - 3600,
+                            "url": f"https://example.com/finnhub/{i}",
+                            "related": "AAPL",
+                        }
+                        for i in range(3)
+                    ]
+            return FhResp()
+        raise ValueError(f"unexpected URL: {url}")
+
+    _req.get = fake_get  # type: ignore
+
+    try:
+        result = svc.fetch_news("AAPL", limit=3)
+        assert len(result) == 3, f"expected 3 items from Finnhub, got {len(result)}"
+        assert result[0]["source"] == "Reuters"
+        assert "example.com/finnhub" in result[0]["url"]
+
+        snap = svc.get_stats()
+        assert snap["stats"]["http_403s"] == 1, "StockNewsAPI 403 should be recorded"
+        assert sn_calls["n"] == 1, "StockNewsAPI was called once"
+        assert fh_calls["n"] == 1, "Finnhub was called exactly once as fallback"
+        assert snap["stats"]["finnhub_calls_made"] == 1
+        assert snap["stats"]["finnhub_fallbacks_served"] == 1
+        assert snap["stats"]["finnhub_errors"] == 0
+    finally:
+        _req.get = original_get  # type: ignore
+    print("  PASS: StockNewsAPI 403 -> Finnhub fallback serves fresh data")
+
+
+def test_finnhub_fallback_on_own_quota_block() -> None:
+    """Our own monthly gate blocks StockNewsAPI; Finnhub still serves data."""
+    state_path = os.path.join(HERE, "_tmp_sn_fallback_gate.json")
+    if os.path.exists(state_path):
+        os.remove(state_path)
+    # monthly=0 so the gate denies every call up front
+    svc = _fresh_service(state_path, rpm=20, monthly=1)
+    # Pre-consume the single monthly token
+    assert svc._gate.try_acquire() is True
+    # Now the gate will deny
+
+    import requests as _req
+    original_get = _req.get
+
+    sn_calls = {"n": 0}
+    fh_calls = {"n": 0}
+
+    def fake_get(url, **kwargs):
+        if "stocknewsapi.com" in url:
+            sn_calls["n"] += 1
+            raise AssertionError(
+                "StockNewsAPI should NOT have been called when our gate denies"
+            )
+        elif "finnhub.io" in url:
+            fh_calls["n"] += 1
+
+            class FhResp:
+                status_code = 200
+                def raise_for_status(self): pass
+                def json(self):
+                    return [
+                        {
+                            "headline": "Market rally on Fed news",
+                            "summary": "Stocks jumped after...",
+                            "source": "Bloomberg",
+                            "datetime": int(time.time()) - 600,
+                            "url": "https://example.com/finnhub/general-1",
+                            "related": "AAPL,MSFT",
+                        }
+                    ]
+            return FhResp()
+        raise ValueError(f"unexpected URL: {url}")
+
+    _req.get = fake_get  # type: ignore
+
+    try:
+        result = svc.fetch_general_news(limit=5)
+        assert len(result) == 1, f"expected Finnhub fallback, got {result}"
+        assert result[0]["source"] == "Bloomberg"
+        assert result[0].get("symbol") == "AAPL"  # first ticker from related CSV
+
+        snap = svc.get_stats()
+        assert snap["stats"]["blocked_by_quota"] == 1
+        assert sn_calls["n"] == 0
+        assert fh_calls["n"] == 1
+        assert snap["stats"]["finnhub_calls_made"] == 1
+        assert snap["stats"]["finnhub_fallbacks_served"] == 1
+    finally:
+        _req.get = original_get  # type: ignore
+    print("  PASS: own-gate blocks StockNewsAPI -> Finnhub fallback serves fresh data")
 
 
 def main() -> int:
@@ -254,6 +381,8 @@ def main() -> int:
         test_stale_fallback_when_blocked,
         test_singleton_identity,
         test_http_403_handling,
+        test_finnhub_fallback_on_stocknews_403,
+        test_finnhub_fallback_on_own_quota_block,
     ]:
         print(f"\n[{test.__name__}]")
         try:

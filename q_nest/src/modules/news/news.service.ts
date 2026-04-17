@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AssetsService } from '../assets/assets.service';
+import { detectCoin } from './crypto-coin-detector';
 
 export interface CryptoNewsItem {
   title: string;
@@ -127,11 +128,19 @@ export class NewsService {
       const news_items = newsRecords.map((record) => {
         const metadata = record.metadata as any;
         const newsDetail = record.news_detail as any;
-        
+
         let description = newsDetail?.description || '';
-        
+
+        // Prefer the per-article detected ticker (set by the general-feed
+        // cron via detectCoin()) over the synthetic asset's symbol. Falls back
+        // to the asset relation, then to "CRYPTO" as a final default.
+        const symbol =
+          metadata?.detected_symbol ||
+          record.asset?.symbol ||
+          'CRYPTO';
+
         return {
-          symbol: record.asset?.symbol || 'Unknown',
+          symbol,
           title: record.heading,
           description: description,
           url: record.article_url,
@@ -354,6 +363,18 @@ export class NewsService {
     }
   }
 
+  /**
+   * The `trending_news.heading` column is VARCHAR(120). Finnhub and some
+   * sources return longer headlines which would throw a Prisma
+   * "value too long for column" error. Truncate with an ellipsis.
+   */
+  private truncateHeading(title: string | null | undefined): string | null {
+    if (!title) return null;
+    const trimmed = title.trim();
+    if (!trimmed) return null;
+    return trimmed.length > 120 ? trimmed.slice(0, 117) + '...' : trimmed;
+  }
+
   private cleanupCache(): void {
     const now = Date.now();
     for (const [key, value] of this.cache.entries()) {
@@ -368,9 +389,12 @@ export class NewsService {
    * Bulk-fetch the general crypto news feed from Python (one LunarCrush call
    * upstream) and upsert rows into `trending_news`.
    *
-   * All rows are linked to a synthetic "__GENERAL__" crypto asset, since the
-   * schema requires a non-null asset_id. Deduplicated by `article_url` within
-   * the last 7 days so re-runs of the same feed don't grow the table.
+   * All rows are linked to a synthetic "CRYPTO" crypto asset, since the
+   * schema requires a non-null asset_id. Each row ALSO stores a
+   * `metadata.detected_symbol` field that carries the actual coin ticker
+   * parsed from the article title (BTC, ETH, ...), or "CRYPTO" as fallback.
+   * Deduplicated by `article_url` within the last 7 days so re-runs of the
+   * same feed don't grow the table.
    *
    * Returns counters for the cron caller to log.
    */
@@ -392,16 +416,17 @@ export class NewsService {
       return { inserted: 0, skipped: 0, fetched: 0 };
     }
 
-    // Find or create the synthetic "__GENERAL__" asset that all general-feed
+    // Find or create the synthetic "CRYPTO" asset that all general-feed
     // rows are attached to. This lets us respect the NOT NULL asset_id FK
-    // without inventing a schema migration.
+    // without inventing a schema migration. The per-article detected ticker
+    // (BTC/ETH/...) is stored separately on the row in `metadata.detected_symbol`.
     let generalAsset = await this.prisma.assets.findFirst({
-      where: { symbol: '__GENERAL__', asset_type: 'crypto' },
+      where: { symbol: 'CRYPTO', asset_type: 'crypto' },
     });
     if (!generalAsset) {
       generalAsset = await this.prisma.assets.create({
         data: {
-          symbol: '__GENERAL__',
+          symbol: 'CRYPTO',
           name: 'General Crypto News',
           display_name: 'General Crypto News',
           asset_type: 'crypto',
@@ -410,7 +435,7 @@ export class NewsService {
           last_seen_at: new Date(),
         },
       });
-      this.logger.log('Created synthetic __GENERAL__ asset for general news feed');
+      this.logger.log('Created synthetic CRYPTO asset for general news feed');
     }
     const assetId = generalAsset.asset_id;
 
@@ -449,6 +474,12 @@ export class NewsService {
       const pollTimestamp = new Date(baseTs + i);
       const publishedAt = item.published_at ? new Date(item.published_at) : null;
 
+      // Parse the article title for a specific coin mention. Falls back to
+      // "CRYPTO" (the synthetic asset's symbol) when no known coin matches.
+      // This is used as a display hint on the frontend; the row itself still
+      // links to the CRYPTO asset regardless.
+      const detectedSymbol = detectCoin(title) ?? 'CRYPTO';
+
       try {
         await this.prisma.trending_news.create({
           data: {
@@ -457,7 +488,7 @@ export class NewsService {
             news_sentiment: item.sentiment?.score ?? 0,
             news_score: item.sentiment?.score ?? 0,
             news_volume: 1,
-            heading: title.length > 120 ? title.slice(0, 117) + '...' : title,
+            heading: this.truncateHeading(title),
             article_url: url,
             published_at: publishedAt,
             sentiment_label: (item.sentiment?.label as any) || null,
@@ -468,6 +499,7 @@ export class NewsService {
             },
             metadata: {
               general_feed: true,
+              detected_symbol: detectedSymbol,
               sentiment: item.sentiment || null,
             },
           } as any,
@@ -623,7 +655,7 @@ export class NewsService {
             news_sentiment: newsItem.sentiment.score,
             news_score: newsItem.sentiment.score,
             news_volume: 1, // Single article
-            heading: newsItem.title || null,
+            heading: this.truncateHeading(newsItem.title),
             article_url: newsItem.url || null,
             published_at: publishedAt,
             sentiment_label: sentimentLabelEnum as any,
@@ -1212,7 +1244,7 @@ export class NewsService {
             news_sentiment: newsItem.sentiment.score,
             news_score: newsItem.sentiment.score,
             news_volume: 1,
-            heading: newsItem.title || null,
+            heading: this.truncateHeading(newsItem.title),
             article_url: newsItem.url || null,
             published_at: publishedAt,
             sentiment_label: sentimentLabelEnum as any,
@@ -1246,15 +1278,26 @@ export class NewsService {
    * Fetch general stock news from Python API and store in database
    * This fetches news for multiple popular stocks at once
    */
-  async fetchAndStoreGeneralStockNewsFromPython(limit: number = 30): Promise<{
+  async fetchAndStoreGeneralStockNewsFromPython(
+    limit: number = 30,
+    tickers?: string[],
+  ): Promise<{
     total_fetched: number;
     total_stored: number;
     symbols: string[];
   }> {
     try {
-      this.logger.log(`Fetching general stock news from Python API (limit=${limit})`);
+      this.logger.log(
+        `Fetching general stock news from Python API (limit=${limit}, tickers=${tickers?.length ?? 'default'})`,
+      );
 
-      // Call Python API endpoint for general stock news
+      // Call Python API endpoint for general stock news.
+      // When `tickers` is omitted, Python falls back to its 5-ticker default.
+      // When supplied, StockNewsAPI searches the CSV and Finnhub fallback
+      // ignores it (returning general US market news either way).
+      const body: { limit: number; tickers?: string[] } = { limit };
+      if (tickers && tickers.length > 0) body.tickers = tickers;
+
       const response = await this.pythonApi.post<{
         total_count: number;
         news_items: Array<{
@@ -1273,7 +1316,7 @@ export class NewsService {
         timestamp: string;
       }>(
         '/api/v1/news/stocks/general',
-        { limit },
+        body,
         { timeout: 300000 }, // 5 minute timeout for sentiment analysis
       );
 
@@ -1349,7 +1392,7 @@ export class NewsService {
               news_sentiment: newsItem.sentiment.score,
               news_score: newsItem.sentiment.score,
               news_volume: 1,
-              heading: newsItem.title || null,
+              heading: this.truncateHeading(newsItem.title),
               article_url: newsItem.url || null,
               published_at: publishedAt,
               sentiment_label: sentimentLabelEnum as any,
@@ -1493,7 +1536,7 @@ export class NewsService {
               news_sentiment: 0, // Neutral - no sentiment analysis
               news_score: 0,
               news_volume: 1,
-              heading: newsItem.title || null,
+              heading: this.truncateHeading(newsItem.title),
               article_url: newsItem.url || null,
               published_at: publishedAt,
               sentiment_label: 'neutral' as any,

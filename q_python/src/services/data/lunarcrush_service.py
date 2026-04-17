@@ -643,8 +643,9 @@ class LunarCrushService:
     def _fetch_general_news_http(self, limit: int) -> List[Dict[str, Any]]:
         """Raw HTTP + parse for the LunarCrush general-crypto-topic news endpoint.
 
-        No per-article OpenAI description regeneration — the feed's native body
-        text (``post_text`` / ``description``) is used directly.
+        No per-article OpenAI description regeneration — the feed's native
+        `post_description` field is used directly (LunarCrush returns ~140-200
+        chars of article body under that key for topic-cryptocurrency news).
         """
         url = f"{self.BASE_URL}/public/topic/cryptocurrency/news/v1"
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -676,9 +677,14 @@ class LunarCrushService:
                     "creator_display_name",
                     article.get("creator_name", article.get("source", "unknown")),
                 )
-                # Body text directly from the feed — no OpenAI call
+                # Body text directly from the feed — no OpenAI call.
+                # LunarCrush's topic/news endpoint returns the article body
+                # under `post_description` (confirmed via live probe).
+                # Other field names kept as fallbacks in case the shape
+                # differs for some articles.
                 body_text = (
-                    article.get("post_text")
+                    article.get("post_description")
+                    or article.get("post_text")
                     or article.get("description")
                     or article.get("text")
                     or ""

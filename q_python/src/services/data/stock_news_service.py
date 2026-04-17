@@ -1,6 +1,6 @@
 """
 Stock News Service
-Fetches stock market news from StockNewsAPI.
+Fetches stock market news from StockNewsAPI with automatic Finnhub fallback.
 
 Hardened with:
 - Process-wide singleton via `get_stock_news_service()`.
@@ -8,6 +8,11 @@ Hardened with:
   file-persisted month counter.
 - 2-hour TTL in-memory cache on `fetch_news` and `fetch_general_news`.
 - Stale-cache fallback when the gate denies or the API returns 403.
+- **Finnhub fallback** when StockNewsAPI is unavailable (403 quota-exhausted,
+  5xx, network error, or our own quota gate blocking). The cache is source-
+  agnostic, so callers always see a consistent response shape. Once
+  StockNewsAPI recovers (e.g. after billing reset), the service resumes using
+  it automatically — no config change needed.
 """
 import json
 import logging
@@ -20,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from src.config import (
+    FINNHUB_API_KEY,
     STOCK_NEWS_API_KEY,
     STOCKNEWS_CACHE_TTL_SECS,
     STOCKNEWS_MAX_STALE_SECS,
@@ -138,10 +144,12 @@ class StockNewsService:
     """
 
     BASE_URL = "https://stocknewsapi.com/api/v1"
+    FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 
     def __init__(self) -> None:
         self.logger = logging.getLogger(__name__)
         self.api_key = STOCK_NEWS_API_KEY
+        self.finnhub_api_key = FINNHUB_API_KEY
         self.CACHE_TTL = STOCKNEWS_CACHE_TTL_SECS
         self.MAX_STALE_SECS = STOCKNEWS_MAX_STALE_SECS
 
@@ -161,11 +169,20 @@ class StockNewsService:
             "cache_hits": 0,
             "cache_misses": 0,
             "http_403s": 0,
+            # Finnhub fallback stats
+            "finnhub_calls_made": 0,
+            "finnhub_errors": 0,
+            "finnhub_fallbacks_served": 0,
         }
 
         if not self.api_key:
             self.logger.warning(
                 "STOCK_NEWS_API_KEY not set. Stock news fetching will fail."
+            )
+        if not self.finnhub_api_key:
+            self.logger.warning(
+                "FINNHUB_API_KEY not set. Stock news fallback will not work when "
+                "StockNewsAPI is unavailable."
             )
 
     # ---- helpers ----
@@ -257,6 +274,130 @@ class StockNewsService:
                 continue
         return items
 
+    # ---- Finnhub fallback ----
+
+    def _finnhub_article_to_item(
+        self, article: Dict[str, Any], include_symbol: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """Normalize a Finnhub article to our standard news-item shape."""
+        title = article.get("headline", "")
+        summary = article.get("summary", "")
+        if not (title or summary):
+            return None
+        ts = article.get("datetime")
+        published_at: Optional[datetime] = None
+        if isinstance(ts, (int, float)) and ts > 0:
+            try:
+                published_at = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+            except (OSError, OverflowError, ValueError):
+                published_at = None
+        item: Dict[str, Any] = {
+            "title": title,
+            "text": summary or title,
+            "source": article.get("source", "finnhub"),
+            "published_at": published_at,
+            "url": article.get("url", ""),
+        }
+        if include_symbol:
+            related = article.get("related", "")
+            if isinstance(related, str):
+                tickers = [t.strip().upper() for t in related.split(",") if t.strip()]
+            elif isinstance(related, list):
+                tickers = [str(t).upper() for t in related if t]
+            else:
+                tickers = []
+            item["symbol"] = tickers[0] if tickers else "GENERAL"
+        return item
+
+    def _fetch_news_via_finnhub_company(
+        self, symbol: str, limit: int
+    ) -> List[Dict[str, Any]]:
+        """Fetch per-ticker news from Finnhub's /company-news endpoint.
+
+        Called only as a fallback when StockNewsAPI is unavailable. Raises
+        on HTTP/network error so the caller can decide whether to serve
+        stale cache or an empty list.
+        """
+        if not self.finnhub_api_key:
+            raise RuntimeError("FINNHUB_API_KEY not configured")
+        # Narrow window: only surface news from the last 2 days so the AI
+        # insights "Latest" feed doesn't show week-old articles. Finnhub
+        # sorts by recency, and callers cap results further via `limit`.
+        now = datetime.now(timezone.utc)
+        window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        from datetime import timedelta as _td
+        window_start = window_start - _td(days=2)
+        params = {
+            "symbol": symbol.upper(),
+            "from": window_start.strftime("%Y-%m-%d"),
+            "to": now.strftime("%Y-%m-%d"),
+            "token": self.finnhub_api_key,
+        }
+        self.logger.info(f"Finnhub fallback: fetching company news for {symbol}")
+        response = requests.get(
+            f"{self.FINNHUB_BASE_URL}/company-news", params=params, timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+        self._bump("finnhub_calls_made")
+        articles = data if isinstance(data, list) else []
+        items: List[Dict[str, Any]] = []
+        for a in articles[: max(1, limit)]:
+            it = self._finnhub_article_to_item(a, include_symbol=False)
+            if it:
+                items.append(it)
+        self.logger.info(f"Finnhub fallback returned {len(items)} items for {symbol}")
+        return items
+
+    def _fetch_news_via_finnhub_general(self, limit: int) -> List[Dict[str, Any]]:
+        """Fetch general US market news from Finnhub's /news endpoint.
+
+        Called only as a fallback when StockNewsAPI is unavailable.
+        """
+        if not self.finnhub_api_key:
+            raise RuntimeError("FINNHUB_API_KEY not configured")
+        params = {"category": "general", "token": self.finnhub_api_key}
+        self.logger.info("Finnhub fallback: fetching general market news")
+        response = requests.get(
+            f"{self.FINNHUB_BASE_URL}/news", params=params, timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+        self._bump("finnhub_calls_made")
+        articles = data if isinstance(data, list) else []
+        items: List[Dict[str, Any]] = []
+        for a in articles[: max(1, limit)]:
+            it = self._finnhub_article_to_item(a, include_symbol=True)
+            if it:
+                items.append(it)
+        self.logger.info(f"Finnhub fallback returned {len(items)} general items")
+        return items
+
+    def _serve_fallback_or_stale(
+        self,
+        cache_key: str,
+        stale: Optional[List[Dict[str, Any]]],
+        finnhub_fetch_fn,
+    ) -> List[Dict[str, Any]]:
+        """Primary (StockNewsAPI) just failed or was blocked. Try Finnhub
+        fallback; on success cache & return, on failure serve stale or []."""
+        try:
+            items = finnhub_fetch_fn()
+        except Exception as e:
+            self._bump("finnhub_errors")
+            self.logger.warning(f"Finnhub fallback failed: {e}")
+            items = []
+
+        if items:
+            self._bump("finnhub_fallbacks_served")
+            self._news_cache[cache_key] = (items, time.time())
+            return items
+
+        if stale is not None:
+            self._bump("served_stale")
+            return stale
+        return []
+
     # ---- public API ----
 
     def fetch_news(
@@ -265,14 +406,17 @@ class StockNewsService:
         limit: int = 50,
         items: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Fetch news for a single stock symbol. Cached + gated."""
-        if not self.api_key:
-            self.logger.error("STOCK_NEWS_API_KEY not configured")
-            return []
+        """Fetch news for a single stock symbol.
 
+        Primary source: StockNewsAPI (cached + gated).
+        Fallback: Finnhub /company-news, invoked on ANY StockNewsAPI failure
+        mode — 403 quota exhaustion, 5xx, network error, OR our own quota
+        gate blocking the call. The cache is source-agnostic so callers see
+        a consistent shape regardless of which upstream served the data.
+        """
         cache_key = f"{symbol.upper()}_{limit}"
 
-        # 1. Fresh cache
+        # 1. Fresh cache — source-agnostic, works for both SNAPI and Finnhub data
         fresh, stale = self._read_cache(cache_key)
         if fresh is not None:
             self._bump("cache_hits")
@@ -280,17 +424,24 @@ class StockNewsService:
 
         self._bump("cache_misses")
 
-        # 2. Quota gate
+        fallback_fn = lambda: self._fetch_news_via_finnhub_company(symbol, limit)
+
+        # 2. If StockNewsAPI is unconfigured, go straight to Finnhub
+        if not self.api_key:
+            self.logger.info(
+                "STOCK_NEWS_API_KEY not configured; using Finnhub fallback directly"
+            )
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+
+        # 3. Respect our own quota gate. If blocked, go to Finnhub.
         if not self._gate.try_acquire():
             self._bump("blocked_by_quota")
-            if stale is not None:
-                self._bump("served_stale")
-                self.logger.warning(f"StockNews quota exhausted; serving stale for {symbol}")
-                return stale
-            self.logger.warning(f"StockNews quota exhausted; no stale for {symbol}")
-            return []
+            self.logger.warning(
+                f"StockNews quota exhausted for {symbol}; trying Finnhub fallback"
+            )
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
 
-        # 3. HTTP call
+        # 4. Primary: StockNewsAPI
         try:
             params = {
                 "tickers": symbol.upper(),
@@ -313,25 +464,22 @@ class StockNewsService:
             if status == 403:
                 self._bump("http_403s")
                 self._gate.force_minute_drain()
-                self.logger.warning(f"StockNewsAPI 403 (quota exhausted) for {symbol}")
+                self.logger.warning(
+                    f"StockNewsAPI 403 (quota exhausted) for {symbol}; trying Finnhub fallback"
+                )
             else:
-                self.logger.error(f"HTTPError fetching stock news for {symbol}: {e}")
-            if stale is not None:
-                self._bump("served_stale")
-                return stale
-            return []
+                self.logger.error(
+                    f"HTTPError fetching stock news for {symbol}: {e}; trying Finnhub fallback"
+                )
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"Network error fetching stock news for {symbol}: {e}")
-            if stale is not None:
-                self._bump("served_stale")
-                return stale
-            return []
+            self.logger.error(
+                f"Network error fetching stock news for {symbol}: {e}; trying Finnhub fallback"
+            )
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
         except Exception as e:
             self.logger.error(f"Unexpected error fetching stock news: {e}", exc_info=True)
-            if stale is not None:
-                self._bump("served_stale")
-                return stale
-            return []
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
 
     def fetch_company_news(self, symbol: str, limit: int = 50) -> List[Dict[str, Any]]:
         """Alias for fetch_news."""
@@ -340,11 +488,12 @@ class StockNewsService:
     def fetch_general_news(
         self, limit: int = 50, tickers: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        """Fetch general stock market news for multiple tickers. Cached + gated."""
-        if not self.api_key:
-            self.logger.error("STOCK_NEWS_API_KEY not configured")
-            return []
+        """Fetch general stock market news for multiple tickers.
 
+        Primary source: StockNewsAPI /api/v1?tickers=CSV (cached + gated).
+        Fallback: Finnhub /news?category=general on ANY StockNewsAPI failure
+        (403, 5xx, network error, or our own gate blocking).
+        """
         popular_tickers = tickers or ["AAPL", "TSLA", "GOOGL", "AMZN", "MSFT"]
         cache_key = f"__general__:{','.join(sorted(t.upper() for t in popular_tickers))}_{limit}"
 
@@ -355,13 +504,20 @@ class StockNewsService:
 
         self._bump("cache_misses")
 
+        fallback_fn = lambda: self._fetch_news_via_finnhub_general(limit)
+
+        if not self.api_key:
+            self.logger.info(
+                "STOCK_NEWS_API_KEY not configured; using Finnhub fallback for general news"
+            )
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+
         if not self._gate.try_acquire():
             self._bump("blocked_by_quota")
-            if stale is not None:
-                self._bump("served_stale")
-                self.logger.warning("StockNews quota exhausted; serving stale general news")
-                return stale
-            return []
+            self.logger.warning(
+                "StockNews quota exhausted for general news; trying Finnhub fallback"
+            )
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
 
         try:
             tickers_str = ",".join(t.upper() for t in popular_tickers)
@@ -386,25 +542,22 @@ class StockNewsService:
             if status == 403:
                 self._bump("http_403s")
                 self._gate.force_minute_drain()
-                self.logger.warning("StockNewsAPI 403 (quota exhausted) on general news")
+                self.logger.warning(
+                    "StockNewsAPI 403 on general news; trying Finnhub fallback"
+                )
             else:
-                self.logger.error(f"HTTPError fetching general stock news: {e}")
-            if stale is not None:
-                self._bump("served_stale")
-                return stale
-            return []
+                self.logger.error(
+                    f"HTTPError fetching general stock news: {e}; trying Finnhub fallback"
+                )
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"Network error fetching general stock news: {e}")
-            if stale is not None:
-                self._bump("served_stale")
-                return stale
-            return []
+            self.logger.error(
+                f"Network error fetching general stock news: {e}; trying Finnhub fallback"
+            )
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
         except Exception as e:
             self.logger.error(f"Unexpected error: {e}", exc_info=True)
-            if stale is not None:
-                self._bump("served_stale")
-                return stale
-            return []
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
 
 
 # --------------------------------------------------------------------------
