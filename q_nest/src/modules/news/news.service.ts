@@ -363,6 +363,18 @@ export class NewsService {
     }
   }
 
+  /**
+   * The `trending_news.heading` column is VARCHAR(120). Finnhub and some
+   * sources return longer headlines which would throw a Prisma
+   * "value too long for column" error. Truncate with an ellipsis.
+   */
+  private truncateHeading(title: string | null | undefined): string | null {
+    if (!title) return null;
+    const trimmed = title.trim();
+    if (!trimmed) return null;
+    return trimmed.length > 120 ? trimmed.slice(0, 117) + '...' : trimmed;
+  }
+
   private cleanupCache(): void {
     const now = Date.now();
     for (const [key, value] of this.cache.entries()) {
@@ -476,7 +488,7 @@ export class NewsService {
             news_sentiment: item.sentiment?.score ?? 0,
             news_score: item.sentiment?.score ?? 0,
             news_volume: 1,
-            heading: title.length > 120 ? title.slice(0, 117) + '...' : title,
+            heading: this.truncateHeading(title),
             article_url: url,
             published_at: publishedAt,
             sentiment_label: (item.sentiment?.label as any) || null,
@@ -643,7 +655,7 @@ export class NewsService {
             news_sentiment: newsItem.sentiment.score,
             news_score: newsItem.sentiment.score,
             news_volume: 1, // Single article
-            heading: newsItem.title || null,
+            heading: this.truncateHeading(newsItem.title),
             article_url: newsItem.url || null,
             published_at: publishedAt,
             sentiment_label: sentimentLabelEnum as any,
@@ -1232,7 +1244,7 @@ export class NewsService {
             news_sentiment: newsItem.sentiment.score,
             news_score: newsItem.sentiment.score,
             news_volume: 1,
-            heading: newsItem.title || null,
+            heading: this.truncateHeading(newsItem.title),
             article_url: newsItem.url || null,
             published_at: publishedAt,
             sentiment_label: sentimentLabelEnum as any,
@@ -1266,15 +1278,26 @@ export class NewsService {
    * Fetch general stock news from Python API and store in database
    * This fetches news for multiple popular stocks at once
    */
-  async fetchAndStoreGeneralStockNewsFromPython(limit: number = 30): Promise<{
+  async fetchAndStoreGeneralStockNewsFromPython(
+    limit: number = 30,
+    tickers?: string[],
+  ): Promise<{
     total_fetched: number;
     total_stored: number;
     symbols: string[];
   }> {
     try {
-      this.logger.log(`Fetching general stock news from Python API (limit=${limit})`);
+      this.logger.log(
+        `Fetching general stock news from Python API (limit=${limit}, tickers=${tickers?.length ?? 'default'})`,
+      );
 
-      // Call Python API endpoint for general stock news
+      // Call Python API endpoint for general stock news.
+      // When `tickers` is omitted, Python falls back to its 5-ticker default.
+      // When supplied, StockNewsAPI searches the CSV and Finnhub fallback
+      // ignores it (returning general US market news either way).
+      const body: { limit: number; tickers?: string[] } = { limit };
+      if (tickers && tickers.length > 0) body.tickers = tickers;
+
       const response = await this.pythonApi.post<{
         total_count: number;
         news_items: Array<{
@@ -1293,7 +1316,7 @@ export class NewsService {
         timestamp: string;
       }>(
         '/api/v1/news/stocks/general',
-        { limit },
+        body,
         { timeout: 300000 }, // 5 minute timeout for sentiment analysis
       );
 
@@ -1369,7 +1392,7 @@ export class NewsService {
               news_sentiment: newsItem.sentiment.score,
               news_score: newsItem.sentiment.score,
               news_volume: 1,
-              heading: newsItem.title || null,
+              heading: this.truncateHeading(newsItem.title),
               article_url: newsItem.url || null,
               published_at: publishedAt,
               sentiment_label: sentimentLabelEnum as any,
@@ -1513,7 +1536,7 @@ export class NewsService {
               news_sentiment: 0, // Neutral - no sentiment analysis
               news_score: 0,
               news_volume: 1,
-              heading: newsItem.title || null,
+              heading: this.truncateHeading(newsItem.title),
               article_url: newsItem.url || null,
               published_at: publishedAt,
               sentiment_label: 'neutral' as any,

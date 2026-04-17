@@ -320,13 +320,16 @@ class StockNewsService:
         """
         if not self.finnhub_api_key:
             raise RuntimeError("FINNHUB_API_KEY not configured")
+        # Narrow window: only surface news from the last 2 days so the AI
+        # insights "Latest" feed doesn't show week-old articles. Finnhub
+        # sorts by recency, and callers cap results further via `limit`.
         now = datetime.now(timezone.utc)
-        seven_days_ago = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         from datetime import timedelta as _td
-        seven_days_ago = seven_days_ago - _td(days=7)
+        window_start = window_start - _td(days=2)
         params = {
             "symbol": symbol.upper(),
-            "from": seven_days_ago.strftime("%Y-%m-%d"),
+            "from": window_start.strftime("%Y-%m-%d"),
             "to": now.strftime("%Y-%m-%d"),
             "token": self.finnhub_api_key,
         }
