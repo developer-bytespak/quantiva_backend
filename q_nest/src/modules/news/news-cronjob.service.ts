@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
@@ -8,17 +9,22 @@ import { NewsService } from './news.service';
 @Injectable()
 export class NewsCronjobService {
   private readonly logger = new Logger(NewsCronjobService.name);
-  private readonly BATCH_SIZE = 3; // Process 3 assets in parallel (reduced for rate limits)
-  private readonly BATCH_DELAY_MS = 5000; // 5 seconds between batches (rate limit protection)
-  private readonly MAX_ASSETS_PER_RUN = 15; // Process max 15 assets per run (rate limit: 15 assets × 2 calls = 30 API calls per 10min)
-  private readonly UPDATE_INTERVAL_MINUTES = 30; // Skip if updated within 30 minutes
+  private readonly BATCH_SIZE = 3;
+  private readonly BATCH_DELAY_MS = 5000;
+  private readonly MAX_ASSETS_PER_RUN = 15;
+  private readonly UPDATE_INTERVAL_MINUTES = 30;
 
   constructor(
     private prisma: PrismaService,
     private pythonApi: PythonApiService,
     private binanceService: BinanceService,
     private newsService: NewsService,
+    private config: ConfigService,
   ) {}
+
+  private get cronsEnabled(): boolean {
+    return this.config.get('ENABLE_CRONS') !== 'false';
+  }
 
   /**
    * Finnhub Trending Stocks Sync - Runs every 10 minutes
@@ -27,6 +33,7 @@ export class NewsCronjobService {
    */
   @Cron('*/10 * * * *') // Every 10 minutes
   async syncTrendingStocksFromFinnhub(): Promise<void> {
+    if (!this.cronsEnabled) return;
     try {
       const response = await this.pythonApi.get('/stocks/trending', {
         params: { limit: 50 },
@@ -227,6 +234,7 @@ export class NewsCronjobService {
    */
   @Cron('*/30 * * * *') // Every 30 minutes
   async aggregateGeneralCryptoNews(): Promise<void> {
+    if (!this.cronsEnabled) return;
     try {
       const result = await this.newsService.refreshGeneralCryptoNewsFeed(50);
       this.logger.log(
@@ -322,6 +330,7 @@ export class NewsCronjobService {
    */
   @Cron('0 */6 * * *') // Every 6 hours on the hour
   async snapshotSocialMetricsBulk(): Promise<void> {
+    if (!this.cronsEnabled) return;
     try {
       const response = await this.pythonApi.post<{
         count: number;
@@ -609,18 +618,37 @@ export class NewsCronjobService {
   // ============== STOCK NEWS CRONJOB ==============
 
   /**
-   * Stock News Aggregation Cronjob
-   * Runs every 15 minutes to fetch and store stock news with sentiment
-   * Similar to crypto news aggregation but for stocks
+   * Stock News Aggregation Cronjob — every 30 minutes, 30 symbols.
+   *
+   * Combined with the Python-side 2-hour cache, only symbols whose cache
+   * has expired actually hit StockNewsAPI. In steady state: ~2-3 symbols
+   * per run × 48 runs/day = ~100-150 real API calls/day.
+   *
+   * Expanded from 10 → 30 popular US stocks to give the AI insights and
+   * sentiment engines broader stock market coverage.
    */
-  @Cron('*/15 * * * *') // Every 15 minutes
+  @Cron('*/30 * * * *')
   async aggregateStockNews(): Promise<void> {
+    if (!this.cronsEnabled) return;
+
     const stockSymbols = [
-      'AAPL', 'TSLA', 'GOOGL', 'AMZN', 'MSFT',
-      'NVDA', 'META', 'AMD', 'NFLX', 'DIS'
+      // Mega-cap tech
+      'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA',
+      // Other mega-cap
+      'BRK.B', 'JPM', 'V', 'JNJ', 'UNH', 'WMT', 'PG',
+      // Growth / popular
+      'AMD', 'NFLX', 'DIS', 'PYPL', 'SQ', 'SHOP', 'COIN',
+      // Energy / industrial
+      'XOM', 'CVX', 'BA',
+      // Finance / health
+      'GS', 'MS', 'PFE', 'ABBV',
+      // ETFs (broad market indicators)
+      'SPY', 'QQQ',
     ];
 
-    const STOCK_BATCH_SIZE = 2;
+    const STOCK_BATCH_SIZE = 3;
+    let processedCount = 0;
+    let errorCount = 0;
 
     try {
       for (let i = 0; i < stockSymbols.length; i += STOCK_BATCH_SIZE) {
@@ -629,8 +657,9 @@ export class NewsCronjobService {
         for (const symbol of batch) {
           try {
             await this.newsService.fetchAndStoreStockNewsFromPython(symbol, 10);
+            processedCount++;
           } catch (error: any) {
-            // Skip failed symbol
+            errorCount++;
           }
         }
 
@@ -638,8 +667,12 @@ export class NewsCronjobService {
           await this.sleep(3000);
         }
       }
+
+      this.logger.log(
+        `[aggregateStockNews] processed=${processedCount} errors=${errorCount}`,
+      );
     } catch (error: any) {
-      // Fatal error - silent
+      this.logger.error(`[aggregateStockNews] failed: ${error?.message || error}`);
     }
   }
 
@@ -688,6 +721,7 @@ export class NewsCronjobService {
    */
   @Cron('0 2 * * *') // Every day at 2:00 AM
   async deleteOldNews(): Promise<void> {
+    if (!this.cronsEnabled) return;
     try {
       const sevenDaysAgo = new Date();
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);

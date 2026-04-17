@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { CoinDetailsCacheService } from '../services/coin-details-cache.service';
 
@@ -9,7 +10,12 @@ export class CoinDetailsSyncCron {
 
   constructor(
     private coinDetailsCacheService: CoinDetailsCacheService,
+    private config: ConfigService,
   ) {}
+
+  private get cronsEnabled(): boolean {
+    return this.config.get('ENABLE_CRONS') !== 'false';
+  }
 
   /**
    * Sync top 200 coins every 12 hours
@@ -20,6 +26,7 @@ export class CoinDetailsSyncCron {
     timeZone: 'UTC',
   })
   async syncTopCoins() {
+    if (!this.cronsEnabled) return;
     if (this.isSyncing) {
       this.logger.warn('Previous sync still running, skipping this run');
       return;
@@ -60,6 +67,7 @@ export class CoinDetailsSyncCron {
     timeZone: 'UTC',
   })
   async refreshStaleCoins() {
+    if (!this.cronsEnabled) return;
     try {
       this.logger.log('Starting refresh of stale coins...');
       
@@ -83,6 +91,7 @@ export class CoinDetailsSyncCron {
     timeZone: 'UTC',
   })
   async logCacheStats() {
+    if (!this.cronsEnabled) return;
     try {
       const stats = await this.coinDetailsCacheService.getCacheStats();
       

@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 
 from src.services.data.coingecko_service import get_coingecko_service
 from src.services.data.lunarcrush_service import get_lunarcrush_service
+from src.services.data.stock_news_service import get_stock_news_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -43,6 +44,16 @@ async def coingecko_stats():
         return get_coingecko_service().get_stats()
     except Exception as e:
         logger.error(f"Failed to read CoinGecko stats: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Stats read failed: {str(e)}")
+
+
+@router.get("/stocknews-stats")
+async def stocknews_stats():
+    """Live diagnostics for the StockNewsAPI quota shield."""
+    try:
+        return get_stock_news_service().get_stats()
+    except Exception as e:
+        logger.error(f"Failed to read StockNews stats: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Stats read failed: {str(e)}")
 
 

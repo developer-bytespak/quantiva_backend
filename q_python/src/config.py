@@ -90,6 +90,16 @@ COINGECKO_QUOTA_STATE_PATH = os.getenv(
     os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "coingecko_quota.json"),
 )
 
+# StockNewsAPI quota & cache (defaults stay safely under the 50k/month Premium plan)
+STOCKNEWS_RPM_LIMIT = int(os.getenv("STOCKNEWS_RPM_LIMIT", "20"))
+STOCKNEWS_MONTHLY_BUDGET = int(os.getenv("STOCKNEWS_MONTHLY_BUDGET", "40000"))
+STOCKNEWS_CACHE_TTL_SECS = int(os.getenv("STOCKNEWS_CACHE_TTL_SECS", "7200"))  # 2h
+STOCKNEWS_MAX_STALE_SECS = int(os.getenv("STOCKNEWS_MAX_STALE_SECS", "86400"))  # 24h
+STOCKNEWS_QUOTA_STATE_PATH = os.getenv(
+    "STOCKNEWS_QUOTA_STATE_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "stocknews_quota.json"),
+)
+
 # NestJS Backend API Configuration
 NESTJS_API_URL = os.getenv("NESTJS_API_URL", "http://localhost:3000")
 NESTJS_API_TIMEOUT = int(os.getenv("NESTJS_API_TIMEOUT", "10"))

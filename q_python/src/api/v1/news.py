@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import logging
 
 from src.services.data.lunarcrush_service import LunarCrushService, get_lunarcrush_service
-from src.services.data.stock_news_service import StockNewsService
+from src.services.data.stock_news_service import StockNewsService, get_stock_news_service
 from src.services.engines.sentiment_engine import SentimentEngine
 
 logger = logging.getLogger(__name__)
@@ -328,7 +328,7 @@ async def get_stock_news_with_sentiment(request_data: Dict[str, Any] = Body(...)
         logger.info(f"Fetching stock news for {symbol} with sentiment analysis (limit={limit})")
         
         # Initialize services
-        stock_news_service = StockNewsService()
+        stock_news_service = get_stock_news_service()
         sentiment_engine = SentimentEngine()
         
         # Fetch news from StockNewsAPI
@@ -464,7 +464,7 @@ async def get_general_stock_news_fast(request_data: Dict[str, Any] = Body(...)):
         
         logger.info(f"Fetching stock news FAST for {tickers} - limit={limit}")
         
-        stock_news_service = StockNewsService()
+        stock_news_service = get_stock_news_service()
         news_items = stock_news_service.fetch_general_news(limit=limit, tickers=tickers)
         
         if not news_items:
@@ -551,7 +551,7 @@ async def get_general_stock_news_with_sentiment(request_data: Dict[str, Any] = B
         logger.info(f"Fetching general stock news with sentiment analysis (limit={limit})")
         
         # Initialize services
-        stock_news_service = StockNewsService()
+        stock_news_service = get_stock_news_service()
         sentiment_engine = SentimentEngine()
         
         # Fetch general news (for multiple popular stocks)
