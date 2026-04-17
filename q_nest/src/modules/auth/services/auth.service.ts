@@ -652,7 +652,18 @@ export class AuthService {
 
     // Step 5: Check VC Pool participation (only block for active/open/full pools)
     // Completed and cancelled pools should not block account deletion
-    const activePoolStatuses = ['open', 'full', 'active'];
+    // Pool/reservation statuses must be typed with the Prisma enum literal
+    // types so `status: { in: ... }` accepts them. A plain array widens to
+    // string[] which Prisma rejects at compile time.
+    const activePoolStatuses: ('open' | 'full' | 'active')[] = [
+      'open',
+      'full',
+      'active',
+    ];
+    const activeReservationStatuses: ('reserved' | 'confirmed')[] = [
+      'reserved',
+      'confirmed',
+    ];
 
     const [
       vcPoolMembershipsCount,
@@ -669,7 +680,7 @@ export class AuthService {
       this.prisma.vc_pool_seat_reservations.count({
         where: {
           user_id: userId,
-          status: { in: ['reserved', 'confirmed'] },
+          status: { in: activeReservationStatuses },
           pool: { status: { in: activePoolStatuses } },
         },
       }),
