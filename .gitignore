@@ -34,3 +34,6 @@ q_python/kyc_face_crops/
 
 # KYC standalone test folder (local testing only)
 kyc_standalone_test/
+
+# Runtime quota state for the API shields (LunarCrush, CoinGecko, StockNewsAPI).
+q_python/data/*.json
