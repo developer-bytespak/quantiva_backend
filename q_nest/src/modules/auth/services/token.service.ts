@@ -8,6 +8,8 @@ export interface TokenPayload {
   email: string;
   username: string;
   session_id?: string; // Optional for backward compatibility, but should be included for new tokens
+  isAdmin?: boolean;
+  isSuperAdmin?: boolean;
 }
 
 @Injectable()

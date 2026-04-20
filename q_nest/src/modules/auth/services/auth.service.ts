@@ -196,11 +196,22 @@ export class AuthService {
       throw new UnauthorizedException('Invalid 2FA code');
     }
 
+    // Check if user is linked to an admin record (by email — no schema change needed)
+    const adminRecord = await this.prisma.admins.findUnique({
+      where: { email: user.email },
+      select: { admin_id: true, is_super_admin: true },
+    });
+
+    const isAdmin = !!adminRecord;
+    const isSuperAdmin = !!adminRecord?.is_super_admin;
+
     // Create session first to get session_id
     const refreshToken = await this.tokenService.generateRefreshToken({
       sub: user.user_id,
       email: user.email,
       username: user.username,
+      isAdmin,
+      isSuperAdmin,
     });
     
     const sessionId = await this.sessionService.createSession(
@@ -216,11 +227,11 @@ export class AuthService {
       email: user.email,
       username: user.username,
       session_id: sessionId,
+      isAdmin,
+      isSuperAdmin,
     };
 
     const accessToken = await this.tokenService.generateAccessToken(payload);
-
-    
 
     return {
       user: {
@@ -229,6 +240,8 @@ export class AuthService {
         username: user.username,
         email_verified: user.email_verified,
         kyc_status: user.kyc_status,
+        isAdmin,
+        isSuperAdmin,
       },
       accessToken,
       refreshToken,
