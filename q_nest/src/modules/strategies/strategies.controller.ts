@@ -2302,6 +2302,7 @@ export class StrategiesController {
    * Manual trigger for sentiment aggregation (for debugging)
    * This will immediately process all active assets through the sentiment engine
    */
+  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
   @Post('trigger-sentiment-aggregation')
   async triggerSentimentAggregation() {
     return this.newsCronjobService.triggerManualAggregation();
@@ -2311,6 +2312,7 @@ export class StrategiesController {
    * Manual trigger for pre-built signals generation (for testing/debugging)
    * This will immediately generate signals for all pre-built strategies
    */
+  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
   @Post('trigger-pre-built-signals')
   @HttpCode(HttpStatus.OK)
   async triggerPreBuiltSignals(@Body() body?: { connectionId?: string }) {
@@ -2321,6 +2323,7 @@ export class StrategiesController {
    * Manual trigger for stock signals generation (for testing/debugging)
    * This will immediately generate signals for all stock-specific strategies
    */
+  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
   @Post('trigger-stock-signals')
   @HttpCode(HttpStatus.OK)
   async triggerStockSignals(@Body() body?: { connectionId?: string }) {
@@ -2331,6 +2334,7 @@ export class StrategiesController {
    * Sync trending stocks from Finnhub into the database
    * This fetches the latest trending stocks and stores them for signal generation
    */
+  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
   @Post('sync-trending-stocks')
   @HttpCode(HttpStatus.OK)
   async syncTrendingStocks() {
@@ -2341,6 +2345,7 @@ export class StrategiesController {
    * Seed popular stocks directly (fallback if Finnhub is slow/unavailable)
    * This adds AAPL, MSFT, GOOGL, TSLA, etc. to the database without API calls
    */
+  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
   @Post('seed-popular-stocks')
   @HttpCode(HttpStatus.OK)
   async seedPopularStocks() {
