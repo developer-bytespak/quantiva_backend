@@ -166,11 +166,22 @@ class SignalGenerator:
             )
             engine_scores['sentiment'] = sentiment_result
             
-            # Fusion Engine (combines all scores)
+            # Fusion Engine (combines all scores).
+            # Pull the strategy's per-engine weights and any optional BUY/SELL
+            # threshold overrides out of strategy_data so each strategy
+            # actually uses its own profile (instead of the default one).
+            # Without this, all strategies collapse onto the same fusion math.
+            strategy_weights = strategy_data.get('engine_weights')
+            strategy_buy_threshold = strategy_data.get('buy_threshold')
+            strategy_sell_threshold = strategy_data.get('sell_threshold')
+
             fusion_result = self.fusion_engine.calculate(
                 asset_id=asset_id,
                 asset_type=asset_type,
-                engine_scores=engine_scores
+                engine_scores=engine_scores,
+                weights=strategy_weights,
+                buy_threshold=strategy_buy_threshold,
+                sell_threshold=strategy_sell_threshold,
             )
             
             # Extract indicator values for strategy execution
@@ -214,7 +225,11 @@ class SignalGenerator:
             has_strategy_rules = (entry_rules and len(entry_rules) > 0) or (exit_rules and len(exit_rules) > 0)
 
             if has_strategy_rules:
-                # Check if executor could actually evaluate the rules (indicators available?)
+                # Check if the executor could actually evaluate the rules.
+                # `all_skipped` now reflects BOTH missing indicators (e.g.,
+                # no OHLCV) AND missing field paths (e.g., a broken
+                # `metadata.engine_details.*` dotted path). Without this
+                # fallback, a broken field path would silently produce HOLD.
                 entry_details = execution_result.get('entry_details', {})
                 exit_details = execution_result.get('exit_details', {})
 
@@ -223,11 +238,11 @@ class SignalGenerator:
                 exit_all_skipped = exit_details.get('all_skipped', False)
 
                 if entry_all_skipped and (exit_no_rules or exit_all_skipped):
-                    # All indicator-based rules were unevaluable (missing OHLCV data)
+                    # All rules were unevaluable (indicator or field data missing)
                     # Fall back to fusion engine decision instead of guaranteed HOLD
                     final_action = fusion_result.get('action', 'HOLD')
                     self.logger.warning(
-                        f"Strategy {strategy_id}: All indicator rules skipped (missing data). "
+                        f"Strategy {strategy_id}: All rules unevaluable (indicator or field data missing). "
                         f"Falling back to fusion engine action: {final_action}"
                     )
                 else:
