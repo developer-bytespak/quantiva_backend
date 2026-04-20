@@ -638,12 +638,19 @@ export class AlpacaService {
     const tpClientId = `${ALPACA_CLIENT_ID_TP_PREFIX}${randomUUID()}`;
     const slClientId = `${ALPACA_CLIENT_ID_SL_PREFIX}${randomUUID()}`;
 
+    // Alpaca rejects stock orders with sub-penny precision on prices ≥ $1
+    // ("invalid limit_price. sub-penny increment does not fulfill minimum
+    // pricing criteria", code 42210000). Round TP/SL strikes to the nearest
+    // cent before submitting. The top-trade universe is liquid mid-to-large
+    // caps well above $1, so 2-decimal rounding is safe across all symbols.
+    const roundToCents = (n: number) => (Math.round(n * 100) / 100).toFixed(2);
+
     const tpBody = {
       symbol: alpacaSymbol,
       qty: quantity.toString(),
       side: 'sell',
       type: 'limit',
-      limit_price: takeProfitPrice.toString(),
+      limit_price: roundToCents(takeProfitPrice),
       time_in_force: 'gtc',
       client_order_id: tpClientId,
     };
@@ -653,7 +660,7 @@ export class AlpacaService {
       qty: quantity.toString(),
       side: 'sell',
       type: 'stop',
-      stop_price: stopLossPrice.toString(),
+      stop_price: roundToCents(stopLossPrice),
       time_in_force: 'gtc',
       client_order_id: slClientId,
     };

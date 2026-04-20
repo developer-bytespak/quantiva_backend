@@ -730,7 +730,7 @@ export class ExchangesService {
             side: (o.side || '').toUpperCase() === 'BUY' ? 'BUY' : 'SELL',
             type: (o.type || o.order_type || '').toUpperCase(),
             quantity: parseFloat(o.qty || o.quantity || '0') || 0,
-            price: parseFloat(o.limit_price || o.filled_avg_price || o.price || '0') || 0,
+            price: parseFloat(o.limit_price || o.stop_price || o.filled_avg_price || o.price || '0') || 0,
             status: ALPACA_ORDER_STATUS_MAP[rawStatus] ?? rawStatus.toUpperCase(),
             time: o.created_at ? new Date(o.created_at).getTime() : Date.now(),
           };
