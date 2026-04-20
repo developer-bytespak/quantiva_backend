@@ -1891,7 +1891,8 @@ export class ExchangesController {
         margin: marginTotal,
         availableSpot,
         availableMargin,
-        invested: Math.max(0, portfolioTotal - availableSpot - availableMargin),
+        investedSpot: Math.max(0, spotTotal - availableSpot),
+        investedMargin: Math.max(0, marginTotal - availableMargin),
       };
 
       return {

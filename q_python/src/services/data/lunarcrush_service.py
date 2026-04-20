@@ -30,6 +30,41 @@ except Exception as e:
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Numeric coercion helpers for LunarCrush response parsing.
+#
+# The LunarCrush `/public/coins/list/v1` bulk endpoint returns `null` for many
+# fields on newer / lightly-tracked coins. `dict.get(key, default)` only
+# returns `default` when the key is MISSING — an explicit `null` passes
+# through as Python `None`, and `float(None)` raises
+# `TypeError: float() argument must be ... not 'NoneType'`. Every numeric
+# coercion against LunarCrush fields must go through these helpers, not
+# through bare `float(...)` / `int(...)`.
+# ---------------------------------------------------------------------------
+
+def _first_numeric(*candidates: Any, default: float = 0.0) -> float:
+    """Return the first candidate that is a real, finite number, else default."""
+    for c in candidates:
+        if c is None:
+            continue
+        try:
+            val = float(c)
+        except (TypeError, ValueError):
+            continue
+        if val != val:  # NaN
+            continue
+        return val
+    return default
+
+
+def _first_int(*candidates: Any, default: int = 0) -> int:
+    v = _first_numeric(*candidates, default=float(default))
+    try:
+        return int(v)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 class LunarCrushQuotaGate:
     """
     Hard rate-limit shield for the LunarCrush API.
@@ -844,54 +879,55 @@ class LunarCrushService:
             if isinstance(coin_data, list) and len(coin_data) > 0:
                 coin_data = coin_data[0]
 
+            # Null-safe coercion — see `_first_numeric` / `_first_int` at
+            # module top. The per-coin endpoint usually returns populated
+            # values, but the same null-guard protects against any edge-case
+            # coin where a field is explicitly `null`.
             metrics = {
-                "social_volume": coin_data.get(
-                    "social_volume_24h",
-                    coin_data.get(
-                        "interactions_24h",
-                        coin_data.get("social_mentions", coin_data.get("social_volume", 0)),
-                    ),
+                "social_volume": _first_numeric(
+                    coin_data.get("social_volume_24h"),
+                    coin_data.get("interactions_24h"),
+                    coin_data.get("social_mentions"),
+                    coin_data.get("social_volume"),
                 ),
-                "social_score": float(
-                    coin_data.get(
-                        "sentiment",
-                        coin_data.get("sentiment_score", coin_data.get("social_score", 0)),
-                    )
+                "social_score": _first_numeric(
+                    coin_data.get("sentiment"),
+                    coin_data.get("sentiment_score"),
+                    coin_data.get("social_score"),
                 ),
-                "galaxy_score": float(
-                    coin_data.get(
-                        "galaxy_score", coin_data.get("score", coin_data.get("galaxy", 0))
-                    )
+                "galaxy_score": _first_numeric(
+                    coin_data.get("galaxy_score"),
+                    coin_data.get("score"),
+                    coin_data.get("galaxy"),
                 ),
-                "alt_rank": int(
-                    coin_data.get(
-                        "alt_rank", coin_data.get("altrank", coin_data.get("rank", 999999))
-                    )
+                "alt_rank": _first_int(
+                    coin_data.get("alt_rank"),
+                    coin_data.get("altrank"),
+                    coin_data.get("rank"),
+                    default=999999,
                 ),
-                "social_dominance": float(
-                    coin_data.get(
-                        "social_dominance",
-                        coin_data.get("social_dominance_24h", coin_data.get("dominance", 0)),
-                    )
+                "social_dominance": _first_numeric(
+                    coin_data.get("social_dominance"),
+                    coin_data.get("social_dominance_24h"),
+                    coin_data.get("dominance"),
                 ),
-                "price_change_24h": float(
-                    coin_data.get(
-                        "percent_change_24h",
-                        coin_data.get(
-                            "price_change_24h",
-                            coin_data.get("change_24h", coin_data.get("price_change", 0)),
-                        ),
-                    )
+                "price_change_24h": _first_numeric(
+                    coin_data.get("percent_change_24h"),
+                    coin_data.get("price_change_24h"),
+                    coin_data.get("change_24h"),
+                    coin_data.get("price_change"),
                 ),
-                "volume_24h": float(
-                    coin_data.get(
-                        "volume_24h",
-                        coin_data.get("volume_24h_usd", coin_data.get("volume", 0)),
-                    )
+                "volume_24h": _first_numeric(
+                    coin_data.get("volume_24h"),
+                    coin_data.get("volume_24h_usd"),
+                    coin_data.get("volume"),
                 ),
-                "interactions_24h": coin_data.get("interactions_24h", 0),
-                "market_cap": float(coin_data.get("market_cap", 0)),
-                "price": float(coin_data.get("price", coin_data.get("price_usd", 0))),
+                "interactions_24h": _first_int(coin_data.get("interactions_24h")),
+                "market_cap": _first_numeric(coin_data.get("market_cap")),
+                "price": _first_numeric(
+                    coin_data.get("price"),
+                    coin_data.get("price_usd"),
+                ),
             }
 
         self.logger.info(f"Fetched social metrics for {symbol}")
@@ -975,6 +1011,10 @@ class LunarCrushService:
             if not isinstance(coins, list):
                 coins = []
 
+            # Null-safe coercion — see `_first_numeric` / `_first_int` at
+            # module top. LunarCrush's bulk response embeds `null` for many
+            # fields on lightly-tracked coins, which would crash a bare
+            # `float(...)` and silently tank the whole snapshot cron.
             result: Dict[str, Dict[str, Any]] = {}
             cache_ts = time.time()
             for coin in coins:
@@ -985,43 +1025,46 @@ class LunarCrushService:
                     continue
 
                 metrics = {
-                    "social_volume": coin.get(
-                        "social_volume_24h",
-                        coin.get("interactions_24h", coin.get("social_volume", 0)),
+                    "social_volume": _first_numeric(
+                        coin.get("social_volume_24h"),
+                        coin.get("interactions_24h"),
+                        coin.get("social_volume"),
                     ),
-                    "social_score": float(
-                        coin.get("sentiment", coin.get("sentiment_score", coin.get("social_score", 0)))
+                    "social_score": _first_numeric(
+                        coin.get("sentiment"),
+                        coin.get("sentiment_score"),
+                        coin.get("social_score"),
                     ),
-                    "galaxy_score": float(
-                        coin.get("galaxy_score", coin.get("score", coin.get("galaxy", 0)))
+                    "galaxy_score": _first_numeric(
+                        coin.get("galaxy_score"),
+                        coin.get("score"),
+                        coin.get("galaxy"),
                     ),
-                    "alt_rank": int(
-                        coin.get("alt_rank", coin.get("altrank", coin.get("rank", 999999)))
+                    "alt_rank": _first_int(
+                        coin.get("alt_rank"),
+                        coin.get("altrank"),
+                        coin.get("rank"),
+                        default=999999,
                     ),
-                    "social_dominance": float(
-                        coin.get(
-                            "social_dominance",
-                            coin.get("social_dominance_24h", coin.get("dominance", 0)),
-                        )
+                    "social_dominance": _first_numeric(
+                        coin.get("social_dominance"),
+                        coin.get("social_dominance_24h"),
+                        coin.get("dominance"),
                     ),
-                    "price_change_24h": float(
-                        coin.get(
-                            "percent_change_24h",
-                            coin.get(
-                                "price_change_24h",
-                                coin.get("change_24h", coin.get("price_change", 0)),
-                            ),
-                        )
+                    "price_change_24h": _first_numeric(
+                        coin.get("percent_change_24h"),
+                        coin.get("price_change_24h"),
+                        coin.get("change_24h"),
+                        coin.get("price_change"),
                     ),
-                    "volume_24h": float(
-                        coin.get(
-                            "volume_24h",
-                            coin.get("volume_24h_usd", coin.get("volume", 0)),
-                        )
+                    "volume_24h": _first_numeric(
+                        coin.get("volume_24h"),
+                        coin.get("volume_24h_usd"),
+                        coin.get("volume"),
                     ),
-                    "interactions_24h": coin.get("interactions_24h", 0),
-                    "market_cap": float(coin.get("market_cap", 0)),
-                    "price": float(coin.get("price", coin.get("price_usd", 0))),
+                    "interactions_24h": _first_int(coin.get("interactions_24h")),
+                    "market_cap": _first_numeric(coin.get("market_cap")),
+                    "price": _first_numeric(coin.get("price"), coin.get("price_usd")),
                 }
                 result[symbol] = metrics
                 # Pre-warm the per-symbol cache so downstream
