@@ -162,11 +162,104 @@ export class QueuedTradeCronService {
 
   /**
    * Maximum time a row can sit in `submitted` after the buy fills before we
-   * give up on attaching TP/SL. 48h covers long holiday weekends and the
-   * usual PDT-lift window (a same-day-buy becomes an overnight position
-   * after midnight ET, so PDT stops blocking the sell).
+   * give up on attaching TP/SL. 96h covers the worst realistic case: a
+   * Friday-afternoon PDT block where the weekend + Monday holiday close
+   * eats ~72h before the position can first be sold. 96h leaves a full
+   * day of retry headroom inside the regular market session.
    */
-  private static readonly PROTECTION_GIVE_UP_MS = 48 * 60 * 60 * 1000;
+  private static readonly PROTECTION_GIVE_UP_MS = 96 * 60 * 60 * 1000;
+
+  /**
+   * Break a Date into the calendar/clock parts as seen in New York time.
+   * Used for PDT "same-day" comparison and market-hours check without
+   * depending on the server's local timezone. Handles DST automatically
+   * via the IANA `America/New_York` zone.
+   */
+  private static getEasternParts(date: Date): {
+    year: number;
+    month: number;
+    day: number;
+    hour: number;
+    minute: number;
+    weekday: number;
+  } {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      weekday: 'short',
+      hour12: false,
+    }).formatToParts(date);
+    const map: Record<string, string> = {};
+    for (const p of parts) if (p.type !== 'literal') map[p.type] = p.value;
+    const weekdayMap: Record<string, number> = {
+      Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+    };
+    return {
+      year: parseInt(map.year, 10),
+      month: parseInt(map.month, 10),
+      day: parseInt(map.day, 10),
+      // 'hour12: false' can emit '24' for midnight in some locales — mod 24 normalizes.
+      hour: parseInt(map.hour, 10) % 24,
+      minute: parseInt(map.minute, 10),
+      weekday: weekdayMap[map.weekday] ?? 0,
+    };
+  }
+
+  /** Is the US stock market currently open? Weekdays 9:30 AM – 4:00 PM ET. */
+  private static isUSMarketOpen(
+    et: ReturnType<typeof QueuedTradeCronService.getEasternParts>,
+  ): boolean {
+    if (et.weekday === 0 || et.weekday === 6) return false;
+    const mins = et.hour * 60 + et.minute;
+    return mins >= 570 && mins < 960; // 9:30 → 16:00
+  }
+
+  /**
+   * Decide whether to skip this tick for a row whose last failure was a
+   * deferrable block. Two cases save thousands of wasted Alpaca calls:
+   *
+   *   1. PDT: Alpaca blocks any sell of a stock bought *today* for flagged
+   *      accounts. The block lifts the moment the position becomes an
+   *      overnight hold — i.e. when the calendar day in ET rolls forward.
+   *      → Skip all retries while the ET date equals the buy's ET date.
+   *
+   *   2. Market closed: outside 9:30–16:00 ET on weekdays Alpaca refuses
+   *      every sell, whatever the reason.
+   *      → Skip until the market is open.
+   *
+   * Any other `failure_reason` (network blip, unknown Alpaca error, etc.)
+   * keeps today's immediate-retry behavior.
+   */
+  private static shouldDeferRetry(row: {
+    buy_filled_at: Date | null;
+    failure_reason: string | null;
+  }): boolean {
+    if (!row.buy_filled_at) return false;
+    const reason = (row.failure_reason || '').toLowerCase();
+    const isPdt = reason.includes('pattern day trading') || reason.includes('pdt');
+    const isMarketClosed =
+      reason.includes('market closed') || reason.includes('market is closed');
+    if (!isPdt && !isMarketClosed) return false;
+
+    const now = QueuedTradeCronService.getEasternParts(new Date());
+
+    if (isPdt) {
+      const buy = QueuedTradeCronService.getEasternParts(
+        new Date(row.buy_filled_at),
+      );
+      const sameDay =
+        buy.year === now.year && buy.month === now.month && buy.day === now.day;
+      if (sameDay) return true;
+    }
+
+    // PDT after the date rolled OR a bare market-closed rejection: only
+    // retry while the market is actually accepting orders.
+    return !QueuedTradeCronService.isUSMarketOpen(now);
+  }
 
   private async watchOne(row: any): Promise<void> {
     if (!row.alpaca_buy_order_id) {
@@ -181,11 +274,18 @@ export class QueuedTradeCronService {
     if (row.buy_filled_at) {
       const ageMs = Date.now() - new Date(row.buy_filled_at).getTime();
       if (ageMs > QueuedTradeCronService.PROTECTION_GIVE_UP_MS) {
-        const reason = `Gave up attaching TP/SL after 48h (attempts=${row.protection_attempts ?? 0}). Last error: ${row.failure_reason ?? 'unknown'}`;
+        const reason = `Gave up attaching TP/SL after 96h (attempts=${row.protection_attempts ?? 0}). Last error: ${row.failure_reason ?? 'unknown'}`;
         await this.queuedTradeService.markFailed(row.id, reason);
         this.logger.warn(`Queue ${row.id}: ${reason}`);
         return;
       }
+    }
+
+    // Skip deferrable rejections (PDT / market-closed) without calling
+    // Alpaca. We already know the next call would be rejected identically
+    // until either the ET date rolls forward (PDT) or the market opens.
+    if (QueuedTradeCronService.shouldDeferRetry(row)) {
+      return;
     }
 
     const connection = await this.prisma.user_exchange_connections.findUnique({
