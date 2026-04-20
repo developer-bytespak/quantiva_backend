@@ -4,13 +4,13 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { TokenService } from './token.service';
 
-type UserTier = 'FREE' | 'PRO' | 'ELITE' | 'INSTITUTIONAL';
+type UserTier = 'FREE' | 'PRO' | 'ELITE' | 'ELITE_PLUS';
 
 const TIER_SESSION_LIMITS: Record<UserTier, number> = {
   FREE: 5,
   PRO: 10,
   ELITE: 15,
-  INSTITUTIONAL: 25,
+  ELITE_PLUS: 20,
 };
 
 @Injectable()
@@ -80,10 +80,29 @@ export class SessionService {
     ipAddress?: string,
     deviceId?: string,
   ): Promise<string> {
-    // Clean up expired sessions before checking limit
     await this.cleanupExpiredSessionsForUser(userId);
-    
-    await this.checkSessionLimit(userId);
+
+    // Replace any existing session from this same device so a single device
+    // only ever occupies one slot (prevents ghost sessions from closed tabs).
+    if (deviceId) {
+      await this.prisma.user_sessions.deleteMany({
+        where: { user_id: userId, device_id: deviceId },
+      });
+    }
+
+    // If still at the tier limit, evict the oldest session instead of erroring.
+    const tier = await this.getUserTier(userId);
+    const activeCount = await this.getActiveSessionCount(userId);
+    const limit = TIER_SESSION_LIMITS[tier];
+    if (activeCount >= limit) {
+      const oldest = await this.prisma.user_sessions.findFirst({
+        where: { user_id: userId, revoked: false },
+        orderBy: { issued_at: 'asc' },
+      });
+      if (oldest) {
+        await this.deleteSession(oldest.session_id);
+      }
+    }
 
     const refreshTokenHash = await this.tokenService.hashRefreshToken(
       refreshToken,
