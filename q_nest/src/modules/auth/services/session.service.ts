@@ -140,6 +140,20 @@ export class SessionService {
     }
   }
 
+  async findSessionById(
+    sessionId: string,
+  ): Promise<{ session_id: string; user_id: string; revoked: boolean; expires_at: Date } | null> {
+    return this.prisma.user_sessions.findUnique({
+      where: { session_id: sessionId },
+      select: {
+        session_id: true,
+        user_id: true,
+        revoked: true,
+        expires_at: true,
+      },
+    });
+  }
+
   async deleteSession(sessionId: string): Promise<boolean> {
     // Actually delete the session from the database
     const result = await this.prisma.user_sessions.deleteMany({
