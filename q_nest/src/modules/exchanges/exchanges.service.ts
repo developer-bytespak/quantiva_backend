@@ -1829,9 +1829,11 @@ export class ExchangesService {
           const sym = this.resolveBinanceSellSymbol(symbol);
           await this.binanceService.cancelAllOpenOrdersForSymbol(apiKey, apiSecret, sym);
         } else if (exchangeService instanceof BinanceUSService) {
-          const sym = symbol.toUpperCase().endsWith('USDT')
-            ? symbol.toUpperCase().replace(/USDT$/, 'USD')
-            : symbol.toUpperCase();
+          // Positions from Binance.US come back with just the base asset
+          // (e.g. "BTC"); cancellation needs a real trading pair ("BTCUSD").
+          // Using the same resolver the Binance.US placeOrder uses keeps
+          // the cancel and the subsequent sell pointed at the same symbol.
+          const sym = this.binanceUSService.resolveTradingPair(symbol);
           await this.binanceUSService.cancelAllOpenOrdersForSymbol(apiKey, apiSecret, sym);
         } else if (exchangeService instanceof BybitService) {
           const sym = this.resolveBybitSellSymbol(symbol);
