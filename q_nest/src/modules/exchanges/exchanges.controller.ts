@@ -869,6 +869,7 @@ export class ExchangesController {
         placeOrderDto.type,
         placeOrderDto.quantity,
         placeOrderDto.price,
+        { closePosition: placeOrderDto.closePosition },
       );
     } catch (err: any) {
       const body = err?.response?.data ?? err?.response ?? err?.getResponse?.() ?? null;
