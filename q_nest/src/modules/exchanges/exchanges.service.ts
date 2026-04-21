@@ -1851,33 +1851,69 @@ export class ExchangesService {
       // Sell the user's ACTUAL live balance, not the (possibly stale) qty the
       // frontend sent. The dashboard polls every ~30s, so between poll and
       // click the balance may have changed (pending fills, interest, rewards).
-      // Selling the real balance is what prevents a "sold slightly less than
-      // you had" leftover that falls below Convert's minimum.
       //
-      // Alpaca is excluded: stocks don't have this dust problem (whole shares),
-      // and Alpaca crypto is already blocked upstream for user-initiated flows.
+      // Unlock race: if we just cancelled a TP/SL order on a protected
+      // position, the exchange may report most of the asset as still locked
+      // for a few hundred ms. In that case `free` is much smaller than the
+      // user's actual holding. We detect this by comparing free to the
+      // frontend-provided qty — if free is far below what the user saw in
+      // the UI, trust the UI qty (the cancel will have propagated by the
+      // time the sell hits Binance anyway).
+      //
+      // Alpaca is excluded: stocks are whole shares (no dust), and Alpaca
+      // crypto is blocked upstream for user-initiated flows.
       const baseAsset = this.extractBaseAsset(symbol);
       if (baseAsset) {
-        let liveBalance = 0;
+        let bal: { free: number; total: number } = { free: 0, total: 0 };
         try {
           if (exchangeService instanceof BinanceService) {
-            liveBalance = await this.binanceService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
+            bal = await this.binanceService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
           } else if (exchangeService instanceof BinanceUSService) {
-            liveBalance = await this.binanceUSService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
+            bal = await this.binanceUSService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
           } else if (exchangeService instanceof BybitService) {
-            liveBalance = await this.bybitService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
+            bal = await this.bybitService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
           }
         } catch (balErr: any) {
-          // Balance fetch failure is non-fatal — fall back to frontend qty.
           this.logger.warn(
             `closePosition live-balance fetch failed for ${connectionId}/${baseAsset}: ${balErr?.message || balErr}`,
           );
         }
-        if (liveBalance > 0 && liveBalance !== quantity) {
+
+        // Pick the quantity to sell:
+        //  1. If total (free + locked) matches the user's UI qty closely, the
+        //     cancel hasn't unlocked yet. Use UI qty — by sell time Binance
+        //     will have processed the cancel.
+        //  2. If free is close to UI qty, use free (normal case).
+        //  3. Otherwise use free (rare — balance genuinely shrank).
+        const userQty = quantity;
+        const tenPctOfUser = userQty * 0.1;
+        const freeIsTruthy = bal.free > 0;
+        const totalMatchesUi = bal.total > 0 && Math.abs(bal.total - userQty) < tenPctOfUser;
+        const freeFarBelowUi = freeIsTruthy && bal.free < userQty * 0.5;
+
+        let chosen = userQty;
+        let reason = 'ui qty (balance fetch returned 0 / not available)';
+        if (freeIsTruthy && !freeFarBelowUi) {
+          chosen = bal.free;
+          reason = 'live free balance';
+        } else if (totalMatchesUi) {
+          chosen = userQty;
+          reason = 'ui qty (unlock race: free < UI, but total ≈ UI)';
+        } else if (freeIsTruthy) {
+          // Free > 0 but way smaller than UI — genuinely less is available.
+          chosen = bal.free;
+          reason = 'live free balance (shrunk vs UI)';
+        }
+
+        if (chosen !== quantity) {
           this.logger.log(
-            `closePosition: overriding UI qty ${quantity} with live balance ${liveBalance} for ${baseAsset}`,
+            `closePosition: overriding UI qty ${quantity} with ${chosen} (${reason}) for ${baseAsset} — free=${bal.free}, total=${bal.total}`,
           );
-          quantity = liveBalance;
+          quantity = chosen;
+        } else {
+          this.logger.log(
+            `closePosition: keeping UI qty ${quantity} (${reason}) for ${baseAsset} — free=${bal.free}, total=${bal.total}`,
+          );
         }
       }
     }

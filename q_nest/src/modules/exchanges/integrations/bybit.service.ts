@@ -353,26 +353,31 @@ export class BybitService {
   }
 
   /**
-   * Gets the free balance of a single asset. Used by the closePosition flow
-   * to sell the user's ACTUAL current balance (not the stale dashboard qty).
-   * Bybit reports `availableToWithdraw` and `walletBalance` separately — we
-   * use walletBalance since Bybit deducts from the same pool for spot sells.
+   * Gets the free + total balance of a single asset. Returns both because the
+   * close-position flow needs to distinguish "true small balance" from "just
+   * cancelled a TP/SL, Bybit hasn't unlocked yet" (unlock race).
    */
-  async getAssetFreeBalance(apiKey: string, apiSecret: string, asset: string): Promise<number> {
+  async getAssetFreeBalance(
+    apiKey: string,
+    apiSecret: string,
+    asset: string,
+  ): Promise<{ free: number; total: number }> {
     try {
       const info = await this.getAccountInfo(apiKey, apiSecret);
       const row = (info?.coin || []).find(
         (c) => c.coin?.toUpperCase() === asset.toUpperCase(),
       );
-      if (!row) return 0;
-      // Prefer availableToWithdraw when present (what Bybit considers free
-      // for new spot orders), fall back to walletBalance.
+      if (!row) return { free: 0, total: 0 };
       const free =
         parseFloat(row.availableToWithdraw || '0') ||
         parseFloat(row.walletBalance || '0');
-      return Number.isFinite(free) && free > 0 ? free : 0;
+      const wallet = parseFloat(row.walletBalance || '0');
+      return {
+        free: Number.isFinite(free) && free > 0 ? free : 0,
+        total: Number.isFinite(wallet) && wallet > 0 ? wallet : 0,
+      };
     } catch {
-      return 0;
+      return { free: 0, total: 0 };
     }
   }
 
