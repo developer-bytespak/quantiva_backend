@@ -1,6 +1,7 @@
-import { Injectable, Logger, BadRequestException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, ServiceUnavailableException, Inject, forwardRef } from '@nestjs/common';
 import * as ccxt from 'ccxt';
 import { OPTIONS_RETRY_CONFIG } from '../options.config';
+import { OptionsBinanceStreamService } from './options-binance-stream.service';
 import {
   OptionContractDto,
   OptionsChainResponseDto,
@@ -42,11 +43,26 @@ export class OptionsBinanceService {
   private exchangeInfoCachedAt = 0;
   private readonly EXCHANGE_INFO_TTL = 5 * 60 * 1000; // 5 minutes
 
+  // Shared response cache for bulk public endpoints (ticker / mark return ALL symbols
+  // across ALL underlyings in one payload — caching collapses N-underlying polls into one fetch).
+  private readonly publicResponseCache = new Map<string, { data: any; expiresAt: number }>();
+  private readonly PUBLIC_CACHE_TTL_MS = 10_000; // 10s — refreshes once per chain cycle across all subscribers
+
+  // In-flight deduplication — if request A is already fetching a key, request B awaits the same promise
+  private readonly inFlight = new Map<string, Promise<any>>();
+
+  // IP ban state — Binance returns 418 with "banned until <epoch-ms>" when weight exceeded.
+  // We pause all public calls until this timestamp passes.
+  private bannedUntil = 0;
+
   // Proxy URL — Binance Options (eapi) is geo-blocked on US IPs (e.g. Render).
   // When BINANCE_PROXY_URL is set, all ccxt HTTP calls are routed through it.
   private readonly proxyUrl: string | undefined;
 
-  constructor() {
+  constructor(
+    @Inject(forwardRef(() => OptionsBinanceStreamService))
+    private readonly stream: OptionsBinanceStreamService,
+  ) {
     this.proxyUrl = process.env.BINANCE_PROXY_URL;
     if (this.proxyUrl) {
       this.logger.log(`Options Binance proxy enabled: ${this.proxyUrl.replace(/\/\/.*@/, '//<redacted>@')}`);
@@ -74,6 +90,27 @@ export class OptionsBinanceService {
   /** Get the shared public exchange instance (no auth, for public data only). */
   getPublicExchange(): ccxt.binance {
     return this.publicExchange;
+  }
+
+  /**
+   * Index price for an underlying. Prefers the live WS stream; falls back to
+   * the cached REST endpoint if the stream hasn't populated yet or is stale.
+   * Shape matches `eapiPublicGetIndex` response ({ indexPrice, time }) so callers
+   * don't need to branch on the source.
+   */
+  async getCachedIndex(underlying: string): Promise<any> {
+    const streamed = this.stream.getIndex(underlying);
+    if (streamed !== null) return { indexPrice: String(streamed), time: Date.now() };
+    return this.cachedFetch<any>(`index:${underlying}`, () =>
+      (this.publicExchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` }),
+    );
+  }
+
+  /** Cached 24h spot ticker for an underlying (uses spot /api/v3, not eapi). */
+  async getCachedSpotTicker24h(underlying: string): Promise<any> {
+    return this.cachedFetch<any>(`spotTicker24h:${underlying}`, () =>
+      (this.publicExchange as any).publicGetTicker24hr({ symbol: `${underlying}USDT` }),
+    );
   }
 
   /**
@@ -127,22 +164,86 @@ export class OptionsBinanceService {
   }
 
   /**
+   * Parse Binance's "banned until <epoch-ms>" message (returned with 418) and,
+   * when present, record the ban so we skip upstream calls until it expires.
+   * Returns true if this error is a ban/rate-limit signal.
+   */
+  private handleRateLimitError(error: any): boolean {
+    const status = error?.response?.status || error?.httpStatus;
+    const msg: string = error?.message || '';
+    const isBan = status === 418 || /\b418\b/.test(msg) || /banned until/i.test(msg);
+    const isRateLimit = status === 429 || /\b429\b/.test(msg) || /Way too many requests/i.test(msg);
+    if (!isBan && !isRateLimit) return false;
+
+    const match = msg.match(/banned until (\d+)/i);
+    const until = match ? parseInt(match[1], 10) : Date.now() + 60_000; // default 60s if not parseable
+    if (until > this.bannedUntil) {
+      this.bannedUntil = until;
+      const seconds = Math.ceil((until - Date.now()) / 1000);
+      this.logger.error(`Binance ${status || 'rate-limit'} — pausing eapi calls for ${seconds}s`);
+    }
+    return true;
+  }
+
+  /** True if we're in an active Binance ban window; skip outbound calls. */
+  private isBanned(): boolean {
+    return Date.now() < this.bannedUntil;
+  }
+
+  /**
+   * Fetch with shared cache + in-flight dedup. Many subscribers polling the same
+   * underlying should share one Binance call. Key = endpoint label + args.
+   * Honors active bans by throwing early.
+   */
+  private async cachedFetch<T>(cacheKey: string, fn: () => Promise<T>): Promise<T> {
+    if (this.isBanned()) {
+      throw new Error(`Binance options API banned until ${new Date(this.bannedUntil).toISOString()}`);
+    }
+    const now = Date.now();
+    const cached = this.publicResponseCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) return cached.data as T;
+
+    const existing = this.inFlight.get(cacheKey);
+    if (existing) return existing as Promise<T>;
+
+    const promise = fn().then(
+      (data) => {
+        this.publicResponseCache.set(cacheKey, { data, expiresAt: Date.now() + this.PUBLIC_CACHE_TTL_MS });
+        this.inFlight.delete(cacheKey);
+        return data;
+      },
+      (err) => {
+        this.inFlight.delete(cacheKey);
+        throw err;
+      },
+    );
+    this.inFlight.set(cacheKey, promise);
+    return promise;
+  }
+
+  /**
    * Retry wrapper with exponential backoff for Binance API calls.
-   * Retries on network errors and 429 (rate limit). Does not retry 4xx client errors.
+   * - Skips entirely if we're in a ban window.
+   * - Does NOT retry on 418 / 429 (retrying only extends the ban).
+   * - Retries only on 5xx / timeouts.
    */
   private async withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+    if (this.isBanned()) {
+      throw new Error(`Binance options API banned until ${new Date(this.bannedUntil).toISOString()}`);
+    }
     const { MAX_RETRIES, BASE_DELAY_MS, MAX_DELAY_MS } = OPTIONS_RETRY_CONFIG;
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         return await fn();
       } catch (error: any) {
+        // Record ban / rate-limit and stop immediately — retrying makes the ban worse
+        if (this.handleRateLimitError(error)) throw error;
+
         const status = error?.response?.status || error?.code;
-        const isRateLimit = status === 429 || error?.message?.includes('rate limit');
         const isTimeout = status === 408 || error?.code === 'ETIMEDOUT' || error?.code === 'ECONNABORTED';
         const isClientError = typeof status === 'number' && status >= 400 && status < 500;
 
-        // Don't retry client errors (except rate limits and timeouts)
-        if (isClientError && !isRateLimit && !isTimeout) throw error;
+        if (isClientError && !isTimeout) throw error;
         if (attempt === MAX_RETRIES) throw error;
 
         const delay = Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1), MAX_DELAY_MS);
@@ -172,12 +273,14 @@ export class OptionsBinanceService {
         }
       }
 
-      // Fetch index prices for each underlying
+      // Fetch index prices for each underlying — shared cache collapses repeat calls
       const results: AvailableUnderlyingDto[] = [];
       for (const [symbol, contractCount] of underlyingMap) {
         let indexPrice = 0;
         try {
-          const indexData = await (this.publicExchange as any).eapiPublicGetIndex({ underlying: `${symbol}USDT` });
+          const indexData = await this.cachedFetch<any>(`index:${symbol}`, () =>
+            (this.publicExchange as any).eapiPublicGetIndex({ underlying: `${symbol}USDT` }),
+          );
           indexPrice = parseFloat(indexData?.indexPrice || '0');
         } catch {
           this.logger.warn(`Could not fetch index price for ${symbol}`);
@@ -313,35 +416,57 @@ export class OptionsBinanceService {
       };
     }
 
-    // Fetch tickers and mark prices in parallel (public endpoints)
+    // Prefer live WebSocket stream for mark/Greeks/bid-ask/index — falls back to REST
+    // when the stream is stale or disconnected. Volume/OI always come from REST ticker
+    // (change slowly, no WS aggregate exists for options).
+    const streamMarks = this.stream.getMarksForUnderlying(underlying);
+    const streamIndex = this.stream.getIndex(underlying);
+    const needMarkRest = streamMarks.size === 0;
+    const needIndexRest = streamIndex === null;
+
     let tickers: any[] = [];
     let markPrices: any[] = [];
-    let indexPrice = 0;
+    let indexPrice = streamIndex ?? 0;
 
     try {
       const [tickerResult, markResult, indexResult] = await Promise.allSettled([
-        this.withRetry<any[]>(() => (exchange as any).eapiPublicGetTicker(), 'getTicker'),
-        this.withRetry<any[]>(() => (exchange as any).eapiPublicGetMark(), 'getMark'),
-        this.withRetry<any>(() => (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` }), 'getIndex'),
+        // Volume + OI only come from REST — shared 60s cache across all underlyings
+        this.cachedFetch<any[]>('ticker:all', () =>
+          this.withRetry<any[]>(() => (exchange as any).eapiPublicGetTicker(), 'getTicker'),
+        ),
+        needMarkRest
+          ? this.cachedFetch<any[]>('mark:all', () =>
+              this.withRetry<any[]>(() => (exchange as any).eapiPublicGetMark(), 'getMark'),
+            )
+          : Promise.resolve([] as any[]),
+        needIndexRest
+          ? this.cachedFetch<any>(`index:${underlying}`, () =>
+              this.withRetry<any>(() => (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` }), 'getIndex'),
+            )
+          : Promise.resolve(null),
       ]);
       if (tickerResult.status === 'fulfilled') tickers = (tickerResult.value as any[]) || [];
       else this.logger.error(`Chain fetch: ticker failed for ${underlying}: ${tickerResult.reason?.message || tickerResult.reason}`);
-      if (markResult.status === 'fulfilled') markPrices = (markResult.value as any[]) || [];
-      else this.logger.error(`Chain fetch: mark failed for ${underlying}: ${markResult.reason?.message || markResult.reason}`);
-      if (indexResult.status === 'fulfilled') indexPrice = parseFloat((indexResult.value as any)?.indexPrice || '0');
-      else this.logger.error(`Chain fetch: index failed for ${underlying}: ${indexResult.reason?.message || indexResult.reason}`);
+      if (needMarkRest) {
+        if (markResult.status === 'fulfilled') markPrices = (markResult.value as any[]) || [];
+        else this.logger.error(`Chain fetch: mark failed for ${underlying}: ${markResult.reason?.message || markResult.reason}`);
+      }
+      if (needIndexRest) {
+        if (indexResult.status === 'fulfilled') indexPrice = parseFloat((indexResult.value as any)?.indexPrice || '0');
+        else this.logger.error(`Chain fetch: index failed for ${underlying}: ${indexResult.reason?.message || indexResult.reason}`);
+      }
     } catch (error: any) {
       this.logger.warn(`Options chain data fetch error: ${error.message}`);
     }
 
-    // Index tickers and marks by symbol for quick lookup
+    // Index tickers + REST marks (latter only used when WS stream is unavailable)
     const tickerMap = new Map<string, any>();
     for (const t of tickers) {
       if (t.symbol) tickerMap.set(t.symbol, t);
     }
-    const markMap = new Map<string, any>();
+    const restMarkMap = new Map<string, any>();
     for (const m of markPrices) {
-      if (m.symbol) markMap.set(m.symbol, m);
+      if (m.symbol) restMarkMap.set(m.symbol, m);
     }
 
     // Build contracts list
@@ -351,7 +476,8 @@ export class OptionsBinanceService {
     for (const sym of optionSymbols) {
       const symbol = sym.symbol; // e.g. "BTC-260327-100000-C"
       const ticker = tickerMap.get(symbol) || {};
-      const mark = markMap.get(symbol) || {};
+      const wsMark = streamMarks.get(symbol);
+      const restMark = restMarkMap.get(symbol) || {};
 
       const expiryMs = sym.expiryDate ? parseInt(sym.expiryDate) : 0;
       const expiryDate = expiryMs ? new Date(expiryMs).toISOString() : '';
@@ -365,25 +491,34 @@ export class OptionsBinanceService {
         ? OptionTypeEnum.CALL
         : OptionTypeEnum.PUT;
 
+      // WS stream carries live bid/ask + mark + Greeks + IV. REST carries the
+      // same fields at a slower cadence (used only when stream is stale/disconnected).
+      const bidPrice = wsMark ? wsMark.bidPrice : parseFloat(ticker.bidPrice || '0');
+      const askPrice = wsMark ? wsMark.askPrice : parseFloat(ticker.askPrice || '0');
+      const markPrice = wsMark
+        ? wsMark.markPrice
+        : parseFloat(restMark.markPrice || ticker.lastPrice || '0');
+      const delta = wsMark ? wsMark.delta : parseFloat(restMark.delta || '0');
+      const gamma = wsMark ? wsMark.gamma : parseFloat(restMark.gamma || '0');
+      const theta = wsMark ? wsMark.theta : parseFloat(restMark.theta || '0');
+      const vega = wsMark ? wsMark.vega : parseFloat(restMark.vega || '0');
+      const impliedVolatility = wsMark
+        ? (wsMark.markIV || undefined)
+        : (restMark.markIV ? parseFloat(restMark.markIV) : undefined);
+
       contracts.push({
         symbol,
         underlying,
         strike,
         expiry: expiryDate,
         type: optType,
-        bidPrice: parseFloat(ticker.bidPrice || '0'),
-        askPrice: parseFloat(ticker.askPrice || '0'),
-        markPrice: parseFloat(mark.markPrice || ticker.lastPrice || '0'),
+        bidPrice,
+        askPrice,
+        markPrice,
         lastPrice: parseFloat(ticker.lastPrice || '0'),
         volume: parseFloat(ticker.volume || '0'),
-        openInterest: parseFloat(ticker.openInterest || mark.openInterest || '0'),
-        greeks: {
-          delta: parseFloat(mark.delta || '0'),
-          gamma: parseFloat(mark.gamma || '0'),
-          theta: parseFloat(mark.theta || '0'),
-          vega: parseFloat(mark.vega || '0'),
-          impliedVolatility: mark.markIV ? parseFloat(mark.markIV) : undefined,
-        },
+        openInterest: parseFloat(ticker.openInterest || restMark.openInterest || '0'),
+        greeks: { delta, gamma, theta, vega, impliedVolatility },
         contractSize: parseInt(sym.unit || '1'),
       });
     }
