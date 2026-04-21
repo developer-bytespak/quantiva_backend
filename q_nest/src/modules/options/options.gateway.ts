@@ -10,6 +10,7 @@ import {
 import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { OptionsBinanceService } from './services/options-binance.service';
+import { OptionsBinanceStreamService } from './services/options-binance-stream.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { WsAuthService } from '../../gateways/ws-auth.service';
 import { OPTIONS_POLLING_CONFIG } from './options.config';
@@ -65,6 +66,7 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
 
   constructor(
     private readonly optionsBinance: OptionsBinanceService,
+    private readonly streamService: OptionsBinanceStreamService,
     private readonly exchangesService: ExchangesService,
     private readonly wsAuthService: WsAuthService,
   ) {}
@@ -200,10 +202,15 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
         underlying,
       );
 
+      const streamConnected = this.streamService.isConnected();
+      const streamHasData = this.streamService.getMarksForUnderlying(underlying).size > 0;
+
       this.server.to(`options:${underlying}`).emit('chain-update', {
         underlying,
         chain,
         timestamp: Date.now(),
+        streamConnected,
+        streamSource: streamConnected && streamHasData ? 'ws' : 'rest',
       });
     } catch (error: any) {
       this.logger.warn(
@@ -214,12 +221,11 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
 
   private async pushTickerUpdate(underlying: string): Promise<void> {
     try {
-      const exchange = this.optionsBinance.getPublicExchange();
-
-      // Fetch index price and 24h spot ticker in parallel
+      // Use service-level cached fetch so multiple subscribers share one upstream call
+      // and Binance 418/429 bans are honored automatically.
       const [indexResult, tickerResult] = await Promise.allSettled([
-        (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` }),
-        (exchange as any).publicGetTicker24hr({ symbol: `${underlying}USDT` }),
+        this.optionsBinance.getCachedIndex(underlying),
+        this.optionsBinance.getCachedSpotTicker24h(underlying),
       ]);
 
       const price = indexResult.status === 'fulfilled'

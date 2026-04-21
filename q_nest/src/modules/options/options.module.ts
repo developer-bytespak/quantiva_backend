@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { OptionsController } from './options.controller';
 import { OptionsService } from './services/options.service';
 import { OptionsBinanceService } from './services/options-binance.service';
+import { OptionsBinanceStreamService } from './services/options-binance-stream.service';
 import { OptionsIvService } from './services/options-iv.service';
 import { OptionsSignalService } from './services/options-signal.service';
 import { OptionsRiskService } from './services/options-risk.service';
@@ -15,7 +16,7 @@ import { TradeFeesModule } from '../trade-fees/trade-fees.module';
 @Module({
   imports: [ConfigModule, PrismaModule, AuthModule, forwardRef(() => ExchangesModule), TradeFeesModule],
   controllers: [OptionsController],
-  providers: [OptionsService, OptionsBinanceService, OptionsGateway, OptionsIvService, OptionsSignalService, OptionsRiskService],
-  exports: [OptionsService, OptionsBinanceService, OptionsIvService, OptionsSignalService, OptionsRiskService],
+  providers: [OptionsService, OptionsBinanceService, OptionsBinanceStreamService, OptionsGateway, OptionsIvService, OptionsSignalService, OptionsRiskService],
+  exports: [OptionsService, OptionsBinanceService, OptionsBinanceStreamService, OptionsIvService, OptionsSignalService, OptionsRiskService],
 })
 export class OptionsModule {}
