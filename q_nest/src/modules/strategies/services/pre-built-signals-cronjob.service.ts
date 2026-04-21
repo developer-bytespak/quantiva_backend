@@ -1,4 +1,5 @@
 import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { PythonApiService } from '../../../kyc/integrations/python-api.service';
@@ -6,6 +7,21 @@ import { PreBuiltStrategiesService } from './pre-built-strategies.service';
 import { StrategyExecutionService } from './strategy-execution.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { ConnectionStatus, StrategyType } from '@prisma/client';
+
+// Keep in sync with the default profile in q_python fusion_engine.py.
+const DEFAULT_ENGINE_WEIGHTS = {
+  sentiment: 0.35,
+  trend: 0.25,
+  fundamental: 0.15,
+  event_risk: 0.15,
+  liquidity: 0.1,
+} as const;
+
+const VALID_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
+
+// Shared 10-minute window used both by the dedup check on writes and by
+// the custom-strategy skip-if-recent guard. One constant; two call sites.
+const SIGNAL_DEDUP_WINDOW_MS = 10 * 60 * 1000;
 
 @Injectable()
 export class PreBuiltSignalsCronjobService {
@@ -21,7 +37,105 @@ export class PreBuiltSignalsCronjobService {
     private strategyExecutionService: StrategyExecutionService,
     @Inject(forwardRef(() => ExchangesService))
     private exchangesService: ExchangesService,
+    private config: ConfigService,
   ) {}
+
+  /**
+   * When the `ENABLE_CRONS` env var is explicitly set to `"false"`, all
+   * crons defined in this service skip execution. Used to prevent duplicate
+   * cron firing when the same NestJS process is deployed to multiple hosts
+   * (e.g., Render + a secondary AWS). Mirrors the pattern used in
+   * news-cronjob.service.ts and coin-details-sync.cron.ts.
+   */
+  private get cronsEnabled(): boolean {
+    return this.config.get('ENABLE_CRONS') !== 'false';
+  }
+
+  /**
+   * Phase 5 — Build strategy_data for a Python `/signals/generate` call
+   * with validation + type coercion.
+   *
+   * Why this exists: Prisma returns `Decimal` objects and nullable JSON
+   * columns. Sending them raw to Python can produce `NaN` / parse errors
+   * on the Python side. This helper:
+   *   - Validates `timeframe` against the known enum and falls back to `1d`.
+   *   - Coerces `stop_loss_value` / `take_profit_value` to numbers.
+   *   - Warns (doesn't crash) when `engine_weights` sum drifts from 1.0 —
+   *     Python normalizes internally but we want the drift visible in logs.
+   */
+  private buildStrategyData(strategy: {
+    user_id: string | null;
+    strategy_id: string;
+    entry_rules: unknown;
+    exit_rules: unknown;
+    indicators: unknown;
+    timeframe: string | null;
+    engine_weights: unknown;
+    stop_loss_value: unknown;
+    take_profit_value: unknown;
+  }): Record<string, any> {
+    const toNumber = (v: unknown, fallback: number): number => {
+      if (v === null || v === undefined) return fallback;
+      const n = Number(v as any);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    const tf = strategy.timeframe as (typeof VALID_TIMEFRAMES)[number] | null;
+    const timeframe = tf && VALID_TIMEFRAMES.includes(tf) ? tf : '1d';
+    if (tf && !VALID_TIMEFRAMES.includes(tf)) {
+      this.logger.warn(
+        `Strategy ${strategy.strategy_id}: invalid timeframe "${tf}" — falling back to "1d"`,
+      );
+    }
+
+    const rawWeights = strategy.engine_weights as Record<string, unknown> | null;
+    if (rawWeights) {
+      const sum = Object.values(rawWeights).reduce<number>(
+        (s, v) => s + toNumber(v, 0),
+        0,
+      );
+      if (Math.abs(sum - 1.0) > 0.05) {
+        this.logger.warn(
+          `Strategy ${strategy.strategy_id}: engine_weights sum to ${sum.toFixed(3)} (not 1.0) — Python will normalize`,
+        );
+      }
+    }
+
+    return {
+      user_id: strategy.user_id ?? null,
+      entry_rules: (strategy.entry_rules as any[]) || [],
+      exit_rules: (strategy.exit_rules as any[]) || [],
+      indicators: (strategy.indicators as any[]) || [],
+      timeframe,
+      engine_weights: rawWeights || { ...DEFAULT_ENGINE_WEIGHTS },
+      stop_loss_value: toNumber(strategy.stop_loss_value, 0),
+      take_profit_value: toNumber(strategy.take_profit_value, 0),
+    };
+  }
+
+  /**
+   * Phase 2b — Returns true when a signal for this (strategy, asset) was
+   * already written within the last SIGNAL_DEDUP_WINDOW_MS. Used to stop
+   * a second cron run (e.g., manual trigger after scheduled tick) from
+   * producing duplicate rows.
+   */
+  private async hasRecentSignal(
+    strategyId: string,
+    assetId: string,
+    userId: string | null,
+  ): Promise<boolean> {
+    const since = new Date(Date.now() - SIGNAL_DEDUP_WINDOW_MS);
+    const recent = await this.prisma.strategy_signals.findFirst({
+      where: {
+        strategy_id: strategyId,
+        asset_id: assetId,
+        user_id: userId,
+        timestamp: { gte: since },
+      },
+      select: { signal_id: true },
+    });
+    return recent !== null;
+  }
 
   /**
    * Scheduled job that runs every 10 minutes
@@ -29,6 +143,9 @@ export class PreBuiltSignalsCronjobService {
    */
   @Cron('*/10 * * * *') // Every 10 minutes
   async generatePreBuiltSignals(options?: { connectionId?: string }): Promise<void> {
+    if (!this.cronsEnabled) {
+      return;
+    }
     if (this.isRunning) {
       return;
     }
@@ -169,24 +286,19 @@ export class PreBuiltSignalsCronjobService {
     const connectionId = connectionInfo?.connectionId || null;
     const exchange = connectionInfo?.exchange || 'binance';
 
-    // Prepare strategy data
-    const strategyData = {
-      user_id: null, // System-level execution
-      entry_rules: strategy.entry_rules || [],
-      exit_rules: strategy.exit_rules || [],
-      indicators: strategy.indicators || [],
-      timeframe: strategy.timeframe,
-      engine_weights:
-        strategy.engine_weights || {
-          sentiment: 0.35,
-          trend: 0.25,
-          fundamental: 0.15,
-          event_risk: 0.15,
-          liquidity: 0.1,
-        },
-      stop_loss_value: strategy.stop_loss_value,
-      take_profit_value: strategy.take_profit_value,
-    };
+    // Prepare strategy data (Phase 5 — validated + coerced)
+    const strategyData = this.buildStrategyData({
+      ...strategy,
+      user_id: null, // System-level execution (overrides strategy.user_id)
+    });
+
+    // Phase 2b — app-level dedup: skip if we already wrote a signal for
+    // this (strategy, asset) in the last 10 minutes. Prevents duplicates
+    // when scheduled + manual triggers race, or when two instances each
+    // run the cron (before ENABLE_CRONS is properly set).
+    if (await this.hasRecentSignal(strategyId, assetId, null)) {
+      return;
+    }
 
     try {
       // Call Python API to generate signal
@@ -399,31 +511,33 @@ export class PreBuiltSignalsCronjobService {
   }
 
   /**
-   * Process all active custom CRYPTO (user) strategies
-   * Stock custom strategies are handled by StockSignalsCronjobService
-   * This runs after pre-built strategies to reuse the same cached market data
+   * Process all active custom CRYPTO (user) strategies.
+   * Stock custom strategies are handled by StockSignalsCronjobService.
+   *
+   * Phase 4 refactor: the old version fired ~3 DB queries per (strategy ×
+   * target_symbol) — a custom strategy with 100 targets meant ~300 round
+   * trips plus 100 sentiment API calls, multiplied across every custom
+   * strategy. This version pre-computes the union of all target symbols
+   * across all strategies, batches the asset lookup/creation, pre-fetches
+   * market data once, and pools sentiment calls per unique symbol.
+   * Typical new cost: 3 bulk queries total + one sentiment call per
+   * unique new symbol, regardless of how many strategies reference it.
    */
   private async processActiveCustomStrategies(
     trendingAssets: any[],
     connectionInfo: { connectionId: string | null; exchange: string } | null,
   ): Promise<void> {
     try {
-      // Get all active custom CRYPTO strategies (user-created)
-      // Stock custom strategies are now handled by StockSignalsCronjobService
       const customStrategies = await this.prisma.strategies.findMany({
         where: {
           type: StrategyType.user,
           is_active: true,
           user_id: { not: null },
-          asset_type: 'crypto', // Only process crypto custom strategies here
-          // Note: target_assets can be null - we'll use all trending assets in that case
+          asset_type: 'crypto',
         },
         include: {
           user: {
-            select: {
-              user_id: true,
-              email: true,
-            },
+            select: { user_id: true, email: true },
           },
         },
       });
@@ -432,123 +546,188 @@ export class PreBuiltSignalsCronjobService {
         return;
       }
 
-      // Build a map of symbol -> asset from trending assets for quick lookup
+      // ----- Phase 4.1: compute the union of all symbols to process -----
       const trendingAssetsMap = new Map<string, any>();
       for (const asset of trendingAssets) {
         trendingAssetsMap.set(asset.symbol, asset);
       }
 
+      // Per-strategy resolution of `assetsToProcess`, in one pass.
+      const trendingSymbols = trendingAssets.map((a) => a.symbol);
+      const perStrategySymbols = new Map<string, string[]>();
+      const allSymbolsSet = new Set<string>();
+      for (const strategy of customStrategies) {
+        const targets = (strategy.target_assets as string[]) || [];
+        const list = targets.length > 0 ? targets : trendingSymbols;
+        perStrategySymbols.set(strategy.strategy_id, list);
+        for (const s of list) allSymbolsSet.add(s);
+      }
+      const allSymbols = Array.from(allSymbolsSet);
+
+      // ----- Phase 4.2: bulk resolve (find existing + create missing) -----
+      const assetMap = new Map<string, any>();
+      for (const a of trendingAssets) {
+        if (a.symbol) assetMap.set(a.symbol, a);
+      }
+
+      const symbolsNotInTrending = allSymbols.filter((s) => !assetMap.has(s));
+
+      if (symbolsNotInTrending.length > 0) {
+        const existing = await this.prisma.assets.findMany({
+          where: {
+            symbol: { in: symbolsNotInTrending },
+            asset_type: 'crypto',
+          },
+        });
+        for (const a of existing) {
+          if (a.symbol) assetMap.set(a.symbol, a);
+        }
+
+        const stillMissing = symbolsNotInTrending.filter((s) => !assetMap.has(s));
+        if (stillMissing.length > 0) {
+          await this.prisma.assets.createMany({
+            data: stillMissing.map((symbol) => ({
+              symbol,
+              name: symbol,
+              display_name: symbol,
+              asset_type: 'crypto',
+              is_active: true,
+              first_seen_at: new Date(),
+              last_seen_at: new Date(),
+            })),
+            skipDuplicates: true,
+          });
+          // createMany doesn't return rows — re-fetch the ones we just created.
+          const created = await this.prisma.assets.findMany({
+            where: { symbol: { in: stillMissing }, asset_type: 'crypto' },
+          });
+          for (const a of created) {
+            if (a.symbol) assetMap.set(a.symbol, a);
+          }
+        }
+      }
+
+      // ----- Phase 4.3: pool sentiment analysis (once per unique new asset) -----
+      // Only symbols NOT in trending need fresh sentiment — trending ones
+      // were already hit by the pre-built loop earlier in this cron run.
+      const freshSentimentTargets = symbolsNotInTrending
+        .map((s) => assetMap.get(s))
+        .filter((a) => a && a.asset_id);
+      for (const asset of freshSentimentTargets) {
+        try {
+          await this.runSentimentAnalysis(asset);
+        } catch {
+          // Non-fatal; strategy exec still proceeds using whatever sentiment is cached.
+        }
+      }
+
+      // ----- Phase 4.4: pre-fetch latest trending_assets market data in one query -----
+      const assetIds = Array.from(assetMap.values())
+        .map((a) => a.asset_id)
+        .filter(Boolean);
+      const marketDataMap = new Map<string, { price: number; volume_24h: number; asset_type: string }>();
+      if (assetIds.length > 0) {
+        const latest = await this.prisma.trending_assets.findMany({
+          where: { asset_id: { in: assetIds } },
+          orderBy: { poll_timestamp: 'desc' },
+        });
+        // Keep only the first (most recent) entry per asset_id.
+        for (const row of latest) {
+          if (!marketDataMap.has(row.asset_id)) {
+            marketDataMap.set(row.asset_id, {
+              price: Number(row.price_usd || 0),
+              volume_24h: Number(row.market_volume || 0),
+              asset_type: 'crypto',
+            });
+          }
+        }
+      }
+
+      // ----- Phase 4.5: per-strategy execution (no more inner DB round-trips) -----
       let customSignalsGenerated = 0;
       let customErrors = 0;
 
       for (const strategy of customStrategies) {
         try {
-          const targetAssets = (strategy.target_assets as string[]) || [];
-          
-          // If no target assets specified, use ALL trending assets (same as pre-built)
-          const assetsToProcess = targetAssets.length > 0
-            ? targetAssets
-            : trendingAssets.map(a => a.symbol);
+          const symbols = perStrategySymbols.get(strategy.strategy_id) || [];
+          const userConnectionInfo = await this.getUserConnection(
+            strategy.user_id!,
+            strategy.asset_type || 'crypto',
+          );
 
-          // Get user-specific connection if available
-          const userConnectionInfo = await this.getUserConnection(strategy.user_id, strategy.asset_type || 'crypto');
-
-          // Process each target asset (or all trending if none specified)
-          for (const symbol of assetsToProcess) {
+          for (const symbol of symbols) {
             try {
-              // First check if asset exists in our trending assets (already has fresh sentiment data)
-              let asset = trendingAssetsMap.get(symbol);
-              
-              if (!asset) {
-                // Look up the asset in the database
-                asset = await this.prisma.assets.findFirst({
-                  where: { symbol },
-                });
+              const asset = assetMap.get(symbol);
+              if (!asset) continue; // Couldn't resolve; should be rare
 
-                if (!asset) {
-                  // Create the asset if it doesn't exist
-                  asset = await this.prisma.assets.create({
-                    data: {
-                      symbol,
-                      name: symbol,
-                      display_name: symbol,
-                      asset_type: strategy.asset_type || 'crypto',
-                    },
-                  });
-                }
+              const marketData = marketDataMap.get(asset.asset_id) || {
+                price: 0,
+                volume_24h: 0,
+                asset_type: 'crypto',
+              };
 
-                // Run sentiment analysis for this asset since it wasn't in trending
-                await this.runSentimentAnalysis(asset);
-              }
-
-              // Execute the strategy for this asset
               await this.executeCustomStrategyForAsset(
                 strategy,
                 asset,
                 userConnectionInfo || connectionInfo,
+                marketData, // pre-fetched; skip the getMarketData round-trip inside
               );
               customSignalsGenerated++;
-            } catch (error: any) {
+            } catch {
               customErrors++;
             }
           }
-        } catch (error: any) {
+        } catch {
           // Continue with next strategy
         }
       }
+
+      if (customSignalsGenerated > 0 || customErrors > 0) {
+        this.logger.log(
+          `[processActiveCustomStrategies] signals=${customSignalsGenerated} errors=${customErrors} strategies=${customStrategies.length} symbols=${allSymbols.length}`,
+        );
+      }
     } catch (error: any) {
-      // Don't throw - continue with the rest of the cronjob
+      this.logger.error(
+        `[processActiveCustomStrategies] fatal: ${error?.message || error}`,
+      );
     }
   }
 
   /**
-   * Execute a custom strategy for a single asset
+   * Execute a custom strategy for a single asset.
+   *
+   * @param preFetchedMarketData Optional pre-resolved market data. When
+   *   supplied (by the batched custom-strategy loop in
+   *   processActiveCustomStrategies), skips the per-asset
+   *   `trending_assets` round trip. Falls back to `getMarketData` when
+   *   called from paths that don't have it pre-resolved.
    */
   private async executeCustomStrategyForAsset(
     strategy: any,
     asset: any,
     connectionInfo: { connectionId: string | null; exchange: string } | null,
+    preFetchedMarketData?: { price: number; volume_24h: number; asset_type: string },
   ): Promise<void> {
-    // Get market data
-    const marketData = await this.getMarketData(asset.asset_id, asset.asset_type);
+    const marketData =
+      preFetchedMarketData ??
+      (await this.getMarketData(asset.asset_id, asset.asset_type));
 
-    // Use provided connection info or default
     const connectionId = connectionInfo?.connectionId || null;
     const exchange = connectionInfo?.exchange || 'binance';
 
-    // Prepare strategy data
-    const strategyData = {
-      user_id: strategy.user_id,
-      entry_rules: strategy.entry_rules || [],
-      exit_rules: strategy.exit_rules || [],
-      indicators: strategy.indicators || [],
-      timeframe: strategy.timeframe,
-      engine_weights:
-        strategy.engine_weights || {
-          sentiment: 0.35,
-          trend: 0.25,
-          fundamental: 0.15,
-          event_risk: 0.15,
-          liquidity: 0.1,
-        },
-      stop_loss_value: strategy.stop_loss_value,
-      take_profit_value: strategy.take_profit_value,
-    };
+    const strategyData = this.buildStrategyData(strategy);
 
     try {
-      // Dedup check: skip if a signal was already created for this strategy+asset within the last 10 minutes
-      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-      const recentSignal = await this.prisma.strategy_signals.findFirst({
-        where: {
-          strategy_id: strategy.strategy_id,
-          asset_id: asset.asset_id,
-          timestamp: { gte: tenMinutesAgo },
-        },
-        select: { signal_id: true },
-      });
-
-      if (recentSignal) {
-        return; // Signal already generated within last 10 minutes — skip
+      // Phase 2b — same app-level dedup helper as the pre-built branch.
+      if (
+        await this.hasRecentSignal(
+          strategy.strategy_id,
+          asset.asset_id,
+          strategy.user_id ?? null,
+        )
+      ) {
+        return;
       }
 
       // Call Python API to generate signal

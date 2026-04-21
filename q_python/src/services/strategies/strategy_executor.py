@@ -2,7 +2,7 @@
 Strategy Executor
 Executes strategy rules against market data and evaluates entry/exit conditions.
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -105,20 +105,19 @@ class StrategyExecutor:
         logic_operator = 'AND'  # Default
 
         for rule in rules:
-            condition_met = self._evaluate_single_rule(
+            # `evaluable` is True when the rule's inputs actually exist
+            # (indicator present OR field path resolves OR rule is pure
+            # fusion-based). A rule that cannot be evaluated is marked
+            # `skipped` so signal_generator can fall back to the fusion
+            # engine's action instead of silently returning HOLD.
+            condition_met, evaluable = self._evaluate_single_rule(
                 rule, indicators, market_data, engine_scores, fusion_result
-            )
-
-            # Track if this rule was skipped due to missing indicator data
-            indicator_missing = (
-                'indicator' in rule and
-                indicators.get(rule['indicator']) is None
             )
 
             conditions_met.append({
                 'rule': rule,
                 'met': condition_met,
-                'skipped': indicator_missing,
+                'skipped': not evaluable,
             })
 
             # Get logic operator (AND/OR)
@@ -137,6 +136,8 @@ class StrategyExecutor:
             'all_met': all_met,
             'conditions': conditions_met,
             'logic': logic_operator,
+            # Retained name for backward compat; now counts ANY rule that
+            # couldn't be evaluated (indicator OR field missing).
             'indicators_missing': skipped_count,
             'all_skipped': skipped_count == len(conditions_met) and len(conditions_met) > 0,
         }
@@ -148,75 +149,91 @@ class StrategyExecutor:
         market_data: Dict[str, Any],
         engine_scores: Optional[Dict[str, Any]] = None,
         fusion_result: Optional[Dict[str, Any]] = None
-    ) -> bool:
+    ) -> Tuple[bool, bool]:
         """
         Evaluate a single rule condition.
-        
+
         Args:
             rule: Rule dictionary
             indicators: Indicator values
             market_data: Market data
             engine_scores: Engine scores (for field-based rules)
             fusion_result: Fusion result (for field-based rules)
-        
+
         Returns:
-            True if condition is met, False otherwise
+            A tuple ``(met, evaluable)``:
+              * ``met``       — True if the condition holds, False otherwise.
+              * ``evaluable`` — True if the rule's inputs were present and we
+                                could actually run the comparison; False if
+                                required data was missing (indicator not
+                                computed, or field path didn't resolve). The
+                                caller uses this flag to decide whether to
+                                treat the rule as "failed" or "skipped".
+
+        A malformed rule (bad operator, missing both ``indicator`` and
+        ``field``) is reported as ``(False, True)`` — it's a real authoring
+        error, not missing runtime data.
         """
         try:
             operator = rule['operator']
             target_value = rule['value']
-            
+
             # Support both indicator-based and field-based rules
             if 'indicator' in rule:
                 # Indicator-based rule
                 indicator_name = rule['indicator']
                 indicator_value = indicators.get(indicator_name)
-                
+
                 if indicator_value is None:
                     self.logger.warning(f"Indicator {indicator_name} not found in data")
-                    return False
-                
+                    return (False, False)  # not evaluable
+
                 value_to_compare = indicator_value
-                
+
             elif 'field' in rule:
                 # Field-based rule (e.g., 'final_score', 'metadata.engine_details.event_risk.score')
                 field_path = rule['field']
                 value_to_compare = self._get_field_value(field_path, engine_scores, fusion_result, market_data)
-                
+
                 if value_to_compare is None:
                     self.logger.warning(f"Field {field_path} not found in data")
-                    return False
+                    return (False, False)  # not evaluable
             else:
                 self.logger.warning(f"Rule missing both 'indicator' and 'field': {rule}")
-                return False
-            
+                # Treat as evaluated-but-failed: the rule is malformed, not
+                # missing runtime data. Falling back to fusion would hide
+                # the authoring bug.
+                return (False, True)
+
             # Evaluate condition based on operator
             if operator == '>':
-                return value_to_compare > target_value
+                met = value_to_compare > target_value
             elif operator == '<':
-                return value_to_compare < target_value
+                met = value_to_compare < target_value
             elif operator == '>=':
-                return value_to_compare >= target_value
+                met = value_to_compare >= target_value
             elif operator == '<=':
-                return value_to_compare <= target_value
+                met = value_to_compare <= target_value
             elif operator == '==':
-                return abs(value_to_compare - target_value) < 0.001  # Float comparison
+                met = abs(value_to_compare - target_value) < 0.001  # Float comparison
             elif operator == '!=':
-                return abs(value_to_compare - target_value) >= 0.001
+                met = abs(value_to_compare - target_value) >= 0.001
             elif operator == 'cross_above':
                 # Check if indicator crossed above target value
                 # This requires historical data - simplified for now
-                return value_to_compare > target_value
+                met = value_to_compare > target_value
             elif operator == 'cross_below':
                 # Check if indicator crossed below target value
-                return value_to_compare < target_value
+                met = value_to_compare < target_value
             else:
                 self.logger.warning(f"Unknown operator: {operator}")
-                return False
-                
+                return (False, True)  # malformed rule, not missing data
+
+            return (met, True)
+
         except Exception as e:
             self.logger.error(f"Error evaluating rule: {str(e)}")
-            return False
+            return (False, True)  # unknown error path — don't claim "skipped"
     
     def _get_field_value(
         self,
