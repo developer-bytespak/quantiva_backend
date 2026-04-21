@@ -1,7 +1,5 @@
 import { Injectable, Logger, BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import * as ccxt from 'ccxt';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-import type { Agent } from 'https';
 import { OPTIONS_RETRY_CONFIG } from '../options.config';
 import {
   OptionContractDto,
@@ -44,15 +42,14 @@ export class OptionsBinanceService {
   private exchangeInfoCachedAt = 0;
   private readonly EXCHANGE_INFO_TTL = 5 * 60 * 1000; // 5 minutes
 
-  // Proxy agent — Binance Options (eapi) is geo-blocked on US IPs (e.g. Render).
+  // Proxy URL — Binance Options (eapi) is geo-blocked on US IPs (e.g. Render).
   // When BINANCE_PROXY_URL is set, all ccxt HTTP calls are routed through it.
-  private readonly proxyAgent: Agent | undefined;
+  private readonly proxyUrl: string | undefined;
 
   constructor() {
-    const proxyUrl = process.env.BINANCE_PROXY_URL;
-    this.proxyAgent = proxyUrl ? (new HttpsProxyAgent(proxyUrl) as unknown as Agent) : undefined;
-    if (proxyUrl) {
-      this.logger.log(`Options Binance proxy enabled: ${proxyUrl.replace(/\/\/.*@/, '//<redacted>@')}`);
+    this.proxyUrl = process.env.BINANCE_PROXY_URL;
+    if (this.proxyUrl) {
+      this.logger.log(`Options Binance proxy enabled: ${this.proxyUrl.replace(/\/\/.*@/, '//<redacted>@')}`);
     } else {
       this.logger.warn('BINANCE_PROXY_URL not set — eapi calls will fail from US-hosted servers');
     }
@@ -60,8 +57,18 @@ export class OptionsBinanceService {
     this.publicExchange = new ccxt.binance({
       options: { defaultType: 'option' },
       enableRateLimit: true,
-      ...(this.proxyAgent ? { agent: this.proxyAgent } : {}),
     });
+    this.applyProxy(this.publicExchange);
+  }
+
+  /**
+   * Apply the Webshare/HTTPS proxy to a ccxt instance using ccxt v4's documented
+   * `httpsProxy` string property. ccxt lazy-loads `https-proxy-agent` internally
+   * on the first request and reuses the agent for subsequent calls.
+   */
+  private applyProxy(exchange: ccxt.binance): void {
+    if (!this.proxyUrl) return;
+    (exchange as any).httpsProxy = this.proxyUrl;
   }
 
   /** Get the shared public exchange instance (no auth, for public data only). */
@@ -89,8 +96,8 @@ export class OptionsBinanceService {
         defaultType: 'option',
       },
       enableRateLimit: true,
-      ...(this.proxyAgent ? { agent: this.proxyAgent } : {}),
     });
+    this.applyProxy(exchange);
 
     // Evict oldest entry if cache is full
     if (this.exchangeInstances.size >= this.MAX_EXCHANGE_CACHE_SIZE) {
