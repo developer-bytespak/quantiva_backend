@@ -43,6 +43,18 @@ export class AuthService {
     return new OAuth2Client(clientId);
   }
 
+  private async getAdminFlagsByEmail(email: string): Promise<{ isAdmin: boolean; isSuperAdmin: boolean }> {
+    const adminRecord = await this.prisma.admins.findUnique({
+      where: { email },
+      select: { admin_id: true, is_super_admin: true },
+    });
+
+    return {
+      isAdmin: !!adminRecord,
+      isSuperAdmin: !!adminRecord?.is_super_admin,
+    };
+  }
+
   async register(registerDto: RegisterDto) {
     const { email, username, password } = registerDto;
 
@@ -196,11 +208,15 @@ export class AuthService {
       throw new UnauthorizedException('Invalid 2FA code');
     }
 
+    const { isAdmin, isSuperAdmin } = await this.getAdminFlagsByEmail(user.email);
+
     // Create session first to get session_id
     const refreshToken = await this.tokenService.generateRefreshToken({
       sub: user.user_id,
       email: user.email,
       username: user.username,
+      isAdmin,
+      isSuperAdmin,
     });
     
     const sessionId = await this.sessionService.createSession(
@@ -216,11 +232,11 @@ export class AuthService {
       email: user.email,
       username: user.username,
       session_id: sessionId,
+      isAdmin,
+      isSuperAdmin,
     };
 
     const accessToken = await this.tokenService.generateAccessToken(payload);
-
-    
 
     return {
       user: {
@@ -229,6 +245,8 @@ export class AuthService {
         username: user.username,
         email_verified: user.email_verified,
         kyc_status: user.kyc_status,
+        isAdmin,
+        isSuperAdmin,
       },
       accessToken,
       refreshToken,
@@ -258,11 +276,15 @@ export class AuthService {
       throw new UnauthorizedException('User not found');
     }
 
+    const { isAdmin, isSuperAdmin } = await this.getAdminFlagsByEmail(user.email);
+
     // Generate new tokens with session_id included
     const newRefreshToken = await this.tokenService.generateRefreshToken({
       sub: user.user_id,
       email: user.email,
       username: user.username,
+      isAdmin,
+      isSuperAdmin,
     });
 
     // Update session with new refresh token (rotation) and extend expiry
@@ -285,6 +307,8 @@ export class AuthService {
       email: user.email,
       username: user.username,
       session_id: session.session_id,
+      isAdmin,
+      isSuperAdmin,
     };
 
     const newAccessToken = await this.tokenService.generateAccessToken(payload);
@@ -472,10 +496,14 @@ export class AuthService {
     deviceId?: string,
     isNewUser = false,
   ) {
+    const { isAdmin, isSuperAdmin } = await this.getAdminFlagsByEmail(user.email);
+
     const refreshToken = await this.tokenService.generateRefreshToken({
       sub: user.user_id,
       email: user.email,
       username: user.username,
+      isAdmin,
+      isSuperAdmin,
     });
     const sessionId = await this.sessionService.createSession(
       user.user_id,
@@ -488,6 +516,8 @@ export class AuthService {
       email: user.email,
       username: user.username,
       session_id: sessionId,
+      isAdmin,
+      isSuperAdmin,
     } as TokenPayload);
     return {
       user: {
@@ -496,6 +526,8 @@ export class AuthService {
         username: user.username,
         email_verified: user.email_verified,
         kyc_status: user.kyc_status,
+        isAdmin,
+        isSuperAdmin,
         isNewUser,
       },
       accessToken,

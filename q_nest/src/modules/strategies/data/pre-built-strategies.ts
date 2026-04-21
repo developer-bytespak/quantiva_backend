@@ -209,7 +209,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
       },
     ],
     stop_loss_value: 4.0, // Tighter stop-loss for capital preservation
-    take_profit_value: 15.0, // Higher target for quality stocks
+    take_profit_value: 10.0, // Industry-standard swing target for quality stocks (was 15%)
   },
   {
     name: 'Tech Momentum (Stocks)',
@@ -259,7 +259,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
       },
     ],
     stop_loss_value: 7.0, // Slightly tighter to protect gains
-    take_profit_value: 20.0, // Higher target for momentum plays
+    take_profit_value: 12.0, // Reachable momentum target within a 1-2 week swing (was 20%)
   },
   {
     name: 'Value Investing (Stocks)',
@@ -304,7 +304,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
       },
     ],
     stop_loss_value: 5.0, // Moderate stop-loss
-    take_profit_value: 18.0, // Higher target for value plays (longer hold)
+    take_profit_value: 12.0, // Swing-realistic target for value reversion (was 18%)
   },
   {
     name: 'Dividend Income (Stocks)',
@@ -354,7 +354,7 @@ export const PRE_BUILT_STRATEGIES: PreBuiltStrategyTemplate[] = [
       },
     ],
     stop_loss_value: 3.0, // Tightest stop-loss - protect income capital
-    take_profit_value: 12.0, // Moderate target for dividend stocks
+    take_profit_value: 8.0, // Reachable target for dividend stocks within typical hold (was 12%)
   },
 ];
 

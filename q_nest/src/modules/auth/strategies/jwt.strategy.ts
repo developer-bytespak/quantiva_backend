@@ -33,7 +33,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (!payload || !payload.sub) {
       throw new UnauthorizedException('Invalid token payload');
     }
-    return payload;
+    return {
+      ...payload,
+      isAdmin: payload.isAdmin ?? false,
+      isSuperAdmin: payload.isSuperAdmin ?? false,
+    };
   }
 }
 
