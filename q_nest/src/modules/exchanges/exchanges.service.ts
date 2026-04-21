@@ -29,6 +29,42 @@ export class ExchangesService {
   // subsequent callers wait for the same Promise instead of firing another REST burst.
   private readonly syncInFlight = new Map<string, Promise<void>>();
 
+  // Remember symbols that were fully closed via the closePosition flow, so
+  // /orders/all keeps showing their history even though the user holds 0 of
+  // them. getTradedSymbols only looks at current holdings/open orders; without
+  // this, a fully-closed coin disappears from the Orders tab immediately.
+  // Keyed by connectionId → Map<symbol, closedAtMs>. In-memory (clears on
+  // backend restart), which is fine — on restart we still see historical
+  // orders whenever the user holds a position in something again.
+  private readonly recentlyClosedSymbols = new Map<string, Map<string, number>>();
+  private static readonly RECENTLY_CLOSED_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+  private rememberClosedSymbol(connectionId: string, symbol: string): void {
+    if (!connectionId || !symbol) return;
+    const sym = symbol.toUpperCase();
+    let inner = this.recentlyClosedSymbols.get(connectionId);
+    if (!inner) {
+      inner = new Map<string, number>();
+      this.recentlyClosedSymbols.set(connectionId, inner);
+    }
+    inner.set(sym, Date.now());
+  }
+
+  private getRecentlyClosedSymbols(connectionId: string): string[] {
+    const inner = this.recentlyClosedSymbols.get(connectionId);
+    if (!inner) return [];
+    const now = Date.now();
+    const live: string[] = [];
+    for (const [sym, closedAt] of inner.entries()) {
+      if (now - closedAt <= ExchangesService.RECENTLY_CLOSED_TTL_MS) {
+        live.push(sym);
+      } else {
+        inner.delete(sym); // lazy cleanup
+      }
+    }
+    return live;
+  }
+
   constructor(
     private prisma: PrismaService,
     private encryptionService: EncryptionService,
@@ -986,6 +1022,13 @@ export class ExchangesService {
       this.logger.warn(`getTradedSymbols: orders failed: ${(err as any)?.message}`);
     }
 
+    // 4. Recently-closed symbols (7d TTL). Without this, coins the user just
+    // closed via the Sell button disappear from /orders/all instantly — we
+    // keep them visible so the Orders tab continues to show their history.
+    for (const sym of this.getRecentlyClosedSymbols(connectionId)) {
+      symbolSet.add(sym);
+    }
+
     return Array.from(symbolSet);
   }
 
@@ -1895,6 +1938,27 @@ export class ExchangesService {
       this.logger.log(
         `closePosition: spot sell rejected by Binance filter (${sellFailedWithFilterError}) — falling back to Convert for ${symbol}`,
       );
+    }
+
+    // Remember this symbol as "recently closed" so /orders/all keeps showing
+    // its history in the Orders tab for 7 days. Without this, a fully-closed
+    // coin disappears from the list because getTradedSymbols only looks at
+    // current holdings/open orders.
+    if (isClosePosition) {
+      const baseForMemory = this.extractBaseAsset(symbol);
+      if (baseForMemory) {
+        // Remember both "BTC" and "BTCUSDT"/"BTCUSD" to survive any symbol
+        // shape the downstream query uses.
+        this.rememberClosedSymbol(connectionId, baseForMemory);
+        if (exchangeService instanceof BinanceService) {
+          this.rememberClosedSymbol(connectionId, this.resolveBinanceSellSymbol(symbol));
+        } else if (exchangeService instanceof BinanceUSService) {
+          const usSym = baseForMemory.endsWith('USD') ? baseForMemory : `${baseForMemory}USD`;
+          this.rememberClosedSymbol(connectionId, usSym);
+        } else if (exchangeService instanceof BybitService) {
+          this.rememberClosedSymbol(connectionId, this.resolveBybitSellSymbol(symbol));
+        }
+      }
     }
 
     // --- Close-position post-step: Convert dust to USDT (Binance only) ---
