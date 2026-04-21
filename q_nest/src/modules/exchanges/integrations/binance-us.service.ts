@@ -815,6 +815,27 @@ export class BinanceUSService {
   }
 
   /**
+   * Normalizes an incoming symbol to a Binance.US trading pair.
+   * Spot-holding endpoints return just the base asset (e.g. "BTC"), but
+   * Binance.US orders/cancels need a pair ("BTCUSD"). Also folds USDT→USD
+   * since Binance.US quotes in USD, not USDT.
+   */
+  resolveTradingPair(symbol: string): string {
+    const inSymUp = (symbol || '').toUpperCase().trim();
+    const inKnownQuotes = ['USD', 'USDT', 'USDC', 'BUSD', 'BTC', 'ETH', 'BNB'];
+    const isPair = inKnownQuotes.some(
+      (q) => inSymUp.endsWith(q) && inSymUp.length > q.length,
+    );
+    if (isPair && inSymUp.endsWith('USDT')) {
+      return inSymUp.replace(/USDT$/, 'USD');
+    }
+    if (!isPair) {
+      return `${inSymUp}USD`;
+    }
+    return inSymUp;
+  }
+
+  /**
    * Places an order on Binance.US
    */
   async placeOrder(
@@ -831,22 +852,7 @@ export class BinanceUSService {
         throw new BinanceApiException('Price is required for LIMIT orders');
       }
 
-      // Normalize: spot-holding endpoints return just the base asset
-      // (e.g. "BTC"), but Binance.US orders need a trading pair ("BTCUSD").
-      // If the incoming symbol is missing a known quote suffix, append USD.
-      // Also fold USDT→USD since Binance.US quotes in USD, not USDT.
-      // Require prefix > 0 so bare assets matching a quote (e.g. "BTC",
-      // "ETH", "USDT") still get "USD" appended.
-      const inSymUp = (symbol || '').toUpperCase().trim();
-      const inKnownQuotes = ['USD', 'USDT', 'USDC', 'BUSD', 'BTC', 'ETH', 'BNB'];
-      const isPair = inKnownQuotes.some((q) => inSymUp.endsWith(q) && inSymUp.length > q.length);
-      if (isPair && inSymUp.endsWith('USDT')) {
-        symbol = inSymUp.replace(/USDT$/, 'USD');
-      } else if (!isPair) {
-        symbol = `${inSymUp}USD`;
-      } else {
-        symbol = inSymUp;
-      }
+      symbol = this.resolveTradingPair(symbol);
 
       // Validate and adjust quantity to comply with LOT_SIZE and MIN_NOTIONAL filters
       const adjustedQuantity = await this.validateAndAdjustQuantity(symbol, quantity, type, price);
