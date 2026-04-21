@@ -149,18 +149,31 @@ export class OptionsBinanceService {
   /**
    * Fetch and cache the eapi exchange info (available contracts, underlyings).
    * This is a PUBLIC endpoint — no API key needed.
+   *
+   * Cold-start dedup: when N subscribers hit this simultaneously before the cache
+   * is warm, the first caller's in-flight promise is reused by the rest so we only
+   * issue one Binance call instead of N.
    */
+  private exchangeInfoInflight: Promise<any> | null = null;
   private async getExchangeInfo(): Promise<any> {
     const now = Date.now();
     if (this.exchangeInfoCache && now - this.exchangeInfoCachedAt < this.EXCHANGE_INFO_TTL) {
       return this.exchangeInfoCache;
     }
+    if (this.exchangeInfoInflight) return this.exchangeInfoInflight;
 
-    const info = await (this.publicExchange as any).eapiPublicGetExchangeInfo();
-    this.exchangeInfoCache = info;
-    this.exchangeInfoCachedAt = now;
-    this.logger.log(`Options exchange info loaded: ${info.optionSymbols?.length || 0} option symbols`);
-    return info;
+    this.exchangeInfoInflight = (this.publicExchange as any)
+      .eapiPublicGetExchangeInfo()
+      .then((info: any) => {
+        this.exchangeInfoCache = info;
+        this.exchangeInfoCachedAt = Date.now();
+        this.logger.log(`Options exchange info loaded: ${info.optionSymbols?.length || 0} option symbols`);
+        return info;
+      })
+      .finally(() => {
+        this.exchangeInfoInflight = null;
+      });
+    return this.exchangeInfoInflight;
   }
 
   /**
