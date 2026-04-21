@@ -1864,18 +1864,46 @@ export class ExchangesService {
       // crypto is blocked upstream for user-initiated flows.
       const baseAsset = this.extractBaseAsset(symbol);
       if (baseAsset) {
-        let bal: { free: number; total: number } = { free: 0, total: 0 };
-        try {
-          if (exchangeService instanceof BinanceService) {
-            bal = await this.binanceService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
-          } else if (exchangeService instanceof BinanceUSService) {
-            bal = await this.binanceUSService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
-          } else if (exchangeService instanceof BybitService) {
-            bal = await this.bybitService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
+        const fetchLiveBalance = async (): Promise<{ free: number; total: number }> => {
+          try {
+            if (exchangeService instanceof BinanceService) {
+              return await this.binanceService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
+            } else if (exchangeService instanceof BinanceUSService) {
+              return await this.binanceUSService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
+            } else if (exchangeService instanceof BybitService) {
+              return await this.bybitService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
+            }
+          } catch (balErr: any) {
+            this.logger.warn(
+              `closePosition live-balance fetch failed for ${connectionId}/${baseAsset}: ${balErr?.message || balErr}`,
+            );
           }
-        } catch (balErr: any) {
-          this.logger.warn(
-            `closePosition live-balance fetch failed for ${connectionId}/${baseAsset}: ${balErr?.message || balErr}`,
+          return { free: 0, total: 0 };
+        };
+
+        let bal = await fetchLiveBalance();
+
+        // Poll until the exchange has actually released the balance locked by
+        // the TP/SL we just cancelled. Binance/Binance.US/Bybit take a few
+        // hundred ms to propagate a cancel — without this wait, the MARKET
+        // SELL below can race the unlock and fail with "Insufficient balance".
+        // Exit as soon as `locked` is ~0 (free ≈ total), or after 3s total.
+        const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        const POLL_INTERVAL_MS = 250;
+        const POLL_MAX_MS = 3000;
+        let waitedMs = 0;
+        while (
+          bal.total > 0 &&
+          bal.free < bal.total * 0.99 &&
+          waitedMs < POLL_MAX_MS
+        ) {
+          await sleep(POLL_INTERVAL_MS);
+          waitedMs += POLL_INTERVAL_MS;
+          bal = await fetchLiveBalance();
+        }
+        if (waitedMs > 0) {
+          this.logger.log(
+            `closePosition: waited ${waitedMs}ms for ${baseAsset} unlock — final free=${bal.free}, total=${bal.total}`,
           );
         }
 
