@@ -1,5 +1,7 @@
 import { Injectable, Logger, BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import * as ccxt from 'ccxt';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import type { Agent } from 'https';
 import { OPTIONS_RETRY_CONFIG } from '../options.config';
 import {
   OptionContractDto,
@@ -42,10 +44,23 @@ export class OptionsBinanceService {
   private exchangeInfoCachedAt = 0;
   private readonly EXCHANGE_INFO_TTL = 5 * 60 * 1000; // 5 minutes
 
+  // Proxy agent — Binance Options (eapi) is geo-blocked on US IPs (e.g. Render).
+  // When BINANCE_PROXY_URL is set, all ccxt HTTP calls are routed through it.
+  private readonly proxyAgent: Agent | undefined;
+
   constructor() {
+    const proxyUrl = process.env.BINANCE_PROXY_URL;
+    this.proxyAgent = proxyUrl ? (new HttpsProxyAgent(proxyUrl) as unknown as Agent) : undefined;
+    if (proxyUrl) {
+      this.logger.log(`Options Binance proxy enabled: ${proxyUrl.replace(/\/\/.*@/, '//<redacted>@')}`);
+    } else {
+      this.logger.warn('BINANCE_PROXY_URL not set — eapi calls will fail from US-hosted servers');
+    }
+
     this.publicExchange = new ccxt.binance({
       options: { defaultType: 'option' },
       enableRateLimit: true,
+      ...(this.proxyAgent ? { agent: this.proxyAgent } : {}),
     });
   }
 
@@ -74,6 +89,7 @@ export class OptionsBinanceService {
         defaultType: 'option',
       },
       enableRateLimit: true,
+      ...(this.proxyAgent ? { agent: this.proxyAgent } : {}),
     });
 
     // Evict oldest entry if cache is full
