@@ -451,18 +451,26 @@ export class BinanceService {
   }
 
   /**
-   * Gets the free balance of a single asset. Used by the close-position flow
-   * after the spot SELL to see if any dust remains in the base asset.
+   * Gets the free + total balance of a single asset. Returns both because the
+   * close-position flow needs to distinguish "true small balance" from "just
+   * cancelled a TP/SL, Binance hasn't unlocked yet" (unlock race).
    */
-  async getAssetFreeBalance(apiKey: string, apiSecret: string, asset: string): Promise<number> {
+  async getAssetFreeBalance(
+    apiKey: string,
+    apiSecret: string,
+    asset: string,
+  ): Promise<{ free: number; total: number }> {
     try {
       const info = await this.getAccountInfo(apiKey, apiSecret);
       const row = (info?.balances || []).find(
         (b) => b.asset?.toUpperCase() === asset.toUpperCase(),
       );
-      return row ? parseFloat(row.free || '0') : 0;
+      if (!row) return { free: 0, total: 0 };
+      const free = parseFloat(row.free || '0');
+      const locked = parseFloat(row.locked || '0');
+      return { free, total: free + locked };
     } catch {
-      return 0;
+      return { free: 0, total: 0 };
     }
   }
 
@@ -483,7 +491,7 @@ export class BinanceService {
     toAsset: string = 'USDT',
   ): Promise<{ ok: boolean; toAmount?: number; reason?: string }> {
     try {
-      const free = await this.getAssetFreeBalance(apiKey, apiSecret, fromAsset);
+      const { free } = await this.getAssetFreeBalance(apiKey, apiSecret, fromAsset);
       if (free <= 0) {
         return { ok: true, toAmount: 0, reason: 'no dust to convert' };
       }

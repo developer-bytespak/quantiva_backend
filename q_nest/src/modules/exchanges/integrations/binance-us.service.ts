@@ -264,16 +264,26 @@ export class BinanceUSService {
   /**
    * Gets the free balance of a single asset. Used by the closePosition flow
    * to sell the user's ACTUAL current balance (not the stale dashboard qty).
+   * Returns both `free` (actually tradeable right now) and `total` (free +
+   * locked) so callers can distinguish a true small balance from an unlock
+   * race after a just-cancelled TP/SL order.
    */
-  async getAssetFreeBalance(apiKey: string, apiSecret: string, asset: string): Promise<number> {
+  async getAssetFreeBalance(
+    apiKey: string,
+    apiSecret: string,
+    asset: string,
+  ): Promise<{ free: number; total: number }> {
     try {
       const info = await this.getAccountInfo(apiKey, apiSecret);
       const row = (info?.balances || []).find(
         (b) => b.asset?.toUpperCase() === asset.toUpperCase(),
       );
-      return row ? parseFloat(row.free || '0') : 0;
+      if (!row) return { free: 0, total: 0 };
+      const free = parseFloat(row.free || '0');
+      const locked = parseFloat(row.locked || '0');
+      return { free, total: free + locked };
     } catch {
-      return 0;
+      return { free: 0, total: 0 };
     }
   }
 
