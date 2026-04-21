@@ -302,8 +302,11 @@ export class OptionsBinanceService {
         this.withRetry<any>(() => (exchange as any).eapiPublicGetIndex({ underlying: `${underlying}USDT` }), 'getIndex'),
       ]);
       if (tickerResult.status === 'fulfilled') tickers = (tickerResult.value as any[]) || [];
+      else this.logger.error(`Chain fetch: ticker failed for ${underlying}: ${tickerResult.reason?.message || tickerResult.reason}`);
       if (markResult.status === 'fulfilled') markPrices = (markResult.value as any[]) || [];
+      else this.logger.error(`Chain fetch: mark failed for ${underlying}: ${markResult.reason?.message || markResult.reason}`);
       if (indexResult.status === 'fulfilled') indexPrice = parseFloat((indexResult.value as any)?.indexPrice || '0');
+      else this.logger.error(`Chain fetch: index failed for ${underlying}: ${indexResult.reason?.message || indexResult.reason}`);
     } catch (error: any) {
       this.logger.warn(`Options chain data fetch error: ${error.message}`);
     }
