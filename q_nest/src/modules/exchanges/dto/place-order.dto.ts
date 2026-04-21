@@ -43,5 +43,17 @@ export class PlaceOrderDto {
   @IsOptional()
   @IsString()
   source?: string;
+
+  /**
+   * When true and side=SELL, the backend performs a full position-close:
+   *   1. Cancel any open TP/SL (OCO) orders on the symbol
+   *   2. Place the market sell (freed balance, no "Insufficient balance")
+   *   3. Convert residual dust to USDT via Binance Convert (best-effort, Binance only)
+   * Sent by the dashboard holdings + top-trades leaderboard "Sell" button.
+   * Ignored for BUY orders.
+   */
+  @IsOptional()
+  @IsBoolean()
+  closePosition?: boolean;
 }
 

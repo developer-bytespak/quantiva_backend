@@ -262,6 +262,22 @@ export class BinanceUSService {
   }
 
   /**
+   * Gets the free balance of a single asset. Used by the closePosition flow
+   * to sell the user's ACTUAL current balance (not the stale dashboard qty).
+   */
+  async getAssetFreeBalance(apiKey: string, apiSecret: string, asset: string): Promise<number> {
+    try {
+      const info = await this.getAccountInfo(apiKey, apiSecret);
+      const row = (info?.balances || []).find(
+        (b) => b.asset?.toUpperCase() === asset.toUpperCase(),
+      );
+      return row ? parseFloat(row.free || '0') : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
    * Maps account info to balance DTO (helper to avoid redundant API calls)
    */
   mapAccountToBalance(accountInfo: BinanceAccountInfo): AccountBalanceDto {
@@ -805,6 +821,23 @@ export class BinanceUSService {
         throw new BinanceApiException('Price is required for LIMIT orders');
       }
 
+      // Normalize: spot-holding endpoints return just the base asset
+      // (e.g. "BTC"), but Binance.US orders need a trading pair ("BTCUSD").
+      // If the incoming symbol is missing a known quote suffix, append USD.
+      // Also fold USDT→USD since Binance.US quotes in USD, not USDT.
+      // Require prefix > 0 so bare assets matching a quote (e.g. "BTC",
+      // "ETH", "USDT") still get "USD" appended.
+      const inSymUp = (symbol || '').toUpperCase().trim();
+      const inKnownQuotes = ['USD', 'USDT', 'USDC', 'BUSD', 'BTC', 'ETH', 'BNB'];
+      const isPair = inKnownQuotes.some((q) => inSymUp.endsWith(q) && inSymUp.length > q.length);
+      if (isPair && inSymUp.endsWith('USDT')) {
+        symbol = inSymUp.replace(/USDT$/, 'USD');
+      } else if (!isPair) {
+        symbol = `${inSymUp}USD`;
+      } else {
+        symbol = inSymUp;
+      }
+
       // Validate and adjust quantity to comply with LOT_SIZE and MIN_NOTIONAL filters
       const adjustedQuantity = await this.validateAndAdjustQuantity(symbol, quantity, type, price);
 
@@ -977,6 +1010,39 @@ export class BinanceUSService {
         throw error;
       }
       throw new BinanceApiException('Failed to place OCO order');
+    }
+  }
+
+  /**
+   * Cancels ALL open orders (regular + OCO legs) for a specific symbol.
+   * Used by the "close position" flow to free up locked base-coin balance
+   * before a market SELL.
+   */
+  async cancelAllOpenOrdersForSymbol(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+  ): Promise<string[]> {
+    try {
+      const result = await this.makeSignedDeleteRequest(
+        '/api/v3/openOrders',
+        apiKey,
+        apiSecret,
+        { symbol },
+      );
+      const arr = Array.isArray(result) ? result : [];
+      const ids = arr.map((o: any) => String(o?.orderId ?? o?.origClientOrderId ?? '')).filter(Boolean);
+      if (ids.length > 0) {
+        this.logger.log(`Cancelled ${ids.length} open order(s) on ${symbol} (Binance.US) before close-position sell`);
+      }
+      return ids;
+    } catch (error: any) {
+      const msg = (error?.response?.data?.msg || error?.message || '').toLowerCase();
+      if (msg.includes('unknown order') || error?.response?.data?.code === -2011) {
+        return [];
+      }
+      this.logger.warn(`cancelAllOpenOrdersForSymbol (Binance.US) ${symbol} failed: ${error?.message || error}`);
+      return [];
     }
   }
 

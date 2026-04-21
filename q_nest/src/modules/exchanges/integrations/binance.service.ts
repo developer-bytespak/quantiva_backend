@@ -103,6 +103,135 @@ export class BinanceService {
   }
 
   /**
+   * Normalizes a spot symbol before placing an order. Binance's account/balance
+   * endpoints return the base asset only (e.g. "TON"), but /api/v3/order needs
+   * a trading pair (e.g. "TONUSDT"). If the incoming symbol doesn't already end
+   * in a known quote currency, append USDT.
+   */
+  private normalizeSpotSymbol(symbol: string): string {
+    const sym = (symbol || '').toUpperCase().trim();
+    // This app only quotes against USDT. If the incoming symbol is already a
+    // USDT pair, use it as-is. Otherwise treat it as a bare base asset and
+    // append USDT. No ambiguity from coin names that also happen to be
+    // quote-currency names (BTC, ETH, BNB) because we don't allow those quotes.
+    if (sym.endsWith('USDT') && sym.length > 4) return sym;
+    return `${sym}USDT`;
+  }
+
+  /**
+   * Converts a Binance order-rejection code/msg pair into a clear, user-facing
+   * sentence. Binance's raw responses (e.g. "Filter failure: NOTIONAL") are
+   * opaque to end users — this translates the common ones into actionable text.
+   * Returns the humanized message (or the original msg when no match).
+   */
+  private humanizeBinanceOrderError(
+    code: number | string | undefined,
+    msg: string,
+    symbol?: string,
+  ): string {
+    const rawMsg = (msg || '').trim();
+    const upper = rawMsg.toUpperCase();
+    const sym = symbol ? ` for ${symbol}` : '';
+
+    // -1013: filter failure (most common). Message text distinguishes the filter.
+    if (String(code) === '-1013' || upper.includes('FILTER FAILURE')) {
+      if (upper.includes('NOTIONAL')) {
+        return (
+          `Order too small${sym}. Binance requires a minimum order value (usually $5–$10 USDT). ` +
+          `Your position is likely "dust" from previous fills. ` +
+          `Tip: use Binance's "Convert Small Balances to BNB" to clear it.`
+        );
+      }
+      if (upper.includes('LOT_SIZE') || upper.includes('MARKET_LOT_SIZE')) {
+        return (
+          `Quantity doesn't meet Binance's lot-size rule${sym}. ` +
+          `The remaining amount is below the minimum step size — it cannot be market-sold. ` +
+          `Tip: use Binance's "Convert Small Balances to BNB" to clear it.`
+        );
+      }
+      if (upper.includes('PRICE_FILTER') || upper.includes('PERCENT_PRICE')) {
+        return `Price is outside Binance's allowed range${sym}. Try again in a moment.`;
+      }
+      if (upper.includes('MIN_NOTIONAL')) {
+        return (
+          `Order value is below Binance's minimum${sym}. ` +
+          `Tip: use Binance's "Convert Small Balances to BNB" to clear dust.`
+        );
+      }
+      return `Binance filter rejected this order${sym}: ${rawMsg}`;
+    }
+
+    // -2010 / -2011 family: balance and unknown-order issues
+    if (String(code) === '-2010' || upper.includes('INSUFFICIENT BALANCE')) {
+      return `Insufficient balance${sym} to place this order.`;
+    }
+    if (String(code) === '-2011' || upper.includes('UNKNOWN ORDER')) {
+      return `Binance could not find this order — it may already be filled or cancelled.`;
+    }
+
+    // -1121: invalid symbol
+    if (String(code) === '-1121' || upper.includes('INVALID SYMBOL')) {
+      return `Invalid trading pair${sym} on Binance.`;
+    }
+
+    // -1111: precision
+    if (String(code) === '-1111' || upper.includes('PRECISION IS OVER')) {
+      return `Quantity precision is too high${sym} for this symbol.`;
+    }
+
+    // -1102: mandatory parameter missing
+    if (String(code) === '-1102') {
+      return `Binance rejected the request — a required field was missing. Please retry.`;
+    }
+
+    // Fallback: return the raw Binance message if we have one, else a generic sentence.
+    return rawMsg || `Binance rejected the order${sym}.`;
+  }
+
+  /**
+   * Extracts the most informative message possible from a Binance axios error.
+   * Handles: coded JSON bodies, plain 400s with `msg`, stringified bodies,
+   * and network errors with no response.
+   */
+  private extractBinanceErrorDetails(error: any): {
+    code?: number | string;
+    msg: string;
+    status?: number;
+  } {
+    const status: number | undefined = error?.response?.status;
+    const data = error?.response?.data;
+
+    // JSON body with {code, msg}
+    if (data && typeof data === 'object') {
+      const code = data.code ?? data.error_code;
+      const msg =
+        data.msg ||
+        data.message ||
+        (Array.isArray(data.errors) ? data.errors.map((e: any) => e?.msg || e).join('; ') : '') ||
+        '';
+      if (code !== undefined || msg) {
+        return { code, msg: String(msg), status };
+      }
+    }
+
+    // Plain string body (some upstream proxies stringify it)
+    if (typeof data === 'string' && data.trim()) {
+      try {
+        const parsed = JSON.parse(data);
+        if (parsed && typeof parsed === 'object') {
+          return { code: parsed.code, msg: String(parsed.msg || parsed.message || data), status };
+        }
+      } catch {
+        // not JSON — use as-is
+      }
+      return { msg: data, status };
+    }
+
+    // No response body — fall back to axios error text
+    return { msg: error?.message || 'Binance request failed', status };
+  }
+
+  /**
    * Makes a signed request to Binance API with retry logic
    */
   private async makeSignedRequest(
@@ -216,8 +345,15 @@ export class BinanceService {
       throw new BinanceRateLimitException();
     }
 
+    // Extract details instead of throwing axios's generic "Request failed with status code 400"
+    const { code, msg, status } = this.extractBinanceErrorDetails(lastError);
+    const humanMsg = msg && !/request failed with status code/i.test(msg)
+      ? msg
+      : `Binance signed request failed after retries [status=${status ?? 'n/a'}${code !== undefined ? ` code=${code}` : ''}].`;
     throw new BinanceApiException(
-      lastError?.message || 'Failed to connect to Binance API',
+      humanMsg,
+      code !== undefined ? `BINANCE_${code}` : 'BINANCE_SIGNED_REQUEST_FAILED',
+      HttpStatus.BAD_REQUEST,
     );
   }
 
@@ -250,7 +386,28 @@ export class BinanceService {
       if (error.response?.status === 429) {
         throw new BinanceRateLimitException();
       }
-      throw new BinanceApiException(error.message || 'Failed to fetch data from Binance');
+
+      // Extract real Binance details instead of axios's generic
+      // "Request failed with status code 400". A common cause here is
+      // geo-restriction (HTTP 451 or 400 with an "Eligibility" message).
+      const { code, msg, status } = this.extractBinanceErrorDetails(error);
+      const isGeoRestricted =
+        status === 451 ||
+        /eligibility|restricted location|not available in your region/i.test(msg);
+      const humanMsg = isGeoRestricted
+        ? `Binance rejected the request from your region${endpoint.includes('order') ? '' : ` (public endpoint ${endpoint})`}. Your connected account or your server's IP may be in a restricted jurisdiction.`
+        : msg && !/request failed with status code/i.test(msg)
+          ? msg
+          : `Binance public request failed [status=${status ?? 'n/a'}${code !== undefined ? ` code=${code}` : ''}]. Endpoint: ${endpoint}`;
+
+      this.logger.warn(
+        `makePublicRequest failed [endpoint=${endpoint} status=${status ?? 'n/a'} code=${code ?? 'none'}]: ${msg}`,
+      );
+      throw new BinanceApiException(
+        humanMsg,
+        code !== undefined ? `BINANCE_${code}` : 'BINANCE_PUBLIC_REQUEST_FAILED',
+        HttpStatus.BAD_REQUEST,
+      );
     }
   }
 
@@ -291,6 +448,101 @@ export class BinanceService {
    */
   async getAccountInfo(apiKey: string, apiSecret: string): Promise<BinanceAccountInfo> {
     return this.makeSignedRequest('/api/v3/account', apiKey, apiSecret) as Promise<BinanceAccountInfo>;
+  }
+
+  /**
+   * Gets the free balance of a single asset. Used by the close-position flow
+   * after the spot SELL to see if any dust remains in the base asset.
+   */
+  async getAssetFreeBalance(apiKey: string, apiSecret: string, asset: string): Promise<number> {
+    try {
+      const info = await this.getAccountInfo(apiKey, apiSecret);
+      const row = (info?.balances || []).find(
+        (b) => b.asset?.toUpperCase() === asset.toUpperCase(),
+      );
+      return row ? parseFloat(row.free || '0') : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Binance Convert dust sweeper. Attempts to convert any remaining balance of
+   * `fromAsset` into `toAsset` (USDT by default) via the Convert API. This runs
+   * as a best-effort cleanup after a close-position market SELL — if it fails
+   * (asset not supported by Convert, below minimum, etc.) we just log and move
+   * on. The user has already received 99%+ of their position as USDT from the
+   * spot sell; Convert just mops up the LOT_SIZE rounding leftover.
+   *
+   * Returns `{ ok, toAmount, reason }`. Never throws.
+   */
+  async convertDustToUsdt(
+    apiKey: string,
+    apiSecret: string,
+    fromAsset: string,
+    toAsset: string = 'USDT',
+  ): Promise<{ ok: boolean; toAmount?: number; reason?: string }> {
+    try {
+      const free = await this.getAssetFreeBalance(apiKey, apiSecret, fromAsset);
+      if (free <= 0) {
+        return { ok: true, toAmount: 0, reason: 'no dust to convert' };
+      }
+
+      // Step 1: get a quote. Binance requires fromAmount precision ≤ 8 for
+      // most assets. Truncate at 8 to avoid "precision over max" rejections.
+      const fromAmount = Math.floor(free * 1e8) / 1e8;
+      if (fromAmount <= 0) {
+        return { ok: true, toAmount: 0, reason: 'below 8-decimal precision' };
+      }
+
+      let quote: any;
+      try {
+        quote = await this.makeSignedPostRequest(
+          '/sapi/v1/convert/getQuote',
+          apiKey,
+          apiSecret,
+          {
+            fromAsset: fromAsset.toUpperCase(),
+            toAsset: toAsset.toUpperCase(),
+            fromAmount: fromAmount.toString(),
+          },
+        );
+      } catch (err: any) {
+        const reason = err?.message || 'getQuote failed';
+        this.logger.warn(`Convert getQuote ${fromAsset}→${toAsset} failed: ${reason}`);
+        return { ok: false, reason };
+      }
+
+      const quoteId = quote?.quoteId;
+      if (!quoteId) {
+        return { ok: false, reason: 'no quoteId returned' };
+      }
+
+      // Step 2: accept the quote to execute the swap.
+      let accept: any;
+      try {
+        accept = await this.makeSignedPostRequest(
+          '/sapi/v1/convert/acceptQuote',
+          apiKey,
+          apiSecret,
+          { quoteId },
+        );
+      } catch (err: any) {
+        const reason = err?.message || 'acceptQuote failed';
+        this.logger.warn(`Convert acceptQuote ${fromAsset}→${toAsset} failed: ${reason}`);
+        return { ok: false, reason };
+      }
+
+      const toAmount = parseFloat(quote?.toAmount || accept?.toAmount || '0');
+      this.logger.log(
+        `Convert dust success: ${fromAmount} ${fromAsset} → ${toAmount} ${toAsset} (quoteId=${quoteId})`,
+      );
+      return { ok: true, toAmount };
+    } catch (err: any) {
+      const reason = err?.message || 'unknown error';
+      this.logger.warn(`convertDustToUsdt(${fromAsset}) unexpected failure: ${reason}`);
+      return { ok: false, reason };
+    }
   }
 
   /**
@@ -679,21 +931,28 @@ export class BinanceService {
       });
       return response.data;
     } catch (error: any) {
-      if (error.response?.data?.code) {
-        const binanceCode = error.response.data.code;
-        const binanceMsg = error.response.data.msg || 'Binance API error';
+      const { code, msg, status } = this.extractBinanceErrorDetails(error);
 
-        if (binanceCode === -2015 || binanceCode === -1022) {
-          throw new InvalidApiKeyException(binanceMsg);
-        }
-
-        if (binanceCode === -1003) {
-          throw new BinanceRateLimitException(binanceMsg);
-        }
-
-        throw new BinanceApiException(binanceMsg, `BINANCE_${binanceCode}`);
+      if (code === -2015 || code === -1022) {
+        throw new InvalidApiKeyException(msg || 'Invalid API key or secret');
       }
-      throw new BinanceApiException(error.message || 'Failed to place order');
+      if (code === -1003) {
+        throw new BinanceRateLimitException(msg || 'Binance rate limit exceeded');
+      }
+
+      // Pull symbol out of the signed query string (first param) for better messages
+      const symbolMatch = /[?&]symbol=([^&]+)/.exec(url);
+      const symbol = symbolMatch ? decodeURIComponent(symbolMatch[1]) : undefined;
+
+      const humanMsg = this.humanizeBinanceOrderError(code, msg, symbol);
+      this.logger.warn(
+        `Binance order POST failed [status=${status ?? 'n/a'} code=${code ?? 'none'}]: ${msg}`,
+      );
+      throw new BinanceApiException(
+        humanMsg,
+        code !== undefined ? `BINANCE_${code}` : 'BINANCE_ORDER_REJECTED',
+        HttpStatus.BAD_REQUEST,
+      );
     }
   }
 
@@ -726,21 +985,27 @@ export class BinanceService {
       });
       return response.data;
     } catch (error: any) {
-      if (error.response?.data?.code) {
-        const binanceCode = error.response.data.code;
-        const binanceMsg = error.response.data.msg || 'Binance API error';
+      const { code, msg, status } = this.extractBinanceErrorDetails(error);
 
-        if (binanceCode === -2015 || binanceCode === -1022) {
-          throw new InvalidApiKeyException(binanceMsg);
-        }
-
-        if (binanceCode === -1003) {
-          throw new BinanceRateLimitException(binanceMsg);
-        }
-
-        throw new BinanceApiException(binanceMsg, `BINANCE_${binanceCode}`);
+      if (code === -2015 || code === -1022) {
+        throw new InvalidApiKeyException(msg || 'Invalid API key or secret');
       }
-      throw new BinanceApiException(error.message || 'Failed to delete order');
+      if (code === -1003) {
+        throw new BinanceRateLimitException(msg || 'Binance rate limit exceeded');
+      }
+
+      const symbolMatch = /[?&]symbol=([^&]+)/.exec(url);
+      const symbol = symbolMatch ? decodeURIComponent(symbolMatch[1]) : undefined;
+
+      const humanMsg = this.humanizeBinanceOrderError(code, msg, symbol);
+      this.logger.warn(
+        `Binance DELETE failed [status=${status ?? 'n/a'} code=${code ?? 'none'}]: ${msg}`,
+      );
+      throw new BinanceApiException(
+        humanMsg,
+        code !== undefined ? `BINANCE_${code}` : 'BINANCE_ORDER_REJECTED',
+        HttpStatus.BAD_REQUEST,
+      );
     }
   }
 
@@ -799,18 +1064,35 @@ export class BinanceService {
           const notional = adjustedQuantity * effectivePrice;
           if (notional < minNotional) {
             throw new BinanceApiException(
-              `Order value $${notional.toFixed(4)} is below the minimum required $${minNotional} for ${symbol}. ` +
-                `Increase your quantity.`,
+              `Order too small for ${symbol}. Binance requires a minimum order value of $${minNotional} ` +
+                `(your order ≈ $${notional.toFixed(4)}). ` +
+                `This looks like "dust" from previous fills — use Binance's "Convert Small Balances to BNB" to clear it.`,
               'BINANCE_-1013',
+              HttpStatus.BAD_REQUEST,
             );
           }
         }
       }
 
+      // Also catch LOT_SIZE dust before it hits Binance: if stepSize floored the quantity to 0.
+      if (adjustedQuantity <= 0 && quantity > 0) {
+        throw new BinanceApiException(
+          `Quantity for ${symbol} is below Binance's minimum step size — can't be market-sold. ` +
+            `Use Binance's "Convert Small Balances to BNB" to clear this dust.`,
+          'BINANCE_-1013',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+
       return adjustedQtyStr;
     } catch (error) {
       if (error instanceof BinanceApiException) throw error;
-      // If exchangeInfo fetch fails, fall back and let Binance validate
+      // If exchangeInfo fetch fails, log and fall back to let Binance validate.
+      // This path is the reason a user can see a raw Binance 400 — if we hit it
+      // often, the pre-flight humanized messages won't be used.
+      this.logger.warn(
+        `validateAndAdjustQuantity fell back for ${symbol}: ${(error as any)?.message || 'unknown error'} — submitting raw quantity`,
+      );
       return quantity.toString();
     }
   }
@@ -828,6 +1110,11 @@ export class BinanceService {
       if (type === 'LIMIT' && !price) {
         throw new BinanceApiException('Price is required for LIMIT orders');
       }
+
+      // Normalize: spot-holding endpoints return just the base asset
+      // (e.g. "TON"), but /api/v3/order requires a trading pair ("TONUSDT").
+      // If the incoming symbol is missing a known quote suffix, append USDT.
+      symbol = this.normalizeSpotSymbol(symbol);
 
       const adjustedQuantity = await this.validateAndAdjustQuantity(symbol, quantity, type, price);
 
@@ -883,7 +1170,20 @@ export class BinanceService {
       if (error instanceof BinanceApiException || error instanceof InvalidApiKeyException) {
         throw error;
       }
-      throw new BinanceApiException('Failed to place order');
+      // Fall-through for any non-Binance-exception error (e.g. a wrapper issue).
+      // Extract whatever we can instead of throwing the generic sentinel.
+      const { code, msg, status } = this.extractBinanceErrorDetails(error);
+      const humanMsg = msg && !/request failed with status code/i.test(msg)
+        ? msg
+        : `Unexpected error placing order on Binance [status=${status ?? 'n/a'}${code !== undefined ? ` code=${code}` : ''}].`;
+      this.logger.warn(
+        `placeOrder fell through to outer catch: ${error?.constructor?.name || 'Error'}: ${error?.message}`,
+      );
+      throw new BinanceApiException(
+        humanMsg,
+        code !== undefined ? `BINANCE_${code}` : 'BINANCE_ORDER_FAILED',
+        HttpStatus.BAD_REQUEST,
+      );
     }
   }
 
@@ -1009,6 +1309,42 @@ export class BinanceService {
         throw error;
       }
       throw new BinanceApiException('Failed to place OCO order');
+    }
+  }
+
+  /**
+   * Cancels ALL open orders (regular + OCO legs) for a specific symbol.
+   * Used by the "close position" flow to free up locked base-coin balance
+   * before placing a market SELL. Safe to call when no orders exist (Binance
+   * returns -2011 "Unknown order"; we swallow that).
+   * Returns the list of cancelled order IDs.
+   */
+  async cancelAllOpenOrdersForSymbol(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+  ): Promise<string[]> {
+    try {
+      const result = await this.makeSignedDeleteRequest(
+        '/api/v3/openOrders',
+        apiKey,
+        apiSecret,
+        { symbol },
+      );
+      const arr = Array.isArray(result) ? result : [];
+      const ids = arr.map((o: any) => String(o?.orderId ?? o?.origClientOrderId ?? '')).filter(Boolean);
+      if (ids.length > 0) {
+        this.logger.log(`Cancelled ${ids.length} open order(s) on ${symbol} before close-position sell`);
+      }
+      return ids;
+    } catch (error: any) {
+      // -2011 = "Unknown order sent" / no orders to cancel. Not an error here.
+      const msg = (error?.response?.data?.msg || error?.message || '').toLowerCase();
+      if (msg.includes('unknown order') || error?.response?.data?.code === -2011) {
+        return [];
+      }
+      this.logger.warn(`cancelAllOpenOrdersForSymbol(${symbol}) failed: ${error?.message || error}`);
+      return [];
     }
   }
 

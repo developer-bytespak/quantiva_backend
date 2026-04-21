@@ -1753,6 +1753,7 @@ export class ExchangesService {
     type: 'MARKET' | 'LIMIT',
     quantity: number,
     price?: number,
+    options: { closePosition?: boolean } = {},
   ): Promise<OrderDto> {
     const connection = await this.prisma.user_exchange_connections.findUnique({
       where: { connection_id: connectionId },
@@ -1774,45 +1775,187 @@ export class ExchangesService {
     // Get the appropriate exchange service
     const exchangeService = this.getExchangeService(connection.exchange.name);
 
-    let placedOrder: OrderDto;
+    // --- Close-position pre-step: cancel any open orders on the symbol ---
+    // Only runs on SELL with closePosition=true (Dashboard holdings + Top-trades
+    // leaderboard). Frees up base-coin balance that TP/SL orders reserve, so
+    // the market SELL below doesn't fail with "Insufficient balance".
+    const isClosePosition = !!options.closePosition && side === 'SELL';
+    if (isClosePosition) {
+      try {
+        if (exchangeService instanceof BinanceService) {
+          const sym = this.resolveBinanceSellSymbol(symbol);
+          await this.binanceService.cancelAllOpenOrdersForSymbol(apiKey, apiSecret, sym);
+        } else if (exchangeService instanceof BinanceUSService) {
+          const sym = symbol.toUpperCase().endsWith('USDT')
+            ? symbol.toUpperCase().replace(/USDT$/, 'USD')
+            : symbol.toUpperCase();
+          await this.binanceUSService.cancelAllOpenOrdersForSymbol(apiKey, apiSecret, sym);
+        } else if (exchangeService instanceof BybitService) {
+          const sym = this.resolveBybitSellSymbol(symbol);
+          await this.bybitService.cancelAllOpenOrdersForSymbol(apiKey, apiSecret, sym);
+        } else if (exchangeService instanceof AlpacaService) {
+          await this.alpacaService.cancelOpenSellOrdersForSymbol(apiKey, apiSecret, symbol);
+        }
+      } catch (cancelErr: any) {
+        // Non-fatal — log and continue with the sell. The sell may still fail
+        // with "Insufficient balance" if TP/SL locked the asset, but that error
+        // now surfaces cleanly via the humanized error mapper.
+        this.logger.warn(
+          `closePosition cancel-open-orders failed for ${connectionId}/${symbol}: ${cancelErr?.message || cancelErr}`,
+        );
+      }
 
-    if (exchangeService instanceof BinanceService) {
-      placedOrder = await this.binanceService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
-    } else if (exchangeService instanceof BinanceUSService) {
-      const normalizedSymbol = symbol.toUpperCase().endsWith('USDT')
-        ? symbol.toUpperCase().replace(/USDT$/, 'USD')
-        : symbol;
-      placedOrder = await this.binanceUSService.placeOrder(apiKey, apiSecret, normalizedSymbol, side, type, quantity, price);
-    } else if (exchangeService instanceof BybitService) {
-      placedOrder = await this.bybitService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
-    } else if (exchangeService instanceof AlpacaService) {
-      // Product decision: Alpaca crypto is not offered to end users on the
-      // unified user-initiated flow. Block here before dispatching so the
-      // guard applies to this entry point only — the strategies paper-trading
-      // flow calls AlpacaService.placeOrder directly and is untouched.
-      if (this.alpacaService.isAlpacaCryptoSymbol(symbol)) {
+      // Sell the user's ACTUAL live balance, not the (possibly stale) qty the
+      // frontend sent. The dashboard polls every ~30s, so between poll and
+      // click the balance may have changed (pending fills, interest, rewards).
+      // Selling the real balance is what prevents a "sold slightly less than
+      // you had" leftover that falls below Convert's minimum.
+      //
+      // Alpaca is excluded: stocks don't have this dust problem (whole shares),
+      // and Alpaca crypto is already blocked upstream for user-initiated flows.
+      const baseAsset = this.extractBaseAsset(symbol);
+      if (baseAsset) {
+        let liveBalance = 0;
+        try {
+          if (exchangeService instanceof BinanceService) {
+            liveBalance = await this.binanceService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
+          } else if (exchangeService instanceof BinanceUSService) {
+            liveBalance = await this.binanceUSService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
+          } else if (exchangeService instanceof BybitService) {
+            liveBalance = await this.bybitService.getAssetFreeBalance(apiKey, apiSecret, baseAsset);
+          }
+        } catch (balErr: any) {
+          // Balance fetch failure is non-fatal — fall back to frontend qty.
+          this.logger.warn(
+            `closePosition live-balance fetch failed for ${connectionId}/${baseAsset}: ${balErr?.message || balErr}`,
+          );
+        }
+        if (liveBalance > 0 && liveBalance !== quantity) {
+          this.logger.log(
+            `closePosition: overriding UI qty ${quantity} with live balance ${liveBalance} for ${baseAsset}`,
+          );
+          quantity = liveBalance;
+        }
+      }
+    }
+
+    let placedOrder: OrderDto | null = null;
+    let sellFailedWithFilterError: string | null = null;
+
+    try {
+      if (exchangeService instanceof BinanceService) {
+        placedOrder = await this.binanceService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
+      } else if (exchangeService instanceof BinanceUSService) {
+        const normalizedSymbol = symbol.toUpperCase().endsWith('USDT')
+          ? symbol.toUpperCase().replace(/USDT$/, 'USD')
+          : symbol;
+        placedOrder = await this.binanceUSService.placeOrder(apiKey, apiSecret, normalizedSymbol, side, type, quantity, price);
+      } else if (exchangeService instanceof BybitService) {
+        placedOrder = await this.bybitService.placeOrder(apiKey, apiSecret, symbol, side, type, quantity, price);
+      } else if (exchangeService instanceof AlpacaService) {
+        // Product decision: Alpaca crypto is not offered to end users on the
+        // unified user-initiated flow. Block here before dispatching so the
+        // guard applies to this entry point only — the strategies paper-trading
+        // flow calls AlpacaService.placeOrder directly and is untouched.
+        if (this.alpacaService.isAlpacaCryptoSymbol(symbol)) {
+          throw new HttpException(
+            {
+              success: false,
+              code: 'ALPACA_CRYPTO_NOT_SUPPORTED',
+              message:
+                'Crypto trading is not supported on your Alpaca connection. Use a Binance, Binance.US, or Bybit connection for crypto orders.',
+              symbol,
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+        placedOrder = await this.alpacaService.placeOrder(
+          symbol,
+          side,
+          type,
+          quantity,
+          price,
+          apiKey,
+          apiSecret,
+        );
+      } else {
+        throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
+      }
+    } catch (err: any) {
+      // In the closePosition flow on Binance, a filter rejection (MIN_NOTIONAL
+      // / LOT_SIZE) just means "position is pure dust, can't use spot order
+      // book". Don't fail — swallow it and let the Convert step below clean
+      // the dust. For any other error, or for non-Binance, rethrow.
+      const isFilterError =
+        isClosePosition &&
+        exchangeService instanceof BinanceService &&
+        this.isBinanceFilterError(err);
+      if (!isFilterError) throw err;
+      sellFailedWithFilterError = err?.message || 'Binance filter rejected';
+      this.logger.log(
+        `closePosition: spot sell rejected by Binance filter (${sellFailedWithFilterError}) — falling back to Convert for ${symbol}`,
+      );
+    }
+
+    // --- Close-position post-step: Convert dust to USDT (Binance only) ---
+    // Runs when either (a) the spot sell succeeded and LOT_SIZE rounding left
+    // a tiny residual, OR (b) the spot sell was rejected as pure-dust (no
+    // placedOrder). In case (b) we await the Convert so the final response
+    // reflects the actual outcome; in case (a) the user already got 99%+
+    // back from the sell, so best-effort dust sweep is fine.
+    let convertResult: { ok: boolean; toAmount?: number; reason?: string } | null = null;
+    if (isClosePosition && exchangeService instanceof BinanceService) {
+      const baseAsset = this.extractBaseAsset(symbol);
+      if (baseAsset) {
+        if (placedOrder) {
+          // Successful sell — dust cleanup is fire-and-forget.
+          this.binanceService
+            .convertDustToUsdt(apiKey, apiSecret, baseAsset)
+            .catch((err) =>
+              this.logger.warn(
+                `convertDustToUsdt(${baseAsset}) post-sell failed for ${connectionId}: ${err?.message || err}`,
+              ),
+            );
+        } else {
+          // Pure-dust position — the sell failed, Convert IS the close.
+          convertResult = await this.binanceService
+            .convertDustToUsdt(apiKey, apiSecret, baseAsset)
+            .catch((err) => ({ ok: false, reason: err?.message || 'convert threw' }));
+        }
+      }
+    }
+
+    // If the spot sell was skipped and Convert couldn't clean up, surface the
+    // original filter-error to the user so they know why nothing happened.
+    if (isClosePosition && !placedOrder) {
+      if (convertResult?.ok && (convertResult.toAmount ?? 0) > 0) {
+        // Dust was converted — synthesise a success response.
+        placedOrder = {
+          orderId: 'convert-' + Date.now(),
+          symbol,
+          side: 'SELL',
+          type: 'MARKET',
+          quantity: 0,
+          price: 0,
+          status: 'FILLED',
+          time: Date.now(),
+        } as OrderDto;
+      } else {
+        // No sell, no convert — nothing to return. Throw the original filter
+        // error so the user's modal shows a clear reason.
         throw new HttpException(
           {
             success: false,
-            code: 'ALPACA_CRYPTO_NOT_SUPPORTED',
+            code: 'CLOSE_POSITION_FAILED',
             message:
-              'Crypto trading is not supported on your Alpaca connection. Use a Binance, Binance.US, or Bybit connection for crypto orders.',
-            symbol,
+              sellFailedWithFilterError ||
+              `Could not close position: spot sell was rejected and dust conversion is unavailable${
+                convertResult?.reason ? ` (${convertResult.reason})` : ''
+              }.`,
           },
           HttpStatus.BAD_REQUEST,
         );
       }
-      placedOrder = await this.alpacaService.placeOrder(
-        symbol,
-        side,
-        type,
-        quantity,
-        price,
-        apiKey,
-        apiSecret,
-      );
-    } else {
-      throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
     }
 
     // Ensure subsequent dashboard/orders requests are not served stale cache.
@@ -1823,7 +1966,67 @@ export class ExchangesService {
       this.logger.warn(`Post-order sync failed for ${connectionId}: ${err?.message || err}`),
     );
 
-    return placedOrder;
+    return placedOrder!;
+  }
+
+  /**
+   * Returns true when an error from BinanceService.placeOrder is a filter
+   * rejection (MIN_NOTIONAL, LOT_SIZE, PRICE_FILTER). These mean the position
+   * is below Binance's spot-order-book minimums — in the closePosition flow
+   * we want to fall back to Convert instead of failing.
+   */
+  private isBinanceFilterError(err: any): boolean {
+    if (!err) return false;
+    const body = err?.response ?? err?.getResponse?.() ?? null;
+    const code = body && typeof body === 'object' ? (body as any).code : undefined;
+    const codeStr = code !== undefined ? String(code) : '';
+    if (codeStr === 'BINANCE_-1013') return true;
+    const msg = ((body && typeof body === 'object' ? (body as any).message : '') || err?.message || '').toString().toUpperCase();
+    return (
+      msg.includes('FILTER FAILURE') ||
+      msg.includes('NOTIONAL') ||
+      msg.includes('LOT_SIZE') ||
+      msg.includes('MINIMUM STEP SIZE') ||
+      msg.includes('BELOW THE MINIMUM')
+    );
+  }
+
+  /**
+   * Resolves a symbol for Binance SELL orders. The frontend may send either a
+   * bare asset ("TON") or a trading pair ("TONUSDT"). Binance's placeOrder
+   * has the same normalization built in, but the cancel-open-orders pre-step
+   * needs it here too.
+   */
+  private resolveBinanceSellSymbol(symbol: string): string {
+    const sym = (symbol || '').toUpperCase().trim();
+    return sym.endsWith('USDT') && sym.length > 4 ? sym : `${sym}USDT`;
+  }
+
+  /**
+   * Resolves a symbol for Bybit SELL orders. Mirrors the normalization inside
+   * BybitService.placeOrder so the cancel pre-step targets the correct symbol.
+   */
+  private resolveBybitSellSymbol(symbol: string): string {
+    const sym = (symbol || '').toUpperCase().trim();
+    return sym.endsWith('USDT') && sym.length > 4 ? sym : `${sym}USDT`;
+  }
+
+  /**
+   * Extracts the base asset from a USDT / USD pair or bare asset (e.g.
+   * "TONUSDT" → "TON", "BTCUSD" → "BTC", "TON" → "TON"). Used to drive the
+   * live-balance lookup and the Binance Convert dust sweeper for close-
+   * position SELLs across Binance, Binance.US, and Bybit.
+   */
+  private extractBaseAsset(symbol: string): string | null {
+    const sym = (symbol || '').toUpperCase().trim();
+    if (!sym) return null;
+    if (sym.endsWith('USDT') && sym.length > 4) {
+      return sym.slice(0, -4);
+    }
+    if (sym.endsWith('USD') && sym.length > 3) {
+      return sym.slice(0, -3);
+    }
+    return sym;
   }
 
   async placeOcoOrder(

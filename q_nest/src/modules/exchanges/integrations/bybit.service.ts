@@ -344,12 +344,36 @@ export class BybitService {
     const result = await this.makeSignedRequest('/v5/account/wallet-balance', apiKey, apiSecret, {
       accountType: 'UNIFIED',
     });
-    
+
     const account = result.list?.[0] || {};
     return {
       totalEquity: account.totalEquity || '0',
       coin: account.coin || [],
     };
+  }
+
+  /**
+   * Gets the free balance of a single asset. Used by the closePosition flow
+   * to sell the user's ACTUAL current balance (not the stale dashboard qty).
+   * Bybit reports `availableToWithdraw` and `walletBalance` separately — we
+   * use walletBalance since Bybit deducts from the same pool for spot sells.
+   */
+  async getAssetFreeBalance(apiKey: string, apiSecret: string, asset: string): Promise<number> {
+    try {
+      const info = await this.getAccountInfo(apiKey, apiSecret);
+      const row = (info?.coin || []).find(
+        (c) => c.coin?.toUpperCase() === asset.toUpperCase(),
+      );
+      if (!row) return 0;
+      // Prefer availableToWithdraw when present (what Bybit considers free
+      // for new spot orders), fall back to walletBalance.
+      const free =
+        parseFloat(row.availableToWithdraw || '0') ||
+        parseFloat(row.walletBalance || '0');
+      return Number.isFinite(free) && free > 0 ? free : 0;
+    } catch {
+      return 0;
+    }
   }
 
   /**
@@ -813,6 +837,12 @@ export class BybitService {
         throw new BybitApiException('Price is required for LIMIT orders');
       }
 
+      // Normalize: spot-holding endpoints return just the base asset
+      // (e.g. "TON"), but order creation needs a trading pair ("TONUSDT").
+      // This app only quotes against USDT, so the rule is simple.
+      const sym = (symbol || '').toUpperCase().trim();
+      symbol = sym.endsWith('USDT') && sym.length > 4 ? sym : `${sym}USDT`;
+
       // Fetch instrument info to get basePrecision for proper quantity rounding
       const precision = await this.getBasePrecision(symbol);
       const factor = Math.pow(10, precision);
@@ -966,6 +996,43 @@ export class BybitService {
       }
       throw new BybitApiException('Failed to place bracket order');
     }
+  }
+
+  /**
+   * Cancels ALL open orders (regular + stop/TP/SL) for a specific symbol.
+   * Uses Bybit's /v5/order/cancel-all endpoint twice — once for regular orders,
+   * once for stop orders — because Bybit tracks them in separate books.
+   * Safe to call when no orders exist.
+   */
+  async cancelAllOpenOrdersForSymbol(
+    apiKey: string,
+    apiSecret: string,
+    symbol: string,
+  ): Promise<number> {
+    let totalCancelled = 0;
+    for (const orderFilter of ['Order', 'StopOrder']) {
+      try {
+        const result = await this.makeSignedRequest(
+          '/v5/order/cancel-all',
+          apiKey,
+          apiSecret,
+          { category: 'spot', symbol, orderFilter },
+          'POST',
+        );
+        const list = (result?.list || []) as any[];
+        totalCancelled += list.length;
+      } catch (error: any) {
+        this.logger.warn(
+          `cancelAllOpenOrdersForSymbol (Bybit/${orderFilter}) ${symbol} failed: ${error?.message || error}`,
+        );
+      }
+    }
+    if (totalCancelled > 0) {
+      this.logger.log(
+        `Cancelled ${totalCancelled} open order(s) on ${symbol} (Bybit) before close-position sell`,
+      );
+    }
+    return totalCancelled;
   }
 
   /**
