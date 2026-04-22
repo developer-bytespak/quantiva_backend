@@ -29,18 +29,24 @@ export class PlaceOptionOrderDto {
   @IsNotEmpty()
   connectionId: string;
 
+  /**
+   * Contract symbol — format depends on the venue behind `connectionId`:
+   *   - Binance crypto options: BTC-260327-100000-C
+   *   - Alpaca US equity options (OCC-21): AAPL240621C00150000
+   */
   @IsString()
-  @Matches(/^[A-Z]{2,10}-\d{6}-\d+-[CP]$/, {
-    message: 'contractSymbol must match format like BTC-260327-100000-C',
+  @Matches(/^([A-Z]{2,10}-\d{6}-\d+-[CP]|[A-Z]{1,6}\d{6}[CP]\d{8})$/, {
+    message:
+      'contractSymbol must be Binance format (BTC-260327-100000-C) or OCC format (AAPL240621C00150000)',
   })
-  contractSymbol: string; // e.g. BTC-260327-100000-C
+  contractSymbol: string;
 
   @IsString()
   @IsNotEmpty()
-  @Matches(/^[A-Z]{2,10}$/, {
-    message: 'underlying must be uppercase letters (e.g. BTC, ETH)',
+  @Matches(/^[A-Z]{1,10}$/, {
+    message: 'underlying must be uppercase letters (e.g. BTC, AAPL)',
   })
-  underlying: string; // e.g. BTC
+  underlying: string;
 
   @IsNumber()
   @Min(0)
@@ -70,6 +76,78 @@ export class PlaceOptionOrderDto {
   @IsOptional()
   @IsString()
   signalId?: string;
+}
+
+// ── Multi-leg (mleg) order DTOs ────────────────────────────
+//
+// Shape intentionally mirrors Alpaca's `legs[]` payload: Binance has no
+// mleg primitive, so this DTO is currently Alpaca-only (routed via
+// `OptionsAlpacaService.placeMultiLegOrder`). A future Binance path would
+// iterate these legs as individual orders inside a shared group_id.
+
+export enum MultiLegPositionIntent {
+  BUY_TO_OPEN = 'buy_to_open',
+  SELL_TO_OPEN = 'sell_to_open',
+  BUY_TO_CLOSE = 'buy_to_close',
+  SELL_TO_CLOSE = 'sell_to_close',
+}
+
+export class MultiLegOrderLegDto {
+  @IsString()
+  @IsNotEmpty()
+  contractSymbol: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^(buy|sell)$/)
+  side: 'buy' | 'sell';
+
+  @IsNumber()
+  @Min(1, { message: 'ratioQty must be at least 1' })
+  @Max(100, { message: 'ratioQty cannot exceed 100' })
+  ratioQty: number;
+
+  @IsEnum(MultiLegPositionIntent)
+  positionIntent: MultiLegPositionIntent;
+}
+
+export class PlaceMultiLegOrderDto {
+  @IsString()
+  @IsNotEmpty()
+  connectionId: string;
+
+  @IsString()
+  @IsNotEmpty()
+  underlying: string;
+
+  @IsNumber()
+  @Min(1)
+  @Max(10000)
+  qty: number;
+
+  @IsString()
+  @Matches(/^(market|limit)$/, { message: 'type must be "market" or "limit"' })
+  type: 'market' | 'limit';
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  @Max(1000000)
+  limitPrice?: number;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^(day|gtc)$/)
+  timeInForce?: 'day' | 'gtc';
+
+  @IsOptional()
+  @IsString()
+  signalId?: string;
+
+  // Validated elementwise at runtime in the controller (class-validator's
+  // nested-array type tracking is brittle with plain-object inputs from
+  // NestJS; the service also enforces the 2–4 leg bound).
+  legs: MultiLegOrderLegDto[];
 }
 
 export class CancelOptionOrderDto {

@@ -17,7 +17,7 @@ import { OptionsService } from './services/options.service';
 import { OptionsIvService } from './services/options-iv.service';
 import { OptionsSignalService } from './services/options-signal.service';
 import { OptionsRiskService } from './services/options-risk.service';
-import { PlaceOptionOrderDto, CancelOptionOrderDto } from './dto/options.dto';
+import { PlaceOptionOrderDto, CancelOptionOrderDto, PlaceMultiLegOrderDto } from './dto/options.dto';
 
 @Controller('options')
 @UseGuards(JwtAuthGuard)
@@ -32,68 +32,67 @@ export class OptionsController {
   // ── Market Data ──────────────────────────────────────────
 
   /**
-   * GET /options/underlyings
-   * Get all available underlying assets for options (public data).
+   * GET /options/underlyings?connectionId=xxx
+   * When a connectionId is supplied the underlying list is venue-scoped
+   * (Binance crypto vs Alpaca equities). Without it, defaults to Binance
+   * (backward-compat with the original unauthenticated public-data route).
    */
   @Get('underlyings')
-  async getAvailableUnderlyings(@CurrentUser() user: TokenPayload) {
+  async getAvailableUnderlyings(
+    @CurrentUser() user: TokenPayload,
+    @Query('connectionId') connectionId?: string,
+  ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.optionsService.getAvailableUnderlyings();
+    return this.optionsService.getAvailableUnderlyings(user.sub, connectionId);
   }
 
-  /**
-   * GET /options/chain/:underlying
-   * Fetch full options chain for an underlying (public data).
-   */
   @Get('chain/:underlying')
   async getOptionsChain(
     @CurrentUser() user: TokenPayload,
     @Param('underlying') underlying: string,
+    @Query('connectionId') connectionId?: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.optionsService.getOptionsChain(underlying.toUpperCase());
+    return this.optionsService.getOptionsChain(
+      underlying.toUpperCase(),
+      user.sub,
+      connectionId,
+    );
   }
 
-  /**
-   * GET /options/greeks/:contractSymbol
-   * Fetch Greeks for a specific option contract (public data).
-   */
   @Get('greeks/:contractSymbol')
   async getGreeks(
     @CurrentUser() user: TokenPayload,
     @Param('contractSymbol') contractSymbol: string,
+    @Query('connectionId') connectionId?: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.optionsService.getGreeks(contractSymbol);
+    return this.optionsService.getGreeks(contractSymbol, user.sub, connectionId);
   }
 
-  /**
-   * GET /options/ticker/:contractSymbol
-   * Fetch 24hr ticker for a specific option contract (public data).
-   */
   @Get('ticker/:contractSymbol')
   async getTicker(
     @CurrentUser() user: TokenPayload,
     @Param('contractSymbol') contractSymbol: string,
+    @Query('connectionId') connectionId?: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.optionsService.getTicker(contractSymbol);
+    return this.optionsService.getTicker(contractSymbol, user.sub, connectionId);
   }
 
-  /**
-   * GET /options/depth/:contractSymbol?limit=20
-   * Fetch order book for an option contract (public data).
-   */
   @Get('depth/:contractSymbol')
   async getDepth(
     @CurrentUser() user: TokenPayload,
     @Param('contractSymbol') contractSymbol: string,
     @Query('limit') limit?: string,
+    @Query('connectionId') connectionId?: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
     return this.optionsService.getDepth(
       contractSymbol,
       limit ? parseInt(limit, 10) : undefined,
+      user.sub,
+      connectionId,
     );
   }
 
@@ -110,6 +109,21 @@ export class OptionsController {
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
     return this.optionsService.getBalance(connectionId, user.sub);
+  }
+
+  /**
+   * GET /options/approval-status?connectionId=xxx
+   * Returns the user's options approval level for the venue. Binance always
+   * reports Level 3 (no approval flow); Alpaca reports 0–3 depending on the
+   * user's application status. Frontend uses this to gate multi-leg UI.
+   */
+  @Get('approval-status')
+  async getApprovalStatus(
+    @CurrentUser() user: TokenPayload,
+    @Query('connectionId') connectionId: string,
+  ) {
+    await this.optionsService.verifyEliteAccess(user.sub);
+    return this.optionsService.getApprovalStatus(connectionId, user.sub);
   }
 
   // ── Positions ────────────────────────────────────────────
@@ -151,6 +165,23 @@ export class OptionsController {
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
     return this.optionsService.placeOrder(user.sub, dto);
+  }
+
+  /**
+   * POST /options/orders/multi-leg
+   * Place a multi-leg (mleg) Alpaca options order — up to 4 legs fill
+   * atomically or not at all. Backend re-checks Level 3 approval and
+   * returns 403 if the user's Alpaca account isn't approved for mleg,
+   * regardless of what the frontend UI shows.
+   */
+  @Post('orders/multi-leg')
+  @HttpCode(HttpStatus.CREATED)
+  async placeMultiLegOrder(
+    @CurrentUser() user: TokenPayload,
+    @Body() dto: PlaceMultiLegOrderDto,
+  ) {
+    await this.optionsService.verifyEliteAccess(user.sub);
+    return this.optionsService.placeMultiLegOrder(user.sub, dto);
   }
 
   /**
@@ -220,9 +251,11 @@ export class OptionsController {
   async getIvRank(
     @CurrentUser() user: TokenPayload,
     @Param('underlying') underlying: string,
+    @Query('venue') venue?: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.ivService.getIvRankData(underlying.toUpperCase());
+    const v = venue?.toUpperCase() === 'ALPACA' ? 'ALPACA' : 'BINANCE';
+    return this.ivService.getIvRankData(underlying.toUpperCase(), v);
   }
 
   @Get('iv/history/:underlying')
@@ -230,9 +263,15 @@ export class OptionsController {
     @CurrentUser() user: TokenPayload,
     @Param('underlying') underlying: string,
     @Query('days') days?: string,
+    @Query('venue') venue?: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.ivService.getIvHistory(underlying.toUpperCase(), days ? parseInt(days, 10) : 90);
+    const v = venue?.toUpperCase() === 'ALPACA' ? 'ALPACA' : 'BINANCE';
+    return this.ivService.getIvHistory(
+      underlying.toUpperCase(),
+      days ? parseInt(days, 10) : 90,
+      v,
+    );
   }
 
   // ── Risk / Portfolio ─────────────────────────────────────
@@ -254,11 +293,19 @@ export class OptionsController {
     @CurrentUser() user: TokenPayload,
     @Query('underlying') underlying?: string,
     @Query('limit') limit?: string,
+    @Query('venue') venue?: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
+    const v =
+      venue?.toUpperCase() === 'ALPACA'
+        ? 'ALPACA'
+        : venue?.toUpperCase() === 'BINANCE'
+        ? 'BINANCE'
+        : undefined;
     return this.signalService.getActiveSignals(
       underlying?.toUpperCase(),
       limit ? parseInt(limit, 10) : 20,
+      v,
     );
   }
 

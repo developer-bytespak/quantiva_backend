@@ -1,12 +1,17 @@
 import { Injectable, Logger, ForbiddenException, NotFoundException, BadRequestException } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { OptionsBinanceService } from './options-binance.service';
+import { OptionsAlpacaService } from './options-alpaca.service';
+import { IOptionsVenueService, OptionCredentials } from './options-venue.interface';
+import { parseOccSymbol } from './alpaca/occ-symbol';
 import { OptionsSignalService } from './options-signal.service';
 import { TradeFeesService } from '../../trade-fees/trade-fees.service';
 import {
   PlaceOptionOrderDto,
+  PlaceMultiLegOrderDto,
   CancelOptionOrderDto,
   OptionsChainResponseDto,
   GreeksDto,
@@ -23,6 +28,38 @@ import { OPTIONS_RISK_CONFIG as RISK_CONFIG } from '../options.config';
 // Use string literals that match the Prisma OptionType enum values
 type OptionType = 'CALL' | 'PUT';
 type OptionOrderStatus = 'submitting' | 'pending' | 'filled' | 'partially_filled' | 'cancelled' | 'rejected' | 'expired';
+export type OptionsVenue = 'BINANCE' | 'ALPACA';
+
+/**
+ * Parse an OCC-21 option symbol into the DB-shape the mleg persistence
+ * path needs (`strike`, `expiry` as Date, `optionType` as Prisma enum).
+ * Wraps the stricter `parseOccSymbol` helper so we can surface a clean
+ * BadRequestException at the edge rather than a generic Error.
+ */
+function parseLegOccForDb(
+  occSymbol: string,
+): { strike: number; expiry: Date; optionType: OptionType } {
+  try {
+    const parsed = parseOccSymbol(occSymbol);
+    return {
+      strike: parsed.strike,
+      expiry: new Date(parsed.expiry),
+      optionType: parsed.type === 'CALL' ? 'CALL' : 'PUT',
+    };
+  } catch (err: any) {
+    throw new BadRequestException(
+      `Invalid OCC option symbol for multi-leg order: ${occSymbol}`,
+    );
+  }
+}
+
+export interface ResolvedVenue {
+  svc: IOptionsVenueService;
+  venue: OptionsVenue;
+  creds: OptionCredentials;
+  isPaper: boolean;
+  connection: any;
+}
 
 @Injectable()
 export class OptionsService {
@@ -34,6 +71,7 @@ export class OptionsService {
     private readonly prisma: PrismaService,
     private readonly exchangesService: ExchangesService,
     private readonly optionsBinance: OptionsBinanceService,
+    private readonly optionsAlpaca: OptionsAlpacaService,
     private readonly signalService: OptionsSignalService,
     private readonly tradeFeesService: TradeFeesService,
   ) {}
@@ -78,7 +116,8 @@ export class OptionsService {
   }
 
   /**
-   * Verify connection belongs to user.
+   * Verify connection belongs to user and points at a venue we support
+   * for options trading (Binance crypto or Alpaca stocks).
    */
   private async verifyConnectionOwnership(connectionId: string, userId: string) {
     const connection = await this.exchangesService.getConnectionById(connectionId);
@@ -88,86 +127,169 @@ export class OptionsService {
     if (connection.user_id !== userId) {
       throw new ForbiddenException('You do not own this connection');
     }
-    // Options trading restricted to Binance crypto connections only
-    if ((connection as any).exchange?.type !== 'crypto') {
-      throw new ForbiddenException('Options trading is only available for crypto exchanges');
-    }
-    if ((connection as any).exchange?.name?.toLowerCase() !== 'binance') {
-      throw new ForbiddenException('Options trading is only supported on Binance');
+    const exchangeName = (connection as any).exchange?.name?.toLowerCase() || '';
+    const exchangeType = (connection as any).exchange?.type;
+    const isBinanceCrypto = exchangeType === 'crypto' && exchangeName === 'binance';
+    const isAlpacaStocks = exchangeType === 'stocks' && exchangeName === 'alpaca';
+    if (!isBinanceCrypto && !isAlpacaStocks) {
+      throw new ForbiddenException('Options trading is only supported on Binance (crypto) or Alpaca (stocks)');
     }
     return connection;
+  }
+
+  /**
+   * Detect paper vs live from the Alpaca API key prefix.
+   * Alpaca paper keys start with "PK", live keys start with "AK".
+   * Mirrors the detection in AlpacaService so behavior is consistent.
+   */
+  private isAlpacaPaperKey(apiKey: string): boolean {
+    return typeof apiKey === 'string' && apiKey.startsWith('PK');
+  }
+
+  /**
+   * Resolve a connection id to a concrete venue adapter + decrypted credentials.
+   * Used by every method that needs to hit a broker; branching lives here so
+   * the rest of OptionsService stays venue-agnostic.
+   */
+  async resolveVenueService(
+    connectionId: string,
+    userId: string,
+  ): Promise<ResolvedVenue> {
+    const connection = await this.verifyConnectionOwnership(connectionId, userId);
+    const creds = await this.exchangesService.getDecryptedCredentials(connectionId);
+    const exchangeName = (connection as any).exchange?.name?.toLowerCase() || '';
+
+    if (exchangeName === 'alpaca') {
+      return {
+        svc: this.optionsAlpaca,
+        venue: 'ALPACA',
+        creds,
+        isPaper: this.isAlpacaPaperKey(creds.apiKey),
+        connection,
+      };
+    }
+
+    // default: binance
+    return {
+      svc: this.optionsBinance,
+      venue: 'BINANCE',
+      creds,
+      isPaper: false,
+      connection,
+    };
   }
 
   // ── Market Data ──────────────────────────────────────────
 
   /**
-   * Get all available underlying assets (public data, no credentials needed).
+   * Resolve the right venue service for a public-data call.
+   *
+   * Binance options market data is public (no creds). Alpaca options data
+   * is gated behind APCA-* headers — we must pass a connection so we can
+   * authenticate. When `connectionId` is provided we honor it and dispatch
+   * via `resolveVenueService`; otherwise we fall back to Binance with null
+   * credentials (preserves legacy behaviour for the unauthenticated
+   * `/options/chain/:underlying` route).
    */
-  async getAvailableUnderlyings(): Promise<AvailableUnderlyingDto[]> {
-    return this.optionsBinance.getAvailableUnderlyings();
+  private async resolveForMarketData(
+    userId: string | undefined,
+    connectionId: string | undefined,
+  ): Promise<{ svc: IOptionsVenueService; creds: OptionCredentials | null }> {
+    if (connectionId && userId) {
+      const resolved = await this.resolveVenueService(connectionId, userId);
+      return { svc: resolved.svc, creds: resolved.creds };
+    }
+    return { svc: this.optionsBinance, creds: null };
   }
 
   /**
-   * Get options chain for an underlying (public data).
+   * Get all available underlying assets. If a connectionId+userId are
+   * supplied we dispatch to the venue for that connection (Alpaca equities
+   * vs Binance crypto); otherwise default to Binance.
    */
-  async getOptionsChain(underlying: string): Promise<OptionsChainResponseDto> {
-    return this.optionsBinance.fetchOptionsChain(null, underlying);
+  async getAvailableUnderlyings(
+    userId?: string,
+    connectionId?: string,
+  ): Promise<AvailableUnderlyingDto[]> {
+    const { svc } = await this.resolveForMarketData(userId, connectionId);
+    return svc.getAvailableUnderlyings();
   }
 
-  /**
-   * Get Greeks for a specific contract (public data).
-   */
-  async getGreeks(contractSymbol: string): Promise<GreeksDto> {
-    return this.optionsBinance.fetchGreeks(null, contractSymbol);
+  async getOptionsChain(
+    underlying: string,
+    userId?: string,
+    connectionId?: string,
+  ): Promise<OptionsChainResponseDto> {
+    const { svc, creds } = await this.resolveForMarketData(userId, connectionId);
+    return svc.fetchOptionsChain(creds, underlying, userId);
   }
 
-  /**
-   * Get ticker for a contract (public data).
-   */
-  async getTicker(contractSymbol: string) {
-    return this.optionsBinance.fetchOptionTicker(null, contractSymbol);
+  async getGreeks(
+    contractSymbol: string,
+    userId?: string,
+    connectionId?: string,
+  ): Promise<GreeksDto> {
+    const { svc, creds } = await this.resolveForMarketData(userId, connectionId);
+    return svc.fetchGreeks(creds, contractSymbol, userId);
   }
 
-  /**
-   * Get order book depth (public data).
-   */
-  async getDepth(contractSymbol: string, limit?: number) {
-    return this.optionsBinance.fetchOptionDepth(null, contractSymbol, limit);
+  async getTicker(
+    contractSymbol: string,
+    userId?: string,
+    connectionId?: string,
+  ) {
+    const { svc, creds } = await this.resolveForMarketData(userId, connectionId);
+    return svc.fetchOptionTicker(creds, contractSymbol, userId);
+  }
+
+  async getDepth(
+    contractSymbol: string,
+    limit?: number,
+    userId?: string,
+    connectionId?: string,
+  ) {
+    const { svc, creds } = await this.resolveForMarketData(userId, connectionId);
+    return svc.fetchOptionDepth(creds, contractSymbol, limit, userId);
   }
 
   // ── Account ──────────────────────────────────────────────
 
-  /**
-   * Get options account balance.
-   */
   async getBalance(
     connectionId: string,
     userId: string,
   ): Promise<OptionsAccountDto> {
-    await this.verifyConnectionOwnership(connectionId, userId);
-    // Use the Options margin wallet (eapi/marginAccount) — this is the wallet Binance
-    // actually debits for options orders, not the spot wallet.
-    const credentials = await this.getCredentials(connectionId);
-    return this.optionsBinance.fetchBalance(credentials, userId);
+    const resolved = await this.resolveVenueService(connectionId, userId);
+    return resolved.svc.fetchBalance(resolved.creds, userId);
+  }
+
+  /** Options approval status (Alpaca Level 1–3; Binance returns Level 3). */
+  async getApprovalStatus(
+    connectionId: string,
+    userId: string,
+  ) {
+    const resolved = await this.resolveVenueService(connectionId, userId);
+    return {
+      venue: resolved.venue,
+      ...(await resolved.svc.getOptionsApprovalStatus(resolved.creds, userId)),
+    };
   }
 
   // ── Positions ────────────────────────────────────────────
 
-  /**
-   * Get open positions from Binance & sync to DB.
-   */
   async getPositions(
     connectionId: string,
     userId: string,
   ): Promise<OptionsPositionDto[]> {
-    await this.verifyConnectionOwnership(connectionId, userId);
-    const credentials = await this.getCredentials(connectionId);
-    const positions = await this.optionsBinance.fetchPositions(credentials, userId);
+    const resolved = await this.resolveVenueService(connectionId, userId);
+    const positions = await resolved.svc.fetchPositions(resolved.creds, userId);
 
-    // Sync positions to DB in background
-    this.syncPositionsToDb(userId, positions).catch((err) =>
-      this.logger.error(`Position sync failed: ${err.message}`),
-    );
+    // Sync positions to DB in background (Binance contract_symbol format only;
+    // Alpaca OCC positions are synced via a venue-aware path added in Phase 3.)
+    if (resolved.venue === 'BINANCE') {
+      this.syncPositionsToDb(userId, positions).catch((err) =>
+        this.logger.error(`Position sync failed: ${err.message}`),
+      );
+    }
 
     return positions;
   }
@@ -367,15 +489,15 @@ export class OptionsService {
   // ── Orders ───────────────────────────────────────────────
 
   /**
-   * Place an option order with risk checks.
+   * Place an option order with risk checks. Dispatches to the correct venue
+   * adapter (Binance or Alpaca) based on the connection's exchange.
    */
   async placeOrder(
     userId: string,
     dto: PlaceOptionOrderDto,
   ): Promise<OptionsOrderDto> {
-    // 1. Verify connection ownership
-    await this.verifyConnectionOwnership(dto.connectionId, userId);
-    const credentials = await this.getCredentials(dto.connectionId);
+    // 1. Resolve the venue (also verifies ownership + decrypts creds)
+    const resolved = await this.resolveVenueService(dto.connectionId, userId);
 
     // 2. Validate signal not expired (if order linked to a signal)
     if (dto.signalId) {
@@ -386,7 +508,10 @@ export class OptionsService {
       }
     }
 
-    // 3. Sell-to-close validation (no naked option writing)
+    // 3. Sell-to-close validation (no naked option writing).
+    //    Matches on contract_symbol literally — works for both Binance's
+    //    dash format and Alpaca's OCC format since we store whatever the
+    //    caller sends.
     if (dto.side === 'SELL') {
       const openPosition = await this.prisma.options_positions.findFirst({
         where: {
@@ -411,17 +536,24 @@ export class OptionsService {
       }
     }
 
-    // 4. Risk checks
-    await this.performRiskChecks(userId, dto, credentials);
+    // 4. Risk checks (Binance-only; Alpaca has its own server-side
+    //    buying-power checks we rely on).
+    if (resolved.venue === 'BINANCE') {
+      await this.performRiskChecks(userId, dto, resolved.creds);
+    }
 
-    // 5. Calculate max loss (premium × qty for buy side)
-    const maxLoss = dto.side === 'BUY' ? dto.price * dto.quantity : null;
+    // 5. Max loss (premium × qty × multiplier for long side; short is more
+    //    complex and left null for the venue/broker to enforce).
+    const maxLoss =
+      dto.side === 'BUY'
+        ? dto.price * dto.quantity * resolved.svc.contractMultiplier
+        : null;
 
-    // 4. Get current Greeks for snapshot
+    // 6. Greeks snapshot — best-effort.
     let greeksSnapshot = null;
     try {
-      greeksSnapshot = await this.optionsBinance.fetchGreeks(
-        credentials,
+      greeksSnapshot = await resolved.svc.fetchGreeks(
+        resolved.creds,
         dto.contractSymbol,
         userId,
       );
@@ -429,12 +561,12 @@ export class OptionsService {
       this.logger.warn('Could not fetch Greeks snapshot before order placement');
     }
 
-    // 5. Parse contract symbol parts
-    const parts = dto.contractSymbol.split('-');
-    const optionType: OptionType = parts[3] === 'C' ? 'CALL' : 'PUT';
-    const expiryDate = this.parseExpiryToDate(parts[1]);
+    // 7. Resolve option type + expiry date without depending on Binance's
+    //    dash format. Prefer the DTO values the client already provides.
+    const optionType: OptionType = dto.optionType === OptionTypeEnum.CALL ? 'CALL' : 'PUT';
+    const expiryDate = new Date(dto.expiry);
 
-    // 6. Create DB record FIRST with 'submitting' status (ensures no orphaned exchange orders)
+    // 8. Create DB record with 'submitting' status + venue tag.
     const dbOrder = await this.prisma.options_orders.create({
       data: {
         user_id: userId,
@@ -451,17 +583,19 @@ export class OptionsService {
         avg_fill_price: null,
         fee: null,
         binance_order_id: null,
+        broker_order_id: null,
+        venue: resolved.venue,
         status: 'submitting',
         max_loss: maxLoss,
-        greeks_at_entry: greeksSnapshot,
+        greeks_at_entry: greeksSnapshot as any,
       },
     });
 
-    // 7. Place on Binance — update DB regardless of outcome
-    let binanceOrder: any;
+    // 9. Place on the venue.
+    let venueOrder: any;
     try {
-      binanceOrder = await this.optionsBinance.placeOptionOrder(
-        credentials,
+      venueOrder = await resolved.svc.placeOptionOrder(
+        resolved.creds,
         dto.contractSymbol,
         dto.side.toLowerCase() as 'buy' | 'sell',
         dto.quantity,
@@ -469,7 +603,6 @@ export class OptionsService {
         userId,
       );
     } catch (exchangeError) {
-      // Exchange rejected — mark DB record as 'rejected' so it's tracked
       await this.prisma.options_orders.update({
         where: { order_id: dbOrder.order_id },
         data: { status: 'rejected' },
@@ -477,37 +610,44 @@ export class OptionsService {
       throw exchangeError;
     }
 
-    // 8. Update DB with exchange response — handle DB failure gracefully
+    const brokerId = (venueOrder?.orderId || venueOrder?.id)?.toString() || null;
+
+    // 10. Update DB with exchange response.
     let updatedOrder: any;
     try {
       updatedOrder = await this.prisma.options_orders.update({
         where: { order_id: dbOrder.order_id },
         data: {
-          binance_order_id: (binanceOrder.orderId || binanceOrder.id)?.toString() || null,
-          status: this.mapOrderStatus(binanceOrder.status),
-          filled_quantity: parseFloat(binanceOrder.executedQty || binanceOrder.filled || '0'),
-          avg_fill_price: parseFloat(binanceOrder.avgPrice || binanceOrder.average || '0') || null,
-          fee: parseFloat(binanceOrder.fee || '0') || null,
+          // Keep binance_order_id populated for Binance for back-compat with
+          // older queries; broker_order_id holds the ID for any venue.
+          binance_order_id: resolved.venue === 'BINANCE' ? brokerId : null,
+          broker_order_id: brokerId,
+          status: this.mapOrderStatus(venueOrder.status),
+          filled_quantity: parseFloat(venueOrder.executedQty || venueOrder.filled || '0'),
+          avg_fill_price: parseFloat(venueOrder.avgPrice || venueOrder.average || '0') || null,
+          fee: parseFloat(venueOrder.fee || '0') || null,
         },
       });
     } catch (dbErr: any) {
       this.logger.error(
-        `DB update failed for order ${dbOrder.order_id}, Binance ID: ${binanceOrder.orderId || binanceOrder.id}. Manual reconciliation needed: ${dbErr.message}`,
+        `DB update failed for order ${dbOrder.order_id}, venue=${resolved.venue} broker_id=${brokerId}. Manual reconciliation needed: ${dbErr.message}`,
       );
-      // Return the original DB order so the client knows the order was placed on Binance
       const fallback = this.mapDbOrderToDto(dbOrder);
-      fallback.binanceOrderId = (binanceOrder.orderId || binanceOrder.id)?.toString() || '';
+      fallback.binanceOrderId = brokerId || '';
       return fallback;
     }
 
-    this.logger.log(`Options order placed: ${dbOrder.order_id} binance=${binanceOrder.orderId || binanceOrder.id}`);
+    this.logger.log(
+      `Options order placed (${resolved.venue}): ${dbOrder.order_id} broker=${brokerId}`,
+    );
 
-    // 9. Record platform execution fee (0.03%) on filled orders
+    // 11. Platform execution fee (0.03%) on filled orders. Both venues'
+    //     fill notional is (filled_qty × avg_fill_price × multiplier).
     const orderStatus = updatedOrder?.status ?? dbOrder.status;
     if (['filled', 'partially_filled'].includes(orderStatus)) {
       const fillQty = Number(updatedOrder?.filled_quantity ?? 0);
       const fillPrice = Number(updatedOrder?.avg_fill_price ?? 0);
-      const fillValue = fillQty * fillPrice;
+      const fillValue = fillQty * fillPrice * resolved.svc.contractMultiplier;
       if (fillValue > 0) {
         this.tradeFeesService.recordTradeFee({
           userId,
@@ -515,7 +655,7 @@ export class OptionsService {
           assetSymbol: dto.underlying,
           tradeSide: dto.side,
           tradeValueUsd: fillValue,
-          feePercent: 0.0003, // 0.03%
+          feePercent: 0.0003,
           source: 'options_execution',
         }).catch((err) => this.logger.warn(`Failed to record execution fee: ${err.message}`));
       }
@@ -525,22 +665,138 @@ export class OptionsService {
   }
 
   /**
-   * Cancel an option order.
+   * Place a multi-leg (mleg) options order — Alpaca only for now.
+   * Persists one `options_orders` row per leg sharing a `group_id`, all
+   * tagged `venue=ALPACA`. The backend re-checks Level 3 approval before
+   * forwarding to Alpaca so a missing-approval bypass returns 403 rather
+   * than a cryptic Alpaca rejection.
+   */
+  async placeMultiLegOrder(
+    userId: string,
+    dto: PlaceMultiLegOrderDto,
+  ): Promise<{ groupId: string; brokerOrderId: string; legs: any[]; status: string }> {
+    const resolved = await this.resolveVenueService(dto.connectionId, userId);
+
+    if (resolved.venue !== 'ALPACA') {
+      throw new BadRequestException(
+        'Multi-leg (mleg) orders are only supported on Alpaca. Binance users should place each leg individually.',
+      );
+    }
+
+    // Defense-in-depth: re-check approval level even though the UI already
+    // gates this button — a hand-crafted request could try to bypass.
+    const approval = await resolved.svc.getOptionsApprovalStatus(resolved.creds, userId);
+    if (approval.level < 3) {
+      throw new ForbiddenException(
+        `Multi-leg strategies require Alpaca options Level 3 approval. Your account is currently at Level ${approval.level}.`,
+      );
+    }
+
+    if (!Array.isArray(dto.legs) || dto.legs.length < 2 || dto.legs.length > 4) {
+      throw new BadRequestException('Multi-leg orders require 2–4 legs');
+    }
+
+    if (dto.signalId) {
+      try {
+        await this.signalService.validateSignalNotExpired(dto.signalId);
+      } catch (err: any) {
+        throw new BadRequestException(err.message);
+      }
+    }
+
+    // Persist one row per leg, pre-trade, sharing a group_id so the UI can
+    // group them. Rows are marked `submitting`; after the broker response
+    // we update with broker_order_id + status.
+    const groupId = randomUUID();
+    const legRows = await Promise.all(
+      dto.legs.map((leg) => {
+        const parsed = parseLegOccForDb(leg.contractSymbol);
+        return this.prisma.options_orders.create({
+          data: {
+            user_id: userId,
+            signal_id: dto.signalId || null,
+            contract_symbol: leg.contractSymbol,
+            underlying: dto.underlying,
+            strike: parsed.strike,
+            expiry: parsed.expiry,
+            option_type: parsed.optionType,
+            side: leg.side.toUpperCase(),
+            quantity: dto.qty * leg.ratioQty,
+            price: dto.limitPrice ?? null,
+            venue: 'ALPACA',
+            group_id: groupId,
+            position_intent: leg.positionIntent,
+            status: 'submitting',
+          },
+        });
+      }),
+    );
+
+    try {
+      const order = await resolved.svc.placeMultiLegOrder(
+        resolved.creds,
+        {
+          underlying: dto.underlying,
+          qty: dto.qty,
+          type: dto.type,
+          limitPrice: dto.limitPrice,
+          timeInForce: dto.timeInForce,
+          legs: dto.legs.map((l) => ({
+            contractSymbol: l.contractSymbol,
+            side: l.side,
+            ratioQty: l.ratioQty,
+            positionIntent: l.positionIntent,
+          })),
+        },
+        userId,
+      );
+
+      const brokerId = (order?.orderId || order?.id)?.toString() || null;
+      const mapped = this.mapOrderStatus(order?.status);
+
+      await this.prisma.options_orders.updateMany({
+        where: { group_id: groupId },
+        data: {
+          broker_order_id: brokerId,
+          status: mapped,
+        },
+      });
+
+      this.logger.log(`Multi-leg order placed (Alpaca): group=${groupId} broker=${brokerId}`);
+      return {
+        groupId,
+        brokerOrderId: brokerId ?? '',
+        legs: legRows.map((r) => r.order_id),
+        status: mapped,
+      };
+    } catch (error) {
+      await this.prisma.options_orders.updateMany({
+        where: { group_id: groupId },
+        data: { status: 'rejected' },
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Cancel an option order. Uses the stored venue on the DB row to route
+   * to the right adapter so a single connectionId doesn't pin us to one
+   * venue (e.g. user switches active connection between submit and cancel).
    */
   async cancelOrder(
     userId: string,
     dto: CancelOptionOrderDto,
   ): Promise<{ success: boolean; message: string }> {
-    await this.verifyConnectionOwnership(dto.connectionId, userId);
-    const credentials = await this.getCredentials(dto.connectionId);
+    const resolved = await this.resolveVenueService(dto.connectionId, userId);
 
-    // Find order in DB
+    // Match on any identifier the client might have handed us.
     const dbOrder = await this.prisma.options_orders.findFirst({
       where: {
         user_id: userId,
         OR: [
           { order_id: dto.orderId },
           { binance_order_id: dto.orderId },
+          { broker_order_id: dto.orderId },
         ],
       },
     });
@@ -549,21 +805,28 @@ export class OptionsService {
       throw new NotFoundException('Order not found');
     }
 
-    const binanceOrderId = dbOrder.binance_order_id || dto.orderId;
+    const brokerId =
+      dbOrder.broker_order_id || dbOrder.binance_order_id || dto.orderId;
 
-    // Cancel on Binance
-    await this.optionsBinance.cancelOptionOrder(
-      credentials,
+    await resolved.svc.cancelOptionOrder(
+      resolved.creds,
       dto.contractSymbol,
-      binanceOrderId,
+      brokerId,
       userId,
     );
 
-    // Update DB
-    await this.prisma.options_orders.update({
-      where: { order_id: dbOrder.order_id },
-      data: { status: 'cancelled' },
-    });
+    // Cancel every leg sharing a group_id so mleg orders update as a unit.
+    if (dbOrder.group_id) {
+      await this.prisma.options_orders.updateMany({
+        where: { group_id: dbOrder.group_id },
+        data: { status: 'cancelled' },
+      });
+    } else {
+      await this.prisma.options_orders.update({
+        where: { order_id: dbOrder.order_id },
+        data: { status: 'cancelled' },
+      });
+    }
 
     return { success: true, message: `Order ${dbOrder.order_id} cancelled` };
   }
@@ -589,16 +852,15 @@ export class OptionsService {
   }
 
   /**
-   * Get open orders live from Binance.
+   * Get open orders live from the venue behind the connection.
    */
   async getOpenOrdersLive(
     connectionId: string,
     userId: string,
     contractSymbol?: string,
   ) {
-    await this.verifyConnectionOwnership(connectionId, userId);
-    const credentials = await this.getCredentials(connectionId);
-    return this.optionsBinance.fetchOpenOrders(credentials, contractSymbol, userId);
+    const resolved = await this.resolveVenueService(connectionId, userId);
+    return resolved.svc.fetchOpenOrders(resolved.creds, contractSymbol, userId);
   }
 
   // ── AI Recommendations ──────────────────────────────────

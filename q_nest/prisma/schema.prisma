@@ -8,70 +8,57 @@ datasource db {
 }
 
 model users {
-  user_id                   String                      @id @default(uuid()) @db.Uuid
-  email                     String                      @unique @db.VarChar(255)
-  username                  String                      @unique @db.VarChar(100)
-  password_hash             String?                     @db.VarChar(255)
-  email_verified            Boolean                     @default(false)
-  kyc_status                KycStatus                   @default(pending)
-  current_tier              PlanTier                    @default(FREE)
-  created_at                DateTime                    @default(now()) @db.Timestamp(6)
-  updated_at                DateTime?                   @updatedAt @db.Timestamp(6)
-  two_factor_enabled        Boolean                     @default(true)
-  two_factor_secret         String?                     @db.VarChar(255)
-  dob                       DateTime?                   @db.Date
-  full_name                 String?                     @db.VarChar(120)
-  gender                    String?                     @db.VarChar(50)
-  nationality               String?                     @db.VarChar(100)
-  phone_number              String?                     @db.VarChar(20)
-  profile_pic_url           String?
-  kyc_verifications         kyc_verifications[]
-  optimization_runs         optimization_runs[]
-  portfolios                portfolios[]
-  risk_events               risk_events[]
-  strategies                strategies[]
-  signals                   strategy_signals[]
-  two_factor_codes          two_factor_codes[]
-  exchange_connections      user_exchange_connections[]
-  sessions                  user_sessions[]
-  settings                  user_settings?
-  subscriptions             user_subscriptions[]
-  subscription_usage        subscription_usage[]
-  payment_history           payment_history[]
-  stripe_connect_account_id String?                     @db.VarChar(255)
-  fcm_token                 String?                     @db.VarChar(512)
-
-  pool_memberships         vc_pool_members[]
-  pool_seat_reservations   vc_pool_seat_reservations[]
-  pool_payment_submissions vc_pool_payment_submissions[]
-  notifications            notifications[]
-
-  // PHASE 1-5: Binance payment flow
-  binance_deposit_address String?                @db.VarChar(255)
-  user_credits            user_credits[]
-  vc_pool_transactions    vc_pool_transactions[]
-
-  // Options trading
-  options_orders    options_orders[]
-  options_positions options_positions[]
-
-  // Trade fees monetization
-  stripe_customer_id    String?                 @db.VarChar(255)
-  trade_fees            trade_fees[]
-  monthly_fee_summaries monthly_fee_summaries[]
-
-  // QHQ Token system
-  qhq_balance      qhq_balances?
-  qhq_transactions qhq_transactions[]
-  qhq_wallet_link  qhq_wallet_links?
-
-  // Onboarding email reminders
-  onboarding_state            OnboardingState              @default(SIGNED_UP)
-  onboarding_emails_opted_out Boolean                      @default(false)
+  user_id                     String                        @id @default(uuid()) @db.Uuid
+  email                       String                        @unique @db.VarChar(255)
+  username                    String                        @unique @db.VarChar(100)
+  password_hash               String?                       @db.VarChar(255)
+  email_verified              Boolean                       @default(false)
+  kyc_status                  KycStatus                     @default(pending)
+  created_at                  DateTime                      @default(now()) @db.Timestamp(6)
+  updated_at                  DateTime?                     @updatedAt @db.Timestamp(6)
+  two_factor_enabled          Boolean                       @default(true)
+  two_factor_secret           String?                       @db.VarChar(255)
+  dob                         DateTime?                     @db.Date
+  full_name                   String?                       @db.VarChar(120)
+  gender                      String?                       @db.VarChar(50)
+  nationality                 String?                       @db.VarChar(100)
+  phone_number                String?                       @db.VarChar(20)
+  profile_pic_url             String?
+  current_tier                PlanTier                      @default(FREE)
+  stripe_connect_account_id   String?                       @db.VarChar(255)
+  binance_deposit_address     String?                       @db.VarChar(255)
+  fcm_token                   String?                       @db.VarChar(512)
+  stripe_customer_id          String?                       @db.VarChar(255)
+  onboarding_emails_opted_out Boolean                       @default(false)
+  onboarding_state            OnboardingState               @default(SIGNED_UP)
+  contact_submissions         contact_submissions[]
+  kyc_verifications           kyc_verifications[]
+  monthly_fee_summaries       monthly_fee_summaries[]
+  notifications               notifications[]
   onboarding_email_reminders  onboarding_email_reminders[]
-
-  // Contact submissions
-  contact_submissions contact_submissions[]
+  optimization_runs           optimization_runs[]
+  options_orders              options_orders[]
+  options_positions           options_positions[]
+  payment_history             payment_history[]
+  portfolios                  portfolios[]
+  qhq_balance                 qhq_balances?
+  qhq_transactions            qhq_transactions[]
+  qhq_wallet_link             qhq_wallet_links?
+  risk_events                 risk_events[]
+  strategies                  strategies[]
+  signals                     strategy_signals[]
+  subscription_usage          subscription_usage[]
+  trade_fees                  trade_fees[]
+  two_factor_codes            two_factor_codes[]
+  user_credits                user_credits[]
+  exchange_connections        user_exchange_connections[]
+  sessions                    user_sessions[]
+  settings                    user_settings?
+  subscriptions               user_subscriptions[]
+  pool_memberships            vc_pool_members[]
+  pool_payment_submissions    vc_pool_payment_submissions[]
+  pool_seat_reservations      vc_pool_seat_reservations[]
+  vc_pool_transactions        vc_pool_transactions[]
 
   @@index([current_tier])
   @@index([onboarding_state])
@@ -121,15 +108,14 @@ model user_settings {
 model notifications {
   id         String    @id @default(uuid()) @db.Uuid
   user_id    String    @db.Uuid
-  type       String    @db.VarChar(100)
   title      String    @db.VarChar(255)
-  message    String    @db.Text
+  message    String
   read       Boolean   @default(false)
   read_at    DateTime? @db.Timestamp(6)
   metadata   Json?
   created_at DateTime  @default(now()) @db.Timestamp(6)
-
-  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  type       String    @db.VarChar(100)
+  user       users     @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
 
   @@index([user_id])
   @@index([user_id, read])
@@ -149,14 +135,13 @@ model kyc_verifications {
   liveness_result         String?            @db.VarChar(20)
   mrz_data                Json?              @db.Json
   created_at              DateTime           @default(now()) @db.Timestamp(6)
-  updated_at              DateTime?          @updatedAt @db.Timestamp(6)
-  // Sumsub integration fields
   sumsub_applicant_id     String?            @unique @db.VarChar(255)
   sumsub_external_user_id String?            @db.VarChar(255)
   sumsub_review_result    Json?              @db.Json
   sumsub_review_status    String?            @db.VarChar(50)
-  review_reject_type      String?            @db.VarChar(10)
+  updated_at              DateTime?          @updatedAt @db.Timestamp(6)
   verification_provider   String             @default("sumsub") @db.VarChar(20)
+  review_reject_type      String?            @db.VarChar(10)
   documents               kyc_documents[]
   face_matches            kyc_face_matches[]
   user                    users              @relation(fields: [user_id], references: [user_id])
@@ -178,11 +163,11 @@ model kyc_documents {
   created_at         DateTime          @default(now()) @db.Timestamp(6)
   authenticity_flags Json?             @db.Json
   document_type      String?           @db.VarChar(50)
-  document_side      String?           @db.VarChar(10)
-  is_primary         Boolean           @default(true)
   expiration_date    DateTime?         @db.Date
   issuing_country    String?           @db.VarChar(100)
   mrz_text           String?
+  document_side      String?           @db.VarChar(10)
+  is_primary         Boolean           @default(true)
   kyc_verifications  kyc_verifications @relation(fields: [kyc_id], references: [kyc_id])
 
   @@index([kyc_id])
@@ -256,7 +241,7 @@ model assets {
   display_name             String?                    @db.VarChar(255)
   logo_url                 String?
   market_cap_rank          Int?
-  available_exchanges      Json?                      @db.JsonB
+  available_exchanges      Json?
   market_data              asset_market_data[]
   asset_metrics            asset_metrics[]
   market_rankings          market_rankings[]
@@ -277,7 +262,7 @@ model coin_details {
   coingecko_id                String    @unique @db.VarChar(100)
   symbol                      String    @db.VarChar(50)
   name                        String    @db.VarChar(200)
-  description                 String?   @db.Text
+  description                 String?
   homepage_url                String?   @db.VarChar(500)
   image_url                   String?   @db.VarChar(500)
   market_cap_rank             Int?
@@ -419,7 +404,6 @@ model strategies {
   user_id              String?                   @db.Uuid
   name                 String?                   @db.VarChar(100)
   type                 StrategyType
-  asset_type           String?
   description          String?
   risk_level           RiskLevel
   auto_trade_threshold Decimal?                  @db.Decimal(5, 4)
@@ -438,6 +422,7 @@ model strategies {
   timeframe            String?                   @db.VarChar(20)
   engine_weights       Json?
   template_id          String?                   @db.Uuid
+  asset_type           String?
   template             strategies?               @relation("StrategyTemplate", fields: [template_id], references: [strategy_id])
   clones               strategies[]              @relation("StrategyTemplate")
   user                 users?                    @relation(fields: [user_id], references: [user_id])
@@ -493,16 +478,14 @@ model strategy_signals {
   volatility_score     Decimal?                 @db.Decimal(6, 3)
   engine_metadata      Json?                    @db.Json
   autoTradeEvaluations auto_trade_evaluations[]
+  options_orders       options_orders[]
+  options_signals      options_signals[]
   orders               orders[]
   details              signal_details[]
   explanations         signal_explanations[]
   asset                assets?                  @relation(fields: [asset_id], references: [asset_id])
   strategy             strategies?              @relation(fields: [strategy_id], references: [strategy_id])
   user                 users?                   @relation(fields: [user_id], references: [user_id])
-
-  // Options trading
-  options_orders  options_orders[]
-  options_signals options_signals[]
 
   @@index([strategy_id])
   @@index([user_id])
@@ -739,19 +722,19 @@ model drawdown_history {
 
 model subscription_plans {
   plan_id            String               @id @default(uuid()) @db.Uuid
-  tier               PlanTier
-  billing_period     BillingPeriod
-  price              Decimal              @db.Decimal(10, 2)
-  base_price         Decimal?             @db.Decimal(10, 2)
-  discount_percent   Decimal?             @default(0) @db.Decimal(5, 2)
   name               String               @db.VarChar(100)
-  description        String?              @db.Text
-  is_active          Boolean              @default(true)
-  display_order      Int?
+  description        String?
+  base_price         Decimal?             @db.Decimal(10, 2)
+  billing_period     BillingPeriod
   created_at         DateTime             @default(now()) @db.Timestamp(6)
+  discount_percent   Decimal?             @default(0) @db.Decimal(5, 2)
+  display_order      Int?
+  is_active          Boolean              @default(true)
+  price              Decimal              @db.Decimal(10, 2)
+  tier               PlanTier
   updated_at         DateTime?            @updatedAt @db.Timestamp(6)
-  user_subscriptions user_subscriptions[]
   plan_features      plan_features[]
+  user_subscriptions user_subscriptions[]
 
   @@unique([tier, billing_period])
   @@index([tier])
@@ -762,25 +745,25 @@ model user_subscriptions {
   subscription_id      String               @id @default(uuid()) @db.Uuid
   user_id              String               @db.Uuid
   plan_id              String               @db.Uuid
-  tier                 PlanTier
-  billing_period       BillingPeriod
   status               SubscriptionStatus   @default(active)
-  current_period_start DateTime?            @db.Timestamp(6)
-  current_period_end   DateTime?            @db.Timestamp(6)
-  last_payment_date    DateTime?            @db.Timestamp(6)
-  next_billing_date    DateTime?            @db.Timestamp(6)
-  auto_renew           Boolean              @default(true)
-  cancelled_at         DateTime?            @db.Timestamp(6)
-  external_id          String?              @db.VarChar(255)
   started_at           DateTime?            @db.Timestamp(6)
   expires_at           DateTime?            @db.Timestamp(6)
   billing_provider     String?              @db.VarChar(50)
+  auto_renew           Boolean              @default(true)
+  billing_period       BillingPeriod
+  cancelled_at         DateTime?            @db.Timestamp(6)
   created_at           DateTime             @default(now()) @db.Timestamp(6)
+  current_period_end   DateTime?            @db.Timestamp(6)
+  current_period_start DateTime?            @db.Timestamp(6)
+  external_id          String?              @db.VarChar(255)
+  last_payment_date    DateTime?            @db.Timestamp(6)
+  next_billing_date    DateTime?            @db.Timestamp(6)
+  tier                 PlanTier
   updated_at           DateTime?            @updatedAt @db.Timestamp(6)
-  plan                 subscription_plans   @relation(fields: [plan_id], references: [plan_id])
-  user                 users                @relation(fields: [user_id], references: [user_id])
   payment_history      payment_history[]
   subscription_usage   subscription_usage[]
+  plan                 subscription_plans   @relation(fields: [plan_id], references: [plan_id])
+  user                 users                @relation(fields: [user_id], references: [user_id])
 
   @@index([user_id])
   @@index([plan_id])
@@ -862,9 +845,9 @@ model payment_history {
   payment_provider    String?            @db.VarChar(50)
   external_payment_id String?            @db.VarChar(255)
   payment_method      String?            @db.VarChar(50)
-  invoice_url         String?            @db.Text
-  receipt_url         String?            @db.Text
-  failure_reason      String?            @db.Text
+  invoice_url         String?
+  receipt_url         String?
+  failure_reason      String?
   paid_at             DateTime?          @db.Timestamp(6)
   created_at          DateTime           @default(now()) @db.Timestamp(6)
   updated_at          DateTime?          @updatedAt @db.Timestamp(6)
@@ -875,6 +858,680 @@ model payment_history {
   @@index([subscription_id])
   @@index([status])
   @@map("payment_history")
+}
+
+model onboarding_email_reminders {
+  id               String          @id @default(uuid()) @db.Uuid
+  user_id          String          @db.Uuid
+  onboarding_state OnboardingState
+  delay_label      String          @db.VarChar(10)
+  bull_job_id      String          @db.VarChar(255)
+  status           ReminderStatus  @default(QUEUED)
+  scheduled_at     DateTime        @db.Timestamp(6)
+  sent_at          DateTime?       @db.Timestamp(6)
+  cancelled_at     DateTime?       @db.Timestamp(6)
+  created_at       DateTime        @default(now()) @db.Timestamp(6)
+  user             users           @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id, status])
+  @@index([user_id, onboarding_state])
+  @@map("onboarding_email_reminders")
+}
+
+model admins {
+  admin_id                         String                        @id @default(uuid()) @db.Uuid
+  email                            String                        @unique @db.VarChar(255)
+  password_hash                    String                        @db.VarChar(255)
+  full_name                        String?                       @db.VarChar(120)
+  stripe_secret_key_encrypted      String?
+  stripe_publishable_key           String?                       @db.VarChar(255)
+  stripe_webhook_secret_encrypted  String?
+  binance_uid                      String?                       @db.VarChar(100)
+  binance_api_key_encrypted        String?
+  binance_api_secret_encrypted     String?
+  default_pool_fee_percent         Decimal                       @default(5.00) @db.Decimal(5, 2)
+  default_admin_profit_fee_percent Decimal                       @default(20.00) @db.Decimal(5, 2)
+  default_cancellation_fee_percent Decimal                       @default(5.00) @db.Decimal(5, 2)
+  default_payment_window_minutes   Int                           @default(30)
+  created_at                       DateTime                      @default(now()) @db.Timestamp(6)
+  updated_at                       DateTime?                     @updatedAt @db.Timestamp(6)
+  payment_network                  String?                       @default("BSC") @db.VarChar(50)
+  wallet_address                   String?                       @db.VarChar(255)
+  is_super_admin                   Boolean                       @default(false)
+  sessions                         admin_sessions[]
+  reviewed_cancellations           vc_pool_cancellations[]
+  pool_exchange_orders             vc_pool_exchange_orders[]
+  reviewed_payments                vc_pool_payment_submissions[] @relation("PaymentReviewer")
+  pool_trades                      vc_pool_trades[]
+  pools                            vc_pools[]
+
+  @@map("admins")
+}
+
+model admin_sessions {
+  session_id         String   @id @default(uuid()) @db.Uuid
+  admin_id           String   @db.Uuid
+  issued_at          DateTime @default(now()) @db.Timestamp(6)
+  expires_at         DateTime @db.Timestamp(6)
+  revoked            Boolean  @default(false)
+  device_id          String?  @db.VarChar(255)
+  ip_address         String?  @db.VarChar(45)
+  refresh_token_hash String?
+  admin              admins   @relation(fields: [admin_id], references: [admin_id], onDelete: Cascade)
+
+  @@index([admin_id])
+  @@map("admin_sessions")
+}
+
+model vc_pools {
+  pool_id                  String                        @id @default(uuid()) @db.Uuid
+  admin_id                 String                        @db.Uuid
+  name                     String                        @db.VarChar(150)
+  description              String?
+  coin_type                String                        @default("USDT") @db.VarChar(10)
+  contribution_amount      Decimal                       @db.Decimal(20, 8)
+  max_members              Int
+  pool_fee_percent         Decimal                       @db.Decimal(5, 2)
+  admin_profit_fee_percent Decimal                       @db.Decimal(5, 2)
+  cancellation_fee_percent Decimal                       @db.Decimal(5, 2)
+  payment_window_minutes   Int                           @default(30)
+  duration_days            Int
+  status                   PoolStatus                    @default(draft)
+  started_at               DateTime?                     @db.Timestamp(6)
+  end_date                 DateTime?                     @db.Timestamp(6)
+  is_replica               Boolean                       @default(false)
+  original_pool_id         String?                       @db.Uuid
+  verified_members_count   Int                           @default(0)
+  reserved_seats_count     Int                           @default(0)
+  total_invested_usdt      Decimal?                      @db.Decimal(20, 8)
+  current_pool_value_usdt  Decimal?                      @db.Decimal(20, 8)
+  total_profit_usdt        Decimal?                      @db.Decimal(20, 8)
+  total_pool_fees_usdt     Decimal?                      @db.Decimal(20, 8)
+  admin_fee_earned_usdt    Decimal?                      @db.Decimal(20, 8)
+  is_archived              Boolean                       @default(false)
+  created_at               DateTime                      @default(now()) @db.Timestamp(6)
+  updated_at               DateTime?                     @updatedAt @db.Timestamp(6)
+  completed_at             DateTime?                     @db.Timestamp(6)
+  cancelled_at             DateTime?                     @db.Timestamp(6)
+  cancellations            vc_pool_cancellations[]
+  exchange_orders          vc_pool_exchange_orders[]
+  members                  vc_pool_members[]
+  payment_submissions      vc_pool_payment_submissions[]
+  payouts                  vc_pool_payouts[]
+  seat_reservations        vc_pool_seat_reservations[]
+  trades                   vc_pool_trades[]
+  vcPoolTransactions       vc_pool_transactions[]
+  admin                    admins                        @relation(fields: [admin_id], references: [admin_id])
+  original_pool            vc_pools?                     @relation("PoolReplica", fields: [original_pool_id], references: [pool_id])
+  replicas                 vc_pools[]                    @relation("PoolReplica")
+
+  @@index([admin_id])
+  @@index([status])
+  @@index([is_archived])
+  @@map("vc_pools")
+}
+
+model vc_pool_seat_reservations {
+  reservation_id     String                       @id @default(uuid()) @db.Uuid
+  pool_id            String                       @db.Uuid
+  user_id            String                       @db.Uuid
+  payment_method     VcPaymentMethod
+  reserved_at        DateTime                     @default(now()) @db.Timestamp(6)
+  expires_at         DateTime                     @db.Timestamp(6)
+  status             SeatReservationStatus        @default(reserved)
+  payment_submission vc_pool_payment_submissions?
+  pool               vc_pools                     @relation(fields: [pool_id], references: [pool_id])
+  user               users                        @relation(fields: [user_id], references: [user_id])
+
+  @@unique([pool_id, user_id])
+  @@index([pool_id])
+  @@index([user_id])
+  @@index([status])
+  @@index([expires_at])
+  @@map("vc_pool_seat_reservations")
+}
+
+model vc_pool_payment_submissions {
+  submission_id                String                    @id @default(uuid()) @db.Uuid
+  pool_id                      String                    @db.Uuid
+  user_id                      String                    @db.Uuid
+  reservation_id               String                    @unique @db.Uuid
+  payment_method               VcPaymentMethod
+  investment_amount            Decimal                   @db.Decimal(20, 8)
+  pool_fee_amount              Decimal                   @db.Decimal(20, 8)
+  total_amount                 Decimal                   @db.Decimal(20, 8)
+  stripe_checkout_session_id   String?                   @db.VarChar(255)
+  stripe_payment_intent_id     String?                   @unique @db.VarChar(255)
+  screenshot_url               String?
+  admin_notes                  String?                   @db.VarChar(500)
+  status                       PaymentSubmissionStatus   @default(pending)
+  payment_deadline             DateTime                  @db.Timestamp(6)
+  rejection_reason             String?                   @db.VarChar(500)
+  reviewed_by_admin_id         String?                   @db.Uuid
+  verified_at                  DateTime?                 @db.Timestamp(6)
+  submitted_at                 DateTime                  @default(now()) @db.Timestamp(6)
+  binance_amount_received_usdt Decimal?                  @db.Decimal(20, 8)
+  binance_payment_status       BinancePaymentStatus      @default(pending)
+  binance_tx_id                String?                   @unique @db.VarChar(255)
+  binance_tx_timestamp         DateTime?                 @db.Timestamp(6)
+  exact_amount_expected        Decimal?                  @db.Decimal(20, 8)
+  exact_amount_received        Decimal?                  @db.Decimal(20, 8)
+  refund_initiated_at          DateTime?                 @db.Timestamp(6)
+  refund_reason                String?                   @db.VarChar(500)
+  tx_hash                      String?                   @unique @db.VarChar(255)
+  user_wallet_address          String?                   @db.VarChar(255)
+  pool                         vc_pools                  @relation(fields: [pool_id], references: [pool_id])
+  reservation                  vc_pool_seat_reservations @relation(fields: [reservation_id], references: [reservation_id])
+  reviewing_admin              admins?                   @relation("PaymentReviewer", fields: [reviewed_by_admin_id], references: [admin_id])
+  user                         users                     @relation(fields: [user_id], references: [user_id])
+  transaction_record           vc_pool_transactions?     @relation("PaymentTransaction")
+
+  @@index([pool_id])
+  @@index([user_id])
+  @@index([status])
+  @@index([stripe_payment_intent_id])
+  @@index([binance_payment_status])
+  @@map("vc_pool_payment_submissions")
+}
+
+model vc_pool_members {
+  member_id            String                 @id @default(uuid()) @db.Uuid
+  pool_id              String                 @db.Uuid
+  user_id              String                 @db.Uuid
+  payment_method       VcPaymentMethod
+  invested_amount_usdt Decimal                @db.Decimal(20, 8)
+  share_percent        Decimal                @db.Decimal(8, 5)
+  user_binance_uid     String?                @db.VarChar(100)
+  is_active            Boolean                @default(true)
+  joined_at            DateTime               @default(now()) @db.Timestamp(6)
+  exited_at            DateTime?              @db.Timestamp(6)
+  user_wallet_address  String?                @db.VarChar(255)
+  cancellation         vc_pool_cancellations?
+  pool                 vc_pools               @relation(fields: [pool_id], references: [pool_id])
+  user                 users                  @relation(fields: [user_id], references: [user_id])
+  payouts              vc_pool_payouts[]
+  vcPoolTransactions   vc_pool_transactions[]
+
+  @@unique([pool_id, user_id])
+  @@index([pool_id])
+  @@index([user_id])
+  @@map("vc_pool_members")
+}
+
+model vc_pool_trades {
+  trade_id         String       @id @default(uuid()) @db.Uuid
+  pool_id          String       @db.Uuid
+  strategy_id      String?      @db.Uuid
+  admin_id         String       @db.Uuid
+  asset_pair       String       @db.VarChar(20)
+  action           SignalAction
+  quantity         Decimal      @db.Decimal(30, 10)
+  entry_price_usdt Decimal      @db.Decimal(20, 8)
+  exit_price_usdt  Decimal?     @db.Decimal(20, 8)
+  pnl_usdt         Decimal?     @db.Decimal(20, 8)
+  is_open          Boolean      @default(true)
+  binance_order_id String?      @db.VarChar(100)
+  notes            String?
+  traded_at        DateTime     @db.Timestamp(6)
+  closed_at        DateTime?    @db.Timestamp(6)
+  created_at       DateTime     @default(now()) @db.Timestamp(6)
+  admin            admins       @relation(fields: [admin_id], references: [admin_id])
+  pool             vc_pools     @relation(fields: [pool_id], references: [pool_id])
+  strategy         strategies?  @relation(fields: [strategy_id], references: [strategy_id])
+
+  @@index([pool_id])
+  @@index([strategy_id])
+  @@index([is_open])
+  @@index([pool_id, strategy_id])
+  @@map("vc_pool_trades")
+}
+
+model vc_pool_exchange_orders {
+  order_id          String    @id @default(uuid()) @db.Uuid
+  pool_id           String    @db.Uuid
+  admin_id          String    @db.Uuid
+  symbol            String    @db.VarChar(20)
+  side              String    @db.VarChar(10)
+  order_type        String    @db.VarChar(20)
+  quantity          Decimal   @db.Decimal(30, 10)
+  entry_price_usdt  Decimal   @db.Decimal(20, 8)
+  exchange_order_id String?   @db.VarChar(100)
+  is_open           Boolean   @default(true)
+  exit_price_usdt   Decimal?  @db.Decimal(20, 8)
+  realized_pnl_usdt Decimal?  @db.Decimal(20, 8)
+  opened_at         DateTime  @default(now()) @db.Timestamp(6)
+  closed_at         DateTime? @db.Timestamp(6)
+  created_at        DateTime  @default(now()) @db.Timestamp(6)
+  admin             admins    @relation(fields: [admin_id], references: [admin_id])
+  pool              vc_pools  @relation(fields: [pool_id], references: [pool_id])
+
+  @@index([pool_id])
+  @@index([pool_id, is_open])
+  @@index([admin_id])
+  @@map("vc_pool_exchange_orders")
+}
+
+model vc_pool_cancellations {
+  cancellation_id        String            @id @default(uuid()) @db.Uuid
+  pool_id                String            @db.Uuid
+  member_id              String            @unique @db.Uuid
+  pool_status_at_request PoolStatus
+  invested_amount        Decimal           @db.Decimal(20, 8)
+  share_percent_at_exit  Decimal?          @db.Decimal(8, 5)
+  pool_value_at_exit     Decimal?          @db.Decimal(20, 8)
+  member_value_at_exit   Decimal           @db.Decimal(20, 8)
+  cancellation_fee_pct   Decimal           @db.Decimal(5, 2)
+  fee_amount             Decimal           @db.Decimal(20, 8)
+  refund_amount          Decimal           @db.Decimal(20, 8)
+  stripe_refund_id       String?           @db.VarChar(255)
+  stripe_transfer_id     String?           @db.VarChar(255)
+  binance_refund_tx_id   String?           @db.VarChar(255)
+  status                 ExitRequestStatus @default(pending)
+  requested_at           DateTime          @default(now()) @db.Timestamp(6)
+  reviewed_by_admin_id   String?           @db.Uuid
+  reviewed_at            DateTime?         @db.Timestamp(6)
+  rejection_reason       String?           @db.VarChar(500)
+  refunded_at            DateTime?         @db.Timestamp(6)
+  member                 vc_pool_members   @relation(fields: [member_id], references: [member_id])
+  pool                   vc_pools          @relation(fields: [pool_id], references: [pool_id])
+  reviewing_admin        admins?           @relation(fields: [reviewed_by_admin_id], references: [admin_id])
+
+  @@index([pool_id])
+  @@index([member_id])
+  @@index([status])
+  @@map("vc_pool_cancellations")
+}
+
+model vc_pool_payouts {
+  payout_id          String           @id @default(uuid()) @db.Uuid
+  pool_id            String           @db.Uuid
+  member_id          String           @db.Uuid
+  payout_type        PayoutType
+  initial_investment Decimal          @db.Decimal(20, 8)
+  share_percent      Decimal          @db.Decimal(8, 5)
+  pool_final_value   Decimal?         @db.Decimal(20, 8)
+  gross_payout       Decimal          @db.Decimal(20, 8)
+  admin_fee_deducted Decimal          @db.Decimal(20, 8)
+  net_payout         Decimal          @db.Decimal(20, 8)
+  profit_loss        Decimal          @db.Decimal(20, 8)
+  stripe_refund_id   String?          @db.VarChar(255)
+  stripe_transfer_id String?          @db.VarChar(255)
+  binance_tx_id      String?          @db.VarChar(255)
+  status             PoolPayoutStatus @default(pending)
+  paid_at            DateTime?        @db.Timestamp(6)
+  notes              String?
+  created_at         DateTime         @default(now()) @db.Timestamp(6)
+  member             vc_pool_members  @relation(fields: [member_id], references: [member_id])
+  pool               vc_pools         @relation(fields: [pool_id], references: [pool_id])
+
+  @@index([pool_id])
+  @@index([member_id])
+  @@index([status])
+  @@map("vc_pool_payouts")
+}
+
+model vc_pool_transactions {
+  transaction_id         String                       @id @default(uuid()) @db.Uuid
+  pool_id                String                       @db.Uuid
+  user_id                String                       @db.Uuid
+  payment_submission_id  String?                      @unique @db.Uuid
+  member_id              String?                      @db.Uuid
+  transaction_type       String                       @db.VarChar(50)
+  amount_usdt            Decimal                      @db.Decimal(20, 8)
+  description            String?
+  binance_tx_id          String?                      @unique @db.VarChar(255)
+  binance_tx_timestamp   DateTime?                    @db.Timestamp(6)
+  expected_amount        Decimal?                     @db.Decimal(20, 8)
+  actual_amount_received Decimal?                     @db.Decimal(20, 8)
+  status                 String                       @db.VarChar(50)
+  created_at             DateTime                     @default(now()) @db.Timestamp(6)
+  resolved_at            DateTime?                    @db.Timestamp(6)
+  member                 vc_pool_members?             @relation(fields: [member_id], references: [member_id])
+  payment_submission     vc_pool_payment_submissions? @relation("PaymentTransaction", fields: [payment_submission_id], references: [submission_id])
+  pool                   vc_pools                     @relation(fields: [pool_id], references: [pool_id])
+  user                   users                        @relation(fields: [user_id], references: [user_id])
+
+  @@index([pool_id])
+  @@index([user_id])
+  @@index([status])
+  @@index([created_at])
+  @@index([binance_tx_id])
+  @@map("vc_pool_transactions")
+}
+
+model user_credits {
+  credit_id          String    @id @default(uuid()) @db.Uuid
+  user_id            String    @db.Uuid
+  credit_amount_usdt Decimal   @db.Decimal(20, 8)
+  source             String    @db.VarChar(50)
+  is_spent           Boolean   @default(false)
+  spent_on_pool_id   String?   @db.Uuid
+  spent_amount       Decimal?  @db.Decimal(20, 8)
+  created_at         DateTime  @default(now()) @db.Timestamp(6)
+  spent_at           DateTime? @db.Timestamp(6)
+  user               users     @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([is_spent])
+  @@map("user_credits")
+}
+
+model options_orders {
+  order_id         String             @id @default(uuid()) @db.Uuid
+  user_id          String             @db.Uuid
+  signal_id        String?            @db.Uuid
+  contract_symbol  String             @db.VarChar(50)
+  underlying       String             @db.VarChar(20)
+  strike           Decimal            @db.Decimal(20, 8)
+  expiry           DateTime           @db.Timestamp(6)
+  option_type      OptionType
+  side             String             @db.VarChar(10)
+  quantity         Decimal            @db.Decimal(30, 10)
+  price            Decimal?           @db.Decimal(20, 8)
+  filled_quantity  Decimal?           @db.Decimal(30, 10)
+  avg_fill_price   Decimal?           @db.Decimal(20, 8)
+  fee              Decimal?           @db.Decimal(20, 8)
+  binance_order_id String?            @db.VarChar(100)
+  broker_order_id  String?            @db.VarChar(100)
+  group_id         String?            @db.Uuid
+  position_intent  String?            @db.VarChar(20)
+  venue            OptionsVenue       @default(BINANCE)
+  status           OptionOrderStatus  @default(pending)
+  order_type       String             @default("LIMIT") @db.VarChar(20)
+  max_loss         Decimal?           @db.Decimal(20, 8)
+  greeks_at_entry  Json?              @db.Json
+  created_at       DateTime           @default(now()) @db.Timestamp(6)
+  updated_at       DateTime?          @updatedAt @db.Timestamp(6)
+  signal           strategy_signals?  @relation(fields: [signal_id], references: [signal_id])
+  user             users              @relation(fields: [user_id], references: [user_id])
+  position         options_positions? @relation("OrderToPosition")
+
+  @@index([user_id])
+  @@index([signal_id])
+  @@index([status])
+  @@index([underlying])
+  @@index([user_id, status])
+  @@index([user_id, venue])
+  @@index([group_id])
+  @@map("options_orders")
+}
+
+model options_positions {
+  position_id       String          @id @default(uuid()) @db.Uuid
+  user_id           String          @db.Uuid
+  order_id          String?         @unique @db.Uuid
+  contract_symbol   String          @db.VarChar(50)
+  underlying        String          @db.VarChar(20)
+  strike            Decimal         @db.Decimal(20, 8)
+  expiry            DateTime        @db.Timestamp(6)
+  option_type       OptionType
+  quantity          Decimal         @db.Decimal(30, 10)
+  avg_premium       Decimal         @db.Decimal(20, 8)
+  current_premium   Decimal?        @db.Decimal(20, 8)
+  unrealized_pnl    Decimal?        @db.Decimal(20, 8)
+  realized_pnl      Decimal?        @db.Decimal(20, 8)
+  delta             Decimal?        @db.Decimal(10, 6)
+  gamma             Decimal?        @db.Decimal(10, 6)
+  theta             Decimal?        @db.Decimal(10, 6)
+  vega              Decimal?        @db.Decimal(10, 6)
+  venue             OptionsVenue    @default(BINANCE)
+  is_open           Boolean         @default(true)
+  opened_at         DateTime        @default(now()) @db.Timestamp(6)
+  closed_at         DateTime?       @db.Timestamp(6)
+  updated_at        DateTime?       @updatedAt @db.Timestamp(6)
+  originating_order options_orders? @relation("OrderToPosition", fields: [order_id], references: [order_id])
+  user              users           @relation(fields: [user_id], references: [user_id])
+
+  @@index([user_id])
+  @@index([is_open])
+  @@index([user_id, is_open])
+  @@index([underlying])
+  @@index([expiry])
+  @@index([user_id, venue])
+  @@map("options_positions")
+}
+
+model options_signals {
+  options_signal_id     String           @id @default(uuid()) @db.Uuid
+  signal_id             String           @db.Uuid
+  recommended_type      OptionType
+  recommended_strike    Decimal          @db.Decimal(20, 8)
+  recommended_expiry    DateTime         @db.Timestamp(6)
+  iv_rank               Decimal?         @db.Decimal(6, 4)
+  iv_value              Decimal?         @db.Decimal(10, 6)
+  estimated_premium     Decimal?         @db.Decimal(20, 8)
+  max_loss              Decimal?         @db.Decimal(20, 8)
+  recommended_qty       Decimal?         @db.Decimal(30, 10)
+  greeks_snapshot       Json?            @db.Json
+  liquidity_ok          Boolean          @default(true)
+  reasoning             String?
+  confidence_adjustment Decimal?         @db.Decimal(5, 4)
+  created_at            DateTime         @default(now()) @db.Timestamp(6)
+  signal                strategy_signals @relation(fields: [signal_id], references: [signal_id])
+
+  @@index([signal_id])
+  @@map("options_signals")
+}
+
+model options_iv_history {
+  id            String       @id @default(uuid()) @db.Uuid
+  underlying    String       @db.VarChar(20)
+  venue         OptionsVenue @default(BINANCE)
+  iv_value      Decimal      @db.Decimal(10, 6)
+  iv_rank       Decimal?     @db.Decimal(6, 4)
+  recorded_at   DateTime     @default(now()) @db.Timestamp(6)
+  iv_percentile Decimal?     @db.Decimal(6, 4)
+
+  @@index([underlying, recorded_at])
+  @@index([venue, underlying, recorded_at])
+  @@map("options_iv_history")
+}
+
+model options_signals_ai {
+  id          String       @id @default(uuid()) @db.Uuid
+  underlying  String       @db.VarChar(20)
+  venue       OptionsVenue @default(BINANCE)
+  strategy    String       @db.VarChar(50)
+  direction   String       @db.VarChar(10)
+  score       Decimal      @db.Decimal(5, 4)
+  confidence  Decimal      @db.Decimal(5, 4)
+  iv_rank     Decimal?     @db.Decimal(6, 4)
+  iv_value    Decimal?     @db.Decimal(10, 6)
+  spot_price  Decimal?     @db.Decimal(20, 8)
+  legs        Json         @db.Json
+  reasoning   String?
+  risk_reward String?      @db.VarChar(20)
+  max_profit  String?      @db.VarChar(50)
+  max_loss    String?      @db.VarChar(50)
+  expires_at  DateTime     @db.Timestamp(6)
+  created_at  DateTime     @default(now()) @db.Timestamp(6)
+
+  @@index([underlying, created_at])
+  @@index([strategy])
+  @@index([venue, underlying, created_at])
+  @@map("options_signals_ai")
+}
+
+model trade_fees {
+  fee_id                 String         @id @default(uuid()) @db.Uuid
+  user_id                String         @db.Uuid
+  trade_reference_id     String?        @db.VarChar(255)
+  asset_symbol           String         @db.VarChar(50)
+  trade_side             String         @db.VarChar(10)
+  trade_value_usd        Decimal        @db.Decimal(18, 4)
+  fee_percent            Decimal        @default(0.001) @db.Decimal(8, 6)
+  fee_amount_usd         Decimal        @db.Decimal(18, 6)
+  status                 TradeFeeStatus @default(pending)
+  source                 TradeFeeSource @default(top_trade_crypto)
+  billing_month          String         @db.VarChar(7)
+  stripe_invoice_item_id String?        @db.VarChar(255)
+  created_at             DateTime       @default(now()) @db.Timestamp(6)
+  user                   users          @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id, billing_month])
+  @@index([status])
+  @@map("trade_fees")
+}
+
+model monthly_fee_summaries {
+  summary_id             String           @id @default(uuid()) @db.Uuid
+  user_id                String           @db.Uuid
+  billing_month          String           @db.VarChar(7)
+  total_trades           Int              @default(0)
+  total_trade_volume_usd Decimal          @default(0) @db.Decimal(18, 4)
+  total_fees_usd         Decimal          @default(0) @db.Decimal(18, 6)
+  status                 MonthlyFeeStatus @default(accumulating)
+  stripe_invoice_id      String?          @db.VarChar(255)
+  paid_at                DateTime?        @db.Timestamp(6)
+  created_at             DateTime         @default(now()) @db.Timestamp(6)
+  updated_at             DateTime?        @updatedAt @db.Timestamp(6)
+  user                   users            @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@unique([user_id, billing_month])
+  @@index([status])
+  @@map("monthly_fee_summaries")
+}
+
+/// Global token configuration (singleton row, id = 1)
+model qhq_token_config {
+  id                  Int       @id @default(1)
+  total_supply        Decimal   @default(100000000) @db.Decimal(30, 18)
+  circulating_supply  Decimal   @default(0) @db.Decimal(30, 18)
+  total_burned        Decimal   @default(0) @db.Decimal(30, 18)
+  contract_address    String?   @db.VarChar(42)
+  network             String    @default("base") @db.VarChar(20)
+  current_merkle_root String?   @db.VarChar(66)
+  merkle_last_updated DateTime? @db.Timestamp(6)
+  updated_at          DateTime  @updatedAt @db.Timestamp(6)
+
+  @@map("qhq_token_config")
+}
+
+/// Off-chain balance ledger — one row per user
+model qhq_balances {
+  id                String   @id @default(uuid()) @db.Uuid
+  user_id           String   @unique @db.Uuid
+  pending_balance   Decimal  @default(0) @db.Decimal(30, 18)
+  cumulative_earned Decimal  @default(0) @db.Decimal(30, 18)
+  lifetime_claimed  Decimal  @default(0) @db.Decimal(30, 18)
+  lifetime_spent    Decimal  @default(0) @db.Decimal(30, 18)
+  lifetime_burned   Decimal  @default(0) @db.Decimal(30, 18)
+  created_at        DateTime @default(now()) @db.Timestamp(6)
+  updated_at        DateTime @updatedAt @db.Timestamp(6)
+  user              users    @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@map("qhq_balances")
+}
+
+/// Full audit log of all QHQ movements
+model qhq_transactions {
+  id            String             @id @default(uuid()) @db.Uuid
+  user_id       String             @db.Uuid
+  type          QhqTransactionType
+  amount        Decimal            @db.Decimal(30, 18)
+  balance_after Decimal            @db.Decimal(30, 18)
+  description   String             @db.VarChar(500)
+  reference_id  String?            @db.VarChar(255)
+  tx_hash       String?            @db.VarChar(66)
+  created_at    DateTime           @default(now()) @db.Timestamp(6)
+  user          users              @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id, created_at])
+  @@index([type])
+  @@map("qhq_transactions")
+}
+
+/// Links a platform user account to a Base chain wallet address
+model qhq_wallet_links {
+  id             String   @id @default(uuid()) @db.Uuid
+  user_id        String   @unique @db.Uuid
+  wallet_address String   @unique @db.VarChar(42)
+  network        String   @default("base") @db.VarChar(20)
+  is_verified    Boolean  @default(false)
+  linked_at      DateTime @default(now()) @db.Timestamp(6)
+  user           users    @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([wallet_address])
+  @@map("qhq_wallet_links")
+}
+
+/// Admin-configurable reward rule amounts
+model qhq_reward_rules {
+  id          String   @id @default(uuid()) @db.Uuid
+  rule_key    String   @unique @db.VarChar(100)
+  amount      Decimal  @db.Decimal(30, 18)
+  is_active   Boolean  @default(true)
+  description String   @db.VarChar(255)
+  created_at  DateTime @default(now()) @db.Timestamp(6)
+  updated_at  DateTime @updatedAt @db.Timestamp(6)
+
+  @@map("qhq_reward_rules")
+}
+
+/// Tracks pending subscription discounts purchased with QHQ
+model qhq_subscription_discounts {
+  id               String    @id @default(uuid()) @db.Uuid
+  user_id          String    @db.Uuid
+  qhq_spent        Decimal   @db.Decimal(30, 18)
+  discount_percent Int
+  applied          Boolean   @default(false)
+  applied_at       DateTime? @db.Timestamp(6)
+  expires_at       DateTime  @db.Timestamp(6)
+  created_at       DateTime  @default(now()) @db.Timestamp(6)
+
+  @@index([user_id, applied])
+  @@map("qhq_subscription_discounts")
+}
+
+/// Contact form submissions from homepage and help-support page
+model contact_submissions {
+  id         String   @id @default(uuid()) @db.Uuid
+  user_id    String?  @db.Uuid
+  name       String   @db.VarChar(100)
+  email      String   @db.VarChar(255)
+  company    String?  @db.VarChar(100)
+  phone      String?  @db.VarChar(20)
+  subject    String   @db.VarChar(50)
+  message    String
+  source     String   @default("homepage") @db.VarChar(20)
+  created_at DateTime @default(now()) @db.Timestamp(6)
+  user       users?   @relation(fields: [user_id], references: [user_id])
+
+  @@index([user_id])
+  @@index([created_at])
+  @@map("contact_submissions")
+}
+
+model pending_queued_trades {
+  id                  String            @id @default(uuid()) @db.Uuid
+  user_id             String            @db.Uuid
+  connection_id       String            @db.Uuid
+  symbol              String            @db.VarChar(50)
+  side                String            @db.VarChar(10)
+  order_type          String            @default("MARKET") @db.VarChar(10)
+  quantity            Decimal           @db.Decimal(20, 8)
+  limit_price         Decimal?          @db.Decimal(20, 8)
+  take_profit_pct     Decimal?          @db.Decimal(10, 6)
+  stop_loss_pct       Decimal?          @db.Decimal(10, 6)
+  source              String            @default("top_trade") @db.VarChar(30)
+  status              QueuedTradeStatus @default(queued)
+  alpaca_buy_order_id String?           @db.VarChar(100)
+  tp_order_id         String?           @db.VarChar(100)
+  sl_order_id         String?           @db.VarChar(100)
+  failure_reason      String?
+  queued_at           DateTime          @default(now()) @db.Timestamp(6)
+  submitted_at        DateTime?         @db.Timestamp(6)
+  filled_at           DateTime?         @db.Timestamp(6)
+  canceled_at         DateTime?         @db.Timestamp(6)
+  expires_at          DateTime?         @db.Timestamp(6)
+  buy_filled_at       DateTime?         @db.Timestamp(6)
+  protection_attempts Int               @default(0)
+
+  @@index([user_id])
+  @@index([connection_id])
+  @@index([status])
+  @@index([user_id, status])
+  @@map("pending_queued_trades")
 }
 
 enum KycStatus {
@@ -1023,8 +1680,6 @@ enum PaymentStatus {
   cancelled
 }
 
-// ── VC Pool Enums ──
-
 enum PoolStatus {
   draft
   open
@@ -1080,8 +1735,6 @@ enum BinancePaymentStatus {
   refunded
 }
 
-// ── Onboarding Email Reminders ──
-
 enum OnboardingState {
   SIGNED_UP
   PERSONAL_INFO
@@ -1097,437 +1750,14 @@ enum ReminderStatus {
   CANCELLED
 }
 
-model onboarding_email_reminders {
-  id               String          @id @default(uuid()) @db.Uuid
-  user_id          String          @db.Uuid
-  onboarding_state OnboardingState
-  delay_label      String          @db.VarChar(10)
-  bull_job_id      String          @db.VarChar(255)
-  status           ReminderStatus  @default(QUEUED)
-  scheduled_at     DateTime        @db.Timestamp(6)
-  sent_at          DateTime?       @db.Timestamp(6)
-  cancelled_at     DateTime?       @db.Timestamp(6)
-  created_at       DateTime        @default(now()) @db.Timestamp(6)
-
-  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
-
-  @@index([user_id, status])
-  @@index([user_id, onboarding_state])
-  @@map("onboarding_email_reminders")
-}
-
-// ── VC Pool Models ──
-
-model admins {
-  admin_id       String  @id @default(uuid()) @db.Uuid
-  email          String  @unique @db.VarChar(255)
-  password_hash  String  @db.VarChar(255)
-  full_name      String? @db.VarChar(120)
-  is_super_admin Boolean @default(false)
-
-  stripe_secret_key_encrypted     String?
-  stripe_publishable_key          String? @db.VarChar(255)
-  stripe_webhook_secret_encrypted String?
-
-  binance_uid                  String? @db.VarChar(100)
-  wallet_address               String? @db.VarChar(255)
-  payment_network              String? @default("BSC") @db.VarChar(50)
-  binance_api_key_encrypted    String?
-  binance_api_secret_encrypted String?
-
-  default_pool_fee_percent         Decimal @default(5.00) @db.Decimal(5, 2)
-  default_admin_profit_fee_percent Decimal @default(20.00) @db.Decimal(5, 2)
-  default_cancellation_fee_percent Decimal @default(5.00) @db.Decimal(5, 2)
-  default_payment_window_minutes   Int     @default(30)
-
-  created_at DateTime  @default(now()) @db.Timestamp(6)
-  updated_at DateTime? @updatedAt @db.Timestamp(6)
-
-  sessions               admin_sessions[]
-  pools                  vc_pools[]
-  pool_trades            vc_pool_trades[]
-  pool_exchange_orders   vc_pool_exchange_orders[]
-  reviewed_payments      vc_pool_payment_submissions[] @relation("PaymentReviewer")
-  reviewed_cancellations vc_pool_cancellations[]
-
-  @@map("admins")
-}
-
-model admin_sessions {
-  session_id         String   @id @default(uuid()) @db.Uuid
-  admin_id           String   @db.Uuid
-  issued_at          DateTime @default(now()) @db.Timestamp(6)
-  expires_at         DateTime @db.Timestamp(6)
-  revoked            Boolean  @default(false)
-  device_id          String?  @db.VarChar(255)
-  ip_address         String?  @db.VarChar(45)
-  refresh_token_hash String?
-
-  admin admins @relation(fields: [admin_id], references: [admin_id], onDelete: Cascade)
-
-  @@index([admin_id])
-  @@map("admin_sessions")
-}
-
-model vc_pools {
-  pool_id  String @id @default(uuid()) @db.Uuid
-  admin_id String @db.Uuid
-
-  name        String  @db.VarChar(150)
-  description String? @db.Text
-  coin_type   String  @default("USDT") @db.VarChar(10)
-
-  contribution_amount Decimal @db.Decimal(20, 8)
-  max_members         Int
-
-  pool_fee_percent         Decimal @db.Decimal(5, 2)
-  admin_profit_fee_percent Decimal @db.Decimal(5, 2)
-  cancellation_fee_percent Decimal @db.Decimal(5, 2)
-
-  payment_window_minutes Int @default(30)
-  duration_days          Int
-
-  status PoolStatus @default(draft)
-
-  started_at DateTime? @db.Timestamp(6)
-  end_date   DateTime? @db.Timestamp(6)
-
-  is_replica       Boolean @default(false)
-  original_pool_id String? @db.Uuid
-
-  verified_members_count Int @default(0)
-  reserved_seats_count   Int @default(0)
-
-  total_invested_usdt     Decimal? @db.Decimal(20, 8)
-  current_pool_value_usdt Decimal? @db.Decimal(20, 8)
-  total_profit_usdt       Decimal? @db.Decimal(20, 8)
-  total_pool_fees_usdt    Decimal? @db.Decimal(20, 8)
-  admin_fee_earned_usdt   Decimal? @db.Decimal(20, 8)
-
-  is_archived  Boolean   @default(false)
-  created_at   DateTime  @default(now()) @db.Timestamp(6)
-  updated_at   DateTime? @updatedAt @db.Timestamp(6)
-  completed_at DateTime? @db.Timestamp(6)
-  cancelled_at DateTime? @db.Timestamp(6)
-
-  admin               admins                        @relation(fields: [admin_id], references: [admin_id])
-  original_pool       vc_pools?                     @relation("PoolReplica", fields: [original_pool_id], references: [pool_id])
-  replicas            vc_pools[]                    @relation("PoolReplica")
-  members             vc_pool_members[]
-  seat_reservations   vc_pool_seat_reservations[]
-  payment_submissions vc_pool_payment_submissions[]
-  trades              vc_pool_trades[]
-  exchange_orders     vc_pool_exchange_orders[]
-  payouts             vc_pool_payouts[]
-  cancellations       vc_pool_cancellations[]
-  vcPoolTransactions  vc_pool_transactions[]
-
-  @@index([admin_id])
-  @@index([status])
-  @@index([is_archived])
-  @@map("vc_pools")
-}
-
-model vc_pool_seat_reservations {
-  reservation_id String @id @default(uuid()) @db.Uuid
-  pool_id        String @db.Uuid
-  user_id        String @db.Uuid
-
-  payment_method VcPaymentMethod
-  reserved_at    DateTime              @default(now()) @db.Timestamp(6)
-  expires_at     DateTime              @db.Timestamp(6)
-  status         SeatReservationStatus @default(reserved)
-
-  pool               vc_pools                     @relation(fields: [pool_id], references: [pool_id])
-  user               users                        @relation(fields: [user_id], references: [user_id])
-  payment_submission vc_pool_payment_submissions?
-
-  @@unique([pool_id, user_id])
-  @@index([pool_id])
-  @@index([user_id])
-  @@index([status])
-  @@index([expires_at])
-  @@map("vc_pool_seat_reservations")
-}
-
-model vc_pool_payment_submissions {
-  submission_id  String @id @default(uuid()) @db.Uuid
-  pool_id        String @db.Uuid
-  user_id        String @db.Uuid
-  reservation_id String @unique @db.Uuid
-
-  payment_method    VcPaymentMethod
-  investment_amount Decimal         @db.Decimal(20, 8)
-  pool_fee_amount   Decimal         @db.Decimal(20, 8)
-  total_amount      Decimal         @db.Decimal(20, 8)
-
-  stripe_checkout_session_id String? @db.VarChar(255)
-  stripe_payment_intent_id   String? @unique @db.VarChar(255)
-
-  screenshot_url String?
-  admin_notes    String? @db.VarChar(500)
-
-  status           PaymentSubmissionStatus @default(pending)
-  payment_deadline DateTime                @db.Timestamp(6)
-
-  rejection_reason     String?   @db.VarChar(500)
-  reviewed_by_admin_id String?   @db.Uuid
-  verified_at          DateTime? @db.Timestamp(6)
-  submitted_at         DateTime  @default(now()) @db.Timestamp(6)
-
-  // Binance P2P TX Details (USD only)
-  binance_tx_id                String?   @unique @db.VarChar(255)
-  binance_tx_timestamp         DateTime? @db.Timestamp(6)
-  binance_amount_received_usdt Decimal?  @db.Decimal(20, 8)
-
-  // On-Chain TX Details
-  tx_hash             String? @unique @db.VarChar(255)
-  user_wallet_address String? @db.VarChar(255)
-
-  // Exact Amount Validation
-  exact_amount_expected Decimal? @db.Decimal(20, 8)
-  exact_amount_received Decimal? @db.Decimal(20, 8)
-
-  // Payment Verification Status
-  binance_payment_status BinancePaymentStatus @default(pending)
-  refund_initiated_at    DateTime?            @db.Timestamp(6)
-  refund_reason          String?              @db.VarChar(500)
-
-  pool               vc_pools                  @relation(fields: [pool_id], references: [pool_id])
-  user               users                     @relation(fields: [user_id], references: [user_id])
-  reservation        vc_pool_seat_reservations @relation(fields: [reservation_id], references: [reservation_id])
-  reviewing_admin    admins?                   @relation("PaymentReviewer", fields: [reviewed_by_admin_id], references: [admin_id])
-  transaction_record vc_pool_transactions?     @relation("PaymentTransaction")
-
-  @@index([pool_id])
-  @@index([user_id])
-  @@index([status])
-  @@index([stripe_payment_intent_id])
-  @@index([binance_payment_status])
-  @@map("vc_pool_payment_submissions")
-}
-
-model vc_pool_members {
-  member_id String @id @default(uuid()) @db.Uuid
-  pool_id   String @db.Uuid
-  user_id   String @db.Uuid
-
-  payment_method       VcPaymentMethod
-  invested_amount_usdt Decimal         @db.Decimal(20, 8)
-  share_percent        Decimal         @db.Decimal(8, 5)
-  user_binance_uid     String?         @db.VarChar(100)
-  user_wallet_address  String?         @db.VarChar(255)
-
-  is_active Boolean   @default(true)
-  joined_at DateTime  @default(now()) @db.Timestamp(6)
-  exited_at DateTime? @db.Timestamp(6)
-
-  pool               vc_pools               @relation(fields: [pool_id], references: [pool_id])
-  user               users                  @relation(fields: [user_id], references: [user_id])
-  payouts            vc_pool_payouts[]
-  cancellation       vc_pool_cancellations?
-  vcPoolTransactions vc_pool_transactions[]
-
-  @@unique([pool_id, user_id])
-  @@index([pool_id])
-  @@index([user_id])
-  @@map("vc_pool_members")
-}
-
-model vc_pool_trades {
-  trade_id    String  @id @default(uuid()) @db.Uuid
-  pool_id     String  @db.Uuid
-  strategy_id String? @db.Uuid
-  admin_id    String  @db.Uuid
-
-  asset_pair       String       @db.VarChar(20)
-  action           SignalAction
-  quantity         Decimal      @db.Decimal(30, 10)
-  entry_price_usdt Decimal      @db.Decimal(20, 8)
-  exit_price_usdt  Decimal?     @db.Decimal(20, 8)
-  pnl_usdt         Decimal?     @db.Decimal(20, 8)
-  is_open          Boolean      @default(true)
-
-  binance_order_id String? @db.VarChar(100)
-
-  notes      String?   @db.Text
-  traded_at  DateTime  @db.Timestamp(6)
-  closed_at  DateTime? @db.Timestamp(6)
-  created_at DateTime  @default(now()) @db.Timestamp(6)
-
-  pool     vc_pools    @relation(fields: [pool_id], references: [pool_id])
-  strategy strategies? @relation(fields: [strategy_id], references: [strategy_id])
-  admin    admins      @relation(fields: [admin_id], references: [admin_id])
-
-  @@index([pool_id])
-  @@index([strategy_id])
-  @@index([is_open])
-  @@index([pool_id, strategy_id])
-  @@map("vc_pool_trades")
-}
-
-model vc_pool_exchange_orders {
-  order_id          String    @id @default(uuid()) @db.Uuid
-  pool_id           String    @db.Uuid
-  admin_id          String    @db.Uuid
-  symbol            String    @db.VarChar(20)
-  side              String    @db.VarChar(10)
-  order_type        String    @db.VarChar(20)
-  quantity          Decimal   @db.Decimal(30, 10)
-  entry_price_usdt  Decimal   @db.Decimal(20, 8)
-  exchange_order_id String?   @db.VarChar(100)
-  is_open           Boolean   @default(true)
-  exit_price_usdt   Decimal?  @db.Decimal(20, 8)
-  realized_pnl_usdt Decimal?  @db.Decimal(20, 8)
-  opened_at         DateTime  @default(now()) @db.Timestamp(6)
-  closed_at         DateTime? @db.Timestamp(6)
-  created_at        DateTime  @default(now()) @db.Timestamp(6)
-
-  pool  vc_pools @relation(fields: [pool_id], references: [pool_id])
-  admin admins   @relation(fields: [admin_id], references: [admin_id])
-
-  @@index([pool_id])
-  @@index([pool_id, is_open])
-  @@index([admin_id])
-  @@map("vc_pool_exchange_orders")
-}
-
-model vc_pool_cancellations {
-  cancellation_id String @id @default(uuid()) @db.Uuid
-  pool_id         String @db.Uuid
-  member_id       String @unique @db.Uuid
-
-  pool_status_at_request PoolStatus
-  invested_amount        Decimal    @db.Decimal(20, 8)
-  share_percent_at_exit  Decimal?   @db.Decimal(8, 5)
-  pool_value_at_exit     Decimal?   @db.Decimal(20, 8)
-  member_value_at_exit   Decimal    @db.Decimal(20, 8)
-
-  cancellation_fee_pct Decimal @db.Decimal(5, 2)
-  fee_amount           Decimal @db.Decimal(20, 8)
-  refund_amount        Decimal @db.Decimal(20, 8)
-
-  stripe_refund_id     String? @db.VarChar(255)
-  stripe_transfer_id   String? @db.VarChar(255)
-  binance_refund_tx_id String? @db.VarChar(255)
-
-  status               ExitRequestStatus @default(pending)
-  requested_at         DateTime          @default(now()) @db.Timestamp(6)
-  reviewed_by_admin_id String?           @db.Uuid
-  reviewed_at          DateTime?         @db.Timestamp(6)
-  rejection_reason     String?           @db.VarChar(500)
-  refunded_at          DateTime?         @db.Timestamp(6)
-
-  pool            vc_pools        @relation(fields: [pool_id], references: [pool_id])
-  member          vc_pool_members @relation(fields: [member_id], references: [member_id])
-  reviewing_admin admins?         @relation(fields: [reviewed_by_admin_id], references: [admin_id])
-
-  @@index([pool_id])
-  @@index([member_id])
-  @@index([status])
-  @@map("vc_pool_cancellations")
-}
-
-model vc_pool_payouts {
-  payout_id String @id @default(uuid()) @db.Uuid
-  pool_id   String @db.Uuid
-  member_id String @db.Uuid
-
-  payout_type PayoutType
-
-  initial_investment Decimal  @db.Decimal(20, 8)
-  share_percent      Decimal  @db.Decimal(8, 5)
-  pool_final_value   Decimal? @db.Decimal(20, 8)
-  gross_payout       Decimal  @db.Decimal(20, 8)
-  admin_fee_deducted Decimal  @db.Decimal(20, 8)
-  net_payout         Decimal  @db.Decimal(20, 8)
-  profit_loss        Decimal  @db.Decimal(20, 8)
-
-  stripe_refund_id   String? @db.VarChar(255)
-  stripe_transfer_id String? @db.VarChar(255)
-  binance_tx_id      String? @db.VarChar(255)
-
-  status     PoolPayoutStatus @default(pending)
-  paid_at    DateTime?        @db.Timestamp(6)
-  notes      String?          @db.Text
-  created_at DateTime         @default(now()) @db.Timestamp(6)
-
-  pool   vc_pools        @relation(fields: [pool_id], references: [pool_id])
-  member vc_pool_members @relation(fields: [member_id], references: [member_id])
-
-  @@index([pool_id])
-  @@index([member_id])
-  @@index([status])
-  @@map("vc_pool_payouts")
-}
-
-// ── PHASE 1-5: Binance Payment Flow Models ──
-
-model vc_pool_transactions {
-  transaction_id        String  @id @default(uuid()) @db.Uuid
-  pool_id               String  @db.Uuid
-  user_id               String  @db.Uuid
-  payment_submission_id String? @unique @db.Uuid
-  member_id             String? @db.Uuid
-
-  // Transaction Type and Details
-  transaction_type String  @db.VarChar(50) // payment_submitted, payment_verified, payment_rejected, refund_initiated, member_created
-  amount_usdt      Decimal @db.Decimal(20, 8)
-  description      String? @db.Text
-
-  // Binance TX Details
-  binance_tx_id          String?   @unique @db.VarChar(255)
-  binance_tx_timestamp   DateTime? @db.Timestamp(6)
-  expected_amount        Decimal?  @db.Decimal(20, 8)
-  actual_amount_received Decimal?  @db.Decimal(20, 8)
-
-  // Status & Timestamps
-  status      String    @db.VarChar(50) // pending, verified, rejected, failed
-  created_at  DateTime  @default(now()) @db.Timestamp(6)
-  resolved_at DateTime? @db.Timestamp(6)
-
-  // Relations
-  pool               vc_pools                     @relation(fields: [pool_id], references: [pool_id])
-  user               users                        @relation(fields: [user_id], references: [user_id])
-  payment_submission vc_pool_payment_submissions? @relation("PaymentTransaction", fields: [payment_submission_id], references: [submission_id])
-  member             vc_pool_members?             @relation(fields: [member_id], references: [member_id])
-
-  @@index([pool_id])
-  @@index([user_id])
-  @@index([status])
-  @@index([created_at])
-  @@index([binance_tx_id])
-  @@map("vc_pool_transactions")
-}
-
-model user_credits {
-  credit_id String @id @default(uuid()) @db.Uuid
-  user_id   String @db.Uuid
-
-  credit_amount_usdt Decimal @db.Decimal(20, 8)
-  source             String  @db.VarChar(50) // admin_transfer, refund, other
-
-  is_spent         Boolean  @default(false)
-  spent_on_pool_id String?  @db.Uuid
-  spent_amount     Decimal? @db.Decimal(20, 8)
-
-  created_at DateTime  @default(now()) @db.Timestamp(6)
-  spent_at   DateTime? @db.Timestamp(6)
-
-  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
-
-  @@index([user_id])
-  @@index([is_spent])
-  @@map("user_credits")
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// OPTIONS TRADING MODULE
-// ──────────────────────────────────────────────────────────────────────
-
 enum OptionType {
   CALL
   PUT
+}
+
+enum OptionsVenue {
+  BINANCE
+  ALPACA
 }
 
 enum OptionOrderStatus {
@@ -1539,201 +1769,6 @@ enum OptionOrderStatus {
   rejected
   expired
 }
-
-model options_orders {
-  order_id  String  @id @default(uuid()) @db.Uuid
-  user_id   String  @db.Uuid
-  signal_id String? @db.Uuid
-
-  contract_symbol String     @db.VarChar(50) // e.g. BTC-260327-100000-C
-  underlying      String     @db.VarChar(20) // e.g. BTC
-  strike          Decimal    @db.Decimal(20, 8)
-  expiry          DateTime   @db.Timestamp(6)
-  option_type     OptionType
-
-  side            String   @db.VarChar(10) // BUY or SELL
-  quantity        Decimal  @db.Decimal(30, 10)
-  price           Decimal? @db.Decimal(20, 8) // limit price (premium)
-  filled_quantity Decimal? @db.Decimal(30, 10)
-  avg_fill_price  Decimal? @db.Decimal(20, 8)
-  fee             Decimal? @db.Decimal(20, 8)
-
-  binance_order_id String?           @db.VarChar(100)
-  status           OptionOrderStatus @default(pending)
-  order_type       String            @default("LIMIT") @db.VarChar(20)
-
-  max_loss        Decimal? @db.Decimal(20, 8) // premium × qty × contract_size
-  greeks_at_entry Json?    @db.Json // snapshot of greeks when order placed
-
-  created_at DateTime  @default(now()) @db.Timestamp(6)
-  updated_at DateTime? @updatedAt @db.Timestamp(6)
-
-  user     users              @relation(fields: [user_id], references: [user_id])
-  signal   strategy_signals?  @relation(fields: [signal_id], references: [signal_id])
-  position options_positions? @relation("OrderToPosition")
-
-  @@index([user_id])
-  @@index([signal_id])
-  @@index([status])
-  @@index([underlying])
-  @@index([user_id, status])
-  @@map("options_orders")
-}
-
-model options_positions {
-  position_id String  @id @default(uuid()) @db.Uuid
-  user_id     String  @db.Uuid
-  order_id    String? @unique @db.Uuid // originating order
-
-  contract_symbol String     @db.VarChar(50)
-  underlying      String     @db.VarChar(20)
-  strike          Decimal    @db.Decimal(20, 8)
-  expiry          DateTime   @db.Timestamp(6)
-  option_type     OptionType
-
-  quantity        Decimal  @db.Decimal(30, 10)
-  avg_premium     Decimal  @db.Decimal(20, 8)
-  current_premium Decimal? @db.Decimal(20, 8)
-  unrealized_pnl  Decimal? @db.Decimal(20, 8)
-  realized_pnl    Decimal? @db.Decimal(20, 8)
-
-  delta Decimal? @db.Decimal(10, 6)
-  gamma Decimal? @db.Decimal(10, 6)
-  theta Decimal? @db.Decimal(10, 6)
-  vega  Decimal? @db.Decimal(10, 6)
-
-  is_open    Boolean   @default(true)
-  opened_at  DateTime  @default(now()) @db.Timestamp(6)
-  closed_at  DateTime? @db.Timestamp(6)
-  updated_at DateTime? @updatedAt @db.Timestamp(6)
-
-  user              users           @relation(fields: [user_id], references: [user_id])
-  originating_order options_orders? @relation("OrderToPosition", fields: [order_id], references: [order_id])
-
-  @@index([user_id])
-  @@index([is_open])
-  @@index([user_id, is_open])
-  @@index([underlying])
-  @@index([expiry])
-  @@map("options_positions")
-}
-
-model options_signals {
-  options_signal_id String @id @default(uuid()) @db.Uuid
-  signal_id         String @db.Uuid // FK to strategy_signals
-
-  recommended_type   OptionType
-  recommended_strike Decimal    @db.Decimal(20, 8)
-  recommended_expiry DateTime   @db.Timestamp(6)
-
-  iv_rank  Decimal? @db.Decimal(6, 4) // 0-1 percentile
-  iv_value Decimal? @db.Decimal(10, 6)
-
-  estimated_premium Decimal? @db.Decimal(20, 8)
-  max_loss          Decimal? @db.Decimal(20, 8)
-  recommended_qty   Decimal? @db.Decimal(30, 10)
-
-  greeks_snapshot Json?   @db.Json // { delta, gamma, theta, vega }
-  liquidity_ok    Boolean @default(true)
-  reasoning       String? @db.Text
-
-  confidence_adjustment Decimal? @db.Decimal(5, 4) // adjustment to base signal confidence
-
-  created_at DateTime @default(now()) @db.Timestamp(6)
-
-  signal strategy_signals @relation(fields: [signal_id], references: [signal_id])
-
-  @@index([signal_id])
-  @@map("options_signals")
-}
-
-// ── AI Options Signal Engine ─────────────────────────────────────────────────
-
-model options_iv_history {
-  id            String   @id @default(uuid()) @db.Uuid
-  underlying    String   @db.VarChar(20) // e.g. "BTC", "ETH"
-  iv_value      Decimal  @db.Decimal(10, 6)
-  iv_rank       Decimal? @db.Decimal(6, 4) // 0-1 rank: (current-min)/(max-min)
-  iv_percentile Decimal? @db.Decimal(6, 4) // 0-1 percentile: fraction below current
-  recorded_at   DateTime @default(now()) @db.Timestamp(6)
-
-  @@index([underlying, recorded_at])
-  @@map("options_iv_history")
-}
-
-model options_signals_ai {
-  id String @id @default(uuid()) @db.Uuid
-
-  underlying String  @db.VarChar(20) // "BTC", "ETH"
-  strategy   String  @db.VarChar(50) // "long_call", "bull_call_spread", etc.
-  direction  String  @db.VarChar(10) // "bullish", "bearish", "neutral"
-  score      Decimal @db.Decimal(5, 4) // -1 to +1
-  confidence Decimal @db.Decimal(5, 4) // 0 to 1
-
-  iv_rank    Decimal? @db.Decimal(6, 4)
-  iv_value   Decimal? @db.Decimal(10, 6)
-  spot_price Decimal? @db.Decimal(20, 8)
-
-  legs Json @db.Json // array of { type, strike, expiry, side, ratio }
-
-  reasoning   String? @db.Text
-  risk_reward String? @db.VarChar(20) // e.g. "3.2:1"
-  max_profit  String? @db.VarChar(50) // "unlimited" or "$1,200"
-  max_loss    String? @db.VarChar(50) // "$400"
-
-  expires_at DateTime @db.Timestamp(6)
-  created_at DateTime @default(now()) @db.Timestamp(6)
-
-  @@index([underlying, created_at])
-  @@index([strategy])
-  @@map("options_signals_ai")
-}
-
-// ─── Trade Fees Monetization ─────────────────────────────────────────
-
-model trade_fees {
-  fee_id                 String         @id @default(uuid()) @db.Uuid
-  user_id                String         @db.Uuid
-  trade_reference_id     String?        @db.VarChar(255)
-  asset_symbol           String         @db.VarChar(50)
-  trade_side             String         @db.VarChar(10)
-  trade_value_usd        Decimal        @db.Decimal(18, 4)
-  fee_percent            Decimal        @default(0.001) @db.Decimal(8, 6)
-  fee_amount_usd         Decimal        @db.Decimal(18, 6)
-  status                 TradeFeeStatus @default(pending)
-  source                 TradeFeeSource @default(top_trade_crypto)
-  billing_month          String         @db.VarChar(7)
-  stripe_invoice_item_id String?        @db.VarChar(255)
-  created_at             DateTime       @default(now()) @db.Timestamp(6)
-
-  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
-
-  @@index([user_id, billing_month])
-  @@index([status])
-  @@map("trade_fees")
-}
-
-model monthly_fee_summaries {
-  summary_id             String           @id @default(uuid()) @db.Uuid
-  user_id                String           @db.Uuid
-  billing_month          String           @db.VarChar(7)
-  total_trades           Int              @default(0)
-  total_trade_volume_usd Decimal          @default(0) @db.Decimal(18, 4)
-  total_fees_usd         Decimal          @default(0) @db.Decimal(18, 6)
-  status                 MonthlyFeeStatus @default(accumulating)
-  stripe_invoice_id      String?          @db.VarChar(255)
-  paid_at                DateTime?        @db.Timestamp(6)
-  created_at             DateTime         @default(now()) @db.Timestamp(6)
-  updated_at             DateTime?        @updatedAt @db.Timestamp(6)
-
-  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
-
-  @@unique([user_id, billing_month])
-  @@index([status])
-  @@map("monthly_fee_summaries")
-}
-
-// ─── QHQ Utility Token System ────────────────────────────────────────────────
 
 enum QhqTransactionType {
   EARN_SUBSCRIPTION
@@ -1752,162 +1787,11 @@ enum QhqTransactionType {
   ADMIN_DEDUCT
 }
 
-/// Global token configuration (singleton row, id = 1)
-model qhq_token_config {
-  id                  Int       @id @default(1)
-  total_supply        Decimal   @default(100000000) @db.Decimal(30, 18)
-  circulating_supply  Decimal   @default(0) @db.Decimal(30, 18)
-  total_burned        Decimal   @default(0) @db.Decimal(30, 18)
-  contract_address    String?   @db.VarChar(42)
-  network             String    @default("base") @db.VarChar(20)
-  current_merkle_root String?   @db.VarChar(66)
-  merkle_last_updated DateTime? @db.Timestamp(6)
-  updated_at          DateTime  @updatedAt @db.Timestamp(6)
-
-  @@map("qhq_token_config")
-}
-
-/// Off-chain balance ledger — one row per user
-model qhq_balances {
-  id                String   @id @default(uuid()) @db.Uuid
-  user_id           String   @unique @db.Uuid
-  pending_balance   Decimal  @default(0) @db.Decimal(30, 18)
-  cumulative_earned Decimal  @default(0) @db.Decimal(30, 18)
-  lifetime_claimed  Decimal  @default(0) @db.Decimal(30, 18)
-  lifetime_spent    Decimal  @default(0) @db.Decimal(30, 18)
-  lifetime_burned   Decimal  @default(0) @db.Decimal(30, 18)
-  created_at        DateTime @default(now()) @db.Timestamp(6)
-  updated_at        DateTime @updatedAt @db.Timestamp(6)
-
-  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
-
-  @@map("qhq_balances")
-}
-
-/// Full audit log of all QHQ movements
-model qhq_transactions {
-  id            String             @id @default(uuid()) @db.Uuid
-  user_id       String             @db.Uuid
-  type          QhqTransactionType
-  amount        Decimal            @db.Decimal(30, 18)
-  balance_after Decimal            @db.Decimal(30, 18)
-  description   String             @db.VarChar(500)
-  reference_id  String?            @db.VarChar(255)
-  tx_hash       String?            @db.VarChar(66)
-  created_at    DateTime           @default(now()) @db.Timestamp(6)
-
-  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
-
-  @@index([user_id, created_at])
-  @@index([type])
-  @@map("qhq_transactions")
-}
-
-/// Links a platform user account to a Base chain wallet address
-model qhq_wallet_links {
-  id             String   @id @default(uuid()) @db.Uuid
-  user_id        String   @unique @db.Uuid
-  wallet_address String   @unique @db.VarChar(42)
-  network        String   @default("base") @db.VarChar(20)
-  is_verified    Boolean  @default(false)
-  linked_at      DateTime @default(now()) @db.Timestamp(6)
-
-  user users @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
-
-  @@index([wallet_address])
-  @@map("qhq_wallet_links")
-}
-
-/// Admin-configurable reward rule amounts
-model qhq_reward_rules {
-  id          String   @id @default(uuid()) @db.Uuid
-  rule_key    String   @unique @db.VarChar(100)
-  amount      Decimal  @db.Decimal(30, 18)
-  is_active   Boolean  @default(true)
-  description String   @db.VarChar(255)
-  created_at  DateTime @default(now()) @db.Timestamp(6)
-  updated_at  DateTime @updatedAt @db.Timestamp(6)
-
-  @@map("qhq_reward_rules")
-}
-
-/// Tracks pending subscription discounts purchased with QHQ
-model qhq_subscription_discounts {
-  id               String    @id @default(uuid()) @db.Uuid
-  user_id          String    @db.Uuid
-  qhq_spent        Decimal   @db.Decimal(30, 18)
-  discount_percent Int
-  applied          Boolean   @default(false)
-  applied_at       DateTime? @db.Timestamp(6)
-  expires_at       DateTime  @db.Timestamp(6)
-  created_at       DateTime  @default(now()) @db.Timestamp(6)
-
-  @@index([user_id, applied])
-  @@map("qhq_subscription_discounts")
-}
-
-/// Contact form submissions from homepage and help-support page
-model contact_submissions {
-  id         String   @id @default(uuid()) @db.Uuid
-  user_id    String?  @db.Uuid
-  name       String   @db.VarChar(100)
-  email      String   @db.VarChar(255)
-  company    String?  @db.VarChar(100)
-  phone      String?  @db.VarChar(20)
-  subject    String   @db.VarChar(50)
-  message    String   @db.Text
-  source     String   @default("homepage") @db.VarChar(20)
-  created_at DateTime @default(now()) @db.Timestamp(6)
-
-  user users? @relation(fields: [user_id], references: [user_id], onDelete: SetNull)
-
-  @@index([user_id])
-  @@index([created_at])
-  @@map("contact_submissions")
-}
-
-// Queue of top-trade orders that were clicked while the market was closed.
-// Populated when ExchangesController.placeOrder catches a MARKET_CLOSED
-// error on an Alpaca connection. A cron picks these up shortly after the
-// next market open, submits the buy via AlpacaService, polls until it fills,
-// then attaches the TP/SL using the stored percentages.
-model pending_queued_trades {
-  id                  String            @id @default(uuid()) @db.Uuid
-  user_id             String            @db.Uuid
-  connection_id       String            @db.Uuid
-  symbol              String            @db.VarChar(50)
-  side                String            @db.VarChar(10) // 'BUY' | 'SELL'
-  order_type          String            @default("MARKET") @db.VarChar(10)
-  quantity            Decimal           @db.Decimal(20, 8)
-  limit_price         Decimal?          @db.Decimal(20, 8)
-  take_profit_pct     Decimal?          @db.Decimal(10, 6) // e.g. 0.10 = 10%
-  stop_loss_pct       Decimal?          @db.Decimal(10, 6)
-  source              String            @default("top_trade") @db.VarChar(30)
-  status              QueuedTradeStatus @default(queued)
-  alpaca_buy_order_id String?           @db.VarChar(100)
-  tp_order_id         String?           @db.VarChar(100)
-  sl_order_id         String?           @db.VarChar(100)
-  failure_reason      String?           @db.Text
-  protection_attempts Int               @default(0) // number of TP/SL placement attempts by the fill-watcher cron
-  queued_at           DateTime          @default(now()) @db.Timestamp(6)
-  submitted_at        DateTime?         @db.Timestamp(6)
-  buy_filled_at       DateTime?         @db.Timestamp(6) // when Alpaca reported the buy filled (independent of TP/SL placement)
-  filled_at           DateTime?         @db.Timestamp(6) // set only when BUY filled AND TP/SL both placed (truly done)
-  canceled_at         DateTime?         @db.Timestamp(6)
-  expires_at          DateTime?         @db.Timestamp(6) // auto-expire stale queues
-
-  @@index([user_id])
-  @@index([connection_id])
-  @@index([status])
-  @@index([user_id, status])
-  @@map("pending_queued_trades")
-}
-
 enum QueuedTradeStatus {
-  queued // waiting for market open
-  submitted // buy posted to Alpaca, awaiting fill
-  filled // buy filled and TP/SL attached
-  canceled // user canceled before submission
-  expired // cron aged out (> expires_at)
-  failed // Alpaca rejected at submission or fill-watch
+  queued
+  submitted
+  filled
+  canceled
+  expired
+  failed
 }

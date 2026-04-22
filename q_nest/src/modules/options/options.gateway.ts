@@ -10,14 +10,19 @@ import {
 import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { OptionsBinanceService } from './services/options-binance.service';
+import { OptionsAlpacaService } from './services/options-alpaca.service';
+import { OptionCredentials } from './services/options-venue.interface';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { WsAuthService } from '../../gateways/ws-auth.service';
 import { OPTIONS_POLLING_CONFIG } from './options.config';
+
+type SubscriptionVenue = 'BINANCE' | 'ALPACA';
 
 interface OptionsSubscription {
   connectionId: string;
   underlying: string;
   userId: string;
+  venue: SubscriptionVenue;
 }
 
 /**
@@ -50,13 +55,22 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
   // socket.id → subscription info
   private readonly subscriptions = new Map<string, OptionsSubscription>();
 
-  // Shared intervals per underlying (multiple clients share one poller)
+  // Shared intervals per (venue, underlying) pair — multiple subscribers to
+  // the same venue-underlying tuple share one poller. Keyed as
+  // `${venue}:${underlying}` so ALPACA:AAPL and BINANCE:BTC never collide.
   private readonly sharedIntervals = new Map<
     string,
     {
+      venue: SubscriptionVenue;
+      underlying: string;
       chainInterval: NodeJS.Timeout;
       tickerInterval: NodeJS.Timeout;
       subscribers: Set<string>; // socket IDs
+      // Alpaca only: credentials from the first subscriber, used to poll the
+      // credentialed data endpoints. Options chain data is market-wide so
+      // it's safe to share the response across subscribers regardless of
+      // whose creds fetched it. Null for Binance (public endpoints).
+      credentials: OptionCredentials | null;
     }
   >();
 
@@ -65,9 +79,14 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
 
   constructor(
     private readonly optionsBinance: OptionsBinanceService,
+    private readonly optionsAlpaca: OptionsAlpacaService,
     private readonly exchangesService: ExchangesService,
     private readonly wsAuthService: WsAuthService,
   ) {}
+
+  private pollerKey(venue: SubscriptionVenue, underlying: string): string {
+    return `${venue}:${underlying}`;
+  }
 
   // ── Lifecycle ────────────────────────────────────────────
 
@@ -110,36 +129,52 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
     this.cleanupClient(client.id);
 
     try {
-      // Verify connection exists (but no need to decrypt credentials — public data only)
-      const connection =
-        await this.exchangesService.getConnectionById(connectionId);
+      const connection = await this.exchangesService.getConnectionById(connectionId);
       if (!connection) {
         client.emit('error', { message: 'Invalid connection' });
         return;
       }
 
       const userId = connection.user_id;
+      const exchangeName = (connection as any).exchange?.name?.toLowerCase() || '';
+      const venue: SubscriptionVenue = exchangeName === 'alpaca' ? 'ALPACA' : 'BINANCE';
+      const up = underlying.toUpperCase();
+
+      // Alpaca market data requires credentials — fetch once and cache on
+      // the shared poller. Binance crypto chain is public, no creds needed.
+      let credentials: OptionCredentials | null = null;
+      if (venue === 'ALPACA') {
+        try {
+          credentials = await this.exchangesService.getDecryptedCredentials(connectionId);
+        } catch (err: any) {
+          client.emit('error', {
+            message: 'Could not decrypt Alpaca credentials for live stream',
+          });
+          return;
+        }
+      }
 
       // Register subscription
       this.subscriptions.set(client.id, {
         connectionId,
-        underlying: underlying.toUpperCase(),
+        underlying: up,
         userId,
+        venue,
       });
 
-      // Join room
-      const room = `options:${underlying.toUpperCase()}`;
+      // Room includes venue so a user on both connections could receive
+      // both venues' data without cross-talk.
+      const room = `options:${venue}:${up}`;
       client.join(room);
 
-      // Setup shared polling (uses public Binance instance, no user credentials)
-      this.setupSharedPolling(underlying.toUpperCase(), client.id);
+      this.setupSharedPolling(venue, up, client.id, credentials);
 
       // Send initial data immediately
-      await this.pushChainUpdate(underlying.toUpperCase());
+      await this.pushChainUpdate(venue, up);
 
-      client.emit('subscribed', { underlying: underlying.toUpperCase() });
+      client.emit('subscribed', { venue, underlying: up });
       this.logger.log(
-        `Client ${client.id} subscribed to options:${underlying.toUpperCase()}`,
+        `Client ${client.id} subscribed to options:${venue}:${up}`,
       );
     } catch (error: any) {
       this.logger.error(`Options subscribe error: ${error.message}`);
@@ -160,62 +195,96 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
 
   // ── Internal polling ─────────────────────────────────────
 
-  private setupSharedPolling(underlying: string, socketId: string): void {
-    const key = underlying;
+  private setupSharedPolling(
+    venue: SubscriptionVenue,
+    underlying: string,
+    socketId: string,
+    credentials: OptionCredentials | null,
+  ): void {
+    const key = this.pollerKey(venue, underlying);
     const existing = this.sharedIntervals.get(key);
 
     if (existing) {
       existing.subscribers.add(socketId);
+      // Upgrade cached creds if the existing poller didn't have any yet
+      // (race between two Alpaca subscribers).
+      if (!existing.credentials && credentials) {
+        existing.credentials = credentials;
+      }
       return;
     }
 
     const subscribers = new Set<string>([socketId]);
 
     const shared = {
+      venue,
+      underlying,
       chainInterval: null as unknown as NodeJS.Timeout,
       tickerInterval: null as unknown as NodeJS.Timeout,
       subscribers,
+      credentials,
     };
     this.sharedIntervals.set(key, shared);
 
-    // Chain update at 15s interval — uses public Binance instance (no user creds)
     shared.chainInterval = setInterval(() => {
-      this.pushChainUpdate(underlying).catch((err) =>
-        this.logger.warn(`Chain interval error for ${underlying}: ${err.message}`),
+      this.pushChainUpdate(venue, underlying).catch((err) =>
+        this.logger.warn(`Chain interval error for ${key}: ${err.message}`),
       );
     }, this.CHAIN_INTERVAL_MS);
 
-    // Underlying spot price at 5s interval
     shared.tickerInterval = setInterval(() => {
-      this.pushTickerUpdate(underlying).catch((err) =>
-        this.logger.warn(`Ticker interval error for ${underlying}: ${err.message}`),
+      this.pushTickerUpdate(venue, underlying).catch((err) =>
+        this.logger.warn(`Ticker interval error for ${key}: ${err.message}`),
       );
     }, this.TICKER_INTERVAL_MS);
   }
 
-  private async pushChainUpdate(underlying: string): Promise<void> {
+  private async pushChainUpdate(
+    venue: SubscriptionVenue,
+    underlying: string,
+  ): Promise<void> {
     try {
-      const chain = await this.optionsBinance.fetchOptionsChain(
-        null,
-        underlying,
-      );
+      const key = this.pollerKey(venue, underlying);
+      const shared = this.sharedIntervals.get(key);
 
-      this.server.to(`options:${underlying}`).emit('chain-update', {
+      let chain;
+      if (venue === 'ALPACA') {
+        const creds = shared?.credentials;
+        if (!creds) {
+          // All Alpaca subscribers have disconnected in between intervals —
+          // nothing to do until a new subscriber refreshes creds.
+          return;
+        }
+        chain = await this.optionsAlpaca.fetchOptionsChain(creds, underlying);
+      } else {
+        chain = await this.optionsBinance.fetchOptionsChain(null, underlying);
+      }
+
+      this.server.to(`options:${venue}:${underlying}`).emit('chain-update', {
+        venue,
         underlying,
         chain,
         timestamp: Date.now(),
       });
     } catch (error: any) {
       this.logger.warn(
-        `Options chain push error for ${underlying}: ${error.message}`,
+        `Options chain push error for ${venue}:${underlying}: ${error.message}`,
       );
     }
   }
 
-  private async pushTickerUpdate(underlying: string): Promise<void> {
+  private async pushTickerUpdate(
+    venue: SubscriptionVenue,
+    underlying: string,
+  ): Promise<void> {
     try {
-      // Use service-level cached fetch so multiple subscribers share one upstream call
-      // and Binance 418/429 bans are honored automatically.
+      if (venue === 'ALPACA') {
+        // Alpaca's underlying spot price comes out of the chain's dailyBar —
+        // the chain poller already emits it, so we don't double-fetch here.
+        // A future Phase 4b may add a dedicated equity ticker poll.
+        return;
+      }
+
       const [indexResult, tickerResult] = await Promise.allSettled([
         this.optionsBinance.getCachedIndex(underlying),
         this.optionsBinance.getCachedSpotTicker24h(underlying),
@@ -231,7 +300,8 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
         ? parseFloat(tickerResult.value?.priceChangePercent || '0')
         : 0;
 
-      this.server.to(`options:${underlying}`).emit('ticker-update', {
+      this.server.to(`options:${venue}:${underlying}`).emit('ticker-update', {
+        venue,
         underlying,
         price,
         change24h,
@@ -240,7 +310,7 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
       });
     } catch (error: any) {
       this.logger.warn(
-        `Options ticker push error for ${underlying}: ${error.message}`,
+        `Options ticker push error for ${venue}:${underlying}: ${error.message}`,
       );
     }
   }
@@ -253,20 +323,21 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
 
     this.subscriptions.delete(socketId);
 
-    const key = sub.underlying;
+    const key = this.pollerKey(sub.venue, sub.underlying);
     const shared = this.sharedIntervals.get(key);
     if (!shared) return;
 
     shared.subscribers.delete(socketId);
 
     if (shared.subscribers.size === 0) {
-      // No subscribers left — tear down intervals
       clearInterval(shared.chainInterval);
       clearInterval(shared.tickerInterval);
       this.sharedIntervals.delete(key);
       this.logger.debug(`Cleaned up shared options interval for ${key}`);
     }
-    // No credential rotation needed — polling uses shared public Binance instance
+    // Binance polling uses the shared public exchange instance (no creds).
+    // Alpaca polling holds a cached credentials ref that is dropped when
+    // the last subscriber for this (venue, underlying) disconnects above.
   }
 
   // ── Module destroy — clean up all intervals on shutdown ──

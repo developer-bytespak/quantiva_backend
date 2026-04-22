@@ -2,8 +2,13 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { OptionsBinanceService } from './options-binance.service';
+import { OptionsAlpacaService } from './options-alpaca.service';
+import { OptionCredentials } from './options-venue.interface';
+import { ALPACA_DEFAULT_UNDERLYINGS } from './alpaca/alpaca-contract-specs';
 import { FALLBACK_UNDERLYINGS } from '../options.config';
 import axios from 'axios';
+
+type Venue = 'BINANCE' | 'ALPACA';
 
 @Injectable()
 export class OptionsIvService {
@@ -12,6 +17,7 @@ export class OptionsIvService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly optionsBinance: OptionsBinanceService,
+    private readonly optionsAlpaca: OptionsAlpacaService,
   ) {}
 
   // ── Dynamic underlyings from Binance exchange info ──────
@@ -25,48 +31,142 @@ export class OptionsIvService {
     }
   }
 
-  // ── Cron: snapshot IV every 4 hours ─────────────────────
+  /** Curated Alpaca universe (keeps OPRA data costs bounded). */
+  getAlpacaUnderlyings(): string[] {
+    return [...ALPACA_DEFAULT_UNDERLYINGS];
+  }
 
-  // Snapshot IV every hour — crypto IV can move 5-15 points in an hour during events
+  /**
+   * Alpaca market data requires authentication. IV snapshots run on a
+   * schedule with no user in context, so we source creds from env:
+   *   ALPACA_SYSTEM_API_KEY + ALPACA_SYSTEM_API_SECRET.
+   * Returns null when unset — callers should skip Alpaca work silently
+   * in that case so the Binance path continues to function.
+   */
+  private systemAlpacaCreds(): OptionCredentials | null {
+    const apiKey = process.env.ALPACA_SYSTEM_API_KEY;
+    const apiSecret = process.env.ALPACA_SYSTEM_API_SECRET;
+    if (!apiKey || !apiSecret) return null;
+    return { apiKey, apiSecret };
+  }
+
+  /**
+   * Resolve an ATM implied-vol snapshot from Alpaca's chain endpoint.
+   * Picks the call whose strike is closest to the underlying spot and
+   * returns its `impliedVolatility`. Falls back to null if the chain has
+   * no usable IV (e.g. weekend, market closed, or all-zero snapshot).
+   */
+  private async getAtmIvFromAlpaca(
+    underlying: string,
+    creds: OptionCredentials,
+  ): Promise<number | null> {
+    try {
+      const chain = await this.optionsAlpaca.fetchOptionsChain(creds, underlying);
+      if (!chain.contracts.length || !chain.underlyingPrice) return null;
+      const spot = chain.underlyingPrice;
+      let best: (typeof chain.contracts)[number] | null = null;
+      let bestDist = Infinity;
+      for (const c of chain.contracts) {
+        if (c.type !== 'CALL') continue;
+        if (!c.greeks?.impliedVolatility) continue;
+        const dist = Math.abs(c.strike - spot);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = c;
+        }
+      }
+      const iv = best?.greeks?.impliedVolatility;
+      return typeof iv === 'number' && Number.isFinite(iv) && iv > 0 ? iv : null;
+    } catch (err: any) {
+      this.logger.warn(`getAtmIvFromAlpaca failed for ${underlying}: ${err.message}`);
+      return null;
+    }
+  }
+
+  // ── Cron: snapshot IV every hour ─────────────────────
+
   @Cron('0 * * * *')
   async snapshotIv() {
     this.logger.log('Starting IV snapshot cron…');
+    await Promise.all([this.snapshotBinanceIv(), this.snapshotAlpacaIv()]);
+  }
+
+  private async snapshotBinanceIv() {
     const underlyings = await this.getAllUnderlyings();
-    this.logger.log(`Snapshotting IV for: ${underlyings.join(', ')}`);
+    this.logger.log(`Binance IV snapshot: ${underlyings.join(', ')}`);
     for (const underlying of underlyings) {
       try {
         const iv = await this.optionsBinance.getAtmIv(underlying);
         if (iv === null) continue;
 
         const [ivRank, ivPercentile] = await Promise.all([
-          this.computeIvRank(underlying, iv),
-          this.computeIvPercentile(underlying, iv),
+          this.computeIvRank(underlying, iv, 'BINANCE'),
+          this.computeIvPercentile(underlying, iv, 'BINANCE'),
         ]);
 
         await this.prisma.options_iv_history.create({
           data: {
             underlying,
+            venue: 'BINANCE',
             iv_value: iv,
             iv_rank: ivRank,
             iv_percentile: ivPercentile,
           },
         });
-        this.logger.log(`IV snapshot ${underlying}: ${iv}`);
+        this.logger.log(`IV snapshot BINANCE ${underlying}: ${iv}`);
       } catch (err) {
-        this.logger.error(`IV snapshot failed for ${underlying}`, err);
+        this.logger.error(`Binance IV snapshot failed for ${underlying}`, err);
       }
     }
   }
 
-  // ── IV Rank & Percentile (vs 1-year history) ────────────
+  private async snapshotAlpacaIv() {
+    const creds = this.systemAlpacaCreds();
+    if (!creds) {
+      this.logger.debug(
+        'Skipping Alpaca IV snapshot — ALPACA_SYSTEM_API_KEY not configured',
+      );
+      return;
+    }
 
-  private async getOneYearIvValues(underlying: string): Promise<number[]> {
+    const underlyings = this.getAlpacaUnderlyings();
+    this.logger.log(`Alpaca IV snapshot: ${underlyings.join(', ')}`);
+    for (const underlying of underlyings) {
+      try {
+        const iv = await this.getAtmIvFromAlpaca(underlying, creds);
+        if (iv === null) continue;
+
+        const [ivRank, ivPercentile] = await Promise.all([
+          this.computeIvRank(underlying, iv, 'ALPACA'),
+          this.computeIvPercentile(underlying, iv, 'ALPACA'),
+        ]);
+
+        await this.prisma.options_iv_history.create({
+          data: {
+            underlying,
+            venue: 'ALPACA',
+            iv_value: iv,
+            iv_rank: ivRank,
+            iv_percentile: ivPercentile,
+          },
+        });
+        this.logger.log(`IV snapshot ALPACA ${underlying}: ${iv}`);
+      } catch (err) {
+        this.logger.error(`Alpaca IV snapshot failed for ${underlying}`, err);
+      }
+    }
+  }
+
+  // ── IV Rank & Percentile (vs 1-year history, per venue) ──
+
+  private async getOneYearIvValues(underlying: string, venue: Venue): Promise<number[]> {
     const oneYearAgo = new Date();
     oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
 
     const history = await this.prisma.options_iv_history.findMany({
       where: {
         underlying,
+        venue,
         recorded_at: { gte: oneYearAgo },
       },
       select: { iv_value: true },
@@ -76,12 +176,8 @@ export class OptionsIvService {
     return history.map((h) => Number(h.iv_value));
   }
 
-  /**
-   * IV Rank: (current - 52wk low) / (52wk high - 52wk low)
-   * Measures where current IV sits within its 1-year range.
-   */
-  async computeIvRank(underlying: string, currentIv: number): Promise<number> {
-    const values = await this.getOneYearIvValues(underlying);
+  async computeIvRank(underlying: string, currentIv: number, venue: Venue = 'BINANCE'): Promise<number> {
+    const values = await this.getOneYearIvValues(underlying, venue);
     if (values.length < 2) return 0.5;
 
     const min = values.reduce((m, v) => Math.min(m, v), Infinity);
@@ -91,12 +187,8 @@ export class OptionsIvService {
     return Math.max(0, Math.min(1, (currentIv - min) / (max - min)));
   }
 
-  /**
-   * IV Percentile: fraction of historical values below current IV.
-   * Measures how often IV has been lower than the current level.
-   */
-  async computeIvPercentile(underlying: string, currentIv: number): Promise<number> {
-    const values = await this.getOneYearIvValues(underlying);
+  async computeIvPercentile(underlying: string, currentIv: number, venue: Venue = 'BINANCE'): Promise<number> {
+    const values = await this.getOneYearIvValues(underlying, venue);
     if (values.length < 2) return 0.5;
 
     const below = values.filter((v) => v < currentIv).length;
@@ -105,32 +197,34 @@ export class OptionsIvService {
 
   // ── Query helpers ──────────────────────────────────────
 
-  async getLatestIv(underlying: string) {
+  async getLatestIv(underlying: string, venue: Venue = 'BINANCE') {
     return this.prisma.options_iv_history.findFirst({
-      where: { underlying },
+      where: { underlying, venue },
       orderBy: { recorded_at: 'desc' },
     });
   }
 
-  async getIvHistory(underlying: string, days = 90) {
+  async getIvHistory(underlying: string, days = 90, venue: Venue = 'BINANCE') {
     const since = new Date();
     since.setDate(since.getDate() - days);
 
     return this.prisma.options_iv_history.findMany({
       where: {
         underlying,
+        venue,
         recorded_at: { gte: since },
       },
       orderBy: { recorded_at: 'asc' },
     });
   }
 
-  async getIvRankData(underlying: string) {
-    const latest = await this.getLatestIv(underlying);
+  async getIvRankData(underlying: string, venue: Venue = 'BINANCE') {
+    const latest = await this.getLatestIv(underlying, venue);
     if (!latest) return null;
 
     return {
       underlying,
+      venue,
       currentIv: Number(latest.iv_value),
       ivRank: latest.iv_rank ? Number(latest.iv_rank) : null,
       ivPercentile: latest.iv_percentile ? Number(latest.iv_percentile) : null,

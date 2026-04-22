@@ -1,2 +1,0 @@
--- AlterEnum
-ALTER TYPE "PlanTier" ADD VALUE 'ELITE_PLUS';
