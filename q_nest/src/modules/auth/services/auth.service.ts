@@ -11,6 +11,7 @@ import { TokenService, TokenPayload } from './token.service';
 import { SessionService } from './session.service';
 import { TwoFactorService } from './two-factor.service';
 import { RateLimitService } from './rate-limit.service';
+import { AuthEmailService } from './auth-email.service';
 import * as bcrypt from 'bcrypt';
 import { promises as dns } from 'dns';
 import { RegisterDto } from '../dto/register.dto';
@@ -36,6 +37,7 @@ export class AuthService {
     private cloudinaryService: CloudinaryService,
     private subscriptionsService: SubscriptionsService,
     private sumsubService: SumsubService,
+    private authEmailService: AuthEmailService,
   ) {}
 
   private getGoogleClient() {
@@ -95,6 +97,14 @@ export class AuthService {
         two_factor_enabled: true,
         two_factor_secret: twoFactorSecret,
       },
+    });
+
+    // 🔔 Send admin notification about new signup
+    await this.authEmailService.sendNewSignupNotification({
+      username: user.username,
+      email: user.email,
+      userId: user.user_id,
+      signupTime: user.created_at,
     });
 
     // Register ke baad FREE plan subscription auto-create (user_subscriptions me inject)
@@ -519,6 +529,20 @@ export class AuthService {
       isAdmin,
       isSuperAdmin,
     } as TokenPayload);
+
+    if (isNewUser) {
+      try {
+        await this.authEmailService.sendNewSignupNotification({
+          username: user.username,
+          email: user.email,
+          userId: user.user_id,
+          signupTime: new Date(),
+        });
+      } catch (error) {
+        // Do not block authentication if email fails
+      }
+    }
+
     return {
       user: {
         user_id: user.user_id,

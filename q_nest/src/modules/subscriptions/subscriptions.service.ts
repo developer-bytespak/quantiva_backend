@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { SubscriptionStatus } from '@prisma/client';
 import { cursorTo } from 'readline';
 import { NotificationsService } from '../notifications/notifications.service';
+import { AuthEmailService } from '../auth/services/auth-email.service';
 import { AppGateway } from 'src/gateways/app.gateway';
 import { tryCatch } from 'bullmq';
 import { SubscriptionLoaderMiddleware } from '../../common/middleware/subscription-loader.middleware';
@@ -36,6 +37,7 @@ export class SubscriptionsService implements OnModuleInit {
   constructor(
     private prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
+    private readonly authEmailService: AuthEmailService,
     private readonly appGateway: AppGateway,
     @Optional() private readonly subscriptionLoader?: SubscriptionLoaderMiddleware,
   ) { }
@@ -508,6 +510,20 @@ export class SubscriptionsService implements OnModuleInit {
       return subscription;
     }, { timeout: 30000 });
 
+    // 🔔 Send admin notification about new subscription
+    try {
+      await this.authEmailService.sendNewSubscriptionNotification({
+        username: result.user.username,
+        email: result.user.email,
+        userId: result.user.user_id,
+        tier: result.tier,
+        billingPeriod: result.billing_period,
+        createdAt: result.started_at,
+      });
+    } catch (error) {
+      this.logger.error(`Failed to send subscription notification: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
     // Clear subscription cache so next request gets fresh data
     this.clearSubscriptionCache(data.user_id);
     return result;
@@ -722,6 +738,31 @@ export class SubscriptionsService implements OnModuleInit {
 
       return updated;
     }, { timeout: 30000 });
+
+    // 🔔 Send admin notification about subscription change (only if plan was changed)
+    if (data.plan_id && data.plan_id !== result.plan_id) {
+      try {
+        const userDetails = await this.prisma.users.findUnique({
+          where: { user_id: result.user_id },
+          select: { username: true, email: true, user_id: true },
+        });
+
+        if (userDetails) {
+          await this.authEmailService.sendSubscriptionChangedNotification({
+            username: userDetails.username,
+            email: userDetails.email,
+            userId: userDetails.user_id,
+            oldTier: result.tier,
+            newTier: result.tier,
+            oldBillingPeriod: result.billing_period,
+            newBillingPeriod: result.billing_period,
+            changedAt: new Date(),
+          });
+        }
+      } catch (error) {
+        this.logger.error(`Failed to send subscription changed notification: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
 
     // Clear subscription cache so next request gets fresh data
     if (result?.user_id) this.clearSubscriptionCache(result.user_id);
@@ -1232,7 +1273,7 @@ export class SubscriptionsService implements OnModuleInit {
     auto_renew?: boolean;
   }) {
    try {
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       const plan = await tx.subscription_plans.findFirst({
         where: { tier: data.plan_id as PlanTier },
       });
@@ -1258,6 +1299,22 @@ export class SubscriptionsService implements OnModuleInit {
       });
       return subscription;
     }, { timeout: 30000 });
+
+    // 🔔 Send admin notification about new subscription
+    try {
+      await this.authEmailService.sendNewSubscriptionNotification({
+        username: result.user.username,
+        email: result.user.email,
+        userId: result.user.user_id,
+        tier: result.tier,
+        billingPeriod: result.billing_period,
+        createdAt: result.started_at,
+      });
+    } catch (error) {
+      this.logger.error(`Failed to send subscription notification: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    return result;
    } catch (error) {
     throw new Error('Failed to create subscription');
    }

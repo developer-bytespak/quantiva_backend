@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -9,6 +9,7 @@ import { TokenService } from './services/token.service';
 import { SessionService } from './services/session.service';
 import { TwoFactorService } from './services/two-factor.service';
 import { RateLimitService } from './services/rate-limit.service';
+import { AuthEmailService } from './services/auth-email.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RefreshTokenGuard } from './guards/refresh-token.guard';
@@ -25,7 +26,7 @@ import { FirebaseService } from 'src/firebase/firebase.service';
   imports: [
     PrismaModule,
     StorageModule,
-    SubscriptionsModule,
+    forwardRef(() => SubscriptionsModule),
     NotificationsModule,
     KycModule,
     PassportModule,
@@ -52,6 +53,7 @@ import { FirebaseService } from 'src/firebase/firebase.service';
     SessionService,
     TwoFactorService,
     RateLimitService,
+    AuthEmailService,
     AppGateway,
     JwtStrategy,
     JwtAuthGuard,
@@ -64,6 +66,7 @@ import { FirebaseService } from 'src/firebase/firebase.service';
     TokenService,
     SessionService,
     JwtAuthGuard,
+    AuthEmailService,
   ],
 })
 export class AuthModule {}
