@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException, ServiceUnavailableException, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotImplementedException, ServiceUnavailableException, Inject, forwardRef } from '@nestjs/common';
 import * as ccxt from 'ccxt';
 import { OPTIONS_RETRY_CONFIG } from '../options.config';
 import { OptionsBinanceStreamService } from './options-binance-stream.service';
@@ -12,11 +12,16 @@ import {
   OptionTypeEnum,
   AvailableUnderlyingDto,
 } from '../dto/options.dto';
+import {
+  IOptionsVenueService,
+  OptionCredentials as VenueOptionCredentials,
+  MultiLegOrderInput,
+  OptionsApprovalStatus,
+} from './options-venue.interface';
 
-interface OptionCredentials {
-  apiKey: string;
-  apiSecret: string;
-}
+// Preserved local alias — matches the shape already used throughout this file.
+// Identical to VenueOptionCredentials; exported via the shared interface.
+type OptionCredentials = VenueOptionCredentials;
 
 /**
  * Low-level Binance Options API wrapper using ccxt.
@@ -28,8 +33,11 @@ interface OptionCredentials {
  * WebSocket streams:        wss://nbstream.binance.com/eoptions/stream
  */
 @Injectable()
-export class OptionsBinanceService {
+export class OptionsBinanceService implements IOptionsVenueService {
   private readonly logger = new Logger(OptionsBinanceService.name);
+
+  // Binance crypto options contract multiplier (e.g. 1 BTC contract = 0.01 BTC notional).
+  readonly contractMultiplier = 0.01;
 
   // Shared public exchange instance — no API key, used for all public eapi endpoints
   private readonly publicExchange: ccxt.binance;
@@ -900,5 +908,34 @@ export class OptionsBinanceService {
   clearAllInstances(): void {
     this.exchangeInstances.clear();
     this.exchangeInfoCache = null;
+  }
+
+  // ── IOptionsVenueService capabilities without a Binance analog ────
+
+  /**
+   * Binance Options has no multi-leg (mleg) order primitive — every leg must
+   * be placed as its own order. Callers planning multi-leg strategies on
+   * Binance should iterate `placeOptionOrder` themselves.
+   */
+  async placeMultiLegOrder(
+    _credentials: OptionCredentials,
+    _input: MultiLegOrderInput,
+    _userId?: string,
+  ): Promise<any> {
+    throw new NotImplementedException(
+      'Multi-leg (mleg) orders are not supported by Binance Options. Place each leg individually.',
+    );
+  }
+
+  /**
+   * Binance has no per-account options approval flow — every account with
+   * the Options wallet enabled can trade every contract type. Report Level 3
+   * approved so the UI treats Binance as unrestricted.
+   */
+  async getOptionsApprovalStatus(
+    _credentials: OptionCredentials,
+    _userId?: string,
+  ): Promise<OptionsApprovalStatus> {
+    return { level: 3, status: 'approved' };
   }
 }

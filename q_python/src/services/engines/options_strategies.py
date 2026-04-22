@@ -204,6 +204,17 @@ def get_matching_strategies(
     return [s for s in STRATEGY_TEMPLATES if s.matches(direction, iv_rank, score)]
 
 
+def build_occ_symbol(underlying: str, expiry_iso: str, option_type: str, strike: float) -> str:
+    """Build an OCC-21 option symbol (unpadded root form used by Alpaca)."""
+    date_part = expiry_iso[:10].replace("-", "")  # "YYYY-MM-DD" -> "YYYYMMDD"
+    yy = date_part[2:4]
+    mm = date_part[4:6]
+    dd = date_part[6:8]
+    cp = "C" if option_type.upper().startswith("C") else "P"
+    strike_int = round(strike * 1000)
+    return f"{underlying.upper()}{yy}{mm}{dd}{cp}{strike_int:08d}"
+
+
 def resolve_strikes(
     template: StrategyTemplate,
     spot_price: float,
