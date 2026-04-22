@@ -146,9 +146,27 @@ export class OptionsController {
    * Get historical positions from DB.
    */
   @Get('positions/history')
-  async getPositionHistory(@CurrentUser() user: TokenPayload) {
+  async getPositionHistory(
+    @CurrentUser() user: TokenPayload,
+    @Query('venue') venue?: string,
+  ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.optionsService.getPositionsFromDb(user.sub);
+    return this.optionsService.getPositionsFromDb(user.sub, venue);
+  }
+
+  /**
+   * POST /options/positions/:positionId/exercise?connectionId=xxx
+   * Early-exercise an option position (Alpaca only).
+   */
+  @Post('positions/:positionId/exercise')
+  @HttpCode(HttpStatus.OK)
+  async exercisePosition(
+    @CurrentUser() user: TokenPayload,
+    @Param('positionId') positionId: string,
+    @Query('connectionId') connectionId: string,
+  ) {
+    await this.optionsService.verifyEliteAccess(user.sub);
+    return this.optionsService.exerciseOptionPosition(user.sub, connectionId, positionId);
   }
 
   // ── Orders ───────────────────────────────────────────────

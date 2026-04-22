@@ -12,6 +12,7 @@ from src.services.engines.base_engine import BaseEngine
 from src.services.engines.options_strategies import (
     get_matching_strategies,
     resolve_strikes,
+    build_occ_symbol,
     StrategyTemplate,
 )
 
@@ -59,6 +60,8 @@ class OptionsSignalEngine(BaseEngine):
             spot_price = kwargs.get("spot_price")
             price_data = kwargs.get("price_data")
             volume_data = kwargs.get("volume_data")
+            venue = kwargs.get("venue", "BINANCE")
+            contract_multiplier = float(kwargs.get("contract_multiplier", 0.01))
 
             # Derive direction and score from available data
             direction, dir_score = self._compute_direction(iv_rank, price_data, volume_data)
@@ -89,6 +92,8 @@ class OptionsSignalEngine(BaseEngine):
                     iv_value=iv_value,
                     spot_price=spot_price or 0,
                     expiry_iso=expiry_iso,
+                    venue=venue,
+                    contract_multiplier=contract_multiplier,
                 )
                 if sig:
                     signals.append(sig)
@@ -188,10 +193,28 @@ class OptionsSignalEngine(BaseEngine):
         iv_value: Optional[float],
         spot_price: float,
         expiry_iso: str,
+        venue: str = "BINANCE",
+        contract_multiplier: float = 0.01,
     ) -> Optional[Dict[str, Any]]:
         """Build a single signal dict from a strategy template."""
         try:
             legs = resolve_strikes(strat, spot_price, expiry_iso) if spot_price > 0 else []
+
+            # Attach contract symbol to each leg, format depends on venue
+            for leg in legs:
+                expiry_date = leg.get("expiry", expiry_iso)[:10]  # YYYY-MM-DD
+                if venue == "ALPACA":
+                    leg["symbol"] = build_occ_symbol(
+                        underlying=underlying,
+                        expiry_iso=expiry_date,
+                        option_type=leg["type"],
+                        strike=leg["strike"],
+                    )
+                else:
+                    # Binance format: UNDERLYING-YYMMDD-STRIKE-C/P
+                    date_part = expiry_date.replace("-", "")[2:]  # YYMMDD
+                    cp = "C" if leg["type"].upper().startswith("C") else "P"
+                    leg["symbol"] = f"{underlying.upper()}-{date_part}-{int(leg['strike'])}-{cp}"
 
             # Confidence based on IV data availability and score strength
             conf = 0.5

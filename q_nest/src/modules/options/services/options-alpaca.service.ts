@@ -67,8 +67,23 @@ export class OptionsAlpacaService implements IOptionsVenueService {
   ): Promise<OptionsChainResponseDto> {
     const api = this.client(credentials);
     try {
-      const snap: any = await api.getOptionsChainSnapshot(underlying, { limit: 1000 });
-      const snapshots: Record<string, any> = snap?.snapshots || snap || {};
+      // Paginate through all contracts — SPY/QQQ have thousands of strikes.
+      // Alpaca returns next_page_token when more pages exist; null/absent = done.
+      const snapshots: Record<string, any> = {};
+      let pageToken: string | undefined;
+      let pageCount = 0;
+      const MAX_PAGES = 10; // safety cap: 10 × ~1000 contracts = 10 000 max
+
+      do {
+        const snap: any = await api.getOptionsChainSnapshot(underlying, {
+          limit: 1000,
+          ...(pageToken ? { page_token: pageToken } : {}),
+        });
+        const page: Record<string, any> = snap?.snapshots || snap || {};
+        Object.assign(snapshots, page);
+        pageToken = snap?.next_page_token ?? undefined;
+        pageCount++;
+      } while (pageToken && pageCount < MAX_PAGES);
 
       const contracts: OptionContractDto[] = [];
       const expirySet = new Set<string>();
@@ -470,6 +485,17 @@ export class OptionsAlpacaService implements IOptionsVenueService {
       updated_at: order.updated_at,
       _raw: order,
     };
+  }
+
+  // ── Exercise position ─────────────────────────────────────────────
+
+  async exercisePosition(
+    credentials: OptionCredentials,
+    positionIdOrSymbol: string,
+    _userId?: string,
+  ): Promise<any> {
+    const api = this.client(credentials);
+    return api.exercisePosition(positionIdOrSymbol);
   }
 
   // ── Options approval level ────────────────────────────────────────

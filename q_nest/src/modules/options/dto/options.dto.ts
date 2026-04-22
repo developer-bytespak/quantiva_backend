@@ -216,6 +216,7 @@ export class OptionsPositionDto {
   realizedPnl: number;
   greeks: GreeksDto;
   isOpen: boolean;
+  venue?: string;
 }
 
 export class OptionsOrderDto {

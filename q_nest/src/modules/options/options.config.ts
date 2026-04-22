@@ -34,6 +34,10 @@ export const OPTIONS_POLLING_CONFIG = {
   // When the stream is down and we fall back to REST, these govern cache-refresh frequency.
   CHAIN_INTERVAL_MS: safeInt(process.env.OPTIONS_CHAIN_POLL_MS, 2000),
   TICKER_INTERVAL_MS: safeInt(process.env.OPTIONS_TICKER_POLL_MS, 1000),
+  // Alpaca chain polling is separate: the indicative feed is 15-min delayed so
+  // there is no data-freshness benefit from polling faster than ~15 s.
+  // Keeping this separate from CHAIN_INTERVAL_MS avoids slowing down Binance.
+  ALPACA_CHAIN_INTERVAL_MS: safeInt(process.env.OPTIONS_ALPACA_CHAIN_POLL_MS, 15000),
 };
 
 // ── Underlyings ───────────────────────────────────────────────

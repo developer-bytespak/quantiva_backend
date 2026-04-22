@@ -76,6 +76,7 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
 
   private readonly TICKER_INTERVAL_MS = OPTIONS_POLLING_CONFIG.TICKER_INTERVAL_MS;
   private readonly CHAIN_INTERVAL_MS = OPTIONS_POLLING_CONFIG.CHAIN_INTERVAL_MS;
+  private readonly ALPACA_CHAIN_INTERVAL_MS = OPTIONS_POLLING_CONFIG.ALPACA_CHAIN_INTERVAL_MS;
 
   constructor(
     private readonly optionsBinance: OptionsBinanceService,
@@ -226,11 +227,14 @@ export class OptionsGateway implements OnGatewayConnection, OnGatewayDisconnect,
     };
     this.sharedIntervals.set(key, shared);
 
+    const chainIntervalMs =
+      venue === 'ALPACA' ? this.ALPACA_CHAIN_INTERVAL_MS : this.CHAIN_INTERVAL_MS;
+
     shared.chainInterval = setInterval(() => {
       this.pushChainUpdate(venue, underlying).catch((err) =>
         this.logger.warn(`Chain interval error for ${key}: ${err.message}`),
       );
-    }, this.CHAIN_INTERVAL_MS);
+    }, chainIntervalMs);
 
     shared.tickerInterval = setInterval(() => {
       this.pushTickerUpdate(venue, underlying).catch((err) =>

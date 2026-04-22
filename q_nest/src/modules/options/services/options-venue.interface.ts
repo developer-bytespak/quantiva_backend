@@ -130,6 +130,15 @@ export interface IOptionsVenueService {
   ): Promise<OptionsApprovalStatus>;
 
   /**
+   * Exercise an option position (Alpaca only; optional — Binance adapter omits this).
+   */
+  exercisePosition?(
+    credentials: OptionCredentials,
+    positionIdOrSymbol: string,
+    userId?: string,
+  ): Promise<any>;
+
+  /**
    * Contract multiplier for this venue. Binance crypto options = 0.01,
    * US equity options = 100. Used by risk aggregation and sizing math.
    */

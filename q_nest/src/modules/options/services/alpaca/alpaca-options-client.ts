@@ -1,7 +1,94 @@
-import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from 'axios';
 import { Logger } from '@nestjs/common';
 import { OptionCredentials } from '../options-venue.interface';
 import { ALPACA_URLS, ALPACA_DEFAULT_FEED } from './alpaca-contract-specs';
+
+const MAX_RETRIES = 3;
+const RETRY_DELAYS_MS = [1_000, 2_000, 4_000];
+const MAX_RETRY_AFTER_MS = 60_000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Attach retry + structured-logging interceptors to an Axios instance. */
+function attachInterceptors(instance: AxiosInstance, logger: Logger, label: string) {
+  // Stamp start time on every request
+  instance.interceptors.request.use((config: any) => {
+    config._startTime = Date.now();
+    return config;
+  });
+
+  // Response: log success, retry on 429/5xx
+  instance.interceptors.response.use(
+    (response) => {
+      const cfg: any = response.config;
+      const duration = Date.now() - (cfg._startTime ?? Date.now());
+      logger.debug({
+        venue: 'ALPACA',
+        client: label,
+        endpoint: cfg.url,
+        status: response.status,
+        duration_ms: duration,
+      });
+      return response;
+    },
+    async (error: AxiosError) => {
+      const cfg: any = error.config;
+      if (!cfg) throw error;
+
+      const retryCount: number = cfg._retryCount ?? 0;
+      const status = error.response?.status;
+
+      if (retryCount < MAX_RETRIES && (status === 429 || (status && status >= 500))) {
+        let delayMs: number;
+
+        if (status === 429) {
+          const retryAfterHeader = error.response?.headers?.['retry-after'];
+          const retryAfterSec = retryAfterHeader ? parseFloat(String(retryAfterHeader)) : NaN;
+          delayMs = isNaN(retryAfterSec)
+            ? RETRY_DELAYS_MS[retryCount]
+            : Math.min(retryAfterSec * 1_000, MAX_RETRY_AFTER_MS);
+          logger.warn({
+            venue: 'ALPACA',
+            client: label,
+            endpoint: cfg.url,
+            status,
+            retry: retryCount + 1,
+            delay_ms: delayMs,
+            msg: '429 rate-limited — retrying',
+          });
+        } else {
+          delayMs = RETRY_DELAYS_MS[retryCount];
+          logger.warn({
+            venue: 'ALPACA',
+            client: label,
+            endpoint: cfg.url,
+            status,
+            retry: retryCount + 1,
+            delay_ms: delayMs,
+            msg: '5xx error — retrying',
+          });
+        }
+
+        await sleep(delayMs);
+        cfg._retryCount = retryCount + 1;
+        return instance.request(cfg);
+      }
+
+      const duration = Date.now() - (cfg._startTime ?? Date.now());
+      logger.error({
+        venue: 'ALPACA',
+        client: label,
+        endpoint: cfg.url,
+        status,
+        duration_ms: duration,
+        msg: error.message,
+      });
+      throw error;
+    },
+  );
+}
 
 /**
  * Thin axios wrapper around Alpaca's Trading + Market Data APIs scoped to
@@ -41,6 +128,9 @@ export class AlpacaOptionsClient {
       timeout: 10_000,
       headers: this.authHeaders(),
     });
+
+    attachInterceptors(this.trading, this.logger, 'trading');
+    attachInterceptors(this.data, this.logger, 'data');
   }
 
   private authHeaders() {

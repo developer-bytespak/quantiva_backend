@@ -270,6 +270,7 @@ export class OptionsService {
     const resolved = await this.resolveVenueService(connectionId, userId);
     return {
       venue: resolved.venue,
+      isPaper: resolved.isPaper,
       ...(await resolved.svc.getOptionsApprovalStatus(resolved.creds, userId)),
     };
   }
@@ -283,13 +284,9 @@ export class OptionsService {
     const resolved = await this.resolveVenueService(connectionId, userId);
     const positions = await resolved.svc.fetchPositions(resolved.creds, userId);
 
-    // Sync positions to DB in background (Binance contract_symbol format only;
-    // Alpaca OCC positions are synced via a venue-aware path added in Phase 3.)
-    if (resolved.venue === 'BINANCE') {
-      this.syncPositionsToDb(userId, positions).catch((err) =>
-        this.logger.error(`Position sync failed: ${err.message}`),
-      );
-    }
+    this.syncPositionsToDb(userId, positions, resolved.venue).catch((err) =>
+      this.logger.error(`Position sync failed: ${err.message}`),
+    );
 
     return positions;
   }
@@ -299,9 +296,12 @@ export class OptionsService {
    * Maps raw snake_case Prisma rows to camelCase OptionsPositionDto shape
    * expected by the frontend.
    */
-  async getPositionsFromDb(userId: string): Promise<OptionsPositionDto[]> {
+  async getPositionsFromDb(userId: string, venue?: string): Promise<OptionsPositionDto[]> {
     const rows = await this.prisma.options_positions.findMany({
-      where: { user_id: userId },
+      where: {
+        user_id: userId,
+        ...(venue ? { venue: venue as any } : {}),
+      },
       orderBy: { opened_at: 'desc' },
     });
 
@@ -324,17 +324,18 @@ export class OptionsService {
         vega: Number(p.vega) || 0,
       },
       isOpen: p.is_open,
+      venue: p.venue as string,
     }));
   }
 
   // Per-user mutex to prevent concurrent sync race conditions
   private syncLocks = new Map<string, Promise<void>>();
 
-  private async syncPositionsToDb(userId: string, positions: OptionsPositionDto[]) {
+  private async syncPositionsToDb(userId: string, positions: OptionsPositionDto[], venue: string = 'BINANCE') {
     // Serialize sync calls per user to prevent race conditions
     const existing = this.syncLocks.get(userId) || Promise.resolve();
     const next = existing
-      .then(() => this._doPositionSync(userId, positions))
+      .then(() => this._doPositionSync(userId, positions, venue))
       .catch((err) => this.logger.error(`Position sync failed for ${userId}: ${err.message}`))
       .finally(() => {
         // Clean up lock if this is still the latest promise for this user
@@ -346,15 +347,24 @@ export class OptionsService {
     return next;
   }
 
-  private async _doPositionSync(userId: string, positions: OptionsPositionDto[]) {
+  private async _doPositionSync(userId: string, positions: OptionsPositionDto[], venue: string = 'BINANCE') {
     const activeSymbols = positions.map((p) => p.contractSymbol);
 
     await this.prisma.$transaction(async (tx) => {
       // Upsert each position (batch within single transaction)
       for (const pos of positions) {
-        const parts = pos.contractSymbol.split('-');
-        const optionType: OptionType = parts[3] === 'C' ? 'CALL' : 'PUT';
-        const expiryDate = this.parseExpiryToDate(parts[1]);
+        let optionType: OptionType;
+        let expiryDate: Date;
+
+        if (venue === 'ALPACA') {
+          const parsed = parseOccSymbol(pos.contractSymbol);
+          optionType = parsed.type === 'CALL' ? 'CALL' : 'PUT';
+          expiryDate = this.parseExpiryToDate(parsed.expiry.replace(/-/g, ''));
+        } else {
+          const parts = pos.contractSymbol.split('-');
+          optionType = parts[3] === 'C' ? 'CALL' : 'PUT';
+          expiryDate = this.parseExpiryToDate(parts[1]);
+        }
 
         // Find existing open position for this user+contract
         const existingPos = await tx.options_positions.findFirst({
@@ -398,12 +408,13 @@ export class OptionsService {
               theta: pos.greeks?.theta ?? 0,
               vega: pos.greeks?.vega ?? 0,
               is_open: true,
+              venue: venue as any,
             },
           });
         }
       }
 
-      // Mark positions as closed if no longer on Binance
+      // Mark positions as closed if no longer in live positions (venue-agnostic)
       // Capture final P&L before marking positions closed
       // Promote last-known unrealized_pnl into realized_pnl so history shows meaningful values
       const closingPositions = await tx.options_positions.findMany({
@@ -489,6 +500,30 @@ export class OptionsService {
   // ── Orders ───────────────────────────────────────────────
 
   /**
+   * Throws BadRequestException if called outside Alpaca's Regular Trading Hours
+   * (09:30–16:00 ET, Mon–Fri). Alpaca rejects off-hours option orders server-side
+   * anyway, but we catch it here first to return a clean, user-friendly message.
+   */
+  private assertAlpacaMarketOpen(): void {
+    const now = new Date();
+    const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const day = et.getDay(); // 0 = Sun, 6 = Sat
+    if (day === 0 || day === 6) {
+      throw new BadRequestException(
+        'Alpaca options orders are not accepted on weekends. Markets resume Monday 09:30 ET.',
+      );
+    }
+    const minutes = et.getHours() * 60 + et.getMinutes();
+    const open = 9 * 60 + 30;  // 09:30
+    const close = 16 * 60;     // 16:00
+    if (minutes < open || minutes >= close) {
+      throw new BadRequestException(
+        'Alpaca options orders are only accepted during Regular Trading Hours (09:30–16:00 ET, Mon–Fri).',
+      );
+    }
+  }
+
+  /**
    * Place an option order with risk checks. Dispatches to the correct venue
    * adapter (Binance or Alpaca) based on the connection's exchange.
    */
@@ -498,6 +533,12 @@ export class OptionsService {
   ): Promise<OptionsOrderDto> {
     // 1. Resolve the venue (also verifies ownership + decrypts creds)
     const resolved = await this.resolveVenueService(dto.connectionId, userId);
+
+    // 1a. Alpaca options only trade during RTH — reject off-hours requests
+    //     before touching the exchange so the user gets a clean error message.
+    if (resolved.venue === 'ALPACA') {
+      this.assertAlpacaMarketOpen();
+    }
 
     // 2. Validate signal not expired (if order linked to a signal)
     if (dto.signalId) {
@@ -683,6 +724,9 @@ export class OptionsService {
       );
     }
 
+    // RTH guard — same as single-leg path.
+    this.assertAlpacaMarketOpen();
+
     // Defense-in-depth: re-check approval level even though the UI already
     // gates this button — a hand-crafted request could try to bypass.
     const approval = await resolved.svc.getOptionsApprovalStatus(resolved.creds, userId);
@@ -829,6 +873,25 @@ export class OptionsService {
     }
 
     return { success: true, message: `Order ${dbOrder.order_id} cancelled` };
+  }
+
+  /**
+   * Exercise an option position (Alpaca only).
+   * Alpaca's early-exercise endpoint: POST /v2/positions/{symbolOrId}/exercise
+   */
+  async exerciseOptionPosition(
+    userId: string,
+    connectionId: string,
+    positionIdOrSymbol: string,
+  ): Promise<any> {
+    const resolved = await this.resolveVenueService(connectionId, userId);
+    if (resolved.venue !== 'ALPACA') {
+      throw new BadRequestException('Exercise is only supported for Alpaca positions');
+    }
+    if (!resolved.svc.exercisePosition) {
+      throw new BadRequestException('Exercise not implemented for this venue');
+    }
+    return resolved.svc.exercisePosition(resolved.creds, positionIdOrSymbol, userId);
   }
 
   /**
