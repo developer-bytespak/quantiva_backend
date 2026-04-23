@@ -305,7 +305,30 @@ export class OptionsService {
       orderBy: { opened_at: 'desc' },
     });
 
-    return rows.map((p) => ({
+    // Collapse by contract_symbol: open rows win over closed rows; for closed
+    // rows with no corresponding open row we keep the most recent and sum
+    // realized_pnl across all historical closes of the same contract so users
+    // see one row per contract with aggregated P&L.
+    const byContract = new Map<
+      string,
+      { row: typeof rows[number]; realizedSum: number }
+    >();
+    for (const r of rows) {
+      const key = r.contract_symbol;
+      const current = byContract.get(key);
+      if (!current) {
+        byContract.set(key, { row: r, realizedSum: Number(r.realized_pnl) || 0 });
+        continue;
+      }
+      current.realizedSum += Number(r.realized_pnl) || 0;
+      // Prefer open rows; otherwise prefer the latest opened_at (already
+      // descending from the query, so the first seen wins — no change).
+      if (r.is_open && !current.row.is_open) {
+        current.row = r;
+      }
+    }
+
+    return Array.from(byContract.values()).map(({ row: p, realizedSum }) => ({
       positionId: p.position_id,
       contractSymbol: p.contract_symbol,
       underlying: p.underlying,
@@ -316,7 +339,7 @@ export class OptionsService {
       avgPremium: Number(p.avg_premium),
       currentPremium: Number(p.current_premium) || 0,
       unrealizedPnl: Number(p.unrealized_pnl) || 0,
-      realizedPnl: Number(p.realized_pnl) || 0,
+      realizedPnl: realizedSum,
       greeks: {
         delta: Number(p.delta) || 0,
         gamma: Number(p.gamma) || 0,
@@ -366,14 +389,36 @@ export class OptionsService {
           expiryDate = this.parseExpiryToDate(parts[1]);
         }
 
-        // Find existing open position for this user+contract
-        const existingPos = await tx.options_positions.findFirst({
+        // Find existing open position for this user+contract. If none, fall
+        // back to the most recently closed row for the same contract — if it
+        // was closed within the last 24h, reopen it instead of creating a new
+        // row (handles phantom closes caused by transient empty-response
+        // blips). Anything older than 24h is treated as a new lifecycle.
+        let existingPos = await tx.options_positions.findFirst({
           where: {
             user_id: userId,
             contract_symbol: pos.contractSymbol,
             is_open: true,
           },
         });
+        if (!existingPos) {
+          const recentlyClosed = await tx.options_positions.findFirst({
+            where: {
+              user_id: userId,
+              contract_symbol: pos.contractSymbol,
+              is_open: false,
+              closed_at: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+            },
+            orderBy: { closed_at: 'desc' },
+          });
+          if (recentlyClosed) {
+            await tx.options_positions.update({
+              where: { position_id: recentlyClosed.position_id },
+              data: { is_open: true, closed_at: null },
+            });
+            existingPos = recentlyClosed;
+          }
+        }
 
         if (existingPos) {
           await tx.options_positions.update({
@@ -417,24 +462,39 @@ export class OptionsService {
       // Mark positions as closed if no longer in live positions.
       // Scope to the same venue so Binance sync never closes Alpaca positions
       // and vice versa — a user may have both venues active simultaneously.
+      //
+      // Guard: if the live response was empty we can't distinguish "user
+      // closed everything" from a transient empty response (API hiccup,
+      // in-flight order, etc.). Mass-closing here would spawn phantom
+      // duplicate rows on the next sync, so we skip reconciliation entirely
+      // and let a future sync (with at least one live position) clean up any
+      // stale open rows.
+      if (activeSymbols.length === 0) {
+        return;
+      }
+
       const closingPositions = await tx.options_positions.findMany({
         where: {
           user_id: userId,
           is_open: true,
           venue: venue as any,
-          ...(activeSymbols.length > 0 ? { contract_symbol: { notIn: activeSymbols } } : {}),
+          contract_symbol: { notIn: activeSymbols },
         },
         select: { position_id: true, unrealized_pnl: true, realized_pnl: true },
       });
 
       const closedAt = new Date();
       for (const pos of closingPositions) {
+        const realizedFromClose =
+          Number(pos.realized_pnl) !== 0
+            ? Number(pos.realized_pnl)
+            : Number(pos.unrealized_pnl) || 0;
         await tx.options_positions.update({
           where: { position_id: pos.position_id },
           data: {
             is_open: false,
             closed_at: closedAt,
-            realized_pnl: pos.realized_pnl ?? pos.unrealized_pnl ?? 0,
+            realized_pnl: realizedFromClose,
             unrealized_pnl: 0,
           },
         });
@@ -908,13 +968,84 @@ export class OptionsService {
     if (status) where.status = status;
     if (venue) where.venue = venue;
 
-    const orders = await this.prisma.options_orders.findMany({
+    let orders = await this.prisma.options_orders.findMany({
       where,
       orderBy: { created_at: 'desc' },
       take: limit,
     });
 
+    // Live-sync any still-pending Binance orders before returning so the UI
+    // doesn't show "pending" for up to 10 minutes while the cron sleeps.
+    const pendingBinance = orders.filter(
+      (o) =>
+        ['submitting', 'pending', 'partially_filled'].includes(o.status) &&
+        o.venue === 'BINANCE' &&
+        !!o.binance_order_id,
+    );
+    if (pendingBinance.length > 0) {
+      await Promise.all(
+        pendingBinance.map((o) => this.syncSingleBinanceOrder(o.order_id).catch(() => null)),
+      );
+      orders = await this.prisma.options_orders.findMany({
+        where,
+        orderBy: { created_at: 'desc' },
+        take: limit,
+      });
+    }
+
     return orders.map((o) => this.mapDbOrderToDto(o));
+  }
+
+  /**
+   * Fetch the live status of a single Binance options order and persist any
+   * state change. Shared between `getOrders` (on-demand) and the scheduled
+   * `syncPendingOrderStatuses` cron.
+   */
+  private async syncSingleBinanceOrder(orderId: string): Promise<void> {
+    const order = await this.prisma.options_orders.findUnique({
+      where: { order_id: orderId },
+    });
+    if (!order) return;
+
+    // Expired contract → Binance auto-cancels at settlement
+    if (order.expiry && order.expiry < new Date()) {
+      if (order.status !== 'expired') {
+        await this.prisma.options_orders.update({
+          where: { order_id: order.order_id },
+          data: { status: 'expired' },
+        });
+      }
+      return;
+    }
+
+    if (!order.binance_order_id) return;
+
+    const connection = await this.prisma.user_exchange_connections.findFirst({
+      where: { user_id: order.user_id, status: 'active' },
+      include: { exchange: true },
+    });
+    if (!connection || connection.exchange?.name?.toLowerCase() !== 'binance') return;
+
+    const credentials = await this.exchangesService.getDecryptedCredentials(connection.connection_id);
+    const binanceOrder = await this.optionsBinance.fetchOrder(
+      credentials,
+      order.contract_symbol,
+      order.binance_order_id,
+      order.user_id,
+    );
+
+    const newStatus = this.mapOrderStatus(binanceOrder.status);
+    if (newStatus === order.status) return;
+    if (newStatus === 'pending' || newStatus === 'submitting') return;
+
+    await this.prisma.options_orders.update({
+      where: { order_id: order.order_id },
+      data: {
+        status: newStatus,
+        filled_quantity: parseFloat(binanceOrder.executedQty || binanceOrder.filled || '0'),
+        avg_fill_price: parseFloat(binanceOrder.avgPrice || binanceOrder.average || '0') || null,
+      },
+    });
   }
 
   /**
@@ -1185,68 +1316,23 @@ export class OptionsService {
     const pendingStatuses: OptionOrderStatus[] = ['submitting', 'pending', 'partially_filled'];
     const pendingOrders = await this.prisma.options_orders.findMany({
       where: { status: { in: pendingStatuses } },
-      select: {
-        order_id: true,
-        user_id: true,
-        contract_symbol: true,
-        binance_order_id: true,
-        expiry: true,
-      },
+      select: { order_id: true },
     });
 
     if (pendingOrders.length === 0) return;
 
-    const now = new Date();
-    let expiredCount = 0;
-    let syncedCount = 0;
-
+    let synced = 0;
     for (const order of pendingOrders) {
-      // 1. If the contract has already expired, mark order expired (Binance auto-cancels at settlement)
-      if (order.expiry && order.expiry < now) {
-        await this.prisma.options_orders.update({
-          where: { order_id: order.order_id },
-          data: { status: 'expired' },
-        });
-        expiredCount++;
-        continue;
-      }
-
-      // 2. Live sync status from Binance — requires a valid binance_order_id + active connection
-      if (!order.binance_order_id) continue;
       try {
-        const connection = await this.prisma.user_exchange_connections.findFirst({
-          where: { user_id: order.user_id, status: 'active' },
-          include: { exchange: true },
-        });
-        if (!connection || connection.exchange?.name?.toLowerCase() !== 'binance') continue;
-
-        const credentials = await this.exchangesService.getDecryptedCredentials(connection.connection_id);
-        const binanceOrder = await this.optionsBinance.fetchOrder(
-          credentials,
-          order.contract_symbol,
-          order.binance_order_id,
-          order.user_id,
-        );
-
-        const newStatus = this.mapOrderStatus(binanceOrder.status);
-        if (newStatus !== 'pending' && newStatus !== 'submitting') {
-          await this.prisma.options_orders.update({
-            where: { order_id: order.order_id },
-            data: {
-              status: newStatus,
-              filled_quantity: parseFloat(binanceOrder.executedQty || binanceOrder.filled || '0'),
-              avg_fill_price: parseFloat(binanceOrder.avgPrice || binanceOrder.average || '0') || null,
-            },
-          });
-          syncedCount++;
-        }
+        await this.syncSingleBinanceOrder(order.order_id);
+        synced++;
       } catch (err: any) {
         this.logger.warn(`Order status sync failed for ${order.order_id}: ${err.message}`);
       }
     }
 
-    if (expiredCount + syncedCount > 0) {
-      this.logger.log(`Order sync: ${expiredCount} expired, ${syncedCount} status-synced`);
+    if (synced > 0) {
+      this.logger.log(`Order sync: processed ${synced} pending orders`);
     }
   }
 

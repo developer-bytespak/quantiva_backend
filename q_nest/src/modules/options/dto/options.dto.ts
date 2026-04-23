@@ -35,9 +35,9 @@ export class PlaceOptionOrderDto {
    *   - Alpaca US equity options (OCC-21): AAPL240621C00150000
    */
   @IsString()
-  @Matches(/^([A-Z]{2,10}-\d{6}-\d+-[CP]|[A-Z]{1,6}\d{6}[CP]\d{8})$/, {
+  @Matches(/^([A-Z]{2,10}-\d{6}-\d+(?:\.\d+)?-[CP]|[A-Z]{1,6}\d{6}[CP]\d{8})$/, {
     message:
-      'contractSymbol must be Binance format (BTC-260327-100000-C) or OCC format (AAPL240621C00150000)',
+      'contractSymbol must be Binance format (BTC-260327-100000-C, XRP-260327-2.5-C) or OCC format (AAPL240621C00150000)',
   })
   contractSymbol: string;
 
