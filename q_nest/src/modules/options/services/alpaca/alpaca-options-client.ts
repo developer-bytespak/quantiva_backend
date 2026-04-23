@@ -225,6 +225,18 @@ export class AlpacaOptionsClient {
     return res.data;
   }
 
+  /**
+   * Latest stock snapshot for the underlying equity.
+   * Returns latestTrade (price `p`), latestQuote (ask `ap`), and dailyBar.
+   * Used to get the spot price for ITM/ATM/OTM classification and P&L diagrams.
+   */
+  async getStockSnapshot<T = any>(symbol: string): Promise<T> {
+    const res = await this.data.get<T>('/v2/stocks/snapshots', {
+      params: { symbols: symbol },
+    });
+    return res.data;
+  }
+
   // ── Order placement ──────────────────────────────────────────────
 
   /**

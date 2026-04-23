@@ -216,20 +216,22 @@ export class OptionsController {
   }
 
   /**
-   * GET /options/orders?status=pending&limit=50
-   * Get user's option orders from DB.
+   * GET /options/orders?status=pending&limit=50&venue=ALPACA
+   * Get user's option orders from DB, scoped to a venue when provided.
    */
   @Get('orders')
   async getOrders(
     @CurrentUser() user: TokenPayload,
     @Query('status') status?: string,
     @Query('limit') limit?: string,
+    @Query('venue') venue?: string,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
     return this.optionsService.getOrders(
       user.sub,
       status,
       limit ? parseInt(limit, 10) : undefined,
+      venue?.toUpperCase(),
     );
   }
 

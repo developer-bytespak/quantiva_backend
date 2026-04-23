@@ -67,6 +67,10 @@ export class OptionsAlpacaService implements IOptionsVenueService {
   ): Promise<OptionsChainResponseDto> {
     const api = this.client(credentials);
     try {
+      // Fetch the underlying stock price in parallel with the first options page
+      // so we have the correct spot price for ITM/ATM/OTM and P&L diagrams.
+      const stockPricePromise = api.getStockSnapshot(underlying).catch(() => null);
+
       // Paginate through all contracts — SPY/QQQ have thousands of strikes.
       // Alpaca returns next_page_token when more pages exist; null/absent = done.
       const snapshots: Record<string, any> = {};
@@ -128,14 +132,17 @@ export class OptionsAlpacaService implements IOptionsVenueService {
         return a.strike - b.strike;
       });
 
-      // Resolve underlying price from any snapshot's dailyBar close, fallback 0
+      // Resolve underlying stock price from the parallel stock snapshot fetch.
+      // Prefer latestTrade.p, then latestQuote.ap, then dailyBar.c.
       let underlyingPrice = 0;
-      for (const data of Object.values(snapshots)) {
-        const c = (data as any)?.dailyBar?.c;
-        if (c && Number.isFinite(Number(c))) {
-          underlyingPrice = Number(c);
-          break;
-        }
+      const stockSnap: any = await stockPricePromise;
+      const stockData = stockSnap?.[underlying.toUpperCase()] ?? stockSnap?.[underlying];
+      const rawPrice =
+        stockData?.latestTrade?.p ??
+        stockData?.latestQuote?.ap ??
+        stockData?.dailyBar?.c;
+      if (rawPrice !== undefined && Number.isFinite(Number(rawPrice))) {
+        underlyingPrice = Number(rawPrice);
       }
 
       return {
