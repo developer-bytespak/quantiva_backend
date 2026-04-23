@@ -189,6 +189,33 @@ export class AuthService {
     };
   }
 
+  /**
+   * Resend the login-flow 2FA code. Called from the verify-2fa screen
+   * when the user's first code didn't arrive (email delay, wrong inbox,
+   * etc.). Intentionally returns the same response whether or not the
+   * user exists so this endpoint can't be used to enumerate accounts.
+   */
+  async resendLoginCode(emailOrUsername: string) {
+    if (!emailOrUsername || typeof emailOrUsername !== 'string') {
+      throw new BadRequestException('emailOrUsername is required');
+    }
+
+    const user = await this.prisma.users.findFirst({
+      where: {
+        OR: [{ email: emailOrUsername }, { username: emailOrUsername }],
+      },
+    });
+
+    if (user) {
+      const code = await this.twoFactorService.generateCode(user.user_id, 'login');
+      await this.twoFactorService.sendCodeByEmail(user.email, code);
+    }
+
+    return {
+      message: 'If an account exists, a new 2FA code has been sent',
+    };
+  }
+
   async verify2FA(
     verify2FADto: Verify2FADto,
     ipAddress?: string,

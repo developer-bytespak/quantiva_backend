@@ -165,6 +165,23 @@ export class AuthController {
     };
   }
 
+  /**
+   * Resend the login-flow 2FA code. Used by the verify-2fa screen's
+   * "Resend code" button. Public because the user hasn't finished login
+   * yet. Throttled to 3/min per IP so this endpoint can't be abused to
+   * spam the SendGrid account.
+   */
+  @Public()
+  @Post('resend-2fa-code')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 60_000, limit: 3 } })
+  async resend2FACode(@Body() body: { emailOrUsername?: string }) {
+    if (!body?.emailOrUsername) {
+      throw new BadRequestException('emailOrUsername is required');
+    }
+    return this.authService.resendLoginCode(body.emailOrUsername);
+  }
+
   @Public()
   @Post('google')
   @HttpCode(HttpStatus.OK)
