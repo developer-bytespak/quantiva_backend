@@ -182,7 +182,18 @@ export class OptionsController {
     @Body() dto: PlaceOptionOrderDto,
   ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.optionsService.placeOrder(user.sub, dto);
+    const order = await this.optionsService.placeOrder(user.sub, dto);
+    const action = dto.side === 'BUY' ? 'Buy' : 'Sell';
+    const label = `${action} ${dto.optionType.toLowerCase()} — ${dto.contractSymbol}`;
+    const message =
+      order.status === 'filled'
+        ? `${label} filled at ${order.avgFillPrice || order.price}`
+        : order.status === 'partially_filled'
+          ? `${label} partially filled (${order.filledQuantity}/${order.quantity})`
+          : order.status === 'rejected'
+            ? `${label} rejected by venue`
+            : `${label} placed — awaiting fill`;
+    return { success: true, message, ...order };
   }
 
   /**
