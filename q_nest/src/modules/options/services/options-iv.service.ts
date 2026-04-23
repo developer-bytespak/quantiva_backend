@@ -38,14 +38,23 @@ export class OptionsIvService {
 
   /**
    * Alpaca market data requires authentication. IV snapshots run on a
-   * schedule with no user in context, so we source creds from env:
-   *   ALPACA_SYSTEM_API_KEY + ALPACA_SYSTEM_API_SECRET.
-   * Returns null when unset — callers should skip Alpaca work silently
-   * in that case so the Binance path continues to function.
+   * schedule with no user in context, so we source creds from env.
+   *
+   * Primary: `ALPACA_SYSTEM_API_KEY` + `ALPACA_SYSTEM_API_SECRET` (lets ops
+   * rotate options-cron creds independently from the stocks-market module).
+   * Fallback: `ALPACA_API_KEY` + `ALPACA_SECRET_KEY` — the broader envs the
+   * stocks-market and paper-trading modules already consume. Using the
+   * fallback avoids forcing two env pairs when one platform Alpaca account
+   * is enough.
+   *
+   * Returns null when neither pair is set — callers should skip Alpaca work
+   * so the Binance path continues to function.
    */
   private systemAlpacaCreds(): OptionCredentials | null {
-    const apiKey = process.env.ALPACA_SYSTEM_API_KEY;
-    const apiSecret = process.env.ALPACA_SYSTEM_API_SECRET;
+    const apiKey =
+      process.env.ALPACA_SYSTEM_API_KEY || process.env.ALPACA_API_KEY;
+    const apiSecret =
+      process.env.ALPACA_SYSTEM_API_SECRET || process.env.ALPACA_SECRET_KEY;
     if (!apiKey || !apiSecret) return null;
     return { apiKey, apiSecret };
   }
@@ -123,8 +132,8 @@ export class OptionsIvService {
   private async snapshotAlpacaIv() {
     const creds = this.systemAlpacaCreds();
     if (!creds) {
-      this.logger.debug(
-        'Skipping Alpaca IV snapshot — ALPACA_SYSTEM_API_KEY not configured',
+      this.logger.warn(
+        'Skipping Alpaca IV snapshot — set ALPACA_API_KEY + ALPACA_SECRET_KEY (or ALPACA_SYSTEM_API_KEY + ALPACA_SYSTEM_API_SECRET)',
       );
       return;
     }

@@ -42,14 +42,25 @@ async def generate_signals(request_data: Dict[str, Any] = Body(...)):
         if not underlying:
             raise HTTPException(status_code=400, detail="Missing 'underlying'")
 
+        # Derive asset_type from venue when the caller didn't pass one
+        # explicitly — ALPACA is US equity options, BINANCE is crypto options.
+        venue = (request_data.get("venue") or "BINANCE").upper()
+        asset_type = request_data.get("asset_type") or (
+            "stock" if venue == "ALPACA" else "crypto"
+        )
+
         result = _engine.calculate(
             asset_id=underlying,
-            asset_type="crypto",
+            asset_type=asset_type,
             iv_rank=request_data.get("iv_rank"),
             iv_value=request_data.get("iv_value"),
             spot_price=request_data.get("spot_price"),
             price_data=request_data.get("price_data"),
             volume_data=request_data.get("volume_data"),
+            venue=venue,
+            contract_multiplier=float(
+                request_data.get("contract_multiplier", 0.01)
+            ),
         )
 
         return {
