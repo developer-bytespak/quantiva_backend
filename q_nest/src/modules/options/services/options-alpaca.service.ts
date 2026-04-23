@@ -20,6 +20,8 @@ import {
   ALPACA_CONTRACT_MULTIPLIER,
   ALPACA_DEFAULT_UNDERLYINGS,
 } from './alpaca/alpaca-contract-specs';
+import { computeGreeksFromMarket } from './alpaca/greeks-engine';
+import { getDividendYield, getRiskFreeRate } from './alpaca/market-params';
 
 /**
  * Alpaca US stock options adapter.
@@ -92,6 +94,19 @@ export class OptionsAlpacaService implements IOptionsVenueService {
       const contracts: OptionContractDto[] = [];
       const expirySet = new Set<string>();
 
+      // We need the spot price first so per-contract greek computation
+      // doesn't have to duplicate the parallel await below. Resolve it here
+      // synchronously relative to the loop (the fetch is already in flight).
+      const stockSnapForLoop: any = await stockPricePromise;
+      const stockData =
+        stockSnapForLoop?.[underlying.toUpperCase()] ?? stockSnapForLoop?.[underlying];
+      const rawSpot =
+        stockData?.latestTrade?.p ??
+        stockData?.latestQuote?.ap ??
+        stockData?.dailyBar?.c ??
+        0;
+      const spot = Number.isFinite(Number(rawSpot)) ? Number(rawSpot) : 0;
+
       for (const [occSymbol, data] of Object.entries(snapshots)) {
         const parsed = tryParseOccSymbol(occSymbol);
         if (!parsed) continue;
@@ -99,8 +114,14 @@ export class OptionsAlpacaService implements IOptionsVenueService {
 
         const lq = (data as any)?.latestQuote || {};
         const lt = (data as any)?.latestTrade || {};
-        const greeks = (data as any)?.greeks || {};
-        const iv = (data as any)?.impliedVolatility;
+
+        const bid = parseFloat(lq.bp ?? '0') || 0;
+        const ask = parseFloat(lq.ap ?? '0') || 0;
+        const mark = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+        const last = parseFloat(lt.p ?? '0') || 0;
+        const referencePrice = mark > 0 ? mark : last;
+
+        const g = this.computeGreeksLocal(parsed, spot, referencePrice);
 
         contracts.push({
           symbol: occSymbol,
@@ -108,19 +129,18 @@ export class OptionsAlpacaService implements IOptionsVenueService {
           strike: parsed.strike,
           expiry: parsed.expiry,
           type: parsed.type,
-          bidPrice: parseFloat(lq.bp ?? '0') || 0,
-          askPrice: parseFloat(lq.ap ?? '0') || 0,
-          markPrice:
-            ((parseFloat(lq.bp ?? '0') || 0) + (parseFloat(lq.ap ?? '0') || 0)) / 2 || 0,
-          lastPrice: parseFloat(lt.p ?? '0') || 0,
+          bidPrice: bid,
+          askPrice: ask,
+          markPrice: mark,
+          lastPrice: last,
           volume: parseInt((data as any)?.dailyBar?.v ?? '0', 10) || 0,
           openInterest: 0, // not included in snapshot payload
           greeks: {
-            delta: Number(greeks.delta ?? 0),
-            gamma: Number(greeks.gamma ?? 0),
-            theta: Number(greeks.theta ?? 0),
-            vega: Number(greeks.vega ?? 0),
-            impliedVolatility: iv !== undefined ? Number(iv) : undefined,
+            delta: g.delta,
+            gamma: g.gamma,
+            theta: g.theta,
+            vega: g.vega,
+            impliedVolatility: g.iv > 0 ? g.iv : undefined,
           },
           contractSize: ALPACA_CONTRACT_MULTIPLIER,
         });
@@ -132,22 +152,9 @@ export class OptionsAlpacaService implements IOptionsVenueService {
         return a.strike - b.strike;
       });
 
-      // Resolve underlying stock price from the parallel stock snapshot fetch.
-      // Prefer latestTrade.p, then latestQuote.ap, then dailyBar.c.
-      let underlyingPrice = 0;
-      const stockSnap: any = await stockPricePromise;
-      const stockData = stockSnap?.[underlying.toUpperCase()] ?? stockSnap?.[underlying];
-      const rawPrice =
-        stockData?.latestTrade?.p ??
-        stockData?.latestQuote?.ap ??
-        stockData?.dailyBar?.c;
-      if (rawPrice !== undefined && Number.isFinite(Number(rawPrice))) {
-        underlyingPrice = Number(rawPrice);
-      }
-
       return {
         underlying: underlying.toUpperCase(),
-        underlyingPrice,
+        underlyingPrice: spot,
         expiryDates: Array.from(expirySet).sort(),
         contracts,
         timestamp: Date.now(),
@@ -168,23 +175,49 @@ export class OptionsAlpacaService implements IOptionsVenueService {
     }
   }
 
+  /**
+   * Alpaca's indicative feed doesn't return greeks — we compute them
+   * ourselves via Black-Scholes-Merton with IV solved by Newton-Raphson
+   * from the option's mid price. Requires a single extra stock-snapshot
+   * fetch for the underlying spot. See `alpaca/greeks-engine.ts` for the
+   * math and `alpaca/market-params.ts` for risk-free rate / div yields.
+   */
   async fetchGreeks(
     credentials: OptionCredentials | null,
     contractSymbol: string,
     _userId?: string,
   ): Promise<GreeksDto> {
     const api = this.client(credentials);
+    const parsed = tryParseOccSymbol(contractSymbol);
+    if (!parsed) {
+      this.logger.warn(`fetchGreeks: cannot parse OCC symbol ${contractSymbol}`);
+      return { delta: 0, gamma: 0, theta: 0, vega: 0 };
+    }
+
     try {
-      const snap: any = await api.getOptionSnapshot(contractSymbol);
-      const row = snap?.snapshots?.[contractSymbol] || snap?.[contractSymbol] || {};
-      const greeks = row?.greeks || {};
+      // Snapshot for the contract + stock snapshot for the underlying spot, in
+      // parallel — halves the latency vs sequential.
+      const [snap, stockSnap] = await Promise.all([
+        api.getOptionSnapshot(contractSymbol),
+        api.getStockSnapshot(parsed.underlying).catch(() => null),
+      ]);
+      const row: any = snap?.snapshots?.[contractSymbol] || snap?.[contractSymbol] || {};
+      const bid = Number(row?.latestQuote?.bp ?? 0);
+      const ask = Number(row?.latestQuote?.ap ?? 0);
+      const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : Number(row?.latestTrade?.p ?? 0);
+
+      const stock: any = (stockSnap as any)?.[parsed.underlying] ?? (stockSnap as any)?.[parsed.underlying?.toUpperCase()];
+      const spot = Number(
+        stock?.latestTrade?.p ?? stock?.latestQuote?.ap ?? stock?.dailyBar?.c ?? 0,
+      );
+
+      const greeks = this.computeGreeksLocal(parsed, spot, mid);
       return {
-        delta: Number(greeks.delta ?? 0),
-        gamma: Number(greeks.gamma ?? 0),
-        theta: Number(greeks.theta ?? 0),
-        vega: Number(greeks.vega ?? 0),
-        impliedVolatility:
-          row?.impliedVolatility !== undefined ? Number(row.impliedVolatility) : undefined,
+        delta: greeks.delta,
+        gamma: greeks.gamma,
+        theta: greeks.theta,
+        vega: greeks.vega,
+        impliedVolatility: greeks.iv > 0 ? greeks.iv : undefined,
       };
     } catch (error: any) {
       this.logger.warn(
@@ -192,6 +225,38 @@ export class OptionsAlpacaService implements IOptionsVenueService {
       );
       return { delta: 0, gamma: 0, theta: 0, vega: 0 };
     }
+  }
+
+  /**
+   * Pure BS-greek computation given a parsed OCC symbol, the underlying
+   * spot, and the option's reference price (usually the mid). Shared by
+   * `fetchGreeks` and the per-contract loop in `fetchOptionsChain`.
+   */
+  private computeGreeksLocal(
+    parsed: { underlying: string; strike: number; expiry: string; type: any },
+    spot: number,
+    marketPrice: number,
+  ): { delta: number; gamma: number; theta: number; vega: number; iv: number } {
+    if (!spot || !marketPrice || !Number.isFinite(spot) || !Number.isFinite(marketPrice)) {
+      return { delta: 0, gamma: 0, theta: 0, vega: 0, iv: 0 };
+    }
+    // Time to expiry in years. Add a half-day buffer so 0DTE options don't
+    // blow up the IV solver with tte≈0 right at the open.
+    const nowMs = Date.now();
+    const expiryMs = new Date(`${parsed.expiry}T20:00:00Z`).getTime(); // 4pm ET ~= 20:00 UTC
+    const tteMs = Math.max(0, expiryMs - nowMs);
+    const tte = tteMs / (1000 * 60 * 60 * 24 * 365);
+    if (tte <= 0) return { delta: 0, gamma: 0, theta: 0, vega: 0, iv: 0 };
+
+    return computeGreeksFromMarket({
+      spot,
+      strike: parsed.strike,
+      rate: getRiskFreeRate(),
+      dividendYield: getDividendYield(parsed.underlying),
+      tte,
+      type: String(parsed.type).toUpperCase() === 'CALL' ? 'CALL' : 'PUT',
+      marketPrice,
+    });
   }
 
   async fetchOptionTicker(

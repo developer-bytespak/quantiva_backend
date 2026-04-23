@@ -60,11 +60,17 @@ export class OptionsSignalService {
   }
 
   private async generateAlpacaSignals() {
-    const apiKey = process.env.ALPACA_SYSTEM_API_KEY;
-    const apiSecret = process.env.ALPACA_SYSTEM_API_SECRET;
+    // Primary: a dedicated options-specific system key (lets ops rotate it
+    // independently). Fallback: the broader ALPACA_API_KEY the stocks-market
+    // and paper-trading modules already consume — avoids forcing two envs
+    // when one platform Alpaca account serves everything.
+    const apiKey =
+      process.env.ALPACA_SYSTEM_API_KEY || process.env.ALPACA_API_KEY;
+    const apiSecret =
+      process.env.ALPACA_SYSTEM_API_SECRET || process.env.ALPACA_SECRET_KEY;
     if (!apiKey || !apiSecret) {
-      this.logger.debug(
-        'Skipping Alpaca signal generation — ALPACA_SYSTEM_API_KEY not configured',
+      this.logger.warn(
+        'Skipping Alpaca signal generation — set ALPACA_API_KEY + ALPACA_SECRET_KEY (or ALPACA_SYSTEM_API_KEY + ALPACA_SYSTEM_API_SECRET)',
       );
       return;
     }
@@ -129,6 +135,10 @@ export class OptionsSignalService {
       {
         underlying,
         venue,
+        // Python's engine validates against {'crypto','stock'} — pass the
+        // right one so equity underlyings aren't rejected by the crypto
+        // default. Aligns OCC vs Binance-dash symbol generation downstream.
+        asset_type: venue === 'ALPACA' ? 'stock' : 'crypto',
         contract_multiplier: contractMultiplier,
         iv_rank: ivData?.ivRank ?? null,
         iv_value: ivData?.currentIv ?? null,

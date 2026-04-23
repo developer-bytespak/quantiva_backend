@@ -61,6 +61,17 @@ export interface ResolvedVenue {
   connection: any;
 }
 
+/** OCC-21 equity options symbol: e.g. `NVDA260424C00170000`. Alpaca format. */
+const OCC_SYMBOL_REGEX = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/;
+/** Binance crypto options symbol: e.g. `BTC-260327-100000-C`, `XRP-260327-2.5-C`. */
+const BINANCE_SYMBOL_REGEX = /^[A-Z]{2,10}-\d{6}-\d+(?:\.\d+)?-[CP]$/;
+
+function detectSymbolVenue(contractSymbol: string): 'ALPACA' | 'BINANCE' | null {
+  if (OCC_SYMBOL_REGEX.test(contractSymbol)) return 'ALPACA';
+  if (BINANCE_SYMBOL_REGEX.test(contractSymbol)) return 'BINANCE';
+  return null;
+}
+
 @Injectable()
 export class OptionsService {
   private readonly logger = new Logger(OptionsService.name);
@@ -184,22 +195,69 @@ export class OptionsService {
   /**
    * Resolve the right venue service for a public-data call.
    *
-   * Binance options market data is public (no creds). Alpaca options data
-   * is gated behind APCA-* headers — we must pass a connection so we can
-   * authenticate. When `connectionId` is provided we honor it and dispatch
-   * via `resolveVenueService`; otherwise we fall back to Binance with null
-   * credentials (preserves legacy behaviour for the unauthenticated
-   * `/options/chain/:underlying` route).
+   * Priority:
+   *   1. Explicit `connectionId` (caller knows which broker to hit).
+   *   2. Symbol-format auto-routing — OCC symbols (e.g. `NVDA260424C00170000`)
+   *      are Alpaca-only, Binance-dash symbols (e.g. `BTC-260327-100000-C`)
+   *      are Binance. When the caller doesn't supply a connectionId but we
+   *      can tell from the symbol, look up the user's active connection for
+   *      that venue. This is what keeps `/options/depth/NVDA…` from landing
+   *      on Binance's adapter and 500-ing.
+   *   3. Fallback: public Binance with no creds (preserves the unauth'd
+   *      `/options/chain/:underlying` behavior).
    */
   private async resolveForMarketData(
     userId: string | undefined,
     connectionId: string | undefined,
+    contractSymbol?: string,
   ): Promise<{ svc: IOptionsVenueService; creds: OptionCredentials | null }> {
+    // 1. Explicit connection wins.
     if (connectionId && userId) {
       const resolved = await this.resolveVenueService(connectionId, userId);
       return { svc: resolved.svc, creds: resolved.creds };
     }
+
+    // 2. Auto-route by symbol format when possible.
+    if (contractSymbol && userId) {
+      const detected = detectSymbolVenue(contractSymbol);
+      if (detected === 'ALPACA') {
+        const match = await this.findUserVenueConnection(userId, 'alpaca');
+        if (match) return match;
+        throw new BadRequestException(
+          `Contract ${contractSymbol} is an OCC (Alpaca) symbol — connect an Alpaca account to view its market data.`,
+        );
+      }
+      if (detected === 'BINANCE') {
+        const match = await this.findUserVenueConnection(userId, 'binance');
+        if (match) return match;
+        // Binance market data is public — fall through with null creds.
+      }
+    }
+
+    // 3. Default: public Binance.
     return { svc: this.optionsBinance, creds: null };
+  }
+
+  /**
+   * Find the user's active connection for a given venue name and return the
+   * corresponding venue service + decrypted creds. Returns null if none.
+   */
+  private async findUserVenueConnection(
+    userId: string,
+    venueName: 'alpaca' | 'binance',
+  ): Promise<{ svc: IOptionsVenueService; creds: OptionCredentials } | null> {
+    const connection = await this.prisma.user_exchange_connections.findFirst({
+      where: {
+        user_id: userId,
+        status: 'active',
+        exchange: { name: { equals: venueName, mode: 'insensitive' } },
+      },
+    });
+    if (!connection) return null;
+    const creds = await this.exchangesService.getDecryptedCredentials(connection.connection_id);
+    const svc: IOptionsVenueService =
+      venueName === 'alpaca' ? this.optionsAlpaca : this.optionsBinance;
+    return { svc, creds };
   }
 
   /**
@@ -229,7 +287,7 @@ export class OptionsService {
     userId?: string,
     connectionId?: string,
   ): Promise<GreeksDto> {
-    const { svc, creds } = await this.resolveForMarketData(userId, connectionId);
+    const { svc, creds } = await this.resolveForMarketData(userId, connectionId, contractSymbol);
     return svc.fetchGreeks(creds, contractSymbol, userId);
   }
 
@@ -238,7 +296,7 @@ export class OptionsService {
     userId?: string,
     connectionId?: string,
   ) {
-    const { svc, creds } = await this.resolveForMarketData(userId, connectionId);
+    const { svc, creds } = await this.resolveForMarketData(userId, connectionId, contractSymbol);
     return svc.fetchOptionTicker(creds, contractSymbol, userId);
   }
 
@@ -248,7 +306,7 @@ export class OptionsService {
     userId?: string,
     connectionId?: string,
   ) {
-    const { svc, creds } = await this.resolveForMarketData(userId, connectionId);
+    const { svc, creds } = await this.resolveForMarketData(userId, connectionId, contractSymbol);
     return svc.fetchOptionDepth(creds, contractSymbol, limit, userId);
   }
 
@@ -974,17 +1032,20 @@ export class OptionsService {
       take: limit,
     });
 
-    // Live-sync any still-pending Binance orders before returning so the UI
-    // doesn't show "pending" for up to 10 minutes while the cron sleeps.
-    const pendingBinance = orders.filter(
+    // Live-sync any still-pending orders (both Binance and Alpaca) before
+    // returning so the UI doesn't show "pending" for up to 10 minutes while
+    // the cron sleeps.
+    const pending = orders.filter(
       (o) =>
         ['submitting', 'pending', 'partially_filled'].includes(o.status) &&
-        o.venue === 'BINANCE' &&
-        !!o.binance_order_id,
+        ((o.venue === 'BINANCE' && !!o.binance_order_id) ||
+          (o.venue === 'ALPACA' && !!o.broker_order_id)),
     );
-    if (pendingBinance.length > 0) {
+    if (pending.length > 0) {
       await Promise.all(
-        pendingBinance.map((o) => this.syncSingleBinanceOrder(o.order_id).catch(() => null)),
+        pending.map((o) =>
+          this.syncSinglePendingOrder({ order_id: o.order_id, venue: o.venue }).catch(() => null),
+        ),
       );
       orders = await this.prisma.options_orders.findMany({
         where,
@@ -1046,6 +1107,74 @@ export class OptionsService {
         avg_fill_price: parseFloat(binanceOrder.avgPrice || binanceOrder.average || '0') || null,
       },
     });
+  }
+
+  /**
+   * Fetch the live status of a single Alpaca options order and persist any
+   * state change. Mirrors `syncSingleBinanceOrder` for the Alpaca venue so
+   * `getOrders` (on-demand) and the `syncPendingOrderStatuses` cron have
+   * feature parity across brokers.
+   */
+  private async syncSingleAlpacaOrder(orderId: string): Promise<void> {
+    const order = await this.prisma.options_orders.findUnique({
+      where: { order_id: orderId },
+    });
+    if (!order) return;
+
+    // Expired contract → Alpaca settles/cancels at market close on expiry day.
+    if (order.expiry && order.expiry < new Date()) {
+      if (order.status !== 'expired') {
+        await this.prisma.options_orders.update({
+          where: { order_id: order.order_id },
+          data: { status: 'expired' },
+        });
+      }
+      return;
+    }
+
+    if (!order.broker_order_id) return;
+
+    const connection = await this.prisma.user_exchange_connections.findFirst({
+      where: { user_id: order.user_id, status: 'active' },
+      include: { exchange: true },
+    });
+    if (!connection || connection.exchange?.name?.toLowerCase() !== 'alpaca') return;
+
+    const credentials = await this.exchangesService.getDecryptedCredentials(connection.connection_id);
+    const alpacaOrder = await this.optionsAlpaca.fetchOrder(
+      credentials,
+      order.contract_symbol,
+      order.broker_order_id,
+      order.user_id,
+    );
+
+    const newStatus = this.mapOrderStatus(alpacaOrder.status);
+    if (newStatus === order.status) return;
+    if (newStatus === 'pending' || newStatus === 'submitting') return;
+
+    await this.prisma.options_orders.update({
+      where: { order_id: order.order_id },
+      data: {
+        status: newStatus,
+        filled_quantity: parseFloat(alpacaOrder.executedQty ?? '0') || 0,
+        avg_fill_price: alpacaOrder.avgPrice != null ? parseFloat(alpacaOrder.avgPrice) || null : null,
+      },
+    });
+  }
+
+  /**
+   * Route a single pending order to the correct venue sync helper. Both
+   * `getOrders` and the cron use this so Alpaca/Binance stay at parity.
+   */
+  private async syncSinglePendingOrder(order: {
+    order_id: string;
+    venue: string | null;
+  }): Promise<void> {
+    if (order.venue === 'ALPACA') {
+      await this.syncSingleAlpacaOrder(order.order_id);
+    } else {
+      await this.syncSingleBinanceOrder(order.order_id);
+    }
   }
 
   /**
@@ -1271,7 +1400,7 @@ export class OptionsService {
     return new Date(2000 + yy, mm - 1, dd, 8, 0, 0); // 08:00 UTC is typical Binance expiry
   }
 
-  private mapOrderStatus(binanceStatus: string): any {
+  private mapOrderStatus(venueStatus: string): any {
     const statusMap: Record<string, string> = {
       // ccxt unified statuses
       open: 'pending',
@@ -1284,8 +1413,21 @@ export class OptionsService {
       cancelled: 'cancelled',
       rejected: 'rejected',
       expired: 'expired',
+      // Alpaca native statuses — map every non-terminal state to `pending`,
+      // every terminal state to its closest equivalent.
+      new: 'pending',
+      pending_new: 'pending',
+      accepted_for_bidding: 'pending',
+      pending_cancel: 'pending',
+      pending_replace: 'pending',
+      held: 'pending',
+      suspended: 'pending',
+      stopped: 'pending',
+      calculated: 'pending',
+      replaced: 'cancelled',
+      done_for_day: 'filled',
     };
-    return statusMap[binanceStatus?.toLowerCase()] || 'pending';
+    return statusMap[venueStatus?.toLowerCase()] || 'pending';
   }
 
   private mapDbOrderToDto(order: any): OptionsOrderDto {
@@ -1309,14 +1451,17 @@ export class OptionsService {
     };
   }
 
-  // ── Sync pending order statuses from Binance (runs every 10 min) ──
+  // ── Sync pending order statuses from venues (runs every 10 min) ──
+  //   Belt-and-suspenders: `getOrders` already live-syncs on demand, but
+  //   this cron catches users who haven't opened the UI in a while so we
+  //   don't leave stale `pending` rows sitting for hours on end.
 
   @Cron(CronExpression.EVERY_10_MINUTES)
   async syncPendingOrderStatuses(): Promise<void> {
     const pendingStatuses: OptionOrderStatus[] = ['submitting', 'pending', 'partially_filled'];
     const pendingOrders = await this.prisma.options_orders.findMany({
       where: { status: { in: pendingStatuses } },
-      select: { order_id: true },
+      select: { order_id: true, venue: true },
     });
 
     if (pendingOrders.length === 0) return;
@@ -1324,7 +1469,7 @@ export class OptionsService {
     let synced = 0;
     for (const order of pendingOrders) {
       try {
-        await this.syncSingleBinanceOrder(order.order_id);
+        await this.syncSinglePendingOrder(order);
         synced++;
       } catch (err: any) {
         this.logger.warn(`Order status sync failed for ${order.order_id}: ${err.message}`);
