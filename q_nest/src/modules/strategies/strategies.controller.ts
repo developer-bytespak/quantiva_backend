@@ -248,11 +248,16 @@ export class StrategiesController {
   }
 
   /**
-   * Generate AI insight for a specific asset card on-demand
-   * Endpoint: POST /strategies/pre-built/:strategyId/assets/:assetId/generate-insight
+   * Generate AI insight for a specific asset card on-demand.
+   * Works for both pre-built (admin) and custom (user-owned) strategies:
+   * the signal's user_id filter is derived from strategy.type.
+   * Endpoint: POST /strategies/strategy/:strategyId/assets/:assetId/generate-insight
    */
-  @Post('pre-built/:strategyId/assets/:assetId/generate-insight')
+  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
+  @AllowTier('PRO', 'ELITE')
+  @Post('strategy/:strategyId/assets/:assetId/generate-insight')
   async generateAssetInsight(
+    @Req() req: any,
     @Param('strategyId') strategyId: string,
     @Param('assetId') assetId: string,
   ) {
@@ -260,6 +265,16 @@ export class StrategiesController {
     const strategy = await this.strategiesService.findOne(strategyId);
     if (!strategy) {
       throw new NotFoundException(`Strategy ${strategyId} not found`);
+    }
+
+    // Ownership check: admins can access any strategy; regular users can only access
+    // pre-built (admin) strategies or their own custom strategies.
+    const isAdmin = req?.user?.role === 'admin';
+    if (!isAdmin && strategy.type !== 'admin') {
+      const requesterId = this.getRequestUserId(req);
+      if (!requesterId || strategy.user_id !== requesterId) {
+        throw new ForbiddenException('You do not own this strategy');
+      }
     }
 
     // Get asset details from trending_assets
@@ -273,12 +288,15 @@ export class StrategiesController {
       throw new NotFoundException(`Asset ${assetId} not found in trending assets`);
     }
 
+    // Pre-built (admin) signals have user_id=null; custom signals are keyed to strategy.user_id.
+    const signalUserIdFilter = strategy.type === 'admin' ? null : strategy.user_id;
+
     // Get signal for this asset-strategy combination
     const signal = await this.prisma.strategy_signals.findFirst({
       where: {
         strategy_id: strategyId,
         asset_id: assetId,
-        user_id: null,
+        user_id: signalUserIdFilter,
       },
       include: {
         details: {
