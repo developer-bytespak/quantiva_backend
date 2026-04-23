@@ -414,13 +414,14 @@ export class OptionsService {
         }
       }
 
-      // Mark positions as closed if no longer in live positions (venue-agnostic)
-      // Capture final P&L before marking positions closed
-      // Promote last-known unrealized_pnl into realized_pnl so history shows meaningful values
+      // Mark positions as closed if no longer in live positions.
+      // Scope to the same venue so Binance sync never closes Alpaca positions
+      // and vice versa — a user may have both venues active simultaneously.
       const closingPositions = await tx.options_positions.findMany({
         where: {
           user_id: userId,
           is_open: true,
+          venue: venue as any,
           ...(activeSymbols.length > 0 ? { contract_symbol: { notIn: activeSymbols } } : {}),
         },
         select: { position_id: true, unrealized_pnl: true, realized_pnl: true },
@@ -895,15 +896,17 @@ export class OptionsService {
   }
 
   /**
-   * Get user's option orders from DB.
+   * Get user's option orders from DB, scoped to a venue when provided.
    */
   async getOrders(
     userId: string,
     status?: string,
     limit: number = 50,
+    venue?: string,
   ) {
     const where: any = { user_id: userId };
     if (status) where.status = status;
+    if (venue) where.venue = venue;
 
     const orders = await this.prisma.options_orders.findMany({
       where,
@@ -1073,9 +1076,10 @@ export class OptionsService {
     dto: PlaceOptionOrderDto,
     credentials: { apiKey: string; apiSecret: string },
   ): Promise<void> {
-    // 1. Max open positions check
+    // 1. Max open positions check — scoped to Binance so Alpaca positions
+    //    don't consume the Binance user's position budget.
     const openPositionCount = await this.prisma.options_positions.count({
-      where: { user_id: userId, is_open: true },
+      where: { user_id: userId, is_open: true, venue: 'BINANCE' },
     });
 
     if (openPositionCount >= RISK_CONFIG.MAX_OPEN_POSITIONS) {
