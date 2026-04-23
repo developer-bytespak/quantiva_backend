@@ -1728,8 +1728,8 @@ export class StrategiesController {
         try {
           const data = await binanceService.getEnrichedMarketData(symbol);
           return { symbol, status: 'success', tradeable: data.price !== null };
-        } catch (error) {
-          return { symbol, status: 'error', error: error.message };
+        } catch (error: any) {
+          return { symbol, status: 'error', error: error?.message };
         }
       });
       
@@ -1743,9 +1743,9 @@ export class StrategiesController {
       } else {
         binanceApiStatus = 'failed';
       }
-    } catch (error) {
+    } catch (error: any) {
       binanceApiStatus = 'error';
-      binanceTestResults = [{ error: error.message }];
+      binanceTestResults = [{ error: error?.message }];
     }
 
     return {
