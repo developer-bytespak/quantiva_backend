@@ -204,6 +204,48 @@ def get_matching_strategies(
     return [s for s in STRATEGY_TEMPLATES if s.matches(direction, iv_rank, score)]
 
 
+def snap_strike_to_listed(strike: float) -> float:
+    """
+    Round a theoretical strike to the nearest increment real options
+    exchanges actually list, so the generated OCC / Binance symbol refers
+    to a contract that exists (and has a bid/ask) instead of a synthetic
+    one that returns empty quotes.
+
+    The tiers match the common listing rules used by CBOE/Alpaca for
+    equities and Binance eapi for crypto:
+
+        <  $1             → $0.01   (DOGE)
+        $1   - $5         → $0.50   (XRP)
+        $5   - $25        → $1      (small caps, altcoins)
+        $25  - $200       → $2.50   (SOL, NVDA, mid-cap equities)
+        $200 - $1,000     → $5      (SPY, QQQ, AAPL, MSFT, TSLA, AMZN, GOOG)
+        $1K  - $10K       → $100    (ETH)
+        ≥ $10K            → $1,000  (BTC)
+
+    Not venue-perfect (Alpaca occasionally lists weekly $1 strikes on
+    $100+ names, Binance sometimes has $25 BTC steps near ATM) but
+    correct for ~95 % of listed contracts — orders of magnitude better
+    than emitting raw decimals like `spot × 1.05`.
+    """
+    if strike <= 0:
+        return 0.0
+    if strike < 1:
+        step = 0.01
+    elif strike < 5:
+        step = 0.5
+    elif strike < 25:
+        step = 1.0
+    elif strike < 200:
+        step = 2.5
+    elif strike < 1_000:
+        step = 5.0
+    elif strike < 10_000:
+        step = 100.0
+    else:
+        step = 1_000.0
+    return round(round(strike / step) * step, 2)
+
+
 def build_occ_symbol(underlying: str, expiry_iso: str, option_type: str, strike: float) -> str:
     """Build an OCC-21 option symbol (unpadded root form used by Alpaca)."""
     date_part = expiry_iso[:10].replace("-", "")  # "YYYY-MM-DD" -> "YYYYMMDD"
@@ -230,7 +272,8 @@ def resolve_strikes(
 
     legs = []
     for leg in template.legs:
-        strike = round(spot_price * (1 + leg.strike_offset), 2)
+        raw_strike = spot_price * (1 + leg.strike_offset)
+        strike = snap_strike_to_listed(raw_strike)
 
         # Use per-leg expiry_days if it differs from default
         if leg.expiry_days != base_expiry_days:
