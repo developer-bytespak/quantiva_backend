@@ -13,6 +13,7 @@ from src.services.engines.options_strategies import (
     get_matching_strategies,
     resolve_strikes,
     build_occ_symbol,
+    snap_to_nearest_friday,
     StrategyTemplate,
 )
 
@@ -66,8 +67,11 @@ class OptionsSignalEngine(BaseEngine):
             # Derive direction and score from available data
             direction, dir_score = self._compute_direction(iv_rank, price_data, volume_data)
 
-            # Determine default expiry
-            expiry_dt = datetime.now(timezone.utc) + timedelta(days=DEFAULT_EXPIRY_DAYS)
+            # Determine default expiry — snap to the nearest Friday so the
+            # resulting OCC / Binance symbol references a contract that's
+            # actually listed on the venue's chain.
+            raw_expiry = datetime.now(timezone.utc) + timedelta(days=DEFAULT_EXPIRY_DAYS)
+            expiry_dt = snap_to_nearest_friday(raw_expiry)
             expiry_iso = expiry_dt.strftime("%Y-%m-%dT08:00:00Z")
 
             # Find matching strategies

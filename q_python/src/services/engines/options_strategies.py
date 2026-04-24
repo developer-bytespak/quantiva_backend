@@ -246,6 +246,26 @@ def snap_strike_to_listed(strike: float) -> float:
     return round(round(strike / step) * step, 2)
 
 
+def snap_to_nearest_friday(dt):
+    """
+    US equity options (Alpaca) expire on Fridays, and Binance eapi options
+    settle at 08:00 UTC on Fridays as well. Given any target datetime, return
+    the Friday closest to it (±3 days max). Picking "Friday closest" rather
+    than "next Friday" means a 30-DTE target lands on ~28 or ~32 DTE instead
+    of drifting far from the intended horizon.
+
+    The engine used to emit `now + N days` directly, which on Sundays /
+    Mondays produced OCC / dash symbols for contracts nobody lists — the
+    resulting bid/ask fetches returned all zeros.
+    """
+    from datetime import timedelta
+    # weekday(): Monday=0 ... Friday=4 ... Sunday=6
+    offset = (4 - dt.weekday()) % 7  # days forward to Friday (0 if already Fri)
+    if offset > 3:
+        offset -= 7  # prefer the Friday BEHIND us if it's closer
+    return dt + timedelta(days=offset)
+
+
 def build_occ_symbol(underlying: str, expiry_iso: str, option_type: str, strike: float) -> str:
     """Build an OCC-21 option symbol (unpadded root form used by Alpaca)."""
     date_part = expiry_iso[:10].replace("-", "")  # "YYYY-MM-DD" -> "YYYYMMDD"
@@ -275,11 +295,12 @@ def resolve_strikes(
         raw_strike = spot_price * (1 + leg.strike_offset)
         strike = snap_strike_to_listed(raw_strike)
 
-        # Use per-leg expiry_days if it differs from default
+        # Use per-leg expiry_days if it differs from default, snapping to
+        # the nearest Friday so the resulting symbol maps to a real listed
+        # contract.
         if leg.expiry_days != base_expiry_days:
-            leg_expiry = (
-                datetime.now(timezone.utc) + timedelta(days=leg.expiry_days)
-            ).isoformat()
+            raw_dt = datetime.now(timezone.utc) + timedelta(days=leg.expiry_days)
+            leg_expiry = snap_to_nearest_friday(raw_dt).isoformat()
         else:
             leg_expiry = expiry_iso
 
