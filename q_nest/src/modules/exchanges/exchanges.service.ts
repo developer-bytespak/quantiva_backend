@@ -693,7 +693,12 @@ export class ExchangesService {
         // dashboard semantics: the *24h* move on the holding, sourced from
         // Alpaca's intraday fields. Lifetime P&L is recoverable from
         // (currentPrice - entryPrice) * quantity if the caller needs it.
-        positions = (positionsRaw || []).map((p: any) => {
+        // Options contracts (asset_class === 'us_option') are excluded — they
+        // surface on the dedicated options page via optionsService, and mixing
+        // OCC-symbol rows into the stocks "Holdings" table is confusing.
+        positions = (positionsRaw || [])
+          .filter((p: any) => (p?.asset_class ?? 'us_equity') !== 'us_option')
+          .map((p: any) => {
           const qty = parseFloat(p.qty || p.quantity || '0') || 0;
           const entryPrice = parseFloat(p.avg_entry_price || p.avg_entry_value || '0') || 0;
           const currentPrice = parseFloat(
