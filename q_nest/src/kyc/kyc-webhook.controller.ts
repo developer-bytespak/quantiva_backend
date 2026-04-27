@@ -13,6 +13,8 @@ import { Request } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { SumsubService } from './integrations/sumsub.service';
 import { KycEmailService } from './services/kyc-email.service';
+import { OnboardingStateService } from '../modules/onboarding-emails/services/onboarding-state.service';
+import { OnboardingState } from '../modules/onboarding-emails/types';
 
 interface RawBodyRequest extends Request {
   rawBody?: Buffer;
@@ -47,6 +49,7 @@ export class KycWebhookController {
     private prisma: PrismaService,
     private sumsubService: SumsubService,
     private kycEmailService: KycEmailService,
+    private onboardingStateService: OnboardingStateService,
   ) {}
 
   @Post('sumsub')
@@ -186,6 +189,7 @@ export class KycWebhookController {
       const user = verification.user;
       if (kycStatus === 'approved') {
         await this.kycEmailService.sendApprovedEmail(user.email, user.username);
+        await this.onboardingStateService.advanceTo(verification.user_id, OnboardingState.KYC);
       } else if (kycStatus === 'rejected') {
         const buttonIds = payload.reviewResult.buttonIds || [];
         const humanReasons = buttonIds.map((b) => this.sumsubService.getRejectionReasonLabel(b));

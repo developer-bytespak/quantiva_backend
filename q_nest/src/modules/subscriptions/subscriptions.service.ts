@@ -7,6 +7,9 @@ import { AuthEmailService } from '../auth/services/auth-email.service';
 import { AppGateway } from 'src/gateways/app.gateway';
 import { tryCatch } from 'bullmq';
 import { SubscriptionLoaderMiddleware } from '../../common/middleware/subscription-loader.middleware';
+import { OnboardingStateService } from '../onboarding-emails/services/onboarding-state.service';
+import { FreeUpgradeCampaignService } from '../onboarding-emails/services/free-upgrade-campaign.service';
+import { OnboardingState } from '../onboarding-emails/types';
 
 export enum PlanTier {
   FREE = 'FREE',
@@ -39,6 +42,8 @@ export class SubscriptionsService implements OnModuleInit {
     private readonly notificationsService: NotificationsService,
     private readonly authEmailService: AuthEmailService,
     private readonly appGateway: AppGateway,
+    private readonly onboardingStateService: OnboardingStateService,
+    private readonly freeUpgradeCampaignService: FreeUpgradeCampaignService,
     @Optional() private readonly subscriptionLoader?: SubscriptionLoaderMiddleware,
   ) { }
 
@@ -437,6 +442,12 @@ export class SubscriptionsService implements OnModuleInit {
         where: { user_id: data.user_id },
         data: { current_tier: plan.tier },
       });
+
+      // Onboarding drip: paid plan triggers PAID stage and stops any free-upgrade campaign in flight.
+      if (plan.tier !== PlanTier.FREE) {
+        await this.onboardingStateService.advanceTo(data.user_id, OnboardingState.PAID);
+        await this.freeUpgradeCampaignService.stop(data.user_id);
+      }
 
       // 5️⃣ Subscription usage records: CUSTOM_STRATEGIES = 1 row per billing period; others = monthly breakdown
       if (plan.plan_features && plan.plan_features.length > 0) {
@@ -991,6 +1002,9 @@ export class SubscriptionsService implements OnModuleInit {
 
       return subscription;
     });
+
+    // Engine 2 — paid → free downgrade. start() internally enforces the no-restart rule.
+    await this.freeUpgradeCampaignService.start(updated.user_id);
 
     return updated;
   }

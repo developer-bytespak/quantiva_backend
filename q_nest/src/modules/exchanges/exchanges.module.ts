@@ -25,6 +25,7 @@ import { BinanceModule } from '../binance/binance.module';
 import { TradeFeesModule } from '../trade-fees/trade-fees.module';
 import { QhqTokenModule } from '../qhq-token/qhq-token.module';
 import { OptionsModule } from '../options/options.module';
+import { OnboardingEmailsModule } from '../onboarding-emails/onboarding-emails.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { OptionsModule } from '../options/options.module';
     TradeFeesModule,
     QhqTokenModule,
     forwardRef(() => OptionsModule),
+    OnboardingEmailsModule,
   ],
   controllers: [ExchangesController, /* Health endpoint for paper trading */ PaperTradingController],
   providers: [

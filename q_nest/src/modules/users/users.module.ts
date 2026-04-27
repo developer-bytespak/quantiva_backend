@@ -7,9 +7,10 @@ import { UserBinanceService } from './services/user-binance.service';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { KycModule } from '../../kyc/kyc.module';
+import { OnboardingEmailsModule } from '../onboarding-emails/onboarding-emails.module';
 
 @Module({
-  imports: [ExchangesModule, PrismaModule, KycModule],
+  imports: [ExchangesModule, PrismaModule, KycModule, OnboardingEmailsModule],
   controllers: [UserBinanceController, UsersController],
   providers: [UsersService, CloudinaryService, UserBinanceService],
   exports: [UsersService],

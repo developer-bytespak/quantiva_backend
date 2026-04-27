@@ -23,6 +23,8 @@ import { StorageService } from '../../../storage/storage.service';
 import { CloudinaryService } from '../../../storage/cloudinary.service';
 import { SubscriptionsService } from '../../subscriptions/subscriptions.service';
 import { SumsubService } from '../../../kyc/integrations/sumsub.service';
+import { OnboardingStateService } from '../../onboarding-emails/services/onboarding-state.service';
+import { OnboardingState } from '../../onboarding-emails/types';
 
 @Injectable()
 export class AuthService {
@@ -38,6 +40,7 @@ export class AuthService {
     private subscriptionsService: SubscriptionsService,
     private sumsubService: SumsubService,
     private authEmailService: AuthEmailService,
+    private onboardingStateService: OnboardingStateService,
   ) {}
 
   private getGoogleClient() {
@@ -98,6 +101,9 @@ export class AuthService {
         two_factor_secret: twoFactorSecret,
       },
     });
+
+    // Kick off onboarding drip — schedules SIGNED_UP-stage reminders.
+    await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
 
     // 🔔 Send admin notification about new signup
     await this.authEmailService.sendNewSignupNotification({

@@ -36,6 +36,7 @@ import { GatewaysModule } from './gateways/gateways.module';
 import { TradeFeesModule } from './modules/trade-fees/trade-fees.module';
 import { QhqTokenModule } from './modules/qhq-token/qhq-token.module';
 import { ContactModule } from './modules/contact/contact.module';
+import { OnboardingEmailsModule } from './modules/onboarding-emails/onboarding-emails.module';
 
 @Module({
   imports: [
@@ -75,6 +76,7 @@ import { ContactModule } from './modules/contact/contact.module';
     BinanceModule,
     QhqTokenModule,
     ContactModule,
+    OnboardingEmailsModule,
   ],
   controllers: [],
   providers: [

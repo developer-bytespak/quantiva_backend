@@ -1,6 +1,8 @@
 import { ForbiddenException, HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ExchangeType, ConnectionStatus } from '@prisma/client';
+import { OnboardingStateService } from '../onboarding-emails/services/onboarding-state.service';
+import { OnboardingState } from '../onboarding-emails/types';
 import { EncryptionService } from './services/encryption.service';
 import { BinanceService } from './integrations/binance.service';
 import { BinanceUSService } from './integrations/binance-us.service';
@@ -74,7 +76,22 @@ export class ExchangesService {
     private alpacaService: AlpacaService,
     private cacheService: CacheService,
     private binanceUserWsService: BinanceUserWsService,
+    private onboardingStateService: OnboardingStateService,
   ) {}
+
+  // Drives onboarding drip past the funnel: marks the user as having connected an exchange,
+  // then immediately to COMPLETED (no reminders for either stage; auto-starts free-upgrade
+  // campaign if the user is still on FREE).
+  private async markFunnelComplete(userId: string): Promise<void> {
+    try {
+      await this.onboardingStateService.advanceTo(userId, OnboardingState.CONNECT_EXCHANGE);
+      await this.onboardingStateService.advanceTo(userId, OnboardingState.COMPLETED);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to advance onboarding state for user ${userId}: ${(error as Error).message}`,
+      );
+    }
+  }
 
   /**
    * Resolve the effective user_id for exchange connections.
@@ -402,7 +419,7 @@ export class ExchangesService {
         },
       });
       
-      return this.prisma.user_exchange_connections.update({
+      const updatedConnection = await this.prisma.user_exchange_connections.update({
         where: { connection_id: existingConnection.connection_id },
         data: {
           api_key_encrypted: apiKeyEncrypted,
@@ -416,6 +433,9 @@ export class ExchangesService {
         },
         include: { exchange: true },
       });
+
+      await this.markFunnelComplete(data.user_id);
+      return updatedConnection;
     }
 
     // Create new connection if none exists (and mark any orphaned ones as invalid)
@@ -432,7 +452,7 @@ export class ExchangesService {
       },
     });
     
-    return this.prisma.user_exchange_connections.create({
+    const newConnection = await this.prisma.user_exchange_connections.create({
       data: {
         user_id: data.user_id,
         exchange_id: data.exchange_id,
@@ -447,6 +467,9 @@ export class ExchangesService {
       },
       include: { exchange: true },
     });
+
+    await this.markFunnelComplete(data.user_id);
+    return newConnection;
   }
 
   /**

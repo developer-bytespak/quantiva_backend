@@ -861,20 +861,23 @@ model payment_history {
 }
 
 model onboarding_email_reminders {
-  id               String          @id @default(uuid()) @db.Uuid
-  user_id          String          @db.Uuid
+  id               String           @id @default(uuid()) @db.Uuid
+  user_id          String           @db.Uuid
   onboarding_state OnboardingState
-  delay_label      String          @db.VarChar(10)
-  bull_job_id      String          @db.VarChar(255)
-  status           ReminderStatus  @default(QUEUED)
-  scheduled_at     DateTime        @db.Timestamp(6)
-  sent_at          DateTime?       @db.Timestamp(6)
-  cancelled_at     DateTime?       @db.Timestamp(6)
-  created_at       DateTime        @default(now()) @db.Timestamp(6)
-  user             users           @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  campaign         ReminderCampaign @default(FUNNEL)
+  delay_label      String           @db.VarChar(10)
+  template_name    String           @db.VarChar(64)
+  bull_job_id      String           @db.VarChar(255)
+  status           ReminderStatus   @default(QUEUED)
+  scheduled_at     DateTime         @db.Timestamp(6)
+  sent_at          DateTime?        @db.Timestamp(6)
+  cancelled_at     DateTime?        @db.Timestamp(6)
+  created_at       DateTime         @default(now()) @db.Timestamp(6)
+  user             users            @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
 
   @@index([user_id, status])
   @@index([user_id, onboarding_state])
+  @@index([user_id, campaign])
   @@map("onboarding_email_reminders")
 }
 
@@ -1748,6 +1751,11 @@ enum ReminderStatus {
   QUEUED
   SENT
   CANCELLED
+}
+
+enum ReminderCampaign {
+  FUNNEL
+  FREE_UPGRADE
 }
 
 enum OptionType {
