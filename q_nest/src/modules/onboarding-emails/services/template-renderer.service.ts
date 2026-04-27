@@ -15,6 +15,17 @@ export class TemplateRendererService {
   private readonly logger = new Logger(TemplateRendererService.name);
   private readonly cache = new Map<string, string>();
 
+  async exists(templateName: string): Promise<boolean> {
+    if (this.cache.has(`${templateName}.html`)) return true;
+    const fullPath = path.join(TEMPLATES_DIR, `${templateName}.html`);
+    try {
+      await fs.access(fullPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async render(templateName: string, vars: Record<string, string>): Promise<RenderedTemplate> {
     const body = await this.loadTemplate(`${templateName}.html`);
     const layout = await this.loadTemplate(BASE_LAYOUT);

@@ -443,9 +443,12 @@ export class SubscriptionsService implements OnModuleInit {
         data: { current_tier: plan.tier },
       });
 
-      // Onboarding drip: paid plan triggers PAID stage and stops any free-upgrade campaign in flight.
+      // Onboarding drip: any plan choice (free or paid) advances the funnel to PAID stage so the
+      // "connect your exchange" reminder series queues. Engine 2 (free-upgrade) only kicks in once
+      // the user reaches COMPLETED while still on FREE, so we still call stop() on paid upgrades
+      // to handle the rare case where a user picks free here, completes, then upgrades later.
+      await this.onboardingStateService.advanceTo(data.user_id, OnboardingState.PAID);
       if (plan.tier !== PlanTier.FREE) {
-        await this.onboardingStateService.advanceTo(data.user_id, OnboardingState.PAID);
         await this.freeUpgradeCampaignService.stop(data.user_id);
       }
 

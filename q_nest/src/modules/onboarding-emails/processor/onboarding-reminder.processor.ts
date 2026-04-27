@@ -82,16 +82,25 @@ export class OnboardingReminderProcessor extends WorkerHost {
     const dashboardUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard`;
     const firstName = (reminder.user.full_name?.split(' ')[0] || reminder.user.username || 'there').trim();
 
+    // Tier-aware template variant: prefer `<name>_free` for free-tier users when one exists.
+    let templateName = reminder.template_name;
+    if (reminder.user.current_tier === PlanTier.FREE) {
+      const freeVariant = `${templateName}_free`;
+      if (await this.renderer.exists(freeVariant)) {
+        templateName = freeVariant;
+      }
+    }
+
     let rendered;
     try {
-      rendered = await this.renderer.render(reminder.template_name, {
+      rendered = await this.renderer.render(templateName, {
         firstName,
         dashboardUrl,
         unsubscribeUrl,
       });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Template render failed for ${reminder.template_name}: ${msg}`);
+      this.logger.error(`Template render failed for ${templateName}: ${msg}`);
       await this.markFailed(reminderId, `render_error:${msg}`);
       return;
     }
@@ -109,7 +118,7 @@ export class OnboardingReminderProcessor extends WorkerHost {
         data: { status: ReminderStatus.SENT, sent_at: new Date() },
       });
       this.logger.log(
-        `Sent ${reminder.template_name} to user ${reminder.user.user_id} (campaign=${reminder.campaign})`,
+        `Sent ${templateName} to user ${reminder.user.user_id} (campaign=${reminder.campaign})`,
       );
     } else {
       await this.markFailed(reminderId, result.error ?? 'unknown_error');
