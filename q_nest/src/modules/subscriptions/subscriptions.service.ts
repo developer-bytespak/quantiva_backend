@@ -931,21 +931,43 @@ export class SubscriptionsService implements OnModuleInit {
       return existing;
     }
 
-    const now = new Date();
     const finalPeriodEnd =
       stripeCurrentPeriodEnd ??
       existing.current_period_end ??
       existing.expires_at ??
-      now;
+      new Date();
 
-    
+    return this.finalizeCancellationLocal(existing.subscription_id, finalPeriodEnd);
+  }
+
+  async handleAdminOverrideSubscriptionCancelled(subscriptionId: string) {
+    const existing = await this.prisma.user_subscriptions.findUnique({
+      where: { subscription_id: subscriptionId },
+    });
+
+    if (!existing || existing.billing_provider !== 'admin_override') {
+      return null;
+    }
+
+    if (existing.status === SubscriptionStatus.cancelled) {
+      return existing;
+    }
+
+    const finalPeriodEnd =
+      existing.current_period_end ?? existing.expires_at ?? new Date();
+
+    return this.finalizeCancellationLocal(existing.subscription_id, finalPeriodEnd);
+  }
+
+  private async finalizeCancellationLocal(subscriptionId: string, finalPeriodEnd: Date) {
+    const now = new Date();
     const plan = await this.prisma.subscription_plans.findFirst({
       where: { tier: PlanTier.FREE, billing_period: BillingPeriod.MONTHLY },
     });
 
     const updated = await this.prisma.$transaction(async (tx) => {
       const subscription = await tx.user_subscriptions.update({
-        where: { subscription_id: existing.subscription_id },
+        where: { subscription_id: subscriptionId },
         data: {
           status: SubscriptionStatus.cancelled,
           cancelled_at: now,

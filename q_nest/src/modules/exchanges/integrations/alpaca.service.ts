@@ -167,6 +167,23 @@ export class AlpacaService {
   }
 
   /**
+   * GET /v2/clock — authoritative US market clock from Alpaca. Honors
+   * holidays and early-close days (which a local Mon–Fri 09:30–16:00 ET
+   * computation does not). Returns the raw Alpaca payload:
+   *   { timestamp, is_open, next_open, next_close }
+   */
+  async getClock(apiKey?: string, apiSecret?: string): Promise<any> {
+    const keyToUse = apiKey || this.apiKey;
+    const isPaperKey = keyToUse?.startsWith('PK');
+    const client = isPaperKey ? this.paperApiClient : this.apiClient;
+
+    const res = await client.get('/v2/clock', {
+      headers: this.getAuthHeaders(apiKey, apiSecret),
+    });
+    return res.data;
+  }
+
+  /**
    * Get account information including balance
    */
   async getAccountInfo(apiKey?: string, apiSecret?: string): Promise<any> {

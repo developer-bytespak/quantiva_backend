@@ -311,4 +311,44 @@ def resolve_strikes(
             "expiry": leg_expiry,
             "ratio": leg.ratio,
         })
+
+    # Butterfly templates need EQUIDISTANT wings to be a real butterfly —
+    # otherwise they become broken-wing butterflies, which have a totally
+    # different (and much larger) right-tail max loss. Independent snapping
+    # of each leg above can produce e.g. K1=335, K2=350, K3=370 from a
+    # symmetric template (-5%, 0%, +5%) because each strike rounds to the
+    # nearest listed increment in isolation. Detect the butterfly shape
+    # (3 legs with a 2-ratio middle leg) and rebuild both wings using the
+    # SMALLER of the two snapped wings — this caps risk at est_debit and
+    # produces a true symmetric butterfly that lands on listed strikes.
+    legs = _enforce_butterfly_symmetry(legs)
+    return legs
+
+
+def _enforce_butterfly_symmetry(legs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Post-process a 3-leg butterfly to guarantee equidistant wings. No-op for
+    any other leg shape. Assumes legs are in template order: lower wing,
+    middle (ratio 2), upper wing — which is the convention in
+    STRATEGY_TEMPLATES["long_butterfly"].
+    """
+    if len(legs) != 3:
+        return legs
+    middle = legs[1]
+    if middle.get("ratio") != 2:
+        return legs
+
+    k1 = float(legs[0]["strike"])
+    k2 = float(middle["strike"])
+    k3 = float(legs[2]["strike"])
+    left_wing = k2 - k1
+    right_wing = k3 - k2
+    if left_wing <= 0 or right_wing <= 0 or left_wing == right_wing:
+        return legs
+
+    # Use the smaller wing on BOTH sides. Both sides land on the listed grid
+    # because k2 is already snapped and we move by an existing-snapped delta.
+    wing = min(left_wing, right_wing)
+    legs[0] = {**legs[0], "strike": round(k2 - wing, 2)}
+    legs[2] = {**legs[2], "strike": round(k2 + wing, 2)}
     return legs

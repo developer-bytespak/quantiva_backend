@@ -282,6 +282,21 @@ export class OptionsService {
     return svc.fetchOptionsChain(creds, underlying, userId);
   }
 
+  /**
+   * Authoritative US market clock (open/closed + next session boundaries),
+   * proxied from Alpaca with holiday + early-close awareness. Requires an
+   * Alpaca connection because Alpaca's clock endpoint is auth-only.
+   */
+  async getMarketClock(userId: string, connectionId: string) {
+    const resolved = await this.resolveVenueService(connectionId, userId);
+    if (resolved.venue !== 'ALPACA') {
+      throw new BadRequestException(
+        'Market clock is only available for Alpaca connections (US equity options).',
+      );
+    }
+    return this.optionsAlpaca.getMarketClock(resolved.creds);
+  }
+
   async getGreeks(
     contractSymbol: string,
     userId?: string,

@@ -36,14 +36,18 @@ export class OptionsRiskService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Aggregate Greeks across all open positions for a user.
+   * Aggregate Greeks across open positions for a user. When `venue` is
+   * supplied the aggregation is scoped to that venue (Alpaca or Binance);
+   * otherwise it spans every connected venue.
    * Multiplies raw per-contract greeks by the venue's contract multiplier so
    * totals are expressed in underlying-unit or share-unit terms (not
    * per-contract), which is how traders actually size exposure.
    */
-  async getPortfolioGreeks(userId: string): Promise<PortfolioGreeks> {
+  async getPortfolioGreeks(userId: string, venue?: string): Promise<PortfolioGreeks> {
+    const venueFilter = venue ? { venue: venue.toUpperCase() as any } : {};
+
     const positions = await this.prisma.options_positions.findMany({
-      where: { user_id: userId, is_open: true },
+      where: { user_id: userId, is_open: true, ...venueFilter },
       select: {
         underlying: true,
         venue: true,
@@ -60,6 +64,7 @@ export class OptionsRiskService {
       where: {
         user_id: userId,
         status: { in: ['pending', 'filled', 'partially_filled'] },
+        ...venueFilter,
       },
       select: { max_loss: true },
     });
