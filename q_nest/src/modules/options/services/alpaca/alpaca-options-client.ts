@@ -147,6 +147,16 @@ export class AlpacaOptionsClient {
     return res.data;
   }
 
+  /**
+   * Authoritative US market clock from Alpaca. Reflects holidays and
+   * early-close days; safe to surface to the UI for "Market open/closed"
+   * banners. Returns `{ timestamp, is_open, next_open, next_close }` (ISO).
+   */
+  async getClock<T = any>(): Promise<T> {
+    const res = await this.trading.get<T>('/v2/clock');
+    return res.data;
+  }
+
   async getAllPositions<T = any>(): Promise<T[]> {
     const res = await this.trading.get<T[]>('/v2/positions');
     return Array.isArray(res.data) ? res.data : [];

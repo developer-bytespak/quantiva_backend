@@ -5,10 +5,15 @@ import {
   IsOptional,
   IsDateString,
   IsNotEmpty,
+  IsArray,
+  ArrayMinSize,
+  ArrayMaxSize,
+  ValidateNested,
   Min,
   Max,
   Matches,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 // ── Enums ──────────────────────────────────────────────────
 
@@ -144,9 +149,13 @@ export class PlaceMultiLegOrderDto {
   @IsString()
   signalId?: string;
 
-  // Validated elementwise at runtime in the controller (class-validator's
-  // nested-array type tracking is brittle with plain-object inputs from
-  // NestJS; the service also enforces the 2–4 leg bound).
+  // 2–4 legs, validated elementwise. The @Type() decorator is required for
+  // ValidateNested to know which class to construct from the plain JSON.
+  @IsArray()
+  @ArrayMinSize(2, { message: 'legs must contain at least 2 entries' })
+  @ArrayMaxSize(4, { message: 'legs cannot contain more than 4 entries' })
+  @ValidateNested({ each: true })
+  @Type(() => MultiLegOrderLegDto)
   legs: MultiLegOrderLegDto[];
 }
 

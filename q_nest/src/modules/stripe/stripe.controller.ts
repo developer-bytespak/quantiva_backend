@@ -54,7 +54,15 @@ export class StripeController {
       where: { user_id: userId, status: 'active' },
     });
 
-    if (activeSubscription && (activeSubscription.tier === 'PRO' || activeSubscription.tier === 'ELITE')) {
+    // Only block when the existing active sub is itself a real Stripe sub.
+    // Admin-comped subs (billing_provider='admin_override') should be allowed
+    // through; the checkout.session.completed webhook overwrites the comp row
+    // in place via SubscriptionsService.updateSubscription().
+    if (
+      activeSubscription &&
+      (activeSubscription.tier === 'PRO' || activeSubscription.tier === 'ELITE') &&
+      activeSubscription.billing_provider === 'stripe'
+    ) {
       throw new BadRequestException(
         'Cancel your current subscription.',
       );
@@ -116,23 +124,34 @@ export class StripeController {
       throw new BadRequestException('You are already on the FREE tier');
     }
 
-    if (active.billing_provider !== 'stripe' || !active.external_id) {
-      throw new BadRequestException('No active Stripe subscription to cancel');
+    let updated;
+    if (active.billing_provider === 'admin_override') {
+      // Comp plan granted by super-admin — no Stripe subscription to cancel,
+      // no trade-fee billing path. Just downgrade locally to FREE.
+      updated = await this.subscriptionsService.handleAdminOverrideSubscriptionCancelled(
+        active.subscription_id,
+      );
+    } else if (active.billing_provider === 'stripe' && active.external_id) {
+      await this.stripeService.cancelSubscriptionImmediately(active.external_id);
+
+      // Bill any accumulated trade fees BEFORE completing cancellation
+      try {
+        await this.tradeFeesService.processCancellationFees(userId);
+      } catch (err: any) {
+        this.logger.warn(`Trade-fee cancellation billing failed (non-blocking): ${err.message}`);
+      }
+
+      updated = await this.subscriptionsService.handleStripeSubscriptionCancelled(
+        active.external_id,
+        new Date(),
+      );
+    } else {
+      throw new BadRequestException('No active subscription to cancel');
     }
 
-    await this.stripeService.cancelSubscriptionImmediately(active.external_id);
-
-    // Bill any accumulated trade fees BEFORE completing cancellation
-    try {
-      await this.tradeFeesService.processCancellationFees(userId);
-    } catch (err: any) {
-      this.logger.warn(`Trade-fee cancellation billing failed (non-blocking): ${err.message}`);
+    if (!updated) {
+      throw new BadRequestException('Failed to cancel subscription');
     }
-
-    const updated = await this.subscriptionsService.handleStripeSubscriptionCancelled(
-      active.external_id,
-      new Date(),
-    );
 
     const notification = await this.notificationsService.createNotification({user_id: userId, type: "subscription_cancelled",title:"Subscription Cancelled",message:"Your subscription has been cancelled",read:false,metadata:null});
     this.notificationsService.sendNotification(userId, "Subscription Cancelled", "Your subscription has been cancelled");

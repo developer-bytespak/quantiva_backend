@@ -134,10 +134,11 @@ export class AlpacaTradingService {
   async getDashboard(userId: string) {
     const { apiKey, apiSecret } = await this.getCredentials(userId);
 
-    const [accountInfo, positions, openOrders] = await Promise.all([
+    const [accountInfo, positions, openOrders, clockRaw] = await Promise.all([
       this.alpacaService.getAccountInfo(apiKey, apiSecret),
       this.alpacaService.getPositions(apiKey, apiSecret),
       this.alpacaService.getOrders(apiKey, apiSecret, 'open'),
+      this.alpacaService.getClock(apiKey, apiSecret).catch(() => null),
     ]);
 
     const equity       = parseFloat(accountInfo.equity           || accountInfo.portfolio_value || 0);
@@ -173,12 +174,18 @@ export class AlpacaTradingService {
       })),
     };
 
-    // US market hours check (Mon–Fri 9:30–16:00 EST = UTC-5)
-    const now     = new Date();
-    const utcMin  = now.getUTCHours() * 60 + now.getUTCMinutes();
-    const etMin   = (utcMin - 5 * 60 + 24 * 60) % (24 * 60);
-    const weekday = now.getUTCDay();
-    const isOpen  = weekday >= 1 && weekday <= 5 && etMin >= 570 && etMin < 960;
+    // Prefer Alpaca's authoritative clock (holiday + early-close aware).
+    // Fall back to a local DST-correct computation if /v2/clock errored;
+    // the local version still doesn't know holidays, but it's better than
+    // failing the whole dashboard response.
+    const clock = clockRaw
+      ? {
+          isOpen: Boolean(clockRaw.is_open),
+          timezone: 'America/New_York',
+          nextOpen: clockRaw.next_open ?? null,   // ISO timestamp
+          nextClose: clockRaw.next_close ?? null, // ISO timestamp
+        }
+      : computeLocalUsMarketClock();
 
     return {
       account: {
@@ -194,12 +201,28 @@ export class AlpacaTradingService {
       portfolio,
       positions,
       openOrders,
-      clock: {
-        isOpen,
-        timezone: 'America/New_York',
-        nextOpen:  isOpen ? null : 'Next trading day 09:30 ET',
-        nextClose: isOpen ? 'Today 16:00 ET' : null,
-      },
+      clock,
     };
   }
+}
+
+/**
+ * Local US-equity market hours fallback. DST-correct (uses the IANA
+ * `America/New_York` zone) but does NOT know about US market holidays
+ * or early-close days. Used only when Alpaca's `/v2/clock` is unreachable.
+ */
+function computeLocalUsMarketClock() {
+  const now = new Date();
+  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const minutes = et.getHours() * 60 + et.getMinutes();
+  const weekday = et.getDay(); // 0=Sun, 6=Sat
+  const open = 9 * 60 + 30;
+  const close = 16 * 60;
+  const isOpen = weekday >= 1 && weekday <= 5 && minutes >= open && minutes < close;
+  return {
+    isOpen,
+    timezone: 'America/New_York',
+    nextOpen: isOpen ? null : 'Next trading day 09:30 ET',
+    nextClose: isOpen ? 'Today 16:00 ET' : null,
+  };
 }

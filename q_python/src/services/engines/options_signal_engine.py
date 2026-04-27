@@ -316,11 +316,26 @@ class OptionsSignalEngine(BaseEngine):
 
         if strat.name == "long_butterfly":
             if len(legs) >= 3:
-                wing_width = abs(legs[0]["strike"] - legs[1]["strike"])
-                est_debit = wing_width * 0.2
-                max_profit_val = wing_width - est_debit
-                ratio = f"{max_profit_val / est_debit:.1f}:1" if est_debit > 0 else "N/A"
-                return ratio, fmt(max_profit_val), fmt(est_debit)
+                # Sort by strike so K1 < K2 < K3 regardless of input order.
+                sorted_legs = sorted(legs, key=lambda l: l["strike"])
+                k1 = float(sorted_legs[0]["strike"])
+                k2 = float(sorted_legs[1]["strike"])
+                k3 = float(sorted_legs[2]["strike"])
+                left_wing = k2 - k1
+                right_wing = k3 - k2
+                # Conservative debit estimate — preserves the old 20%-of-wing
+                # heuristic, anchored on the smaller wing (which bounds the
+                # debit in either symmetric or broken-wing cases).
+                est_debit = min(left_wing, right_wing) * 0.2
+                # Peak P&L at S = K2 is the LEFT wing minus the debit.
+                max_profit_val = left_wing - est_debit
+                # For a long butterfly the right tail (S ≥ K3) is flat at
+                #   P&L = (left_wing - right_wing) - debit
+                # so when right_wing > left_wing, max loss exceeds the debit
+                # by exactly the wing imbalance. Symmetric → max_loss = debit.
+                max_loss_val = est_debit + max(0.0, right_wing - left_wing)
+                ratio = f"{max_profit_val / max_loss_val:.1f}:1" if max_loss_val > 0 else "N/A"
+                return ratio, fmt(max_profit_val), fmt(max_loss_val)
             return "N/A", "N/A", "N/A"
 
         if strat.name == "calendar_spread":

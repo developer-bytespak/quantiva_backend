@@ -112,6 +112,22 @@ export class OptionsController {
   }
 
   /**
+   * GET /options/market-clock?connectionId=xxx
+   * Authoritative US market clock proxied from Alpaca's `/v2/clock`.
+   * Honors holidays and early-close days; cached 30s server-side so the
+   * Alpaca rate limit stays flat regardless of how many clients poll.
+   * Requires an Alpaca connection (Alpaca's clock endpoint is auth-only).
+   */
+  @Get('market-clock')
+  async getMarketClock(
+    @CurrentUser() user: TokenPayload,
+    @Query('connectionId') connectionId: string,
+  ) {
+    await this.optionsService.verifyEliteAccess(user.sub);
+    return this.optionsService.getMarketClock(user.sub, connectionId);
+  }
+
+  /**
    * GET /options/approval-status?connectionId=xxx
    * Returns the user's options approval level for the venue. Binance always
    * reports Level 3 (no approval flow); Alpaca reports 0–3 depending on the
@@ -309,12 +325,16 @@ export class OptionsController {
 
   /**
    * GET /options/portfolio-greeks
-   * Get aggregated Greeks across all open options positions.
+   * Aggregate Greeks across open positions. Pass `?venue=ALPACA` or
+   * `?venue=BINANCE` to scope to one venue; omit for cross-venue total.
    */
   @Get('portfolio-greeks')
-  async getPortfolioGreeks(@CurrentUser() user: TokenPayload) {
+  async getPortfolioGreeks(
+    @CurrentUser() user: TokenPayload,
+    @Query('venue') venue?: string,
+  ) {
     await this.optionsService.verifyEliteAccess(user.sub);
-    return this.riskService.getPortfolioGreeks(user.sub);
+    return this.riskService.getPortfolioGreeks(user.sub, venue);
   }
 
   // ── AI Signals ──────────────────────────────────────────

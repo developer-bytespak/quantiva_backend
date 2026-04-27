@@ -23,6 +23,25 @@ import {
 import { computeGreeksFromMarket } from './alpaca/greeks-engine';
 import { getDividendYield, getRiskFreeRate } from './alpaca/market-params';
 
+export interface MarketClock {
+  isOpen: boolean;
+  /** ISO timestamp of the next session open (null when already open). */
+  nextOpen: string | null;
+  /** ISO timestamp of the next session close (null when already closed). */
+  nextClose: string | null;
+  /** Server timestamp Alpaca returned with the clock snapshot. */
+  timestamp: string;
+}
+
+/**
+ * Module-level cache for the US market clock. Clock state is identical
+ * across users (it's market-wide) so we share one entry and refresh it
+ * at most every 30 s — keeps Alpaca rate-limit pressure flat regardless
+ * of how many clients are polling.
+ */
+const CLOCK_TTL_MS = 30_000;
+let clockCache: { value: MarketClock; expiresAt: number } | null = null;
+
 /**
  * Alpaca US stock options adapter.
  *
@@ -60,6 +79,29 @@ export class OptionsAlpacaService implements IOptionsVenueService {
       indexPrice: 0,
       contractCount: 0,
     }));
+  }
+
+  /**
+   * Authoritative US-equity market clock, proxied from Alpaca's `/v2/clock`.
+   * Honors holidays and early-close days, which the previous local
+   * computation in MarketHoursBanner / alpaca-trading.service does not.
+   * Cached globally for 30 s — clock state is identical for every user.
+   */
+  async getMarketClock(credentials: OptionCredentials): Promise<MarketClock> {
+    const now = Date.now();
+    if (clockCache && clockCache.expiresAt > now) {
+      return clockCache.value;
+    }
+    const api = this.client(credentials);
+    const raw: any = await api.getClock();
+    const value: MarketClock = {
+      isOpen: Boolean(raw?.is_open),
+      nextOpen: raw?.next_open ?? null,
+      nextClose: raw?.next_close ?? null,
+      timestamp: raw?.timestamp ?? new Date().toISOString(),
+    };
+    clockCache = { value, expiresAt: now + CLOCK_TTL_MS };
+    return value;
   }
 
   async fetchOptionsChain(
