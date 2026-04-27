@@ -5,7 +5,8 @@
   "compilerOptions": {
     "deleteOutDir": true,
     "assets": [
-      { "include": "firebase/*.json", "watchAssets": true }
+      { "include": "firebase/*.json", "watchAssets": true },
+      { "include": "modules/onboarding-emails/templates/*.html", "watchAssets": true }
     ]
   }
 }
