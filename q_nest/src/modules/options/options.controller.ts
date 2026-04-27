@@ -17,7 +17,7 @@ import { OptionsService } from './services/options.service';
 import { OptionsIvService } from './services/options-iv.service';
 import { OptionsSignalService } from './services/options-signal.service';
 import { OptionsRiskService } from './services/options-risk.service';
-import { PlaceOptionOrderDto, CancelOptionOrderDto, PlaceMultiLegOrderDto } from './dto/options.dto';
+import { PlaceOptionOrderDto, CancelOptionOrderDto, PlaceMultiLegOrderDto, PreviewMultiLegOrderDto } from './dto/options.dto';
 
 @Controller('options')
 @UseGuards(JwtAuthGuard)
@@ -210,6 +210,24 @@ export class OptionsController {
             ? `${label} rejected by venue`
             : `${label} placed — awaiting fill`;
     return { success: true, message, ...order };
+  }
+
+  /**
+   * POST /options/orders/multi-leg/preview
+   * Pure-quote endpoint: fetches live bid/ask for every leg in parallel
+   * and returns the worst-case net debit/credit, suggested limit price,
+   * and the package $ value the user will pay/receive at the requested
+   * qty. No state is mutated. Replaces the N-call ticker fan-out the
+   * confirm modal previously did client-side.
+   */
+  @Post('orders/multi-leg/preview')
+  @HttpCode(HttpStatus.OK)
+  async previewMultiLegOrder(
+    @CurrentUser() user: TokenPayload,
+    @Body() dto: PreviewMultiLegOrderDto,
+  ) {
+    await this.optionsService.verifyEliteAccess(user.sub);
+    return this.optionsService.previewMultiLegOrder(user.sub, dto);
   }
 
   /**

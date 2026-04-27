@@ -12,6 +12,7 @@ import { TradeFeesService } from '../../trade-fees/trade-fees.service';
 import {
   PlaceOptionOrderDto,
   PlaceMultiLegOrderDto,
+  PreviewMultiLegOrderDto,
   CancelOptionOrderDto,
   OptionsChainResponseDto,
   GreeksDto,
@@ -837,6 +838,93 @@ export class OptionsService {
     }
 
     return this.mapDbOrderToDto(updatedOrder ?? dbOrder);
+  }
+
+  /**
+   * Preview a multi-leg order: fetch live bid/ask for every leg in parallel
+   * and return the worst-case net debit/credit, suggested limit price, and
+   * package $ value the user will pay/receive. No state is mutated and no
+   * approval check is enforced — this is a quote, not an order. Replaces
+   * the old N-call ticker fan-out the modal used to do client-side.
+   */
+  async previewMultiLegOrder(userId: string, dto: PreviewMultiLegOrderDto) {
+    const resolved = await this.resolveVenueService(dto.connectionId, userId);
+    if (resolved.venue !== 'ALPACA') {
+      throw new BadRequestException(
+        'Multi-leg preview is only supported on Alpaca. Binance has no mleg primitive.',
+      );
+    }
+    if (!Array.isArray(dto.legs) || dto.legs.length < 2 || dto.legs.length > 4) {
+      throw new BadRequestException('Multi-leg preview requires 2–4 legs');
+    }
+
+    const qty = Math.max(1, Math.floor(Number(dto.qty) || 1));
+    const contractMultiplier = (resolved.svc as any).contractMultiplier ?? 100;
+
+    // Fetch all leg quotes in parallel. Per-leg failures are surfaced as
+    // `{ error: true, bid: 0, ask: 0 }` rather than failing the whole call —
+    // the modal renders a "—" for that leg and disables the confirm button.
+    const legResults = await Promise.all(
+      dto.legs.map(async (leg) => {
+        try {
+          const t: any = await resolved.svc.fetchOptionTicker(
+            resolved.creds,
+            leg.contractSymbol,
+            userId,
+          );
+          return {
+            contractSymbol: leg.contractSymbol,
+            bid: Number(t?.bidPrice) || 0,
+            ask: Number(t?.askPrice) || 0,
+            error: false as const,
+          };
+        } catch (e: any) {
+          this.logger.warn(
+            `previewMultiLegOrder ticker failed for ${leg.contractSymbol}: ${e?.message}`,
+          );
+          return {
+            contractSymbol: leg.contractSymbol,
+            bid: 0,
+            ask: 0,
+            error: true as const,
+          };
+        }
+      }),
+    );
+
+    // Worst-case fill: BUY crosses the ask, SELL gets hit at the bid.
+    // Positive net = debit (you pay), negative = credit (you receive).
+    let netPerUnit = 0;
+    let allLegsPriced = true;
+    for (let i = 0; i < dto.legs.length; i++) {
+      const leg = dto.legs[i];
+      const q = legResults[i];
+      if (q.error) {
+        allLegsPriced = false;
+        continue;
+      }
+      const fill = leg.side === 'buy' ? q.ask : q.bid;
+      if (!(fill > 0)) {
+        allLegsPriced = false;
+        continue;
+      }
+      netPerUnit += (leg.side === 'buy' ? fill : -fill) * (leg.ratio || 1);
+    }
+
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const isDebit = netPerUnit >= 0;
+    const absNet = Math.abs(netPerUnit);
+    const packageValueUsd = absNet * contractMultiplier * qty;
+
+    return {
+      legs: legResults,
+      netPerUnit: round2(netPerUnit),
+      isDebit,
+      suggestedLimit: round2(absNet),
+      packageValueUsd: round2(packageValueUsd),
+      contractMultiplier,
+      allLegsPriced,
+    };
   }
 
   /**
