@@ -244,7 +244,11 @@ export class PaymentSubmissionService {
       reservation_expires_at: submission.reservation?.expires_at,
       admin_binance_uid: submission.pool.admin?.binance_uid,
       admin_wallet_address: submission.pool.admin?.wallet_address || null,
-      payment_network: submission.pool.admin?.payment_network || 'BSC',
+      admin_exchange_name: submission.admin_exchange_name || null,
+      payment_network:
+        submission.payment_network_used ||
+        submission.pool.admin?.payment_network ||
+        'TRC20',
       deposit_coin: 'USDT',
       deposit_method: 'on_chain',
     };

@@ -1,13 +1,19 @@
-import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { Injectable, ForbiddenException, NotFoundException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import {
   UpdateBinanceSettingsDto,
   UpdateFeeSettingsDto,
 } from '../dto/update-admin-settings.dto';
+import { AdminBinanceService } from './admin-binance.service';
 
 @Injectable()
 export class AdminSettingsService {
-  constructor(private prisma: PrismaService) {}
+  private readonly logger = new Logger(AdminSettingsService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private readonly adminBinanceService: AdminBinanceService,
+  ) {}
 
   async getSettings(adminId: string) {
     const admin = await this.prisma.admins.findUnique({
@@ -28,7 +34,19 @@ export class AdminSettingsService {
     });
 
     if (!admin) throw new NotFoundException('Admin not found');
-    return admin;
+
+    // Best-effort: include the admin's connected Binance variant so the settings UI
+    // can show "Connected to: Binance" or "Connected to: Binance.US".
+    let connected_exchange_name: string | null = null;
+    try {
+      connected_exchange_name = await this.adminBinanceService.getAdminExchangeName(adminId);
+    } catch (err: any) {
+      this.logger.debug(
+        `Admin ${adminId} has no active Binance connection: ${err.message}`,
+      );
+    }
+
+    return { ...admin, connected_exchange_name };
   }
 
   async updateBinanceSettings(

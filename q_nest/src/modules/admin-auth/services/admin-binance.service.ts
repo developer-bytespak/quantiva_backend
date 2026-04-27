@@ -1,7 +1,17 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { BinanceService } from '../../exchanges/integrations/binance.service';
+import { BinanceUSService } from '../../exchanges/integrations/binance-us.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
+
+type BinanceVariant = 'binance' | 'binance.us';
+
+interface AdminBinanceContext {
+  apiKey: string;
+  apiSecret: string;
+  variant: BinanceVariant;
+  exchangeName: string;
+}
 
 @Injectable()
 export class AdminBinanceService {
@@ -10,21 +20,29 @@ export class AdminBinanceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly binanceService: BinanceService,
+    private readonly binanceUSService: BinanceUSService,
     private readonly exchangesService: ExchangesService,
   ) {}
 
   /**
-   * Get admin's decrypted Binance API credentials via the exchange connections system.
-   * Admin connects Binance through POST /exchanges/connections (same as users).
-   * ExchangesService.getEffectiveUserId maps admin → linked user by email.
+   * Normalize an exchanges.name string to a Binance variant discriminator.
+   * Mirrors `ExchangesService.getExchangeService()` matching.
    */
-  private async getAdminBinanceCredentials(
-    adminId: string,
-  ): Promise<{ apiKey: string; apiSecret: string }> {
-    // Map admin → linked user account (matched by email)
+  private normalizeVariant(exchangeName: string): BinanceVariant | null {
+    const n = (exchangeName || '').toLowerCase();
+    if (n === 'binance') return 'binance';
+    if (n === 'binance.us' || n === 'binanceus' || n === 'binance-us') return 'binance.us';
+    return null;
+  }
+
+  /**
+   * Resolve the admin's connected Binance variant + decrypted credentials.
+   * Admin connects Binance through POST /exchanges/connections (same as users).
+   * `getEffectiveUserId` maps admin → linked user by email.
+   */
+  private async getAdminBinanceContext(adminId: string): Promise<AdminBinanceContext> {
     const effectiveUserId = await this.exchangesService.getEffectiveUserId(adminId, 'admin');
 
-    // Find the active crypto connection for that user
     const connection = await this.exchangesService.getActiveConnectionByType(effectiveUserId, 'crypto');
     if (!connection) {
       throw new BadRequestException(
@@ -32,12 +50,35 @@ export class AdminBinanceService {
       );
     }
 
-    // Decrypt and return credentials
-    return this.exchangesService.getDecryptedCredentials(connection.connection_id);
+    const variant = this.normalizeVariant(connection.exchange.name);
+    if (!variant) {
+      throw new BadRequestException(
+        `Connected exchange "${connection.exchange.name}" is not Binance or Binance.US. VC pool payments require one of those.`,
+      );
+    }
+
+    const credentials = await this.exchangesService.getDecryptedCredentials(connection.connection_id);
+
+    return {
+      apiKey: credentials.apiKey,
+      apiSecret: credentials.apiSecret,
+      variant,
+      exchangeName: connection.exchange.name,
+    };
   }
 
   /**
-   * Get admin's deposit history
+   * Public: returns which Binance variant the admin is connected to (for snapshotting / UI).
+   * Throws if the admin has no active crypto connection.
+   */
+  async getAdminExchangeName(adminId: string): Promise<string> {
+    const ctx = await this.getAdminBinanceContext(adminId);
+    return ctx.exchangeName;
+  }
+
+  /**
+   * Get admin's deposit history. Routes to BinanceService or BinanceUSService
+   * based on which exchange the admin is connected to.
    */
   async getAdminDepositHistory(
     adminId: string,
@@ -49,11 +90,12 @@ export class AdminBinanceService {
     endTime?: number,
   ): Promise<any[]> {
     try {
-      const credentials = await this.getAdminBinanceCredentials(adminId);
+      const ctx = await this.getAdminBinanceContext(adminId);
+      const svc = ctx.variant === 'binance.us' ? this.binanceUSService : this.binanceService;
 
-      return this.binanceService.getDepositHistory(
-        credentials.apiKey,
-        credentials.apiSecret,
+      return svc.getDepositHistory(
+        ctx.apiKey,
+        ctx.apiSecret,
         coin,
         status,
         offset,
@@ -68,7 +110,7 @@ export class AdminBinanceService {
   }
 
   /**
-   * Get admin's withdrawal history
+   * Get admin's withdrawal history. Routes by connected variant.
    */
   async getAdminWithdrawalHistory(
     adminId: string,
@@ -80,11 +122,12 @@ export class AdminBinanceService {
     endTime?: number,
   ): Promise<any[]> {
     try {
-      const credentials = await this.getAdminBinanceCredentials(adminId);
+      const ctx = await this.getAdminBinanceContext(adminId);
+      const svc = ctx.variant === 'binance.us' ? this.binanceUSService : this.binanceService;
 
-      return this.binanceService.getWithdrawalHistory(
-        credentials.apiKey,
-        credentials.apiSecret,
+      return svc.getWithdrawalHistory(
+        ctx.apiKey,
+        ctx.apiSecret,
         coin,
         status,
         offset,
@@ -99,9 +142,8 @@ export class AdminBinanceService {
   }
 
   /**
-   * Get admin's trade history for a symbol (public market data - recent trades)
-   * Note: This fetches public trades, not admin's personal trade history
-   * For admin's own trades, use getAdminAccountInfo which shows order history
+   * Get admin's trade history for a symbol (public market data - recent trades).
+   * Routes by connected variant so US admins see Binance.US market data.
    */
   async getAdminTradeHistory(
     adminId: string,
@@ -109,7 +151,6 @@ export class AdminBinanceService {
     limit: number = 50,
   ): Promise<any[]> {
     try {
-      // Validate admin exists
       const admin = await this.prisma.admins.findUnique({
         where: { admin_id: adminId },
         select: { admin_id: true },
@@ -119,7 +160,9 @@ export class AdminBinanceService {
         throw new BadRequestException('Admin not found');
       }
 
-      return this.binanceService.getRecentTrades(symbol, limit);
+      const ctx = await this.getAdminBinanceContext(adminId);
+      const svc = ctx.variant === 'binance.us' ? this.binanceUSService : this.binanceService;
+      return svc.getRecentTrades(symbol, limit);
     } catch (error: any) {
       this.logger.error(`Failed to fetch admin trade history for ${symbol}: ${error.message}`);
       throw error;
@@ -127,20 +170,14 @@ export class AdminBinanceService {
   }
 
   /**
-   * Get admin's account info (balance, permissions)
+   * Get admin's account info (balance, permissions). Routes by connected variant.
    */
   async getAdminAccountInfo(adminId: string): Promise<any> {
     try {
-      const credentials = await this.getAdminBinanceCredentials(adminId);
+      const ctx = await this.getAdminBinanceContext(adminId);
+      const svc = ctx.variant === 'binance.us' ? this.binanceUSService : this.binanceService;
 
-      // You can reuse getAccountBalance from BinanceService if it exists
-      // Or use getAccountInfo from exchanges service
-      const accountInfo = await this.binanceService.getAccountBalance(
-        credentials.apiKey,
-        credentials.apiSecret,
-      );
-
-      return accountInfo;
+      return svc.getAccountBalance(ctx.apiKey, ctx.apiSecret);
     } catch (error: any) {
       this.logger.error(`Failed to fetch admin account info: ${error.message}`);
       throw error;
@@ -149,7 +186,6 @@ export class AdminBinanceService {
 
   /**
    * Get summary of admin's Binance account
-   * Returns deposits, withdrawals, and account info
    */
   async getAdminBinanceSummary(
     adminId: string,

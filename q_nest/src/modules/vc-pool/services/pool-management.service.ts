@@ -401,7 +401,7 @@ export class PoolManagementService {
       payment_window_minutes: p.payment_window_minutes,
       admin_binance_uid: p.admin?.binance_uid || null,
       admin_wallet_address: p.admin?.wallet_address || null,
-      payment_network: p.admin?.payment_network || 'BSC',
+      payment_network: p.admin?.payment_network || 'TRC20',
       deposit_coin: 'USDT',
       deposit_method: 'on_chain',
       created_at: p.created_at,
@@ -612,7 +612,7 @@ export class PoolManagementService {
       admin_info: {
         binance_uid: pool.admin?.binance_uid || null,
         wallet_address: pool.admin?.wallet_address || null,
-        payment_network: pool.admin?.payment_network || 'BSC',
+        payment_network: pool.admin?.payment_network || 'TRC20',
         deposit_coin: 'USDT',
         deposit_method: 'on_chain',
       },

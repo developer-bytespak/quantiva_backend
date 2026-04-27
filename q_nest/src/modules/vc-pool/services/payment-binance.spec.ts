@@ -235,13 +235,20 @@ describe('PaymentSubmissionService', () => {
 describe('BinanceVerificationService', () => {
   let service: BinanceVerificationService;
   let prisma: any;
+  let adminBinance: { getAdminDepositHistory: jest.Mock };
 
   beforeEach(async () => {
     const prismaProvider = mockPrismaService();
+    adminBinance = { getAdminDepositHistory: jest.fn() };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         BinanceVerificationService,
         { provide: PrismaService, useValue: prismaProvider },
+        {
+          provide: require('../../admin-auth/services/admin-binance.service').AdminBinanceService,
+          useValue: adminBinance,
+        },
       ],
     }).compile();
 
@@ -249,41 +256,11 @@ describe('BinanceVerificationService', () => {
     prisma = module.get<PrismaService>(PrismaService);
   });
 
-  describe('verifyPayment', () => {
-    it('should return verified:false if no TX ID provided', async () => {
-      const result = await service.verifyPayment({
-        submission_id: 'sub-1',
-        binance_tx_id: null,
-        pool: { admin_id: 'admin-1' },
-      });
-
-      expect(result.verified).toBe(false);
-      expect(result.reason).toBe('No Binance TX ID provided');
-    });
-
-    it('should return verified:false if admin has no Binance API keys', async () => {
-      prisma.admins.findUnique.mockResolvedValue({
-        admin_id: 'admin-1',
-        binance_api_key_encrypted: null,
-        binance_api_secret_encrypted: null,
-      });
-
-      const result = await service.verifyPayment({
-        submission_id: 'sub-1',
-        binance_tx_id: 'TX123',
-        pool: { admin_id: 'admin-1' },
-      });
-
-      expect(result.verified).toBe(false);
-      expect(result.reason).toContain('API keys not configured');
-    });
-  });
-
-  describe('verifyPendingPayments', () => {
-    it('should return zero stats when no pending payments', async () => {
+  describe('verifyPaymentsByDepositHistory', () => {
+    it('returns zero stats when no pending payments', async () => {
       prisma.vc_pool_payment_submissions.findMany.mockResolvedValue([]);
 
-      const result = await service.verifyPendingPayments();
+      const result = await service.verifyPaymentsByDepositHistory();
 
       expect(result).toEqual({
         processed: 0,
@@ -291,6 +268,54 @@ describe('BinanceVerificationService', () => {
         rejected: 0,
         errors: 0,
       });
+      expect(adminBinance.getAdminDepositHistory).not.toHaveBeenCalled();
+    });
+
+    it('routes deposit-history fetch through AdminBinanceService (which dispatches Binance vs Binance.US)', async () => {
+      prisma.vc_pool_payment_submissions.findMany.mockResolvedValue([
+        {
+          submission_id: 'sub-1',
+          pool_id: 'pool-1',
+          user_id: 'user-1',
+          reservation_id: 'res-1',
+          payment_method: 'binance',
+          binance_payment_status: 'pending',
+          tx_hash: '0xABC',
+          exact_amount_expected: '100',
+          total_amount: '100',
+          investment_amount: '100',
+          pool: {
+            pool_id: 'pool-1',
+            admin_id: 'admin-1',
+            name: 'P',
+            max_members: 10,
+            verified_members_count: 0,
+            contribution_amount: 100,
+            pool_fee_percent: 0,
+            admin_profit_fee_percent: 0,
+            status: 'open',
+          },
+          user: { user_id: 'user-1', email: 'u@x' },
+        },
+      ]);
+      prisma.admins.findUnique.mockResolvedValue({ admin_id: 'admin-1' });
+
+      // No matching deposit yet — submission stays pending, no error
+      adminBinance.getAdminDepositHistory.mockResolvedValue([]);
+
+      const result = await service.verifyPaymentsByDepositHistory();
+
+      expect(adminBinance.getAdminDepositHistory).toHaveBeenCalledWith(
+        'admin-1',
+        'USDT',
+        1,
+        0,
+        100,
+        expect.any(Number),
+        expect.any(Number),
+      );
+      expect(result.processed).toBe(1);
+      expect(result.approved).toBe(0);
     });
   });
 });
