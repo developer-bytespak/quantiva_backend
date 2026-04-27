@@ -583,6 +583,19 @@ export class PoolCancellationService {
       this.appGateway.emitNotificationCount(cancellation.member.user_id, 1, notification);
     }
 
+    // Pull the network the user originally paid on (snapshotted at submission time)
+    // so the refund goes back on the same chain. Falls back to TRC20.
+    const lastVerifiedSubmission = await this.prisma.vc_pool_payment_submissions.findFirst({
+      where: {
+        pool_id: poolId,
+        user_id: cancellation.member.user_id,
+        binance_payment_status: 'verified',
+      },
+      orderBy: { verified_at: 'desc' },
+      select: { payment_network_used: true, admin_exchange_name: true },
+    });
+    const refundNetwork = lastVerifiedSubmission?.payment_network_used || 'TRC20';
+
     return {
       cancellation_id: updated.cancellation_id,
       contribution_amount: Number(updated.invested_amount),
@@ -590,15 +603,16 @@ export class PoolCancellationService {
       cancellation_fee_amount: Number(updated.fee_amount),
       refund_amount: Number(updated.refund_amount),
       user_wallet_address: cancellation.member.user_wallet_address,
+      refund_network: refundNetwork,
       status: EXIT_REQUEST_STATUS.approved,
       approved_at: updated.reviewed_at,
       message: 'Cancellation approved. Transfer refund externally, then mark as refunded.',
-      next_step: `Transfer ${updated.refund_amount} USDT to ${cancellation.member.user_wallet_address} on BSC network`,
+      next_step: `Transfer ${updated.refund_amount} USDT to ${cancellation.member.user_wallet_address} on ${refundNetwork} network`,
       instructions: [
-        '1. Open Binance → Click "Send" or "Withdraw Crypto"',
+        '1. Open your exchange → Click "Withdraw Crypto" (on-chain only)',
         '2. Select Token: USDT',
         `3. Paste wallet address: ${cancellation.member.user_wallet_address}`,
-        '4. Select Network: BSC (BEP-20)',
+        `4. Select Network: ${refundNetwork} (same network the user paid on)`,
         `5. Set Amount: ${updated.refund_amount} USDT`,
         '6. Click Withdraw and confirm',
         '7. Copy the Transaction Hash',
