@@ -159,6 +159,46 @@ export class PlaceMultiLegOrderDto {
   legs: MultiLegOrderLegDto[];
 }
 
+// ── Multi-leg preview DTO ──────────────────────────────────
+//
+// Lightweight leg shape (no positionIntent — we're only pricing here, not
+// opening anything) used by `POST /options/orders/multi-leg/preview` to
+// compute net debit/credit and suggested limit price server-side.
+
+export class PreviewMultiLegOrderLegDto {
+  @IsString()
+  @IsNotEmpty()
+  contractSymbol: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^(buy|sell)$/)
+  side: 'buy' | 'sell';
+
+  @IsNumber()
+  @Min(1, { message: 'ratio must be at least 1' })
+  @Max(100, { message: 'ratio cannot exceed 100' })
+  ratio: number;
+}
+
+export class PreviewMultiLegOrderDto {
+  @IsString()
+  @IsNotEmpty()
+  connectionId: string;
+
+  @IsNumber()
+  @Min(1)
+  @Max(10000)
+  qty: number;
+
+  @IsArray()
+  @ArrayMinSize(2, { message: 'legs must contain at least 2 entries' })
+  @ArrayMaxSize(4, { message: 'legs cannot contain more than 4 entries' })
+  @ValidateNested({ each: true })
+  @Type(() => PreviewMultiLegOrderLegDto)
+  legs: PreviewMultiLegOrderLegDto[];
+}
+
 export class CancelOptionOrderDto {
   @IsString()
   connectionId: string;
