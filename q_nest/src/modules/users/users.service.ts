@@ -3,6 +3,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { KycStatus } from '@prisma/client';
 import { UpdatePersonalInfoDto } from './dto/update-personal-info.dto';
 import { SumsubService } from '../../kyc/integrations/sumsub.service';
+import { OnboardingStateService } from '../onboarding-emails/services/onboarding-state.service';
+import { OnboardingState } from '../onboarding-emails/types';
 import { DeleteReason } from './dto/delete-self.dto';
 
 @Injectable()
@@ -12,6 +14,7 @@ export class UsersService {
   constructor(
     private prisma: PrismaService,
     private sumsubService: SumsubService,
+    private onboardingStateService: OnboardingStateService,
   ) {}
 
   async findAll() {
@@ -304,7 +307,7 @@ export class UsersService {
     // Convert dob string to Date object
     const dobDate = data.dob ? new Date(data.dob) : null;
 
-    return this.prisma.users.update({
+    const updated = await this.prisma.users.update({
       where: { user_id: userId },
       data: {
         full_name: data.fullName,
@@ -326,6 +329,10 @@ export class UsersService {
         updated_at: true,
       },
     });
+
+    await this.onboardingStateService.advanceTo(userId, OnboardingState.PERSONAL_INFO);
+
+    return updated;
   }
 
   async updateProfilePicture(userId: string, imageUrl: string) {

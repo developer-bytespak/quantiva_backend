@@ -11,9 +11,10 @@ import { ReviewService } from './services/review.service';
 import { PythonApiService } from './integrations/python-api.service';
 import { SumsubService } from './integrations/sumsub.service';
 import { KycEmailService } from './services/kyc-email.service';
+import { OnboardingEmailsModule } from '../modules/onboarding-emails/onboarding-emails.module';
 
 @Module({
-  imports: [PrismaModule, StorageModule, ConfigModule],
+  imports: [PrismaModule, StorageModule, ConfigModule, OnboardingEmailsModule],
   controllers: [KycController, KycWebhookController],
   providers: [
     KycService,

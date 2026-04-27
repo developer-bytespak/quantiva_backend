@@ -19,6 +19,7 @@ import { StorageModule } from '../../storage/storage.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { KycModule } from '../../kyc/kyc.module';
+import { OnboardingEmailsModule } from '../onboarding-emails/onboarding-emails.module';
 import { AppGateway } from 'src/gateways/app.gateway';
 import { FirebaseService } from 'src/firebase/firebase.service';
 
@@ -29,6 +30,7 @@ import { FirebaseService } from 'src/firebase/firebase.service';
     forwardRef(() => SubscriptionsModule),
     NotificationsModule,
     KycModule,
+    OnboardingEmailsModule,
     PassportModule,
     ConfigModule,
     ScheduleModule,
