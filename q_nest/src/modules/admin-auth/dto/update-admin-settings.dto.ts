@@ -6,7 +6,11 @@ import {
   Max,
   IsInt,
   IsNotEmpty,
+  IsIn,
 } from 'class-validator';
+
+export const ALLOWED_PAYMENT_NETWORKS = ['TRC20', 'ERC20', 'BEP20'] as const;
+export type PaymentNetwork = (typeof ALLOWED_PAYMENT_NETWORKS)[number];
 
 export class UpdateBinanceSettingsDto {
   @IsString()
@@ -17,9 +21,11 @@ export class UpdateBinanceSettingsDto {
   @IsOptional()
   wallet_address?: string;
 
-  @IsString()
+  @IsIn(ALLOWED_PAYMENT_NETWORKS, {
+    message: `payment_network must be one of: ${ALLOWED_PAYMENT_NETWORKS.join(', ')}`,
+  })
   @IsOptional()
-  payment_network?: string;
+  payment_network?: PaymentNetwork;
 }
 
 export class UpdateFeeSettingsDto {

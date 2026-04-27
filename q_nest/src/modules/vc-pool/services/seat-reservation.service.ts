@@ -11,10 +11,12 @@ import { JoinPoolDto } from '../dto/join-pool.dto';
 import { VcPoolEmailService } from './vc-pool-email.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { AppGateway } from '../../../gateways/app.gateway';
+import { AdminBinanceService } from '../../admin-auth/services/admin-binance.service';
 
 const POOL_STATUS = { open: 'open', full: 'full' } as const;
 const RESERVATION_STATUS = { reserved: 'reserved', confirmed: 'confirmed' } as const;
 const SUBMISSION_STATUS = { pending: 'pending', processing: 'processing' } as const;
+const DEFAULT_PAYMENT_NETWORK = 'TRC20';
 
 @Injectable()
 export class SeatReservationService {
@@ -25,7 +27,25 @@ export class SeatReservationService {
     private readonly vcPoolEmailService: VcPoolEmailService,
     private readonly notificationsService: NotificationsService,
     private readonly appGateway: AppGateway,
+    private readonly adminBinanceService: AdminBinanceService,
   ) {}
+
+  /**
+   * Best-effort: resolve which Binance variant the admin is currently connected to
+   * (Binance vs Binance.US) so we can snapshot it onto the submission. If the admin
+   * has no active connection, returns null — verification will surface a clear error
+   * later instead of blocking the user from reserving the seat.
+   */
+  private async resolveAdminExchangeName(adminId: string): Promise<string | null> {
+    try {
+      return await this.adminBinanceService.getAdminExchangeName(adminId);
+    } catch (err: any) {
+      this.logger.warn(
+        `Could not resolve admin ${adminId} exchange at reservation time: ${err.message}`,
+      );
+      return null;
+    }
+  }
 
   async joinPool(userId: string, poolId: string, dto: JoinPoolDto) {
     const pool = await this.prisma.vc_pools.findUnique({
@@ -132,6 +152,15 @@ export class SeatReservationService {
         const poolFeeAmount = investmentAmount * Number(pool.pool_fee_percent) / 100;
         const totalAmount = investmentAmount + poolFeeAmount;
 
+        const adminExchangeName =
+          dto.payment_method === 'binance'
+            ? await this.resolveAdminExchangeName(pool.admin_id)
+            : null;
+        const networkUsed =
+          dto.payment_method === 'binance'
+            ? pool.admin?.payment_network || DEFAULT_PAYMENT_NETWORK
+            : null;
+
         submission = await this.prisma.vc_pool_payment_submissions.create({
           data: {
             pool_id: poolId,
@@ -144,6 +173,8 @@ export class SeatReservationService {
             payment_deadline: existingReservation.expires_at,
             status: submissionStatus as any,
             user_wallet_address: dto.user_wallet_address || null,
+            admin_exchange_name: adminExchangeName,
+            payment_network_used: networkUsed,
           },
         });
       } else {
@@ -169,10 +200,12 @@ export class SeatReservationService {
       // Return updated reservation response
       if (dto.payment_method === 'binance') {
         const adminAddress = pool.admin?.wallet_address || pool.admin?.binance_uid;
-        const network = pool.admin?.payment_network || 'BSC';
+        const network = pool.admin?.payment_network || DEFAULT_PAYMENT_NETWORK;
+        const adminExchangeName = await this.resolveAdminExchangeName(pool.admin_id);
         const investmentAmount = Number(pool.contribution_amount);
         const poolFeeAmount = investmentAmount * Number(pool.pool_fee_percent) / 100;
         const totalAmount = investmentAmount + poolFeeAmount;
+        const sourceLabel = adminExchangeName === 'Binance.US' ? 'Binance.US' : 'Binance';
 
         return {
           member_id: updatedMember.member_id,
@@ -186,6 +219,7 @@ export class SeatReservationService {
           coin: pool.coin_type,
           admin_binance_uid: pool.admin?.binance_uid,
           admin_wallet_address: pool.admin?.wallet_address || null,
+          admin_exchange_name: adminExchangeName,
           payment_network: network,
           deposit_coin: 'USDT',
           deposit_method: 'on_chain',
@@ -193,11 +227,11 @@ export class SeatReservationService {
           minutes_remaining: minutesRemaining,
           payment_method: 'binance',
           instructions: [
-            '1. Open Binance → Click Send → Withdraw Crypto',
+            `1. Open your exchange → Click Withdraw Crypto (on-chain only — Binance Pay / UID transfer will NOT be detected)`,
             '2. Select USDT as the coin',
-            `3. Paste the admin deposit address: ${adminAddress}`,
-            `4. Select Network: ${network} (BEP-20)`,
-            `5. Enter the exact amount: ${totalAmount} USDT`,
+            `3. Paste the admin's ${sourceLabel} deposit address: ${adminAddress}`,
+            `4. Select Network: ${network}`,
+            `5. Enter the exact amount: ${totalAmount} USDT (cover the network fee yourself — admin must receive this exact amount)`,
             '6. Click Withdraw and confirm the transaction',
             '7. Copy the TX Hash from the confirmation',
             '8. Come back and paste the TX Hash to verify your payment',
@@ -246,6 +280,17 @@ export class SeatReservationService {
     const expiresAt = new Date();
     expiresAt.setMinutes(expiresAt.getMinutes() + pool.payment_window_minutes);
 
+    // Resolve admin's connected Binance variant once, before the transaction, so
+    // the snapshot is consistent and we don't hold the txn open during an HTTP call.
+    const adminExchangeName =
+      dto.payment_method === 'binance'
+        ? await this.resolveAdminExchangeName(pool.admin_id)
+        : null;
+    const networkUsed =
+      dto.payment_method === 'binance'
+        ? pool.admin?.payment_network || DEFAULT_PAYMENT_NETWORK
+        : null;
+
     // Atomic transaction: reserve seat + create payment submission
     const result = await this.prisma.$transaction(async (tx) => {
       // Delete stale reservation + linked submission if exists (expired/released)
@@ -290,6 +335,8 @@ export class SeatReservationService {
           payment_deadline: expiresAt,
           status: submissionStatus as any,
           user_wallet_address: dto.user_wallet_address || null,
+          admin_exchange_name: adminExchangeName,
+          payment_network_used: networkUsed,
         },
       });
 
@@ -329,7 +376,8 @@ export class SeatReservationService {
 
     if (dto.payment_method === 'binance') {
       const adminAddress = pool.admin?.wallet_address || pool.admin?.binance_uid;
-      const network = pool.admin?.payment_network || 'BSC';
+      const network = networkUsed || DEFAULT_PAYMENT_NETWORK;
+      const sourceLabel = adminExchangeName === 'Binance.US' ? 'Binance.US' : 'Binance';
       return {
         member_id: memberToUse.member_id,
         reservation_id: result.reservation.reservation_id,
@@ -341,6 +389,7 @@ export class SeatReservationService {
         coin: pool.coin_type,
         admin_binance_uid: pool.admin?.binance_uid,
         admin_wallet_address: pool.admin?.wallet_address || null,
+        admin_exchange_name: adminExchangeName,
         payment_network: network,
         deposit_coin: 'USDT',
         deposit_method: 'on_chain',
@@ -348,11 +397,11 @@ export class SeatReservationService {
         minutes_remaining: minutesRemaining,
         payment_method: 'binance',
         instructions: [
-          '1. Open Binance → Click Send → Withdraw Crypto',
+          `1. Open your exchange → Click Withdraw Crypto (on-chain only — Binance Pay / UID transfer will NOT be detected)`,
           '2. Select USDT as the coin',
-          `3. Paste the admin deposit address: ${adminAddress}`,
-          `4. Select Network: ${network} (BEP-20)`,
-          `5. Enter the exact amount: ${totalAmount} USDT`,
+          `3. Paste the admin's ${sourceLabel} deposit address: ${adminAddress}`,
+          `4. Select Network: ${network}`,
+          `5. Enter the exact amount: ${totalAmount} USDT (cover the network fee yourself — admin must receive this exact amount)`,
           '6. Click Withdraw and confirm the transaction',
           '7. Copy the TX Hash from the confirmation',
           '8. Come back and paste the TX Hash to verify your payment',
