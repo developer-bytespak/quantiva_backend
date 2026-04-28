@@ -4,6 +4,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { DocumentService } from './document.service';
 import { DecisionEngineService } from './decision-engine.service';
 import { SumsubService } from '../integrations/sumsub.service';
+import { OnboardingStateService } from '../../modules/onboarding-emails/services/onboarding-state.service';
+import { OnboardingState } from '../../modules/onboarding-emails/types';
 
 @Injectable()
 export class KycService {
@@ -21,6 +23,7 @@ export class KycService {
     private decisionEngine: DecisionEngineService,
     private configService: ConfigService,
     private sumsubService: SumsubService,
+    private onboardingStateService: OnboardingStateService,
   ) {}
 
   /**
@@ -659,6 +662,17 @@ export class KycService {
               data: { kyc_status: newStatus as any },
             });
             this.logger.log(`   ✅ User KYC status updated to ${newStatus.toUpperCase()}`);
+
+            // Onboarding drip: when polling discovers an approval before Sumsub's webhook
+            // arrives, advance the funnel state too. advanceTo is idempotent — a later
+            // webhook approval call is a no-op because state is already KYC.
+            if (newStatus === 'approved') {
+              try {
+                await this.onboardingStateService.advanceTo(userId, OnboardingState.KYC);
+              } catch (advanceError) {
+                this.logger.warn(`Failed to advance onboarding state: ${advanceError.message}`);
+              }
+            }
           }
         }
       } catch (error) {
