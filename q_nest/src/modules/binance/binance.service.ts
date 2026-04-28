@@ -25,7 +25,7 @@ interface TickerPrice {
   price: string;
 }
 
-interface Candlestick {
+export interface Candlestick {
   openTime: number;
   open: number;
   high: number;
@@ -278,6 +278,78 @@ export class BinanceService {
     } catch (error: any) {
       this.logger.error(`Failed to get OHLCV for ${symbol}: ${error.message}`);
       throw new Error(`Failed to fetch OHLCV for ${symbol}`);
+    }
+  }
+
+  /**
+   * Get order book (depth) for a symbol via Binance's public REST endpoint.
+   * No auth required — used for the anonymous market-detail preview.
+   */
+  async getOrderBook(
+    symbol: string,
+    limit: number = 20,
+  ): Promise<{
+    bids: Array<{ price: number; quantity: number; total: number }>;
+    asks: Array<{ price: number; quantity: number; total: number }>;
+    lastUpdateId: number;
+    spread: number;
+    spreadPercent: number;
+  }> {
+    const formattedSymbol = this.formatSymbol(symbol);
+    try {
+      const response = await this.apiClient.get('/api/v3/depth', {
+        params: { symbol: formattedSymbol, limit },
+      });
+      const raw = response.data;
+
+      let bidTotal = 0;
+      const bids = raw.bids.map((b: [string, string]) => {
+        const quantity = parseFloat(b[1]);
+        bidTotal += quantity;
+        return { price: parseFloat(b[0]), quantity, total: bidTotal };
+      });
+
+      let askTotal = 0;
+      const asks = raw.asks.map((a: [string, string]) => {
+        const quantity = parseFloat(a[1]);
+        askTotal += quantity;
+        return { price: parseFloat(a[0]), quantity, total: askTotal };
+      });
+
+      const bestBid = bids[0]?.price ?? 0;
+      const bestAsk = asks[0]?.price ?? 0;
+      const spread = bestAsk - bestBid;
+      const spreadPercent = bestBid > 0 ? (spread / bestBid) * 100 : 0;
+
+      return { bids, asks, lastUpdateId: raw.lastUpdateId, spread, spreadPercent };
+    } catch (error: any) {
+      this.logger.error(`Failed to get order book for ${symbol}: ${error.message}`);
+      throw new Error(`Failed to fetch order book for ${symbol}`);
+    }
+  }
+
+  /**
+   * Get recent trades for a symbol via Binance's public REST endpoint.
+   */
+  async getRecentTrades(
+    symbol: string,
+    limit: number = 50,
+  ): Promise<Array<{ id: string; price: number; quantity: number; time: number; isBuyerMaker: boolean }>> {
+    const formattedSymbol = this.formatSymbol(symbol);
+    try {
+      const response = await this.apiClient.get('/api/v3/trades', {
+        params: { symbol: formattedSymbol, limit },
+      });
+      return response.data.map((t: any) => ({
+        id: String(t.id),
+        price: parseFloat(t.price),
+        quantity: parseFloat(t.qty),
+        time: t.time,
+        isBuyerMaker: !!t.isBuyerMaker,
+      }));
+    } catch (error: any) {
+      this.logger.error(`Failed to get recent trades for ${symbol}: ${error.message}`);
+      throw new Error(`Failed to fetch recent trades for ${symbol}`);
     }
   }
 
