@@ -515,6 +515,11 @@ export class AuthService {
         kyc_status: 'pending',
       },
     });
+
+    // Kick off onboarding drip — same as email/password signup. Google signup users still need to
+    // fill personal info, do KYC, etc., so they go through the same funnel reminders.
+    await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
+
     // try {
     //   const freePlan = await this.prisma.subscription_plans.findFirst({
     //     where: { tier: 'FREE', billing_period: 'MONTHLY', is_active: true },
