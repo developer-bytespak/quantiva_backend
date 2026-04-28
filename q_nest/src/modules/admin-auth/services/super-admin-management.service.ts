@@ -205,7 +205,7 @@ export class SuperAdminManagementService {
           },
         },
       }),
-      this.prisma.users.count({ where: { current_tier: { in: ['PRO', 'ELITE'] } } }),
+      this.prisma.users.count({ where: { current_tier: { in: ['PRO', 'ELITE', 'ELITE_PLUS'] } } }),
       this.prisma.users.count({ where: { current_tier: 'FREE' } }),
       this.prisma.users.groupBy({
         by: ['current_tier'],
@@ -279,6 +279,7 @@ export class SuperAdminManagementService {
       FREE: 0,
       PRO: 0,
       ELITE: 0,
+      ELITE_PLUS: 0,
     };
 
     for (const item of planDistribution) {

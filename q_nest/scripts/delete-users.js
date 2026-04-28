@@ -11,11 +11,28 @@
  */
 
 require('dotenv').config();
+const crypto = require('crypto');
+const axios = require('axios');
 const { PrismaClient } = require('@prisma/client');
 
 const EXACT_EMAILS = [
-  'muhammadaliyanmalik1@gmail.com',
+  'extuser_1773340770910@test.com',
+  'debuguser_1773340564668@test.com',
+  'debuguser_1773340155156@test.com',
+  'cycleuser_1773340031562@test.com',
+  'cycleuser_1773339908398@test.com',
+  'admin@quantiva.io',
+  'mdhani212@proton.me',
+  'anas2@gmail.com',
   'ameerun35@gmail.com',
+  'rdtest052@gmail.com',
+  'rdtest0523@gmail.com',
+  'qazimaaz404@gmail.com',
+  'rejoin_u2_1775519987089@gmail.com',
+  'rejoin_u1_1775519987089@gmail.com',
+  'ali.siddiqui0324@gmail.com',
+  'anas091012@gmail.com',
+  'k224207@nu.edu.pk',
 ];
 
 // case-insensitive prefix matches on email
@@ -24,6 +41,50 @@ const PREFIX_PATTERNS = [];
 const APPLY = process.argv.includes('--apply');
 
 const prisma = new PrismaClient();
+
+// ---------- Sumsub client ----------
+const SUMSUB_APP_TOKEN = process.env.SUMSUB_APP_TOKEN;
+const SUMSUB_SECRET_KEY = process.env.SUMSUB_SECRET_KEY;
+const SUMSUB_BASE_URL = process.env.SUMSUB_BASE_URL || 'https://api.sumsub.com';
+
+function sumsubSignature(ts, method, path, body = '') {
+  return crypto
+    .createHmac('sha256', SUMSUB_SECRET_KEY)
+    .update(ts + method + path + body)
+    .digest('hex');
+}
+
+// Permanently delete a Sumsub applicant. Mirrors SumsubService.deleteApplicant —
+// 404s and other errors are swallowed so a stale or already-removed applicant
+// doesn't block the rest of the deletion run.
+async function deleteSumsubApplicant(applicantId) {
+  if (!SUMSUB_APP_TOKEN || !SUMSUB_SECRET_KEY) {
+    console.log(`  [skip] ${applicantId} — SUMSUB_APP_TOKEN/SECRET_KEY not set`);
+    return false;
+  }
+  const method = 'DELETE';
+  const path = `/resources/applicants/${applicantId}`;
+  const ts = Math.floor(Date.now() / 1000);
+  try {
+    await axios({
+      method,
+      url: `${SUMSUB_BASE_URL}${path}`,
+      headers: {
+        'X-App-Token': SUMSUB_APP_TOKEN,
+        'X-App-Access-Ts': ts.toString(),
+        'X-App-Access-Sig': sumsubSignature(ts, method, path),
+        Accept: 'application/json',
+      },
+    });
+    console.log(`  [ok]   ${applicantId}`);
+    return true;
+  } catch (e) {
+    const status = e.response?.status;
+    const body = e.response?.data;
+    console.log(`  [warn] ${applicantId} — ${status || ''} ${JSON.stringify(body) || e.message}`);
+    return false;
+  }
+}
 
 async function main() {
   const target = process.env.DATABASE_URL?.split('@')[1]?.split('?')[0] || 'unknown';
@@ -58,6 +119,22 @@ async function main() {
 
   const userIds = users.map((u) => u.user_id);
 
+  // Sumsub applicant IDs linked to these users (fetch once; reused for preview + apply)
+  const kycRows = await prisma.kyc_verifications.findMany({
+    where: { user_id: { in: userIds }, sumsub_applicant_id: { not: null } },
+    select: { user_id: true, sumsub_applicant_id: true },
+  });
+  const applicantIds = [...new Set(kycRows.map((r) => r.sumsub_applicant_id))];
+  if (applicantIds.length) {
+    console.log('\nSumsub applicants linked:');
+    kycRows.forEach((r) => {
+      const u = users.find((x) => x.user_id === r.user_id);
+      console.log(`  ${(u?.email || r.user_id).padEnd(40)} ${r.sumsub_applicant_id}`);
+    });
+  } else {
+    console.log('\nSumsub applicants linked: (none)');
+  }
+
   // Shared relation filters — all expressed as subqueries so Postgres doesn't
   // see a giant IN-list of UUIDs.
   const whereUser = { user_id: { in: userIds } };
@@ -73,57 +150,60 @@ async function main() {
   const whereViaOptionsOrder = { originating_order: whereUser };
 
   // ---------- Preview counts ----------
+  // Run sequentially — Neon pooler caps connections (default 9) and parallel
+  // counts here exhaust the pool.
   const counts = {};
-  const count = async (label, promise) => { counts[label] = await promise; };
-
-  await Promise.all([
-    count('users', prisma.users.count({ where: whereUser })),
-    count('user_sessions', prisma.user_sessions.count({ where: whereUser })),
-    count('two_factor_codes', prisma.two_factor_codes.count({ where: whereUser })),
-    count('user_settings', prisma.user_settings.count({ where: whereUser })),
-    count('notifications', prisma.notifications.count({ where: whereUser })),
-    count('kyc_verifications', prisma.kyc_verifications.count({ where: whereUser })),
-    count('kyc_documents', prisma.kyc_documents.count({ where: whereViaKyc })),
-    count('kyc_face_matches', prisma.kyc_face_matches.count({ where: whereViaKyc })),
-    count('user_exchange_connections', prisma.user_exchange_connections.count({ where: whereUser })),
-    count('strategies', prisma.strategies.count({ where: whereUser })),
-    count('strategy_parameters', prisma.strategy_parameters.count({ where: whereViaStrategy })),
-    count('strategy_execution_jobs', prisma.strategy_execution_jobs.count({ where: whereViaStrategy })),
-    count('strategy_signals', prisma.strategy_signals.count({ where: whereUser })),
-    count('signal_details', prisma.signal_details.count({ where: whereViaSignal })),
-    count('signal_explanations', prisma.signal_explanations.count({ where: whereViaSignal })),
-    count('auto_trade_evaluations', prisma.auto_trade_evaluations.count({ where: whereViaSignal })),
-    count('portfolios', prisma.portfolios.count({ where: whereUser })),
-    count('portfolio_positions', prisma.portfolio_positions.count({ where: whereViaPortfolio })),
-    count('portfolio_snapshots', prisma.portfolio_snapshots.count({ where: whereViaPortfolio })),
-    count('drawdown_history', prisma.drawdown_history.count({ where: whereViaPortfolio })),
-    count('orders', prisma.orders.count({ where: whereViaPortfolio })),
-    count('order_executions', prisma.order_executions.count({ where: whereViaOrder })),
-    count('optimization_runs', prisma.optimization_runs.count({ where: whereUser })),
-    count('optimization_allocations', prisma.optimization_allocations.count({ where: whereViaOptimization })),
-    count('rebalance_suggestions', prisma.rebalance_suggestions.count({ where: whereViaOptimization })),
-    count('risk_events', prisma.risk_events.count({ where: whereUser })),
-    count('user_subscriptions', prisma.user_subscriptions.count({ where: whereUser })),
-    count('subscription_usage', prisma.subscription_usage.count({ where: whereUser })),
-    count('payment_history', prisma.payment_history.count({ where: whereUser })),
-    count('vc_pool_seat_reservations', prisma.vc_pool_seat_reservations.count({ where: whereUser })),
-    count('vc_pool_payment_submissions', prisma.vc_pool_payment_submissions.count({ where: whereUser })),
-    count('vc_pool_members', prisma.vc_pool_members.count({ where: whereUser })),
-    count('vc_pool_payouts', prisma.vc_pool_payouts.count({ where: whereViaMember })),
-    count('vc_pool_cancellations', prisma.vc_pool_cancellations.count({ where: whereViaMember })),
-    count('vc_pool_transactions', prisma.vc_pool_transactions.count({ where: whereUser })),
-    count('user_credits', prisma.user_credits.count({ where: whereUser })),
-    count('options_orders', prisma.options_orders.count({ where: whereUser })),
-    count('options_positions', prisma.options_positions.count({ where: whereUser })),
-    count('trade_fees', prisma.trade_fees.count({ where: whereUser })),
-    count('monthly_fee_summaries', prisma.monthly_fee_summaries.count({ where: whereUser })),
-    count('qhq_balances', prisma.qhq_balances.count({ where: whereUser })),
-    count('qhq_transactions', prisma.qhq_transactions.count({ where: whereUser })),
-    count('qhq_wallet_links', prisma.qhq_wallet_links.count({ where: whereUser })),
-    count('onboarding_email_reminders', prisma.onboarding_email_reminders.count({ where: whereUser })),
-    count('contact_submissions', prisma.contact_submissions.count({ where: whereUser })),
-    count('pending_queued_trades', prisma.pending_queued_trades.count({ where: whereUser })),
-  ]);
+  const countDefs = [
+    ['users', () => prisma.users.count({ where: whereUser })],
+    ['user_sessions', () => prisma.user_sessions.count({ where: whereUser })],
+    ['two_factor_codes', () => prisma.two_factor_codes.count({ where: whereUser })],
+    ['user_settings', () => prisma.user_settings.count({ where: whereUser })],
+    ['notifications', () => prisma.notifications.count({ where: whereUser })],
+    ['kyc_verifications', () => prisma.kyc_verifications.count({ where: whereUser })],
+    ['kyc_documents', () => prisma.kyc_documents.count({ where: whereViaKyc })],
+    ['kyc_face_matches', () => prisma.kyc_face_matches.count({ where: whereViaKyc })],
+    ['user_exchange_connections', () => prisma.user_exchange_connections.count({ where: whereUser })],
+    ['strategies', () => prisma.strategies.count({ where: whereUser })],
+    ['strategy_parameters', () => prisma.strategy_parameters.count({ where: whereViaStrategy })],
+    ['strategy_execution_jobs', () => prisma.strategy_execution_jobs.count({ where: whereViaStrategy })],
+    ['strategy_signals', () => prisma.strategy_signals.count({ where: whereUser })],
+    ['signal_details', () => prisma.signal_details.count({ where: whereViaSignal })],
+    ['signal_explanations', () => prisma.signal_explanations.count({ where: whereViaSignal })],
+    ['auto_trade_evaluations', () => prisma.auto_trade_evaluations.count({ where: whereViaSignal })],
+    ['portfolios', () => prisma.portfolios.count({ where: whereUser })],
+    ['portfolio_positions', () => prisma.portfolio_positions.count({ where: whereViaPortfolio })],
+    ['portfolio_snapshots', () => prisma.portfolio_snapshots.count({ where: whereViaPortfolio })],
+    ['drawdown_history', () => prisma.drawdown_history.count({ where: whereViaPortfolio })],
+    ['orders', () => prisma.orders.count({ where: whereViaPortfolio })],
+    ['order_executions', () => prisma.order_executions.count({ where: whereViaOrder })],
+    ['optimization_runs', () => prisma.optimization_runs.count({ where: whereUser })],
+    ['optimization_allocations', () => prisma.optimization_allocations.count({ where: whereViaOptimization })],
+    ['rebalance_suggestions', () => prisma.rebalance_suggestions.count({ where: whereViaOptimization })],
+    ['risk_events', () => prisma.risk_events.count({ where: whereUser })],
+    ['user_subscriptions', () => prisma.user_subscriptions.count({ where: whereUser })],
+    ['subscription_usage', () => prisma.subscription_usage.count({ where: whereUser })],
+    ['payment_history', () => prisma.payment_history.count({ where: whereUser })],
+    ['vc_pool_seat_reservations', () => prisma.vc_pool_seat_reservations.count({ where: whereUser })],
+    ['vc_pool_payment_submissions', () => prisma.vc_pool_payment_submissions.count({ where: whereUser })],
+    ['vc_pool_members', () => prisma.vc_pool_members.count({ where: whereUser })],
+    ['vc_pool_payouts', () => prisma.vc_pool_payouts.count({ where: whereViaMember })],
+    ['vc_pool_cancellations', () => prisma.vc_pool_cancellations.count({ where: whereViaMember })],
+    ['vc_pool_transactions', () => prisma.vc_pool_transactions.count({ where: whereUser })],
+    ['user_credits', () => prisma.user_credits.count({ where: whereUser })],
+    ['options_orders', () => prisma.options_orders.count({ where: whereUser })],
+    ['options_positions', () => prisma.options_positions.count({ where: whereUser })],
+    ['trade_fees', () => prisma.trade_fees.count({ where: whereUser })],
+    ['monthly_fee_summaries', () => prisma.monthly_fee_summaries.count({ where: whereUser })],
+    ['qhq_balances', () => prisma.qhq_balances.count({ where: whereUser })],
+    ['qhq_transactions', () => prisma.qhq_transactions.count({ where: whereUser })],
+    ['qhq_wallet_links', () => prisma.qhq_wallet_links.count({ where: whereUser })],
+    ['onboarding_email_reminders', () => prisma.onboarding_email_reminders.count({ where: whereUser })],
+    ['contact_submissions', () => prisma.contact_submissions.count({ where: whereUser })],
+    ['pending_queued_trades', () => prisma.pending_queued_trades.count({ where: whereUser })],
+  ];
+  for (const [label, fn] of countDefs) {
+    counts[label] = await fn();
+  }
 
   console.log('\nRows that will be deleted (preview):');
   let total = 0;
@@ -138,6 +218,17 @@ async function main() {
   if (!APPLY) {
     console.log('\nPreview only. Re-run with --apply to delete.');
     return;
+  }
+
+  // ---------- Delete Sumsub applicants first ----------
+  // Done outside the DB transaction because it's a remote API call. If a
+  // delete fails we still proceed with the local DB cleanup — the warning
+  // above flags it and the applicant can be removed manually from Sumsub.
+  if (applicantIds.length) {
+    console.log(`\nDeleting ${applicantIds.length} Sumsub applicant(s)...`);
+    for (const id of applicantIds) {
+      await deleteSumsubApplicant(id);
+    }
   }
 
   console.log('\nDeleting in transaction...');
