@@ -4,6 +4,7 @@ import { CoinDetailsCacheService } from './services/coin-details-cache.service';
 import { CoinGeckoMeterService } from './services/coingecko-meter.service';
 import { ExchangesService as MarketExchangesService } from './services/exchanges.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
+import { BinanceService } from '../binance/binance.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
@@ -18,7 +19,88 @@ export class MarketController {
     private readonly cgMeter: CoinGeckoMeterService,
     private readonly exchangesService: MarketExchangesService,
     private readonly exchangesConnectionService: ExchangesService,
+    private readonly binanceService: BinanceService,
   ) {}
+
+  // ── Public Binance market data ────────────────────────────────────────
+  // These endpoints proxy Binance's public REST endpoints so the
+  // market-detail page can render charts / tickers / order book / recent
+  // trades for users who haven't yet connected an exchange. No auth guard.
+  // BinanceService already enforces TTL caches (30s prices, 1m stats) so we
+  // stay well under the 1200 weight/min IP cap even under anonymous load.
+
+  @Get('binance/ticker')
+  async getBinanceTicker(@Query('symbol') symbol: string) {
+    if (!symbol) {
+      throw new HttpException('symbol is required', HttpStatus.BAD_REQUEST);
+    }
+    try {
+      return await this.binanceService.get24hStats(symbol);
+    } catch (error: any) {
+      throw new HttpException(
+        error?.message || `Failed to fetch ticker for ${symbol}`,
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+  }
+
+  @Get('binance/klines')
+  async getBinanceKlines(
+    @Query('symbol') symbol: string,
+    @Query('interval') interval = '1h',
+    @Query('limit') limitRaw?: string,
+  ) {
+    if (!symbol) {
+      throw new HttpException('symbol is required', HttpStatus.BAD_REQUEST);
+    }
+    const limit = Math.min(Math.max(parseInt(limitRaw ?? '200', 10) || 200, 1), 1000);
+    try {
+      return await this.binanceService.getOHLCV(symbol, interval, limit);
+    } catch (error: any) {
+      throw new HttpException(
+        error?.message || `Failed to fetch klines for ${symbol}`,
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+  }
+
+  @Get('binance/depth')
+  async getBinanceDepth(
+    @Query('symbol') symbol: string,
+    @Query('limit') limitRaw?: string,
+  ) {
+    if (!symbol) {
+      throw new HttpException('symbol is required', HttpStatus.BAD_REQUEST);
+    }
+    const limit = Math.min(Math.max(parseInt(limitRaw ?? '20', 10) || 20, 1), 100);
+    try {
+      return await this.binanceService.getOrderBook(symbol, limit);
+    } catch (error: any) {
+      throw new HttpException(
+        error?.message || `Failed to fetch depth for ${symbol}`,
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+  }
+
+  @Get('binance/trades')
+  async getBinanceTrades(
+    @Query('symbol') symbol: string,
+    @Query('limit') limitRaw?: string,
+  ) {
+    if (!symbol) {
+      throw new HttpException('symbol is required', HttpStatus.BAD_REQUEST);
+    }
+    const limit = Math.min(Math.max(parseInt(limitRaw ?? '50', 10) || 50, 1), 500);
+    try {
+      return await this.binanceService.getRecentTrades(symbol, limit);
+    } catch (error: any) {
+      throw new HttpException(
+        error?.message || `Failed to fetch trades for ${symbol}`,
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+  }
 
   /**
    * GET /api/market/admin/coingecko-stats
