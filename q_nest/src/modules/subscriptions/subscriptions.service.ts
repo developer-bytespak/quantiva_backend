@@ -360,6 +360,98 @@ export class SubscriptionsService implements OnModuleInit {
     });
   }
 
+  /**
+   * Create a FREE subscription row at registration time. Mirrors the relevant
+   * parts of createSubscription (user_subscriptions row + subscription_usage
+   * records + current_tier update) but deliberately skips advancing
+   * onboarding_state to PAID — fresh users still need PERSONAL_INFO and KYC
+   * funnel emails, and the dashboard "Activate your account" widget needs to
+   * keep showing the subscription step as not-yet-acknowledged. Idempotent:
+   * if the user already has any subscription, this is a no-op.
+   */
+  async createInitialFreeSubscription(userId: string): Promise<void> {
+    const existing = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: userId },
+      select: { subscription_id: true },
+    });
+    if (existing) return;
+
+    const freePlan = await this.prisma.subscription_plans.findFirst({
+      where: { tier: 'FREE', billing_period: 'MONTHLY', is_active: true },
+      include: { plan_features: true },
+    });
+    if (!freePlan) {
+      this.logger.warn(
+        `createInitialFreeSubscription: no active FREE/MONTHLY plan in subscription_plans — skipping for user ${userId}`,
+      );
+      return;
+    }
+
+    const now = new Date();
+    const current_period_end = new Date(now);
+    current_period_end.setMonth(current_period_end.getMonth() + 1);
+
+    await this.prisma.$transaction(async (tx) => {
+      const subscription = await tx.user_subscriptions.create({
+        data: {
+          user_id: userId,
+          plan_id: freePlan.plan_id,
+          tier: freePlan.tier,
+          billing_period: freePlan.billing_period,
+          status: 'active',
+          current_period_start: now,
+          current_period_end,
+          next_billing_date: current_period_end,
+          last_payment_date: now,
+          started_at: now,
+          auto_renew: false,
+        },
+      });
+
+      if (freePlan.plan_features && freePlan.plan_features.length > 0) {
+        const usageRecords: Array<{
+          subscription_id: string;
+          user_id: string;
+          feature_type: (typeof freePlan.plan_features)[0]['feature_type'];
+          usage_count: number;
+          period_start: Date;
+          period_end: Date;
+        }> = [];
+
+        for (const feature of freePlan.plan_features) {
+          if (feature.feature_type === FeatureType.CUSTOM_STRATEGIES) {
+            usageRecords.push({
+              subscription_id: subscription.subscription_id,
+              user_id: userId,
+              feature_type: feature.feature_type,
+              usage_count: 0,
+              period_start: now,
+              period_end: current_period_end,
+            });
+          } else {
+            const monthlyPeriods = this.getMonthlyPeriods(now, current_period_end);
+            for (const period of monthlyPeriods) {
+              usageRecords.push({
+                subscription_id: subscription.subscription_id,
+                user_id: userId,
+                feature_type: feature.feature_type,
+                usage_count: 0,
+                period_start: period.start,
+                period_end: period.end,
+              });
+            }
+          }
+        }
+
+        if (usageRecords.length > 0) {
+          await tx.subscription_usage.createMany({ data: usageRecords });
+        }
+      }
+    }, { timeout: 30000 });
+
+    this.clearSubscriptionCache(userId);
+  }
+
   async createSubscription(data: {
     user_id: string;
     plan_id: string;
@@ -745,6 +837,19 @@ export class SubscriptionsService implements OnModuleInit {
         },
       });
 
+      // Drive the onboarding funnel forward when a plan change lands the
+      // user on a paid tier. Mirrors createSubscription's advanceTo(PAID).
+      // Needed because dashboard-first signup auto-creates a FREE row, so
+      // the first paid checkout hits updateSubscription rather than
+      // createSubscription. advanceTo is one-way so this is a no-op once
+      // the user has progressed past PAID.
+      if (newPlan && newPlan.tier && newPlan.tier !== PlanTier.FREE) {
+        await this.onboardingStateService.advanceTo(
+          currentSubscription.user_id,
+          OnboardingState.PAID,
+        );
+        await this.freeUpgradeCampaignService.stop(currentSubscription.user_id);
+      }
 
       const notification = await this.notificationsService.createNotification({user_id: currentSubscription.user_id, type: "subscription_updated",title:"Subscription Updated",message:"Your subscription has been updated",read:false,metadata:null});
       this.notificationsService.sendNotification(currentSubscription.user_id, "Subscription Updated", "Your subscription has been updated");

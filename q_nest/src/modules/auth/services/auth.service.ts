@@ -105,6 +105,15 @@ export class AuthService {
     // Kick off onboarding drip — schedules SIGNED_UP-stage reminders.
     await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
 
+    // Auto-assign FREE tier so the dashboard-first onboarding flow can render
+    // immediately without a hasPlan redirect. Wrapped in try/catch so a missing
+    // FREE plan row in subscription_plans never blocks signup.
+    try {
+      await this.subscriptionsService.createInitialFreeSubscription(user.user_id);
+    } catch (error) {
+      console.error(`[register] Failed to create initial FREE subscription for ${user.user_id}:`, error);
+    }
+
     // 🔔 Send admin notification about new signup
     await this.authEmailService.sendNewSignupNotification({
       username: user.username,
@@ -112,25 +121,6 @@ export class AuthService {
       userId: user.user_id,
       signupTime: user.created_at,
     });
-
-    // Register ke baad FREE plan subscription auto-create (user_subscriptions me inject)
-    // let subscriptionCreated = false;
-    // try {
-    //   const freePlan = await this.prisma.subscription_plans.findFirst({
-    //     where: { tier: 'FREE', billing_period: 'MONTHLY', is_active: true },
-    //   });
-    //   if (freePlan) {
-    //     await this.subscriptionsService.createSubscription({
-    //       user_id: user.user_id,
-    //       plan_id: freePlan.plan_id,
-    //       status: 'active',
-    //       auto_renew: false,
-    //     });
-    //     subscriptionCreated = true;
-    //   }
-    // } catch {
-    //   // FREE plan na mile ya create fail ho to register ko fail mat karo
-    // }
 
     return {
       user: {
@@ -520,21 +510,14 @@ export class AuthService {
     // fill personal info, do KYC, etc., so they go through the same funnel reminders.
     await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
 
-    // try {
-    //   const freePlan = await this.prisma.subscription_plans.findFirst({
-    //     where: { tier: 'FREE', billing_period: 'MONTHLY', is_active: true },
-    //   });
-    //   if (freePlan) {
-    //     await this.subscriptionsService.createSubscription({
-    //       user_id: user.user_id,
-    //       plan_id: freePlan.plan_id,
-    //       status: 'active',
-    //       auto_renew: false,
-    //     });
-    //   }
-    // } catch {
-    //   // don't fail signup if subscription create fails
-    // }
+    // Same auto-assignment as the email/password path — keeps the dashboard
+    // accessible immediately for Google signups.
+    try {
+      await this.subscriptionsService.createInitialFreeSubscription(user.user_id);
+    } catch (error) {
+      console.error(`[signupWithGoogle] Failed to create initial FREE subscription for ${user.user_id}:`, error);
+    }
+
     return this.createGoogleAuthResponse(user, ipAddress, deviceId, true);
   }
 
