@@ -37,6 +37,7 @@ import { TradeFeesModule } from './modules/trade-fees/trade-fees.module';
 import { QhqTokenModule } from './modules/qhq-token/qhq-token.module';
 import { ContactModule } from './modules/contact/contact.module';
 import { OnboardingEmailsModule } from './modules/onboarding-emails/onboarding-emails.module';
+import { OnboardingModule } from './modules/onboarding/onboarding.module';
 
 @Module({
   imports: [
@@ -77,6 +78,7 @@ import { OnboardingEmailsModule } from './modules/onboarding-emails/onboarding-e
     QhqTokenModule,
     ContactModule,
     OnboardingEmailsModule,
+    OnboardingModule,
   ],
   controllers: [],
   providers: [

@@ -200,7 +200,7 @@ export class ExchangesController {
    * @returns Connection ID and status
    */
   @Post('connections')
-  // @UseGuards(KycVerifiedGuard)
+  @UseGuards(KycVerifiedGuard)
   @HttpCode(HttpStatus.CREATED)
   async createConnection(
     @Body() createConnectionDto: CreateConnectionDto,
