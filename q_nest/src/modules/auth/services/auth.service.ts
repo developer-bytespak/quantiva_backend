@@ -506,6 +506,10 @@ export class AuthService {
       },
     });
 
+    // Kick off onboarding drip — same as email/password signup. Google signup users still need to
+    // fill personal info, do KYC, etc., so they go through the same funnel reminders.
+    await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
+
     // Same auto-assignment as the email/password path — keeps the dashboard
     // accessible immediately for Google signups.
     try {
