@@ -478,7 +478,6 @@ model strategy_signals {
   volatility_score     Decimal?                 @db.Decimal(6, 3)
   engine_metadata      Json?                    @db.Json
   autoTradeEvaluations auto_trade_evaluations[]
-  options_orders       options_orders[]
   options_signals      options_signals[]
   orders               orders[]
   details              signal_details[]
@@ -1247,7 +1246,6 @@ model options_orders {
   greeks_at_entry  Json?              @db.Json
   created_at       DateTime           @default(now()) @db.Timestamp(6)
   updated_at       DateTime?          @updatedAt @db.Timestamp(6)
-  signal           strategy_signals?  @relation(fields: [signal_id], references: [signal_id])
   user             users              @relation(fields: [user_id], references: [user_id])
   position         options_positions? @relation("OrderToPosition")
 
