@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { AlpacaMarketService, AlpacaQuote } from '../../stocks-market/services/alpaca-market.service';
+import { AlpacaMarketService, AlpacaQuote } from './alpaca-market.service';
 
 interface CacheEntry {
   quote: AlpacaQuote;
@@ -7,9 +7,11 @@ interface CacheEntry {
 }
 
 /**
- * Per-symbol cache for live Alpaca stock quotes used by the Top Trades realtime
- * enrichment. Coalesces concurrent fetches so the same symbol never hits Alpaca
- * twice in a TTL window — important for the free tier (~200 req/min limit).
+ * Per-symbol cache for live Alpaca stock quotes used by realtime card displays
+ * (Top Trades, S&P 500 Market list). Coalesces concurrent fetches so the same
+ * symbol never hits Alpaca twice in a TTL window — important for the free tier
+ * (~200 req/min limit). At any user scale, total Alpaca traffic stays bounded
+ * by ceil(uniqueSymbols / 100) batch requests per TTL window.
  */
 @Injectable()
 export class StockQuoteCacheService {
@@ -37,9 +39,6 @@ export class StockQuoteCacheService {
 
     if (toFetch.length === 0) return result;
 
-    // Coalesce: if a fetch for any of these symbols is already in flight, await it
-    // instead of issuing a duplicate request.
-    const pendingKeys = toFetch.filter((s) => this.inflight.has(s));
     const newKeys = toFetch.filter((s) => !this.inflight.has(s));
 
     if (newKeys.length > 0) {

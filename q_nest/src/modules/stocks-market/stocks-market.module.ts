@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { StocksMarketController } from './stocks-market.controller';
 import { StocksMarketService } from './stocks-market.service';
 import { AlpacaMarketService } from './services/alpaca-market.service';
+import { StockQuoteCacheService } from './services/stock-quote-cache.service';
 import { FmpService } from './services/fmp.service';
 import { MarketAggregatorService } from './services/market-aggregator.service';
 import { MarketStocksDbService } from './services/market-stocks-db.service';
@@ -16,12 +17,13 @@ import { PrismaModule } from '../../prisma/prisma.module';
   providers: [
     StocksMarketService,
     AlpacaMarketService,
+    StockQuoteCacheService,
     FmpService,
     MarketAggregatorService,
     MarketStocksDbService,
     CacheManagerService,
     MarketSyncCronService,
   ],
-  exports: [StocksMarketService, AlpacaMarketService, MarketStocksDbService, FmpService],
+  exports: [StocksMarketService, AlpacaMarketService, StockQuoteCacheService, MarketStocksDbService, FmpService],
 })
 export class StocksMarketModule {}

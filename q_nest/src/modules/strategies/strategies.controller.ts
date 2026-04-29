@@ -4,7 +4,7 @@ import { StrategiesService } from './strategies.service';
 import { CreateStrategyDto, ValidateStrategyDto } from './dto/create-strategy.dto';
 import { PreBuiltStrategiesService } from './services/pre-built-strategies.service';
 import { StockTrendingService } from './services/stock-trending.service';
-import { StockQuoteCacheService } from './services/stock-quote-cache.service';
+import { StockQuoteCacheService } from '../stocks-market/services/stock-quote-cache.service';
 import { StrategyPreviewService } from './services/strategy-preview.service';
 import { StrategyExecutionService } from './services/strategy-execution.service';
 import { PreBuiltSignalsCronjobService } from './services/pre-built-signals-cronjob.service';
@@ -152,6 +152,27 @@ export class StrategiesController {
       // This ensures we get the same stocks available on the market page
       assets = await this.preBuiltStrategiesService.getTopStocks(limitNum);
       this.logger.log(`Retrieved ${assets.length} stocks from market database`);
+
+      // Compliance: market_rankings can be stale. Overwrite price/change/volume
+      // fields with live Alpaca quotes (30s cache) so the displayed Entry matches
+      // what the order will actually execute at.
+      const symbols = assets.map((a: any) => a.symbol).filter((s: any): s is string => !!s);
+      if (symbols.length > 0) {
+        const quotes = await this.stockQuoteCacheService.getQuotes(symbols);
+        assets = assets.map((a: any) => {
+          const q = quotes.get((a.symbol || '').toUpperCase());
+          if (!q || !(q.price > 0)) return a;
+          return {
+            ...a,
+            price_usd: q.price,
+            price_change_24h: q.changePercent24h,
+            price_change_24h_usd: q.change24h,
+            volume_24h: q.volume24h,
+            high_24h: q.dayHigh ?? a.high_24h,
+            low_24h: q.dayLow ?? a.low_24h,
+          };
+        });
+      }
     } else {
       assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, true, userId);
       this.logger.log(`Retrieved ${assets.length} crypto assets for ${exchangeLabel}`);
@@ -435,72 +456,39 @@ export class StrategiesController {
 
       // Enrich with realtime data if requested
       if (enrichWithRealtime) {
-        const isStockStrategy = strategy.asset_type === 'stock';
+        const { BinanceService } = await import('../binance/binance.service');
+        const binanceService = new BinanceService();
 
-        if (isStockStrategy) {
-          // Stocks: fetch live Alpaca quotes via 30s-cached batch service.
-          // Binance has no equity symbols, so the previous code would have
-          // filtered every stock signal out — this branch keeps stocks live.
-          const symbols = results
-            .map((r) => r.asset?.symbol)
-            .filter((s): s is string => !!s);
-          const quotes = await this.stockQuoteCacheService.getQuotes(symbols);
+        results = await Promise.all(
+          results.map(async (signal) => {
+            if (signal.asset?.symbol) {
+              try {
+                const realtimeData = await binanceService.getEnrichedMarketData(signal.asset.symbol);
+                // Check if Binance has valid price data for this symbol
+                const isTradeable = realtimeData.price !== null && realtimeData.price > 0;
 
-          results = results.map((signal) => {
-            const symbol = signal.asset?.symbol?.toUpperCase();
-            const quote = symbol ? quotes.get(symbol) : null;
-            const isTradeable = !!quote && quote.price > 0;
-            return {
-              ...signal,
-              is_tradeable: isTradeable,
-              realtime_data: isTradeable
-                ? {
-                    price: quote!.price,
-                    priceChangePercent: quote!.changePercent24h,
-                    high24h: quote!.dayHigh,
-                    low24h: quote!.dayLow,
-                    volume24h: quote!.volume24h,
-                    quoteVolume24h: quote!.volume24h,
-                  }
-                : null,
-            };
-          });
-        } else {
-          // Crypto: existing Binance enrichment
-          const { BinanceService } = await import('../binance/binance.service');
-          const binanceService = new BinanceService();
-
-          results = await Promise.all(
-            results.map(async (signal) => {
-              if (signal.asset?.symbol) {
-                try {
-                  const realtimeData = await binanceService.getEnrichedMarketData(signal.asset.symbol);
-                  // Check if Binance has valid price data for this symbol
-                  const isTradeable = realtimeData.price !== null && realtimeData.price > 0;
-
-                  return {
-                    ...signal,
-                    is_tradeable: isTradeable,
-                    realtime_data: isTradeable ? {
-                      price: realtimeData.price,
-                      priceChangePercent: realtimeData.priceChangePercent,
-                      high24h: realtimeData.high24h,
-                      low24h: realtimeData.low24h,
-                      volume24h: realtimeData.volume24h,
-                      quoteVolume24h: realtimeData.quoteVolume24h,
-                    } : null,
-                  };
-                } catch (error: any) {
-                  // Symbol not found on Binance - mark as not tradeable
-                  return { ...signal, is_tradeable: false, realtime_data: null };
-                }
+                return {
+                  ...signal,
+                  is_tradeable: isTradeable,
+                  realtime_data: isTradeable ? {
+                    price: realtimeData.price,
+                    priceChangePercent: realtimeData.priceChangePercent,
+                    high24h: realtimeData.high24h,
+                    low24h: realtimeData.low24h,
+                    volume24h: realtimeData.volume24h,
+                    quoteVolume24h: realtimeData.quoteVolume24h,
+                  } : null,
+                };
+              } catch (error: any) {
+                // Symbol not found on Binance - mark as not tradeable
+                return { ...signal, is_tradeable: false, realtime_data: null };
               }
-              return { ...signal, is_tradeable: false };
-            })
-          );
-        }
+            }
+            return { ...signal, is_tradeable: false };
+          })
+        );
 
-        // Filter out non-tradeable assets (no live price available)
+        // Filter out non-tradeable assets (not available on Binance)
         results = results.filter(r => r.is_tradeable);
         this.logger.log(`Filtered signals to ${results.length} tradeable assets`);
       }

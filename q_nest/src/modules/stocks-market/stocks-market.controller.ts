@@ -8,12 +8,16 @@ import {
   Logger,
 } from '@nestjs/common';
 import { StocksMarketService } from './stocks-market.service';
+import { StockQuoteCacheService } from './services/stock-quote-cache.service';
 
 @Controller('api/stocks-market')
 export class StocksMarketController {
   private readonly logger = new Logger(StocksMarketController.name);
 
-  constructor(private readonly stocksMarketService: StocksMarketService) {}
+  constructor(
+    private readonly stocksMarketService: StocksMarketService,
+    private readonly stockQuoteCacheService: StockQuoteCacheService,
+  ) {}
 
   /**
    * GET /api/stocks-market/stocks
@@ -53,6 +57,27 @@ export class StocksMarketController {
         search,
         sector,
       });
+
+      // Compliance: market_rankings cache can lag the market. Overlay live Alpaca
+      // quotes (30s shared cache) so the price the user sees matches what an
+      // order would execute at.
+      if (result.items && result.items.length > 0) {
+        const symbolList = result.items.map((s) => s.symbol).filter((s): s is string => !!s);
+        if (symbolList.length > 0) {
+          const quotes = await this.stockQuoteCacheService.getQuotes(symbolList);
+          result.items = result.items.map((stock) => {
+            const q = quotes.get((stock.symbol || '').toUpperCase());
+            if (!q || !(q.price > 0)) return stock;
+            return {
+              ...stock,
+              price: q.price,
+              change24h: q.change24h,
+              changePercent24h: q.changePercent24h,
+              volume24h: q.volume24h,
+            };
+          });
+        }
+      }
 
       return result;
     } catch (error: any) {
