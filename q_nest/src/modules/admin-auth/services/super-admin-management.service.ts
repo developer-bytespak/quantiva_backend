@@ -581,6 +581,30 @@ export class SuperAdminManagementService {
     const yearStart = new Date(Date.UTC(selectedYear, 0, 1, 0, 0, 0));
     const yearEnd = new Date(Date.UTC(selectedYear + 1, 0, 1, 0, 0, 0));
 
+    // A user is treated as "internal" (and excluded from authentic revenue) if
+    // they have ever had an admin-granted subscription, OR their email belongs
+    // to a company domain. We resolve the set once and reuse it below.
+    const INTERNAL_EMAIL_DOMAINS = ['bytesplatform.com', 'quantivahq.com'];
+    const [adminOverrideUsers, internalDomainUsers] = await Promise.all([
+      this.prisma.user_subscriptions.findMany({
+        where: { billing_provider: 'admin_override' },
+        select: { user_id: true },
+        distinct: ['user_id'],
+      }),
+      this.prisma.users.findMany({
+        where: {
+          OR: INTERNAL_EMAIL_DOMAINS.map((domain) => ({
+            email: { endsWith: `@${domain}`, mode: 'insensitive' as const },
+          })),
+        },
+        select: { user_id: true },
+      }),
+    ]);
+    const internalUserIds = new Set<string>([
+      ...adminOverrideUsers.map((s) => s.user_id),
+      ...internalDomainUsers.map((u) => u.user_id),
+    ]);
+
     const firstPayment = await this.prisma.payment_history.findFirst({
       orderBy: { created_at: 'asc' },
       select: { created_at: true },
@@ -656,6 +680,7 @@ export class SuperAdminManagementService {
         status: true,
         created_at: true,
         paid_at: true,
+        user_id: true,
         subscription: {
           select: {
             tier: true,
@@ -679,6 +704,7 @@ export class SuperAdminManagementService {
         fee_amount_usd: true,
         status: true,
         created_at: true,
+        user_id: true,
       },
       orderBy: {
         created_at: 'asc',
@@ -815,6 +841,11 @@ export class SuperAdminManagementService {
     };
 
     for (const payment of subscriptionPayments) {
+      // Exclude internal users (admin-granted at any point, or company-domain emails).
+      if (internalUserIds.has(payment.user_id)) {
+        continue;
+      }
+
       const amountNumber = Number(payment.amount ?? 0);
       if (!Number.isFinite(amountNumber) || !matchesSelectedPlan(amountNumber)) {
         continue;
@@ -845,6 +876,11 @@ export class SuperAdminManagementService {
     }
 
     for (const fee of tradeFees) {
+      // Exclude internal users (admin-granted at any point, or company-domain emails).
+      if (internalUserIds.has(fee.user_id)) {
+        continue;
+      }
+
       const amount = Number(fee.fee_amount_usd ?? 0);
       if (Number.isFinite(amount)) {
         tradeFeesSummary.total_amount += amount;
