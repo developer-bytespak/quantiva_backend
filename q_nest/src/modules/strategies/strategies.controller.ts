@@ -4,6 +4,7 @@ import { StrategiesService } from './strategies.service';
 import { CreateStrategyDto, ValidateStrategyDto } from './dto/create-strategy.dto';
 import { PreBuiltStrategiesService } from './services/pre-built-strategies.service';
 import { StockTrendingService } from './services/stock-trending.service';
+import { StockQuoteCacheService } from './services/stock-quote-cache.service';
 import { StrategyPreviewService } from './services/strategy-preview.service';
 import { StrategyExecutionService } from './services/strategy-execution.service';
 import { PreBuiltSignalsCronjobService } from './services/pre-built-signals-cronjob.service';
@@ -50,6 +51,7 @@ export class StrategiesController {
     private readonly appGateway: AppGateway,
     private readonly notificationsService: NotificationsService,
     private readonly qhqService: QhqTokenService,
+    private readonly stockQuoteCacheService: StockQuoteCacheService,
 
   ) {
     this.pythonApiUrl = this.configService.get<string>('PYTHON_API_URL') || 'http://localhost:8000/api/v1';
@@ -200,34 +202,16 @@ export class StrategiesController {
       }
     }
 
-    // Generate AI insights for top 2 assets
-    const top2Assets = assets.slice(0, 2);
-    const assetsWithInsights = await this.aiInsightsService.generateTrendingAssetsInsights(
-      top2Assets,
-      strategyId,
-      strategy.name,
-      signalMap,
-      2,
-    );
-
-    // Return top 2 with insights + remaining without
-    const remaining = assets.slice(2).map(asset => ({
+    // AI insights are generated entirely on-demand via /generate-insight; no eager batch.
+    let finalAssets = assets.map(asset => ({
       ...asset,
       hasAiInsight: false,
       signal: signalMap.get(asset.asset_id) || null,
     }));
-
-    let finalAssets = [
-      ...assetsWithInsights.map(a => ({
-        ...a,
-        signal: signalMap.get(a.asset_id) || null,
-      })),
-      ...remaining,
-    ];
     // Only return assets that have a BUY signal (signal map only contains BUY)
     finalAssets = finalAssets.filter(a => a.signal != null);
-    
-    this.logger.log(`Returning ${finalAssets.length} assets (${assetsWithInsights.length} with insights, ${remaining.length} without)`);
+
+    this.logger.log(`Returning ${finalAssets.length} assets (insights on-demand)`);
     
     return {
       strategy: {
@@ -451,39 +435,72 @@ export class StrategiesController {
 
       // Enrich with realtime data if requested
       if (enrichWithRealtime) {
-        const { BinanceService } = await import('../binance/binance.service');
-        const binanceService = new BinanceService();
-        
-        results = await Promise.all(
-          results.map(async (signal) => {
-            if (signal.asset?.symbol) {
-              try {
-                const realtimeData = await binanceService.getEnrichedMarketData(signal.asset.symbol);
-                // Check if Binance has valid price data for this symbol
-                const isTradeable = realtimeData.price !== null && realtimeData.price > 0;
-                
-                return {
-                  ...signal,
-                  is_tradeable: isTradeable,
-                  realtime_data: isTradeable ? {
-                    price: realtimeData.price,
-                    priceChangePercent: realtimeData.priceChangePercent,
-                    high24h: realtimeData.high24h,
-                    low24h: realtimeData.low24h,
-                    volume24h: realtimeData.volume24h,
-                    quoteVolume24h: realtimeData.quoteVolume24h,
-                  } : null,
-                };
-              } catch (error: any) {
-                // Symbol not found on Binance - mark as not tradeable
-                return { ...signal, is_tradeable: false, realtime_data: null };
+        const isStockStrategy = strategy.asset_type === 'stock';
+
+        if (isStockStrategy) {
+          // Stocks: fetch live Alpaca quotes via 30s-cached batch service.
+          // Binance has no equity symbols, so the previous code would have
+          // filtered every stock signal out — this branch keeps stocks live.
+          const symbols = results
+            .map((r) => r.asset?.symbol)
+            .filter((s): s is string => !!s);
+          const quotes = await this.stockQuoteCacheService.getQuotes(symbols);
+
+          results = results.map((signal) => {
+            const symbol = signal.asset?.symbol?.toUpperCase();
+            const quote = symbol ? quotes.get(symbol) : null;
+            const isTradeable = !!quote && quote.price > 0;
+            return {
+              ...signal,
+              is_tradeable: isTradeable,
+              realtime_data: isTradeable
+                ? {
+                    price: quote!.price,
+                    priceChangePercent: quote!.changePercent24h,
+                    high24h: quote!.dayHigh,
+                    low24h: quote!.dayLow,
+                    volume24h: quote!.volume24h,
+                    quoteVolume24h: quote!.volume24h,
+                  }
+                : null,
+            };
+          });
+        } else {
+          // Crypto: existing Binance enrichment
+          const { BinanceService } = await import('../binance/binance.service');
+          const binanceService = new BinanceService();
+
+          results = await Promise.all(
+            results.map(async (signal) => {
+              if (signal.asset?.symbol) {
+                try {
+                  const realtimeData = await binanceService.getEnrichedMarketData(signal.asset.symbol);
+                  // Check if Binance has valid price data for this symbol
+                  const isTradeable = realtimeData.price !== null && realtimeData.price > 0;
+
+                  return {
+                    ...signal,
+                    is_tradeable: isTradeable,
+                    realtime_data: isTradeable ? {
+                      price: realtimeData.price,
+                      priceChangePercent: realtimeData.priceChangePercent,
+                      high24h: realtimeData.high24h,
+                      low24h: realtimeData.low24h,
+                      volume24h: realtimeData.volume24h,
+                      quoteVolume24h: realtimeData.quoteVolume24h,
+                    } : null,
+                  };
+                } catch (error: any) {
+                  // Symbol not found on Binance - mark as not tradeable
+                  return { ...signal, is_tradeable: false, realtime_data: null };
+                }
               }
-            }
-            return { ...signal, is_tradeable: false };
-          })
-        );
-        
-        // Filter out non-tradeable assets (not available on Binance)
+              return { ...signal, is_tradeable: false };
+            })
+          );
+        }
+
+        // Filter out non-tradeable assets (no live price available)
         results = results.filter(r => r.is_tradeable);
         this.logger.log(`Filtered signals to ${results.length} tradeable assets`);
       }
@@ -1974,34 +1991,16 @@ export class StrategiesController {
       }
     }
 
-    // Generate AI insights for top 2 assets (same as pre-built)
-    const top2Assets = assets.slice(0, 2);
-    const assetsWithInsights = await this.aiInsightsService.generateTrendingAssetsInsights(
-      top2Assets,
-      strategyId,
-      strategy.name || 'Custom Strategy',
-      signalMap,
-      2,
-    );
-
-    // Return top 2 with insights + remaining without
-    const remaining = assets.slice(2).map(asset => ({
+    // AI insights are generated entirely on-demand via /generate-insight; no eager batch.
+    let finalAssets = assets.map(asset => ({
       ...asset,
       hasAiInsight: false,
       signal: signalMap.get(asset.asset_id) || null,
     }));
-
-    let finalAssets = [
-      ...assetsWithInsights.map(a => ({
-        ...a,
-        signal: signalMap.get(a.asset_id) || null,
-      })),
-      ...remaining,
-    ];
     // Only return assets that have a BUY signal
     finalAssets = finalAssets.filter(a => a.signal != null);
-    
-    this.logger.log(`Returning ${finalAssets.length} assets for custom strategy (${assetsWithInsights.length} with insights)`);
+
+    this.logger.log(`Returning ${finalAssets.length} assets for custom strategy (insights on-demand)`);
     
     return {
       strategy: {

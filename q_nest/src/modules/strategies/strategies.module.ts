@@ -16,6 +16,7 @@ import { PreBuiltSignalsCronjobService } from './services/pre-built-signals-cron
 import { StockSignalsCronjobService } from './services/stock-signals-cronjob.service';
 import { CustomStrategyCronjobService } from './services/custom-strategy-cronjob.service';
 import { StockTrendingService } from './services/stock-trending.service';
+import { StockQuoteCacheService } from './services/stock-quote-cache.service';
 import { AlpacaSyncCronjobService } from './services/alpaca-sync-cronjob.service';
 import { PaperTradingService } from './services/paper-trading.service';
 import { PrismaModule } from '../../prisma/prisma.module';
@@ -74,6 +75,7 @@ import { QhqTokenModule } from '../qhq-token/qhq-token.module';
     StockSignalsCronjobService,
     CustomStrategyCronjobService,
     StockTrendingService,
+    StockQuoteCacheService,
     FeatureAccessService,
   ],
   exports: [
