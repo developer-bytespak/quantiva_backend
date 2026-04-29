@@ -278,11 +278,23 @@ export class OptionsOrderDto {
   side: string;
   quantity: number;
   price: number;
-  filledQuantity: number;
-  avgFillPrice: number;
-  fee: number;
+  // Null for orders that haven't filled yet — distinguishes "pending" from
+  // "filled at zero" which the old `Number(x || 0)` coercion conflated.
+  filledQuantity: number | null;
+  avgFillPrice: number | null;
+  fee: number | null;
   status: string;
+  // Binance broker order id (legacy field name; populated only on Binance).
   binanceOrderId: string;
+  // Alpaca broker order id; null on Binance. Previously dropped by the DTO
+  // mapper, which left Alpaca orders unidentifiable to the broker.
+  brokerOrderId: string | null;
+  // Multi-leg order group id — every leg of an mleg trade shares this so the
+  // UI can collapse them into one logical row.
+  groupId: string | null;
+  // Per-leg position intent for mleg orders (e.g. `buy_to_open`,
+  // `sell_to_close`). Surfaced so the orders tab can label spread/close legs.
+  positionIntent: string | null;
   maxLoss: number;
   createdAt: string;
 }

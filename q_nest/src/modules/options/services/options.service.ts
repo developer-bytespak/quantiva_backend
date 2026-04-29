@@ -371,10 +371,13 @@ export class OptionsService {
    * expected by the frontend.
    */
   async getPositionsFromDb(userId: string, venue?: string): Promise<OptionsPositionDto[]> {
+    // DB enum values are uppercase; normalise so internal callers that bypass
+    // the controller's upcasing don't silently get zero rows on `"alpaca"`.
+    const venueUC = venue ? venue.toUpperCase() : undefined;
     const rows = await this.prisma.options_positions.findMany({
       where: {
         user_id: userId,
-        ...(venue ? { venue: venue as any } : {}),
+        ...(venueUC ? { venue: venueUC as any } : {}),
       },
       orderBy: { opened_at: 'desc' },
     });
@@ -1127,7 +1130,10 @@ export class OptionsService {
   ) {
     const where: any = { user_id: userId };
     if (status) where.status = status;
-    if (venue) where.venue = venue;
+    // DB enum values are uppercase; normalise here so internal callers (cron,
+    // tests, scripts) that bypass the controller's upcasing don't silently
+    // get zero rows when they pass `"alpaca"` or `"Alpaca"`.
+    if (venue) where.venue = venue.toUpperCase();
 
     let orders = await this.prisma.options_orders.findMany({
       where,
@@ -1534,6 +1540,10 @@ export class OptionsService {
   }
 
   private mapDbOrderToDto(order: any): OptionsOrderDto {
+    // Preserve nullability for fill columns — `null` means "no fill yet",
+    // distinct from a literal-zero fill which the old `|| 0` coercion masked.
+    const nullableNum = (v: any): number | null =>
+      v === null || v === undefined ? null : Number(v);
     return {
       orderId: order.order_id,
       contractSymbol: order.contract_symbol,
@@ -1544,11 +1554,14 @@ export class OptionsService {
       side: order.side,
       quantity: Number(order.quantity),
       price: Number(order.price || 0),
-      filledQuantity: Number(order.filled_quantity || 0),
-      avgFillPrice: Number(order.avg_fill_price || 0),
-      fee: Number(order.fee || 0),
+      filledQuantity: nullableNum(order.filled_quantity),
+      avgFillPrice: nullableNum(order.avg_fill_price),
+      fee: nullableNum(order.fee),
       status: order.status,
       binanceOrderId: order.binance_order_id || '',
+      brokerOrderId: order.broker_order_id ?? null,
+      groupId: order.group_id ?? null,
+      positionIntent: order.position_intent ?? null,
       maxLoss: Number(order.max_loss || 0),
       createdAt: order.created_at?.toISOString() || '',
     };
