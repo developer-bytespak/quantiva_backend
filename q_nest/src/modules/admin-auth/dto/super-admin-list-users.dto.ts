@@ -15,8 +15,8 @@ export class SuperAdminListUsersDto {
   search?: string;
 
   @IsOptional()
-  @IsIn(['FREE', 'PRO', 'ELITE'])
-  plan?: 'FREE' | 'PRO' | 'ELITE';
+  @IsIn(['FREE', 'PRO', 'ELITE', 'ELITE_PLUS'])
+  plan?: 'FREE' | 'PRO' | 'ELITE' | 'ELITE_PLUS';
 
   @IsOptional()
   @IsIn(['active', 'cancelled', 'trial', 'expired'])
