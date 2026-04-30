@@ -6,9 +6,36 @@ import { OptionsIvService } from './options-iv.service';
 import { OptionsAlpacaService } from './options-alpaca.service';
 import { OptionCredentials } from './options-venue.interface';
 import { ALPACA_CONTRACT_MULTIPLIER } from './alpaca/alpaca-contract-specs';
+import {
+  computeEv,
+  computePop,
+  relevantDaysToExpiry,
+  type PopLeg,
+} from './alpaca/pop-engine';
 import axios from 'axios';
 
 type Venue = 'BINANCE' | 'ALPACA';
+
+// Strategy templates that COLLECT premium (net credit). Everything else
+// pays a net debit. Source of truth: the Python engine's strategy templates
+// — `iron_condor` and `short_put` are the only credit-receiving templates
+// currently emitted to `options_signals_ai`.
+const CREDIT_STRATEGIES = new Set(['iron_condor', 'short_put']);
+
+/**
+ * Pull a numeric value out of one of the engine's pre-formatted USD strings
+ * (e.g. `"$5.50"`, `"$1,264"`, `"$-2.75"`). Returns null on `null`/`""` or
+ * when no number is found. Tolerant of commas, currency symbols, and the
+ * `$X.XX` vs `$X` shapes the engine emits across strategies.
+ */
+function parseUsdString(s: string | null | undefined): number | null {
+  if (s == null || s === '') return null;
+  const cleaned = String(s).replace(/[$,\s]/g, '');
+  const m = cleaned.match(/-?\d+(?:\.\d+)?/);
+  if (!m) return null;
+  const n = Number(m[0]);
+  return Number.isFinite(n) ? n : null;
+}
 
 @Injectable()
 export class OptionsSignalService {
@@ -220,7 +247,7 @@ export class OptionsSignalService {
 
   async getActiveSignals(underlying?: string, limit = 20, venue?: Venue) {
     const now = new Date();
-    return this.prisma.options_signals_ai.findMany({
+    const rows = await this.prisma.options_signals_ai.findMany({
       where: {
         ...(underlying ? { underlying } : {}),
         ...(venue ? { venue } : {}),
@@ -230,17 +257,19 @@ export class OptionsSignalService {
       distinct: ['underlying', 'strategy'],
       take: limit,
     });
+    return rows.map((r) => this.enrichSignal(r));
   }
 
   async getSignalById(id: string) {
-    return this.prisma.options_signals_ai.findUnique({ where: { id } });
+    const row = await this.prisma.options_signals_ai.findUnique({ where: { id } });
+    return row ? this.enrichSignal(row) : null;
   }
 
   async getSignalHistory(underlying: string, days = 30, venue?: Venue) {
     const since = new Date();
     since.setDate(since.getDate() - days);
 
-    return this.prisma.options_signals_ai.findMany({
+    const rows = await this.prisma.options_signals_ai.findMany({
       where: {
         underlying,
         ...(venue ? { venue } : {}),
@@ -248,5 +277,84 @@ export class OptionsSignalService {
       },
       orderBy: { created_at: 'desc' },
     });
+    return rows.map((r) => this.enrichSignal(r));
+  }
+
+  /**
+   * Add `probabilityOfProfit`, `expectedValuePerUnit`, `expectedValueTotal`
+   * to a raw signal row. Falls back to nulls whenever inputs are missing or
+   * the strategy isn't recognised — the frontend hides those fields rather
+   * than rendering "0%" or "$0".
+   *
+   * Inputs come from the signal row itself (spot, IV, legs JSON, strategy,
+   * stored max_profit/max_loss strings). The contract multiplier is
+   * approximated as 100 for ALPACA (US equity options) and 1 for BINANCE
+   * (crypto options); the modal recomputes with the live multiplier when
+   * the user opens it, but at signal-list level "1× crypto" is close enough
+   * for the EV display to be directionally correct.
+   */
+  private enrichSignal(row: any) {
+    const legsRaw = (row.legs as any[]) ?? [];
+    const legs: PopLeg[] = legsRaw.map((l) => ({
+      side: l.side,
+      type: l.type,
+      strike: Number(l.strike),
+      expiry: l.expiry,
+      ratio: l.ratio,
+    }));
+
+    const spot = row.spot_price != null ? Number(row.spot_price) : 0;
+    const iv = row.iv_value != null ? Number(row.iv_value) : 0;
+    const days = relevantDaysToExpiry(row.strategy, legs);
+
+    const maxProfitPerUnit = parseUsdString(row.max_profit);
+    const maxLossPerUnit = parseUsdString(row.max_loss);
+
+    // Reconstruct signed netPerUnit from the engine-stored max numbers.
+    // Debit strategies: the max_loss IS the debit you paid (positive net).
+    // Credit strategies: the max_profit IS the credit you received
+    // (negative net under our sign convention).
+    const isCredit = CREDIT_STRATEGIES.has(row.strategy);
+    const netPerUnit = isCredit
+      ? -(maxProfitPerUnit ?? 0)
+      : maxLossPerUnit ?? 0;
+
+    const nullEnrichment = {
+      probabilityOfProfit: null as number | null,
+      expectedValuePerUnit: null as number | null,
+      expectedValueTotal: null as number | null,
+    };
+
+    if (!days || spot <= 0 || iv <= 0 || netPerUnit === 0) {
+      return { ...row, ...nullEnrichment };
+    }
+
+    const pop = computePop({
+      strategy: row.strategy,
+      legs,
+      spotPrice: spot,
+      ivValue: iv,
+      daysToExpiry: days,
+      netPerUnit,
+    });
+
+    if (pop == null || maxProfitPerUnit == null || maxLossPerUnit == null) {
+      return {
+        ...row,
+        ...nullEnrichment,
+        probabilityOfProfit: pop !== null ? Math.round(pop * 1e4) / 1e4 : null,
+      };
+    }
+
+    const evPerUnit = computeEv(pop, maxProfitPerUnit, maxLossPerUnit);
+    const multiplier = row.venue === 'ALPACA' ? ALPACA_CONTRACT_MULTIPLIER : 1;
+    const evTotal = evPerUnit * multiplier;
+
+    return {
+      ...row,
+      probabilityOfProfit: Math.round(pop * 1e4) / 1e4,
+      expectedValuePerUnit: Math.round(evPerUnit * 100) / 100,
+      expectedValueTotal: Math.round(evTotal * 100) / 100,
+    };
   }
 }

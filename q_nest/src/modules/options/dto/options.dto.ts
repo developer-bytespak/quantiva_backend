@@ -197,6 +197,22 @@ export class PreviewMultiLegOrderDto {
   @ValidateNested({ each: true })
   @Type(() => PreviewMultiLegOrderLegDto)
   legs: PreviewMultiLegOrderLegDto[];
+
+  // Strategy template name (e.g. `iron_condor`, `calendar_spread`). When
+  // present, the preview recomputes max-profit / max-loss from the live
+  // net debit/credit instead of echoing the signal's stale generation-time
+  // estimates. Optional for backwards compatibility with legacy callers.
+  @IsString()
+  @IsOptional()
+  strategy?: string;
+
+  // Signal id the preview is being computed for. Used to fetch stored
+  // spot/IV when computing POP/EV — those inputs aren't available from the
+  // live ticker fetch alone. Optional so legacy callers without a signal
+  // context (e.g. ad-hoc previews) still work.
+  @IsString()
+  @IsOptional()
+  signalId?: string;
 }
 
 export class CancelOptionOrderDto {

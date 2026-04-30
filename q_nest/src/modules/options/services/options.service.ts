@@ -7,6 +7,12 @@ import { OptionsBinanceService } from './options-binance.service';
 import { OptionsAlpacaService } from './options-alpaca.service';
 import { IOptionsVenueService, OptionCredentials } from './options-venue.interface';
 import { parseOccSymbol } from './alpaca/occ-symbol';
+import {
+  computeEv,
+  computePop,
+  relevantDaysToExpiry,
+  type PopLeg,
+} from './alpaca/pop-engine';
 import { OptionsSignalService } from './options-signal.service';
 import { TradeFeesService } from '../../trade-fees/trade-fees.service';
 import {
@@ -919,6 +925,79 @@ export class OptionsService {
     const absNet = Math.abs(netPerUnit);
     const packageValueUsd = absNet * contractMultiplier * qty;
 
+    // Recompute max-profit / max-loss from the *live* net debit/credit when
+    // the caller passed a strategy hint and all legs priced cleanly. The
+    // signal row stores a generation-time estimate (computed via spot×percent
+    // heuristics in the Python engine), which can be off by 30%+ from the
+    // actual fill economics. Falling back to `null` lets the modal keep the
+    // signal's stored values for legacy callers / unknown strategies.
+    let maxProfitPerUnit: number | null = null;
+    let maxLossPerUnit: number | null = null;
+    if (allLegsPriced && dto.strategy) {
+      const risk = this.estimateRiskRewardFromPreview(
+        dto.strategy,
+        dto.legs,
+        netPerUnit,
+      );
+      if (risk) {
+        maxProfitPerUnit = round2(risk.maxProfit);
+        maxLossPerUnit = round2(risk.maxLoss);
+      }
+    }
+
+    // POP / EV — requires spot + IV, which the live ticker fetch doesn't
+    // provide. Pull them from the signal row when `signalId` was passed.
+    // No signalId or no signal row → POP/EV null, frontend hides the rows.
+    let probabilityOfProfit: number | null = null;
+    let expectedValuePerUnit: number | null = null;
+    let expectedValueTotal: number | null = null;
+
+    if (
+      allLegsPriced &&
+      dto.strategy &&
+      dto.signalId &&
+      maxProfitPerUnit !== null &&
+      maxLossPerUnit !== null
+    ) {
+      try {
+        const sig = await this.prisma.options_signals_ai.findUnique({
+          where: { id: dto.signalId },
+          select: { spot_price: true, iv_value: true, legs: true },
+        });
+        const spot = sig?.spot_price ? Number(sig.spot_price) : 0;
+        const iv = sig?.iv_value ? Number(sig.iv_value) : 0;
+        const legsForPop: PopLeg[] = ((sig?.legs as any[]) ?? []).map((l) => ({
+          side: l.side,
+          type: l.type,
+          strike: Number(l.strike),
+          expiry: l.expiry,
+          ratio: l.ratio,
+        }));
+        const days = relevantDaysToExpiry(dto.strategy, legsForPop);
+        if (spot > 0 && iv > 0 && days) {
+          const pop = computePop({
+            strategy: dto.strategy,
+            legs: legsForPop,
+            spotPrice: spot,
+            ivValue: iv,
+            daysToExpiry: days,
+            netPerUnit,
+          });
+          if (pop !== null) {
+            probabilityOfProfit = Math.round(pop * 1e4) / 1e4;
+            const ev = computeEv(pop, maxProfitPerUnit, maxLossPerUnit);
+            expectedValuePerUnit = round2(ev);
+            expectedValueTotal = round2(ev * contractMultiplier * qty);
+          }
+        }
+      } catch (e: any) {
+        // Non-fatal — POP/EV are an enhancement, not a blocker for placing.
+        this.logger.warn(
+          `POP/EV computation failed for signal ${dto.signalId}: ${e?.message}`,
+        );
+      }
+    }
+
     return {
       legs: legResults,
       netPerUnit: round2(netPerUnit),
@@ -927,7 +1006,108 @@ export class OptionsService {
       packageValueUsd: round2(packageValueUsd),
       contractMultiplier,
       allLegsPriced,
+      maxProfitPerUnit,
+      maxLossPerUnit,
+      maxProfitTotal:
+        maxProfitPerUnit === null
+          ? null
+          : round2(maxProfitPerUnit * contractMultiplier * qty),
+      maxLossTotal:
+        maxLossPerUnit === null
+          ? null
+          : round2(maxLossPerUnit * contractMultiplier * qty),
+      probabilityOfProfit,
+      expectedValuePerUnit,
+      expectedValueTotal,
     };
+  }
+
+  /**
+   * Strategy-specific max-profit / max-loss formulas, parameterised on the
+   * *real* net per-unit debit/credit from the preview rather than a stored
+   * estimate. Returns null for unknown strategy names so callers can fall
+   * back to whatever the signal had.
+   *
+   * Conventions: `netPerUnit` is positive for debits (you pay), negative for
+   * credits (you receive). Returned values are always non-negative
+   * per-share dollars; the caller multiplies by contract size × qty for
+   * total $.
+   */
+  private estimateRiskRewardFromPreview(
+    strategy: string,
+    legs: PreviewMultiLegOrderDto['legs'],
+    netPerUnit: number,
+  ): { maxProfit: number; maxLoss: number } | null {
+    const absNet = Math.abs(netPerUnit);
+    const isDebit = netPerUnit >= 0;
+
+    // Pull strikes off the OCC symbols once. Skips any malformed leg.
+    const strikes: number[] = [];
+    for (const leg of legs) {
+      try {
+        strikes.push(parseOccSymbol(leg.contractSymbol).strike);
+      } catch {
+        return null; // can't reason about strikes → signal estimate wins
+      }
+    }
+    const sorted = [...strikes].sort((a, b) => a - b);
+
+    switch (strategy) {
+      // Defined-risk verticals: profit = width − debit, loss = debit.
+      case 'bull_call_spread':
+      case 'bear_put_spread': {
+        if (sorted.length < 2 || !isDebit) return null;
+        const width = sorted[sorted.length - 1] - sorted[0];
+        return { maxProfit: Math.max(0, width - absNet), maxLoss: absNet };
+      }
+
+      // Symmetric long butterfly: profit at the body strike = wing − debit,
+      // loss at the wing edges = debit. The signal engine enforces wing
+      // symmetry server-side, so using either wing is fine.
+      case 'long_butterfly': {
+        if (sorted.length < 3 || !isDebit) return null;
+        const wing = sorted[1] - sorted[0];
+        return { maxProfit: Math.max(0, wing - absNet), maxLoss: absNet };
+      }
+
+      // Iron condor: max profit = credit received, max loss = wing − credit.
+      // Wing = inner spacing on either side (4 strikes K1<K2<K3<K4 with
+      // K2−K1 = K4−K3 by template construction).
+      case 'iron_condor': {
+        if (sorted.length < 4 || isDebit) return null;
+        const wing = sorted[1] - sorted[0];
+        return { maxProfit: absNet, maxLoss: Math.max(0, wing - absNet) };
+      }
+
+      // Calendar: profit is fuzzy (depends on near-leg time-decay vs
+      // far-leg theta), but max loss is bounded at the debit. The Python
+      // engine uses a 0.5×debit profit estimate; we keep parity here.
+      case 'calendar_spread': {
+        if (!isDebit) return null;
+        return { maxProfit: absNet * 0.5, maxLoss: absNet };
+      }
+
+      // Long single-leg buys + straddles + strangles: loss = debit, profit
+      // is theoretically uncapped. Use 2×debit as a loose target — anything
+      // sharper would mislead the user about asymmetric upside.
+      case 'long_call':
+      case 'long_put':
+      case 'long_straddle':
+      case 'long_strangle': {
+        if (!isDebit) return null;
+        return { maxProfit: absNet * 2, maxLoss: absNet };
+      }
+
+      // Short put: max profit = credit, max loss = strike − credit (down to
+      // zero of the underlying).
+      case 'short_put': {
+        if (sorted.length < 1 || isDebit) return null;
+        return { maxProfit: absNet, maxLoss: Math.max(0, sorted[0] - absNet) };
+      }
+
+      default:
+        return null;
+    }
   }
 
   /**
