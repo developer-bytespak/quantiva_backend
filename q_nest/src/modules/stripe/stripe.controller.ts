@@ -54,15 +54,9 @@ export class StripeController {
       where: { user_id: userId, status: 'active' },
     });
 
-    // Only block when the existing active sub is itself a real Stripe sub.
-    // Admin-comped subs (billing_provider='admin_override') should be allowed
-    // through; the checkout.session.completed webhook overwrites the comp row
-    // in place via SubscriptionsService.updateSubscription().
-    if (
-      activeSubscription &&
-      activeSubscription.tier !== 'FREE' &&
-      activeSubscription.billing_provider === 'stripe'
-    ) {
+    // Block any non-FREE active subscription from starting a new checkout —
+    // user must cancel first regardless of how they got their plan.
+    if (activeSubscription && activeSubscription.tier !== 'FREE') {
       throw new BadRequestException(
         'Cancel your current subscription.',
       );
