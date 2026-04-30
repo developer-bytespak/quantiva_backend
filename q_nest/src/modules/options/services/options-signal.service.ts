@@ -52,11 +52,19 @@ export class OptionsSignalService {
       this.configService.get<string>('PYTHON_API_URL') || 'http://localhost:8000';
   }
 
-  // ── Cron: generate signals every 2 hours (aligned to even UTC hours) ──
+  // ── Cron: generate signals every hour (aligned to the top of the hour) ──
+  //
+  // Hourly regeneration keeps strikes aligned to current spot — a 30-min-old
+  // "ATM call" picked when GOOG was at $367 isn't ATM anymore once GOOG
+  // drifts to $373. Live-recomputing POP at read time would fix the
+  // probability number but not the strike misalignment, so the right answer
+  // is fresh signals on a tighter cadence. Per-strategy TTLs (in
+  // options_strategies.py) drop to ~2h so a missed cron tick only leaves
+  // stale signals visible briefly before they self-expire.
 
   private isGenerating = false;
 
-  @Cron('0 */2 * * *')
+  @Cron('0 * * * *')
   async generateSignals() {
     if (this.isGenerating) {
       this.logger.warn('Signal generation already in progress, skipping this run');
