@@ -56,8 +56,8 @@ export class SubscriptionsController {
       throw new BadRequestException('Subscription ID is required to update subscription');
     }
 
-    // User must cancel current PRO/ELITE subscription before updating
-    if (active.tier === 'PRO' || active.tier === 'ELITE') {
+    // User must cancel current paid subscription before updating
+    if (active.tier !== 'FREE') {
       throw new BadRequestException(
         'Cancel your current subscription.',
       );

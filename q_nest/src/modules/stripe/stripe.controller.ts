@@ -60,7 +60,7 @@ export class StripeController {
     // in place via SubscriptionsService.updateSubscription().
     if (
       activeSubscription &&
-      (activeSubscription.tier === 'PRO' || activeSubscription.tier === 'ELITE') &&
+      activeSubscription.tier !== 'FREE' &&
       activeSubscription.billing_provider === 'stripe'
     ) {
       throw new BadRequestException(
