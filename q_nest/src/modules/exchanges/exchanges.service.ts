@@ -2055,30 +2055,34 @@ export class ExchangesService {
       }
     }
 
-    // --- Close-position post-step: Convert dust to USDT (Binance only) ---
-    // Runs when either (a) the spot sell succeeded and LOT_SIZE rounding left
-    // a tiny residual, OR (b) the spot sell was rejected as pure-dust (no
-    // placedOrder). In case (b) we await the Convert so the final response
-    // reflects the actual outcome; in case (a) the user already got 99%+
-    // back from the sell, so best-effort dust sweep is fine.
-    let convertResult: { ok: boolean; toAmount?: number; reason?: string } | null = null;
+    // --- Close-position post-step: sweep LOT_SIZE dust (Binance only) ---
+    // The market SELL above floors quantity to LOT_SIZE step, so a tiny
+    // residual always remains. Dashboard and leaderboard are balance-based
+    // (any balance > 0 = position still shown), so leftover dust makes the
+    // position appear stuck "open" even after a successful close. We always
+    // await the sweep — fire-and-forget meant errors went unnoticed and dust
+    // remained unswept. Binance Convert is tried first; if it can't process
+    // the dust (sub-minimum, unsupported asset), Dust-to-BNB is the fallback.
+    let convertResult: {
+      ok: boolean;
+      toAmount?: number;
+      reason?: string;
+      method?: string;
+    } | null = null;
     if (isClosePosition && exchangeService instanceof BinanceService) {
       const baseAsset = this.extractBaseAsset(symbol);
       if (baseAsset) {
-        if (placedOrder) {
-          // Successful sell — dust cleanup is fire-and-forget.
-          this.binanceService
-            .convertDustToUsdt(apiKey, apiSecret, baseAsset)
-            .catch((err) =>
-              this.logger.warn(
-                `convertDustToUsdt(${baseAsset}) post-sell failed for ${connectionId}: ${err?.message || err}`,
-              ),
-            );
-        } else {
-          // Pure-dust position — the sell failed, Convert IS the close.
-          convertResult = await this.binanceService
-            .convertDustToUsdt(apiKey, apiSecret, baseAsset)
-            .catch((err) => ({ ok: false, reason: err?.message || 'convert threw' }));
+        convertResult = await this.binanceService
+          .convertDustToUsdt(apiKey, apiSecret, baseAsset)
+          .catch((err) => ({ ok: false, reason: err?.message || 'convert threw' }));
+
+        if (placedOrder && !convertResult.ok) {
+          // Sell already gave the user 99%+ of position value — log the
+          // sweep failure but don't fail the response. Leftover will be
+          // attempted again on the user's next close.
+          this.logger.warn(
+            `Dust sweep failed after successful sell on ${connectionId} for ${baseAsset}: ${convertResult.reason ?? 'unknown'}`,
+          );
         }
       }
     }

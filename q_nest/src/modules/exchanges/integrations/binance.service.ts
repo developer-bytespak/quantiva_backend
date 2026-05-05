@@ -136,27 +136,16 @@ export class BinanceService {
     // -1013: filter failure (most common). Message text distinguishes the filter.
     if (String(code) === '-1013' || upper.includes('FILTER FAILURE')) {
       if (upper.includes('NOTIONAL')) {
-        return (
-          `Order too small${sym}. Binance requires a minimum order value (usually $5–$10 USDT). ` +
-          `Your position is likely "dust" from previous fills. ` +
-          `Tip: use Binance's "Convert Small Balances to BNB" to clear it.`
-        );
+        return `Order too small${sym}. Binance requires a minimum order value (usually $5–$10 USDT).`;
       }
       if (upper.includes('LOT_SIZE') || upper.includes('MARKET_LOT_SIZE')) {
-        return (
-          `Quantity doesn't meet Binance's lot-size rule${sym}. ` +
-          `The remaining amount is below the minimum step size — it cannot be market-sold. ` +
-          `Tip: use Binance's "Convert Small Balances to BNB" to clear it.`
-        );
+        return `Quantity doesn't meet Binance's lot-size rule${sym}. The remaining amount is below the minimum step size and can't be market-sold.`;
       }
       if (upper.includes('PRICE_FILTER') || upper.includes('PERCENT_PRICE')) {
         return `Price is outside Binance's allowed range${sym}. Try again in a moment.`;
       }
       if (upper.includes('MIN_NOTIONAL')) {
-        return (
-          `Order value is below Binance's minimum${sym}. ` +
-          `Tip: use Binance's "Convert Small Balances to BNB" to clear dust.`
-        );
+        return `Order value is below Binance's minimum${sym}.`;
       }
       return `Binance filter rejected this order${sym}: ${rawMsg}`;
     }
@@ -475,81 +464,231 @@ export class BinanceService {
   }
 
   /**
-   * Binance Convert dust sweeper. Attempts to convert any remaining balance of
-   * `fromAsset` into `toAsset` (USDT by default) via the Convert API. This runs
-   * as a best-effort cleanup after a close-position market SELL — if it fails
-   * (asset not supported by Convert, below minimum, etc.) we just log and move
-   * on. The user has already received 99%+ of their position as USDT from the
-   * spot sell; Convert just mops up the LOT_SIZE rounding leftover.
+   * Binance dust sweeper used after a close-position market SELL. The market
+   * SELL leaves a tiny LOT_SIZE rounding leftover — without sweeping, that
+   * leftover keeps the asset balance > 0, which makes the position appear
+   * "still open" on the dashboard / leaderboard (those views are balance-based,
+   * not order-history based).
    *
-   * Returns `{ ok, toAmount, reason }`. Never throws.
+   * Strategy: try Binance Convert first (no cooldown, gives USDT directly).
+   * If Convert is unavailable for this dust (sub-minimum, asset not supported),
+   * fall back to /sapi/v1/asset/dust (Dust-to-BNB), which accepts almost any
+   * altcoin but has a 6h-per-account cooldown.
+   *
+   * Returns `{ ok, toAmount, reason, method }`. Never throws.
    */
   async convertDustToUsdt(
     apiKey: string,
     apiSecret: string,
     fromAsset: string,
     toAsset: string = 'USDT',
-  ): Promise<{ ok: boolean; toAmount?: number; reason?: string }> {
+  ): Promise<{
+    ok: boolean;
+    toAmount?: number;
+    reason?: string;
+    method?: 'convert' | 'dust-to-bnb' | 'none';
+  }> {
     try {
       const { free } = await this.getAssetFreeBalance(apiKey, apiSecret, fromAsset);
       if (free <= 0) {
-        return { ok: true, toAmount: 0, reason: 'no dust to convert' };
+        return { ok: true, toAmount: 0, method: 'none', reason: 'no dust to convert' };
       }
 
-      // Step 1: get a quote. Binance requires fromAmount precision ≤ 8 for
-      // most assets. Truncate at 8 to avoid "precision over max" rejections.
+      // Binance requires fromAmount precision ≤ 8 for most assets. Truncate
+      // at 8 to avoid "precision over max" rejections.
       const fromAmount = Math.floor(free * 1e8) / 1e8;
       if (fromAmount <= 0) {
-        return { ok: true, toAmount: 0, reason: 'below 8-decimal precision' };
+        return { ok: true, toAmount: 0, method: 'none', reason: 'below 8-decimal precision' };
       }
 
-      let quote: any;
-      try {
-        quote = await this.makeSignedPostRequest(
-          '/sapi/v1/convert/getQuote',
-          apiKey,
-          apiSecret,
-          {
-            fromAsset: fromAsset.toUpperCase(),
-            toAsset: toAsset.toUpperCase(),
-            fromAmount: fromAmount.toString(),
-          },
-        );
-      } catch (err: any) {
-        const reason = err?.message || 'getQuote failed';
-        this.logger.warn(`Convert getQuote ${fromAsset}→${toAsset} failed: ${reason}`);
-        return { ok: false, reason };
-      }
-
-      const quoteId = quote?.quoteId;
-      if (!quoteId) {
-        return { ok: false, reason: 'no quoteId returned' };
-      }
-
-      // Step 2: accept the quote to execute the swap.
-      let accept: any;
-      try {
-        accept = await this.makeSignedPostRequest(
-          '/sapi/v1/convert/acceptQuote',
-          apiKey,
-          apiSecret,
-          { quoteId },
-        );
-      } catch (err: any) {
-        const reason = err?.message || 'acceptQuote failed';
-        this.logger.warn(`Convert acceptQuote ${fromAsset}→${toAsset} failed: ${reason}`);
-        return { ok: false, reason };
-      }
-
-      const toAmount = parseFloat(quote?.toAmount || accept?.toAmount || '0');
-      this.logger.log(
-        `Convert dust success: ${fromAmount} ${fromAsset} → ${toAmount} ${toAsset} (quoteId=${quoteId})`,
+      // Step 1: try Convert (preferred — direct to USDT, no cooldown).
+      // tryConvertEndpoint re-throws auth / rate-limit errors so they bypass
+      // the fallback (no point burning the 6h Dust-to-BNB cooldown on a
+      // doomed call). Anything else returns ok:false with a reason.
+      const convertResult = await this.tryConvertEndpoint(
+        apiKey,
+        apiSecret,
+        fromAsset,
+        toAsset,
+        fromAmount,
       );
-      return { ok: true, toAmount };
+      if (convertResult.ok) {
+        return { ...convertResult, method: 'convert' };
+      }
+
+      // Step 2: Convert refused this dust (sub-min, range, unsupported asset,
+      // etc.). Always try Dust-to-BNB as the fallback — it has different
+      // (looser) constraints than Convert and is the only path that clears
+      // dust below Convert's per-asset minimum.
+      const dustResult = await this.tryDustToBnb(apiKey, apiSecret, fromAsset);
+      if (dustResult.ok) {
+        return { ...dustResult, method: 'dust-to-bnb' };
+      }
+      return {
+        ok: false,
+        method: 'none',
+        reason: `convert: ${convertResult.reason}; dust-to-bnb: ${dustResult.reason}`,
+      };
     } catch (err: any) {
       const reason = err?.message || 'unknown error';
       this.logger.warn(`convertDustToUsdt(${fromAsset}) unexpected failure: ${reason}`);
+      return { ok: false, method: 'none', reason };
+    }
+  }
+
+  private async tryConvertEndpoint(
+    apiKey: string,
+    apiSecret: string,
+    fromAsset: string,
+    toAsset: string,
+    fromAmount: number,
+  ): Promise<{ ok: boolean; toAmount?: number; reason?: string }> {
+    let quote: any;
+    try {
+      quote = await this.makeSignedPostRequest(
+        '/sapi/v1/convert/getQuote',
+        apiKey,
+        apiSecret,
+        {
+          fromAsset: fromAsset.toUpperCase(),
+          toAsset: toAsset.toUpperCase(),
+          fromAmount: fromAmount.toString(),
+        },
+      );
+    } catch (err: any) {
+      // Auth and rate-limit errors must propagate — Dust-to-BNB would also
+      // fail (same credentials, same rate limiter) and trying it would
+      // burn the 6h cooldown for nothing.
+      if (err instanceof InvalidApiKeyException || err instanceof BinanceRateLimitException) {
+        throw err;
+      }
+      const reason = err?.message || 'getQuote failed';
+      this.logger.warn(`Convert getQuote ${fromAsset}→${toAsset} failed: ${reason}`);
       return { ok: false, reason };
+    }
+
+    const quoteId = quote?.quoteId;
+    if (!quoteId) {
+      return { ok: false, reason: 'no quoteId returned' };
+    }
+
+    let accept: any;
+    try {
+      accept = await this.makeSignedPostRequest(
+        '/sapi/v1/convert/acceptQuote',
+        apiKey,
+        apiSecret,
+        { quoteId },
+      );
+    } catch (err: any) {
+      if (err instanceof InvalidApiKeyException || err instanceof BinanceRateLimitException) {
+        throw err;
+      }
+      const reason = err?.message || 'acceptQuote failed';
+      this.logger.warn(`Convert acceptQuote ${fromAsset}→${toAsset} failed: ${reason}`);
+      return { ok: false, reason };
+    }
+
+    const toAmount = parseFloat(quote?.toAmount || accept?.toAmount || '0');
+    this.logger.log(
+      `Convert dust success: ${fromAmount} ${fromAsset} → ${toAmount} ${toAsset} (quoteId=${quoteId})`,
+    );
+    return { ok: true, toAmount };
+  }
+
+  /**
+   * Calls /sapi/v1/asset/dust to convert small leftover balances to BNB.
+   * Used as a fallback when Convert can't process the dust (sub-minimum,
+   * unsupported pair). Subject to a 6h-per-account cooldown.
+   *
+   * Bundling strategy: a single sub-minimum asset is often rejected with
+   * "valuation too low", but Binance evaluates the COMBINED valuation when
+   * multiple assets are sent in one call. We fetch the user's full list of
+   * dust-eligible assets via /sapi/v1/asset/dust-btc and send them all in
+   * one batch alongside the requested asset — this clears more dust per
+   * call and gives the requested asset the best chance of acceptance.
+   */
+  private async tryDustToBnb(
+    apiKey: string,
+    apiSecret: string,
+    asset: string,
+  ): Promise<{ ok: boolean; toAmount?: number; reason?: string }> {
+    const requested = asset.toUpperCase();
+    const eligible = await this.fetchDustEligibleAssets(apiKey, apiSecret);
+    const isEligible = eligible.some(
+      (e) => String(e?.asset || '').toUpperCase() === requested,
+    );
+
+    // If Binance's own dust-btc endpoint says this asset isn't dust-eligible,
+    // /sapi/v1/asset/dust will reject the entire batch with -5005 ("valuation
+    // too low") and burn the 6h cooldown for everyone. Bail early — we can't
+    // help, and we don't want to block other future dust sweeps.
+    if (!isEligible) {
+      this.logger.log(
+        `Dust-to-BNB ${requested}: not on Binance's dust-eligible list (eligible=${eligible.length}). Skipping — Binance API has no path to clear this holding.`,
+      );
+      return {
+        ok: false,
+        reason: 'asset not dust-eligible per Binance',
+      };
+    }
+
+    // Target is eligible — bundle every other eligible asset to give Binance
+    // the largest combined valuation possible (sometimes the per-asset check
+    // passes when the bundle does).
+    const assetSet = new Set<string>([requested]);
+    for (const item of eligible) {
+      if (item?.asset) assetSet.add(String(item.asset).toUpperCase());
+    }
+    const assetList = Array.from(assetSet);
+
+    this.logger.log(
+      `Dust-to-BNB ${requested}: eligible=${eligible.length}, batch=[${assetList.join(', ')}]`,
+    );
+
+    try {
+      const result = await this.makeSignedPostRequest(
+        '/sapi/v1/asset/dust',
+        apiKey,
+        apiSecret,
+        { asset: assetList },
+      );
+      // Binance response uses `totalTransfered` (their typo, not ours).
+      const transferred = parseFloat(result?.totalTransfered ?? '0') || 0;
+      this.logger.log(
+        `Dust-to-BNB success: [${assetList.join(', ')}] → ${transferred} BNB (after fees)`,
+      );
+      return { ok: true, toAmount: transferred };
+    } catch (err: any) {
+      const reason = err?.message || 'dust-to-bnb failed';
+      this.logger.warn(
+        `Dust-to-BNB ${requested} failed (batch tried [${assetList.join(', ')}]): ${reason}`,
+      );
+      return { ok: false, reason };
+    }
+  }
+
+  /**
+   * Fetches the list of assets currently eligible for Dust-to-BNB conversion.
+   * Returns an empty array on failure so the caller can still attempt a
+   * single-asset fallback. Result shape: `{ asset, amountFree, toBNB, ... }[]`.
+   */
+  private async fetchDustEligibleAssets(
+    apiKey: string,
+    apiSecret: string,
+  ): Promise<Array<{ asset: string; amountFree?: string; toBNB?: string }>> {
+    try {
+      const result = await this.makeSignedPostRequest(
+        '/sapi/v1/asset/dust-btc',
+        apiKey,
+        apiSecret,
+        {},
+      );
+      const details = result?.details;
+      return Array.isArray(details) ? details : [];
+    } catch (err: any) {
+      this.logger.warn(`fetchDustEligibleAssets failed: ${err?.message ?? err}`);
+      return [];
     }
   }
 
@@ -911,7 +1050,9 @@ export class BinanceService {
   }
 
   /**
-   * Makes a signed POST request to Binance API
+   * Makes a signed POST request to Binance API. Array values produce repeated
+   * keys (e.g. /sapi/v1/asset/dust expects asset=BCH&asset=DOT for batch
+   * dust transfer); scalar values are sent once as before.
    */
   private async makeSignedPostRequest(
     endpoint: string,
@@ -922,11 +1063,18 @@ export class BinanceService {
     const serverTime = await this.getBinanceServerTime();
     const recvWindow = 60000;
 
-    const queryString = new URLSearchParams({
-      ...params,
-      timestamp: serverTime.toString(),
-      recvWindow: recvWindow.toString(),
-    }).toString();
+    const tuples: Array<[string, string]> = [];
+    for (const [k, v] of Object.entries(params)) {
+      if (Array.isArray(v)) {
+        for (const item of v) tuples.push([k, String(item)]);
+      } else {
+        tuples.push([k, String(v)]);
+      }
+    }
+    tuples.push(['timestamp', serverTime.toString()]);
+    tuples.push(['recvWindow', recvWindow.toString()]);
+
+    const queryString = new URLSearchParams(tuples).toString();
 
     const signature = this.createSignature(queryString, apiSecret);
     const url = `${endpoint}?${queryString}&signature=${signature}`;
@@ -1072,9 +1220,7 @@ export class BinanceService {
           const notional = adjustedQuantity * effectivePrice;
           if (notional < minNotional) {
             throw new BinanceApiException(
-              `Order too small for ${symbol}. Binance requires a minimum order value of $${minNotional} ` +
-                `(your order ≈ $${notional.toFixed(4)}). ` +
-                `This looks like "dust" from previous fills — use Binance's "Convert Small Balances to BNB" to clear it.`,
+              `Order too small for ${symbol}. Binance requires a minimum order value of $${minNotional} (your order ≈ $${notional.toFixed(4)}).`,
               'BINANCE_-1013',
               HttpStatus.BAD_REQUEST,
             );
@@ -1085,8 +1231,7 @@ export class BinanceService {
       // Also catch LOT_SIZE dust before it hits Binance: if stepSize floored the quantity to 0.
       if (adjustedQuantity <= 0 && quantity > 0) {
         throw new BinanceApiException(
-          `Quantity for ${symbol} is below Binance's minimum step size — can't be market-sold. ` +
-            `Use Binance's "Convert Small Balances to BNB" to clear this dust.`,
+          `Quantity for ${symbol} is below Binance's minimum step size and can't be market-sold.`,
           'BINANCE_-1013',
           HttpStatus.BAD_REQUEST,
         );
