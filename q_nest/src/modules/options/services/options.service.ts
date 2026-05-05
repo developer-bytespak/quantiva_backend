@@ -998,6 +998,14 @@ export class OptionsService {
       }
     }
 
+    // Risk / reward = max profit ÷ max loss, formatted "X.XX:1" to match the
+    // shape AI signals already use (single string field). Null when either
+    // side is null or max loss is non-positive.
+    const risk_reward =
+      maxProfitPerUnit !== null && maxLossPerUnit !== null && maxLossPerUnit > 0
+        ? `${(maxProfitPerUnit / maxLossPerUnit).toFixed(2)}:1`
+        : null;
+
     return {
       legs: legResults,
       netPerUnit: round2(netPerUnit),
@@ -1016,6 +1024,7 @@ export class OptionsService {
         maxLossPerUnit === null
           ? null
           : round2(maxLossPerUnit * contractMultiplier * qty),
+      risk_reward,
       probabilityOfProfit,
       expectedValuePerUnit,
       expectedValueTotal,
