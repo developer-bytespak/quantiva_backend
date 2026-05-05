@@ -1877,13 +1877,17 @@ export class ExchangesController {
       const portfolioTotalValue = Number((portfolio as any)?.totalValue ?? 0) || 0;
       const spotTotal = balanceTotalUSD > 0 ? balanceTotalUSD : portfolioTotalValue;
       const marginTotal = Number(optionsAccount?.totalBalance ?? 0) || 0;
-      // Available spot: Alpaca exposes buyingPower; Binance exposes free USD/USDT/BUSD.
+      // Available spot = cash. For Alpaca margin accounts buyingPower is
+      // leveraged (~2x cash) and is NOT comparable to equity-based spotTotal —
+      // using it here made availableSpot exceed portfolio and zeroed out
+      // investedSpot via the clamp below. Use cash (usdAsset.total) and expose
+      // buyingPower separately for UIs that want leveraged purchasing power.
       const buyingPower = Number((balance as any)?.buyingPower ?? 0) || 0;
       const usdAsset = Array.isArray((balance as any)?.assets)
         ? (balance as any).assets.find((a: any) => /^(USD|USDT|BUSD)$/i.test(a?.symbol ?? ''))
         : null;
       const usdFree = Number(usdAsset?.total ?? usdAsset?.free ?? 0) || 0;
-      const availableSpot = buyingPower > 0 ? buyingPower : usdFree;
+      const availableSpot = Math.max(0, usdFree);
       const availableMargin = Number(optionsAccount?.availableBalance ?? 0) || 0;
       const portfolioTotal = spotTotal + marginTotal;
       const totals = {
@@ -1894,6 +1898,7 @@ export class ExchangesController {
         availableMargin,
         investedSpot: Math.max(0, spotTotal - availableSpot),
         investedMargin: Math.max(0, marginTotal - availableMargin),
+        buyingPower,
       };
 
       return {
