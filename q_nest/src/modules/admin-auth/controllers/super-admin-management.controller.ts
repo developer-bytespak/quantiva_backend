@@ -10,6 +10,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { CurrentAdmin } from '../decorators/current-admin.decorator';
 import { DeleteVcPoolAdminDto } from '../dto/delete-vc-pool-admin.dto';
@@ -53,6 +54,15 @@ export class SuperAdminManagementController {
       return { found: false, is_us_user: false };
     }
     return this.superAdminManagementService.lookupUserByEmail(email.trim());
+  }
+
+  @Get('users/search')
+  @Throttle({ default: { ttl: 60_000, limit: 30 } })
+  async searchUsers(@Query('q') q: string) {
+    if (!q?.trim() || q.trim().length < 4) {
+      return { results: [] };
+    }
+    return this.superAdminManagementService.searchUsers(q.trim());
   }
 
   @Get('vc-pool-admins')

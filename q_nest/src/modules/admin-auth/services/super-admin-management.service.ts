@@ -1341,6 +1341,43 @@ export class SuperAdminManagementService {
     };
   }
 
+  async searchUsers(query: string) {
+    const trimmed = query.trim();
+    if (trimmed.length < 4) {
+      return { results: [] };
+    }
+
+    const users = await this.prisma.users.findMany({
+      where: {
+        OR: [
+          { email: { contains: trimmed, mode: 'insensitive' } },
+          { username: { contains: trimmed, mode: 'insensitive' } },
+        ],
+      },
+      select: {
+        email: true,
+        username: true,
+        current_tier: true,
+        nationality: true,
+      },
+      take: 10,
+      orderBy: { email: 'asc' },
+    });
+
+    return {
+      results: users.map((u) => {
+        const normalized = (u.nationality ?? '').toLowerCase().trim();
+        const isUsUser = ['us', 'usa', 'united states', 'united states of america'].includes(normalized);
+        return {
+          email: u.email,
+          username: u.username,
+          current_tier: u.current_tier,
+          is_us_user: isUsUser,
+        };
+      }),
+    };
+  }
+
   async adminUpgradeUserSubscription(data: {
     email: string;
     tier: PlanTier;
