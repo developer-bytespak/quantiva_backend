@@ -738,7 +738,11 @@ export class ExchangesService {
             unrealizedPnl: intradayPnl,
             pnlPercent: intradayPnlPct,
           } as PositionDto;
-        });
+        })
+          // Quantiva is long-only — drop any short positions (qty < 0) the user
+          // may have opened on Alpaca's main platform. Showing them in Holdings
+          // would imply we support shorting; we don't.
+          .filter((p: PositionDto) => p.quantity > 0);
 
         // Map balance. The USD asset row uses cash for both free and total so
         // the free <= total invariant holds; buying power is exposed at the
@@ -799,6 +803,21 @@ export class ExchangesService {
             time: o.created_at ? new Date(o.created_at).getTime() : Date.now(),
           };
         }) as OrderDto[];
+
+        // Action Center filter: hide PENDING SELL orders for symbols the
+        // user doesn't hold. These are short sells placed externally on
+        // Alpaca's platform and would confuse users since the underlying
+        // short position is hidden from Holdings above. Filled/canceled
+        // history is preserved so the order log stays accurate.
+        const heldSymbols = new Set(
+          positions.map((p) => (p.symbol || '').toUpperCase()),
+        );
+        orders = orders.filter((o) => {
+          if (o.side === 'BUY') return true;
+          const isPending = o.status === 'NEW' || o.status === 'PARTIALLY_FILLED';
+          if (!isPending) return true;
+          return heldSymbols.has((o.symbol || '').toUpperCase());
+        });
 
         // Portfolio. Use Alpaca's equity directly so portfolio.totalValue
         // matches balance.totalValueUSD and matches what the user sees in
@@ -1845,6 +1864,49 @@ export class ExchangesService {
 
     // Get the appropriate exchange service
     const exchangeService = this.getExchangeService(connection.exchange.name);
+
+    // --- Short-sell guard (Alpaca stocks only) ---
+    // Quantiva is long-only. Block SELLs for symbols the user doesn't own.
+    // Skipped when `closePosition: true` (dashboard / open-positions sell
+    // button only renders for owned positions, and the cancel-then-close
+    // flow below uses live Alpaca state anyway). Crypto is excluded —
+    // crypto exchanges already reject unbacked sells with a balance error.
+    if (
+      side === 'SELL' &&
+      !options.closePosition &&
+      exchangeService instanceof AlpacaService &&
+      !this.alpacaService.isAlpacaCryptoSymbol(symbol)
+    ) {
+      const positions = await this.alpacaService.getPositions(apiKey, apiSecret);
+      const position = (positions || []).find(
+        (p: any) => (p.symbol || '').toUpperCase() === symbol.toUpperCase(),
+      );
+      const heldQty = position ? parseFloat(position.qty || '0') || 0 : 0;
+      if (!position || heldQty <= 0) {
+        throw new HttpException(
+          {
+            success: false,
+            code: 'POSITION_NOT_OWNED',
+            message: "You don't own this stock. Quantiva does not allow short selling.",
+            symbol,
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      if (heldQty < quantity) {
+        throw new HttpException(
+          {
+            success: false,
+            code: 'INSUFFICIENT_POSITION',
+            message: `You own ${heldQty} share(s) of ${symbol} but tried to sell ${quantity}.`,
+            symbol,
+            held: heldQty,
+            requested: quantity,
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+    }
 
     // --- Close-position pre-step: cancel any open orders on the symbol ---
     // Only runs on SELL with closePosition=true (Dashboard holdings + Top-trades
