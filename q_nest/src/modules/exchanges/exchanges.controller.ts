@@ -1126,13 +1126,27 @@ export class ExchangesController {
             // gets marked 'failed' with a reason if the buy never fills.
             ((status === 403 || status === 422) && buyIsPending);
 
+          // PDT on the protective sell legs: the buy itself succeeds (often
+          // already FILLED), only TP/SL gets rejected because Alpaca blocks
+          // same-day sells for sub-$25k accounts. Track the row regardless of
+          // buyIsPending so the cron retries overnight when the position
+          // becomes an overnight hold.
+          const isPdtOnProtection =
+            status === 403 &&
+            (errMsgLower.includes('pattern day') || errMsgLower.includes('pdt'));
+
           this.logger.debug(
             `[TP/SL catch] exchange=${exchangeName} orderId=${order?.orderId} ` +
               `buyStatus=${buyStatus} buyIsPending=${buyIsPending} ` +
-              `status=${status} alpacaMsg="${alpacaMsg}" isRaceExhausted=${isRaceExhausted}`,
+              `status=${status} alpacaMsg="${alpacaMsg}" isRaceExhausted=${isRaceExhausted} ` +
+              `isPdtOnProtection=${isPdtOnProtection}`,
           );
 
-          if (exchangeName === 'alpaca' && buyIsPending && isRaceExhausted && user?.sub) {
+          if (
+            exchangeName === 'alpaca' &&
+            ((buyIsPending && isRaceExhausted) || isPdtOnProtection) &&
+            user?.sub
+          ) {
             const tracked = await this.queuedTradeService.trackForDelayedProtection({
               userId: user.sub,
               connectionId,
@@ -1147,8 +1161,11 @@ export class ExchangesController {
               alpacaBuyOrderId: String(order.orderId),
             });
             delayedProtectionQueueId = tracked.id;
+            const reasonLabel = isPdtOnProtection
+              ? 'PDT blocked same-day TP/SL'
+              : 'buy accepted but not filled';
             this.logger.log(
-              `Buy ${order.orderId} accepted but not filled; tracking for delayed TP/SL (queueId=${tracked.id})`,
+              `Buy ${order.orderId} ${reasonLabel}; tracking for delayed TP/SL (queueId=${tracked.id})`,
             );
           }
         }
