@@ -38,6 +38,8 @@ import { QhqTokenModule } from './modules/qhq-token/qhq-token.module';
 import { ContactModule } from './modules/contact/contact.module';
 import { OnboardingEmailsModule } from './modules/onboarding-emails/onboarding-emails.module';
 import { OnboardingModule } from './modules/onboarding/onboarding.module';
+import { PositionInsightsModule } from './modules/position-insights/position-insights.module';
+import { NewsWarmerModule } from './modules/news-warmer/news-warmer.module';
 
 @Module({
   imports: [
@@ -79,6 +81,8 @@ import { OnboardingModule } from './modules/onboarding/onboarding.module';
     ContactModule,
     OnboardingEmailsModule,
     OnboardingModule,
+    PositionInsightsModule,
+    NewsWarmerModule,
   ],
   controllers: [],
   providers: [
