@@ -534,19 +534,6 @@ export class AlpacaService {
   }
 
   /**
-   * Alias for bracket order to match Binance naming
-   */
-  async placeOcoOrder(
-    symbol: string,
-    side: 'BUY' | 'SELL',
-    quantity: number,
-    takeProfitPrice: number,
-    stopLossPrice: number,
-  ): Promise<any> {
-    return this.placeBracketOrder(symbol, side, quantity, takeProfitPrice, stopLossPrice);
-  }
-
-  /**
    * Cancel a single order by ID. Used for orphan cleanup and manual cancels.
    * Returns silently on 404/422 ("order already finalized") — if the order is
    * already filled or canceled, the cleanup is effectively a no-op.
@@ -621,13 +608,25 @@ export class AlpacaService {
   }
 
   /**
-   * Attach TP/SL protection to an existing position by placing two independent
-   * sell orders: a LIMIT sell at takeProfitPrice and a STOP sell at
-   * stopLossPrice. Both are GTC.
+   * Attach TP/SL protection to an existing position using Alpaca's OCO
+   * (One-Cancels-Other) order class. A single API call submits both legs
+   * as a linked pair — Alpaca locks the shares once for the pair and
+   * server-side auto-cancels the unfilled leg when the other fills.
    *
-   * Why not use placeBracketOrder? Alpaca's order_class='bracket' is for
-   * atomic entry+TP+SL submission and cannot attach to an already-filled
-   * position. Bybit has the same constraint and uses two separate sells too.
+   * This replaces the prior two-independent-orders implementation, which
+   * caused the "insufficient qty available" / orphan bug class: TP would
+   * place first, lock all shares, and SL would fail with `available: 0`,
+   * leaving an orphan TP on Alpaca. OCO makes that scenario structurally
+   * impossible. See ALPACA_OCO_MIGRATION_PLAN.md.
+   *
+   * Note: bracket (`order_class: 'bracket'`) is NOT used here because
+   * bracket requires atomic entry+TP+SL submission and cannot attach to
+   * an already-filled position. OCO is a different order_class that does
+   * support post-fill attachment.
+   *
+   * Rollback: set ALPACA_USE_OCO=false to revert to the legacy two-orders
+   * path without redeploying. The legacy branch is preserved in this method
+   * for emergency rollback only — remove after 30 days of clean OCO ops.
    *
    * Stocks require whole-share quantities for LIMIT/STOP orders, so callers
    * must floor fractional positions before invoking this method (or pass the
@@ -645,29 +644,99 @@ export class AlpacaService {
     const client = this.getClientForKey(apiKey);
     const headers = this.getAuthHeaders(apiKey, apiSecret);
 
-    this.logger.log(
-      `Placing Alpaca protection: ${quantity} ${alpacaSymbol} TP=${takeProfitPrice} SL=${stopLossPrice}`,
-    );
-
-    // Tag each order with a client_order_id prefixed by `ta-tp-` / `ta-sl-`
-    // so the orphan-cleanup cron can identify orders we placed and avoid
-    // cancelling orders the user placed themselves directly in Alpaca.
-    const tpClientId = `${ALPACA_CLIENT_ID_TP_PREFIX}${randomUUID()}`;
-    const slClientId = `${ALPACA_CLIENT_ID_SL_PREFIX}${randomUUID()}`;
-
     // Alpaca rejects stock orders with sub-penny precision on prices ≥ $1
     // ("invalid limit_price. sub-penny increment does not fulfill minimum
-    // pricing criteria", code 42210000). Round TP/SL strikes to the nearest
-    // cent before submitting. The top-trade universe is liquid mid-to-large
-    // caps well above $1, so 2-decimal rounding is safe across all symbols.
+    // pricing criteria", code 42210000). Round both legs to the nearest cent
+    // before submitting. The top-trade universe is liquid mid-to-large caps
+    // well above $1, so 2-decimal rounding is safe across all symbols.
     const roundToCents = (n: number) => (Math.round(n * 100) / 100).toFixed(2);
+    const tpPriceRounded = roundToCents(takeProfitPrice);
+    const slPriceRounded = roundToCents(stopLossPrice);
+
+    const useOco =
+      (process.env.ALPACA_USE_OCO ?? 'true').toLowerCase() !== 'false';
+
+    if (useOco) {
+      // OCO path. Verified body shape against live Alpaca on 2026-05-07:
+      //   - top-level `type: 'limit'` is required
+      //   - leg prices live in nested `take_profit` / `stop_loss` objects
+      //   - response: parent order represents the TP leg; legs[0] is the SL
+      //   - shares lock once for the pair; auto-cancel of the other leg
+      //     happens server-side in <10ms when one fills
+      this.logger.log(
+        `Placing Alpaca OCO protection: ${quantity} ${alpacaSymbol} TP=${tpPriceRounded} SL=${slPriceRounded}`,
+      );
+
+      // Tag with the `ta-tp-` prefix so the orphan-cleanup cron (still alive
+      // during the migration as a safety net) recognizes this as one of ours.
+      const ocoClientId = `${ALPACA_CLIENT_ID_TP_PREFIX}${randomUUID()}`;
+
+      const ocoBody = {
+        symbol: alpacaSymbol,
+        qty: quantity.toString(),
+        side: 'sell',
+        type: 'limit',
+        order_class: 'oco',
+        time_in_force: 'gtc',
+        take_profit: { limit_price: tpPriceRounded },
+        stop_loss: { stop_price: slPriceRounded },
+        client_order_id: ocoClientId,
+      };
+
+      try {
+        const res = await this.postOrderWithRaceRetry(
+          client,
+          headers,
+          ocoBody,
+          'OCO',
+        );
+        const tpOrderId = res?.id ?? '';
+        const slOrderId = res?.legs?.[0]?.id ?? '';
+
+        if (!tpOrderId || !slOrderId) {
+          // Defensive: 200 OK but the response shape was unexpected. Cancel
+          // whatever came back so we don't leave an orphan, then surface the
+          // error to the caller's existing ocoError handling.
+          this.logger.error(
+            `Alpaca OCO returned unexpected shape: parent=${tpOrderId} sl=${slOrderId}`,
+          );
+          if (tpOrderId) {
+            await this.cancelOrder(apiKey, apiSecret, tpOrderId).catch(() => {});
+          }
+          throw new Error(
+            `Alpaca OCO returned unexpected shape (parent=${tpOrderId}, sl=${slOrderId})`,
+          );
+        }
+
+        return { takeProfitOrderId: tpOrderId, stopLossOrderId: slOrderId };
+      } catch (error: any) {
+        this.logger.error(
+          `Error placing Alpaca OCO protection: ${error?.message}`,
+          error?.response?.data,
+        );
+        throw error;
+      }
+    }
+
+    // --- Legacy fallback: two separate orders ---
+    // Reachable only via ALPACA_USE_OCO=false. Known limitation: when TP
+    // places first it locks all shares, causing SL to fail with
+    // "insufficient qty available" and leaving an orphan TP on Alpaca.
+    // The orphan-cleanup cron and queued-trade retry exist to mitigate
+    // this — see ALPACA_ORDER_FLOWS_CURRENT.md.
+    this.logger.warn(
+      `Placing Alpaca legacy two-order protection (OCO disabled via env): ${quantity} ${alpacaSymbol} TP=${tpPriceRounded} SL=${slPriceRounded}`,
+    );
+
+    const tpClientId = `${ALPACA_CLIENT_ID_TP_PREFIX}${randomUUID()}`;
+    const slClientId = `${ALPACA_CLIENT_ID_SL_PREFIX}${randomUUID()}`;
 
     const tpBody = {
       symbol: alpacaSymbol,
       qty: quantity.toString(),
       side: 'sell',
       type: 'limit',
-      limit_price: roundToCents(takeProfitPrice),
+      limit_price: tpPriceRounded,
       time_in_force: 'gtc',
       client_order_id: tpClientId,
     };
@@ -677,16 +746,15 @@ export class AlpacaService {
       qty: quantity.toString(),
       side: 'sell',
       type: 'stop',
-      stop_price: roundToCents(stopLossPrice),
+      stop_price: slPriceRounded,
       time_in_force: 'gtc',
       client_order_id: slClientId,
     };
 
     try {
-      // Each leg retries independently on race errors ("insufficient qty",
-      // "position not found") so that if TP succeeds on the first attempt
-      // and SL hits the race, we retry only SL — we don't re-place TP and
-      // end up with a duplicate. See Issue 3 in ALPACA_TP_SL_ISSUES.md.
+      // Each leg retries independently on race errors so that if TP succeeds
+      // on the first attempt and SL hits the race, we retry only SL — we
+      // don't re-place TP and end up with a duplicate.
       const tpRes = await this.postOrderWithRaceRetry(client, headers, tpBody, 'TP');
       const slRes = await this.postOrderWithRaceRetry(client, headers, slBody, 'SL');
 
@@ -696,7 +764,7 @@ export class AlpacaService {
       };
     } catch (error: any) {
       this.logger.error(
-        `Error placing Alpaca protection: ${error.message}`,
+        `Error placing Alpaca legacy protection: ${error.message}`,
         error?.response?.data,
       );
       throw error;
@@ -714,7 +782,7 @@ export class AlpacaService {
     client: AxiosInstance,
     headers: Record<string, string | undefined>,
     body: Record<string, any>,
-    leg: 'TP' | 'SL',
+    leg: 'TP' | 'SL' | 'OCO',
   ): Promise<any> {
     const maxAttempts = 3;
     const backoffMs = 500;
