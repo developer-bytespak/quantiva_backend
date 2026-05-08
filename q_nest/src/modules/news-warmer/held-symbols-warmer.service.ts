@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
-import { PrismaService } from '../../prisma/prisma.service';
 import { NewsService } from '../news/news.service';
+import { ExchangePositionsDiscoveryService } from './exchange-positions-discovery.service';
 
 /**
  * Refreshes news for symbols that any user is currently holding so that the
@@ -29,8 +29,8 @@ export class HeldSymbolsWarmerService {
   private readonly PER_COIN_DELAY_MS = 8000; // ~7.5 calls/min, under the 8 rpm cap
 
   constructor(
-    private readonly prisma: PrismaService,
     private readonly newsService: NewsService,
+    private readonly discovery: ExchangePositionsDiscoveryService,
     private readonly config: ConfigService,
   ) {}
 
@@ -45,9 +45,15 @@ export class HeldSymbolsWarmerService {
 
     let symbols: string[] = [];
     try {
-      symbols = await this.distinctHeldSymbols('crypto', this.CRYPTO_HOT_CAP);
+      const { crypto } = await this.discovery.discoverAll();
+      // Sort by holdersCount DESC so we refresh the most-held first; if the
+      // quota gate trips later in the loop, the popular coins still got refreshed.
+      symbols = [...crypto.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, this.CRYPTO_HOT_CAP)
+        .map(([s]) => s);
     } catch (err: any) {
-      this.logger.error(`Failed to query held crypto symbols: ${err?.message}`);
+      this.logger.error(`Failed to discover held crypto symbols: ${err?.message}`);
       return;
     }
 
@@ -85,10 +91,10 @@ export class HeldSymbolsWarmerService {
 
     let symbols: string[] = [];
     try {
-      // No cap on stocks — multi-ticker batching collapses cost.
-      symbols = await this.distinctHeldSymbols('stock', null);
+      const { stock } = await this.discovery.discoverAll();
+      symbols = [...stock.keys()];
     } catch (err: any) {
-      this.logger.error(`Failed to query held stock symbols: ${err?.message}`);
+      this.logger.error(`Failed to discover held stock symbols: ${err?.message}`);
       return;
     }
 
@@ -119,42 +125,6 @@ export class HeldSymbolsWarmerService {
     this.logger.log(
       `warmStockHeldSymbols: done — batches ok=${okBatches} fail=${failBatches}`,
     );
-  }
-
-  /**
-   * Returns symbols held in `portfolio_positions` (quantity > 0), ranked by
-   * unique-holder count descending, capped at `cap` (or no cap when null).
-   *
-   * Note: this does NOT include ephemeral exchange-API balances that aren't
-   * mirrored into `portfolio_positions`. If/when the system starts caching
-   * live exchange holdings server-side, expand this query to UNION them in.
-   */
-  private async distinctHeldSymbols(
-    assetType: 'crypto' | 'stock',
-    cap: number | null,
-  ): Promise<string[]> {
-    const limitClause = cap && cap > 0 ? `LIMIT ${cap}` : '';
-
-    const rows = (await this.prisma.$queryRawUnsafe(
-      `
-        SELECT a.symbol AS symbol
-        FROM portfolio_positions pp
-        JOIN portfolios p  ON p.portfolio_id = pp.portfolio_id
-        JOIN assets     a  ON a.asset_id     = pp.asset_id
-        WHERE pp.quantity IS NOT NULL
-          AND pp.quantity > 0
-          AND a.asset_type = $1
-          AND a.symbol IS NOT NULL
-          AND a.symbol <> ''
-          AND a.symbol <> 'CRYPTO'
-        GROUP BY a.symbol
-        ORDER BY COUNT(DISTINCT p.user_id) DESC, a.symbol ASC
-        ${limitClause}
-      `,
-      assetType,
-    )) as { symbol: string }[];
-
-    return rows.map((r) => r.symbol).filter(Boolean);
   }
 
   private chunk<T>(arr: T[], size: number): T[][] {
