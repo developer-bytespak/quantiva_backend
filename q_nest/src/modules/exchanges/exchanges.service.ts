@@ -1843,7 +1843,7 @@ export class ExchangesService {
     type: 'MARKET' | 'LIMIT',
     quantity: number,
     price?: number,
-    options: { closePosition?: boolean } = {},
+    options: { closePosition?: boolean; cancelOpenOrders?: boolean } = {},
   ): Promise<OrderDto> {
     const connection = await this.prisma.user_exchange_connections.findUnique({
       where: { connection_id: connectionId },
@@ -1908,12 +1908,19 @@ export class ExchangesService {
       }
     }
 
-    // --- Close-position pre-step: cancel any open orders on the symbol ---
-    // Only runs on SELL with closePosition=true (Dashboard holdings + Top-trades
-    // leaderboard). Frees up base-coin balance that TP/SL orders reserve, so
-    // the market SELL below doesn't fail with "Insufficient balance".
+    // --- Cancel any open TP/SL orders on the symbol ---
+    // Runs on SELL when EITHER:
+    //   - closePosition=true (full-position close from Dashboard / Top-trades), or
+    //   - cancelOpenOrders=true (partial sell from those same surfaces — user
+    //     wants to exit part of the position; the leftover shares are left
+    //     without TP/SL because an old TP/SL sized for the full position
+    //     could trigger against the now-smaller holding).
+    // Frees up base-coin balance that TP/SL orders reserve, so the market
+    // SELL below doesn't fail with "Insufficient balance".
     const isClosePosition = !!options.closePosition && side === 'SELL';
-    if (isClosePosition) {
+    const shouldCancelOpenOrders =
+      side === 'SELL' && (isClosePosition || !!options.cancelOpenOrders);
+    if (shouldCancelOpenOrders) {
       try {
         if (exchangeService instanceof BinanceService) {
           const sym = this.resolveBinanceSellSymbol(symbol);
@@ -1936,9 +1943,14 @@ export class ExchangesService {
         // with "Insufficient balance" if TP/SL locked the asset, but that error
         // now surfaces cleanly via the humanized error mapper.
         this.logger.warn(
-          `closePosition cancel-open-orders failed for ${connectionId}/${symbol}: ${cancelErr?.message || cancelErr}`,
+          `cancel-open-orders failed for ${connectionId}/${symbol}: ${cancelErr?.message || cancelErr}`,
         );
       }
+    }
+    // The live-balance override + dust-conversion below is gated on the
+    // stricter `isClosePosition` flag — partial sells must respect the
+    // user-typed quantity exactly, not get overridden with the entire holding.
+    if (isClosePosition) {
 
       // Sell the user's ACTUAL live balance, not the (possibly stale) qty the
       // frontend sent. The dashboard polls every ~30s, so between poll and
