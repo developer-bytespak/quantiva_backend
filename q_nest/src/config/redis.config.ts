@@ -7,9 +7,6 @@ export default registerAs('redis', () => ({
   db: parseInt(process.env.REDIS_DB || '0', 10),
   // Upstash and other managed Redis services require TLS. Set REDIS_TLS=true in .env to enable.
   tls: process.env.REDIS_TLS === 'true' ? {} : undefined,
-  maxRetriesPerRequest: 3,
-  retryStrategy: (times: number) => {
-    const delay = Math.min(times * 50, 2000);
-    return delay;
-  },
+  maxRetriesPerRequest: null,
+  retryStrategy: (times: number) => Math.min(times * 200, 10000),
 }));

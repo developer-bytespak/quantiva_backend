@@ -11,7 +11,10 @@ interface StrategyJobData {
   user_id?: string;
 }
 
-@Processor('strategy-execution')
+@Processor('strategy-execution', {
+  drainDelay: 60,
+  stalledInterval: 60_000,
+})
 @Injectable()
 export class StrategyProcessor extends WorkerHost {
   private readonly logger = new Logger(StrategyProcessor.name);

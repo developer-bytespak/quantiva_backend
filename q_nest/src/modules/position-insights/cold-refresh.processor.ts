@@ -15,7 +15,11 @@ export interface ColdRefreshJobData {
  * isn't currently warm in `trending_news`. Concurrency = 1 so we spread calls
  * out and never burst against the Python-side quota gate.
  */
-@Processor(COLD_REFRESH_QUEUE, { concurrency: 1 })
+@Processor(COLD_REFRESH_QUEUE, {
+  concurrency: 1,
+  drainDelay: 60,
+  stalledInterval: 60_000,
+})
 @Injectable()
 export class ColdRefreshProcessor extends WorkerHost {
   private readonly logger = new Logger(ColdRefreshProcessor.name);

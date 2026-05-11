@@ -25,7 +25,7 @@ import { OnboardingEmailsController } from './controllers/onboarding-emails.cont
           password?: string;
           db: number;
           tls?: object;
-          maxRetriesPerRequest: number;
+          maxRetriesPerRequest: number | null;
           retryStrategy: (times: number) => number;
         }>('redis')!;
         return {

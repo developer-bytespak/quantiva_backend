@@ -9,7 +9,10 @@ import { UnsubscribeTokenService } from '../services/unsubscribe-token.service';
 import { QUEUE_NAME } from '../config/schedule.config';
 import type { OnboardingReminderJobData } from '../services/reminder-scheduler.service';
 
-@Processor(QUEUE_NAME)
+@Processor(QUEUE_NAME, {
+  drainDelay: 60,
+  stalledInterval: 60_000,
+})
 @Injectable()
 export class OnboardingReminderProcessor extends WorkerHost {
   private readonly logger = new Logger(OnboardingReminderProcessor.name);
