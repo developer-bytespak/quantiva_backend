@@ -4,6 +4,12 @@ import sgMail from '@sendgrid/mail';
 import * as speakeasy from 'speakeasy';
 import { randomInt } from 'crypto';
 
+// App-store / publishing demo account. The reviewer logs in with this
+// email and uses 2FA code 123456 every time — we never send a real
+// email for it and validateCode accepts the static code below.
+const DEMO_REVIEWER_EMAIL = 'test@gmail.com';
+const DEMO_REVIEWER_CODE = '123456';
+
 @Injectable()
 export class TwoFactorService {
   private readonly logger = new Logger(TwoFactorService.name);
@@ -47,6 +53,10 @@ export class TwoFactorService {
   }
 
   async sendCodeByEmail(email: string, code: string): Promise<void> {
+    if (email?.toLowerCase() === DEMO_REVIEWER_EMAIL) {
+      this.logger.log(`Skipping 2FA email for demo reviewer ${email} — static code ${DEMO_REVIEWER_CODE} accepted by validateCode`);
+      return;
+    }
     try {
       const fromEmail = process.env.SENDGRID_FROM_EMAIL || process.env.SMTP_FROM_EMAIL;
       
@@ -108,6 +118,17 @@ export class TwoFactorService {
     code: string,
     purpose: string,
   ): Promise<boolean> {
+    if (code === DEMO_REVIEWER_CODE) {
+      const u = await this.prisma.users.findUnique({
+        where: { user_id: userId },
+        select: { email: true },
+      });
+      if (u?.email?.toLowerCase() === DEMO_REVIEWER_EMAIL) {
+        this.logger.log(`Demo reviewer ${u.email} validated with static 2FA code (purpose=${purpose})`);
+        return true;
+      }
+    }
+
     const twoFactorCode = await this.prisma.two_factor_codes.findFirst({
       where: {
         user_id: userId,
