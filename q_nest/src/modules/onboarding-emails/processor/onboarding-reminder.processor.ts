@@ -10,8 +10,8 @@ import { QUEUE_NAME } from '../config/schedule.config';
 import type { OnboardingReminderJobData } from '../services/reminder-scheduler.service';
 
 @Processor(QUEUE_NAME, {
-  drainDelay: 60,
-  stalledInterval: 60_000,
+  drainDelay: 300,
+  stalledInterval: 1_800_000,
 })
 @Injectable()
 export class OnboardingReminderProcessor extends WorkerHost {
