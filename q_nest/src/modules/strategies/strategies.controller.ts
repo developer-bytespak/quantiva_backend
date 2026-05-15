@@ -1077,6 +1077,19 @@ export class StrategiesController {
       throw new ForbiddenException('You do not own this strategy');
     }
 
+    // Validate incoming rules (skip when caller is using field-based rules,
+    // matching createCustomStrategy at strategies.service.ts).
+    const hasFieldBasedRules =
+      updateDto.entry_rules?.some((r: any) => r.field) ||
+      updateDto.exit_rules?.some((r: any) => r.field);
+
+    if (!hasFieldBasedRules && (updateDto.entry_rules || updateDto.exit_rules || updateDto.indicators)) {
+      const validation = await this.strategiesService.validateStrategy(updateDto as any);
+      if (!validation.valid) {
+        throw new BadRequestException({ message: 'Strategy validation failed', errors: validation.errors });
+      }
+    }
+
     // Update strategy
     const updated = await this.prisma.strategies.update({
       where: { strategy_id: strategyId },
@@ -1084,10 +1097,8 @@ export class StrategiesController {
         name: updateDto.name,
         description: updateDto.description,
         risk_level: updateDto.risk_level,
-        timeframe: updateDto.timeframe,
         entry_rules: updateDto.entry_rules as any,
-        exit_rules: updateDto.exit_rules as any,
-        indicators: updateDto.indicators as any,
+        engine_weights: updateDto.engine_weights as any,
         stop_loss_value: updateDto.stop_loss_value,
         take_profit_value: updateDto.take_profit_value,
         target_assets: updateDto.target_assets as any,
