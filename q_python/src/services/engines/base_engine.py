@@ -155,23 +155,43 @@ class BaseEngine(ABC):
     
     def handle_error(self, error: Exception, context: str = "") -> Dict[str, Any]:
         """
-        Handle errors and return default score.
-        
-        Args:
-            error: Exception that occurred
-            context: Additional context information
-        
-        Returns:
-            Dictionary with error score and metadata
+        Handle errors and return a 'no answer' result.
+
+        Returns ``score=None`` (not 0.0) so the fusion engine can distinguish
+        between "this engine evaluated and found neutral conditions" (a real
+        0.0) and "this engine could not compute" (None). Treating failures as
+        0 was silently dragging final scores toward HOLD whenever an API was
+        rate-limited or data was missing.
         """
         self.logger.error(f"{self.name} error{': ' + context if context else ''}: {str(error)}")
         return {
-            'score': 0.0,
+            'score': None,
             'confidence': 0.0,
             'metadata': {
+                'status': 'error',
                 'error': str(error),
-                'context': context
-            }
+                'context': context,
+            },
+        }
+
+    def handle_no_data(self, reason: str, context: str = "") -> Dict[str, Any]:
+        """
+        Return a 'no answer' result when the engine has no data to compute on
+        (rate-limit, empty response, asset not covered, etc.) — distinct from
+        an exception. Same null-score contract as :meth:`handle_error` so the
+        fusion engine skips this engine instead of treating it as 0.
+        """
+        self.logger.warning(
+            f"{self.name} no-data{': ' + context if context else ''}: {reason}"
+        )
+        return {
+            'score': None,
+            'confidence': 0.0,
+            'metadata': {
+                'status': 'no_data',
+                'reason': reason,
+                'context': context,
+            },
         }
     
     def create_result(

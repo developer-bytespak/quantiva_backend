@@ -93,7 +93,10 @@ export class EngineScoresService {
       const engineScores = signalData.engine_scores || {};
       const metadata = signalData.metadata || {};
 
-      // Extract all engine scores
+      // Extract all engine scores. ?? null preserves "engine returned null"
+      // (failed or no data) — Python's base_engine.handle_error / handle_no_data
+      // now return score=None for those cases. See fusion_engine.py for how
+      // null engines are excluded from the weighted sum.
       const sentimentScore = engineScores.sentiment?.score ?? null;
       const trendScore = engineScores.trend?.score ?? null;
       const fundamentalScore = engineScores.fundamental?.score ?? null;

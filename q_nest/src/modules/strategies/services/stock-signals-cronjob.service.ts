@@ -393,11 +393,15 @@ export class StockSignalsCronjobService {
         final_score: signalData.final_score,
         action: signalData.action,
         confidence: signalData.confidence,
-        sentiment_score: signalData.engine_scores?.sentiment?.score || 0,
-        trend_score: signalData.engine_scores?.trend?.score || 0,
-        fundamental_score: signalData.engine_scores?.fundamental?.score || 0,
-        liquidity_score: signalData.engine_scores?.liquidity?.score || 0,
-        event_risk_score: signalData.engine_scores?.event_risk?.score || 0,
+        // ?? null (not || 0) — Python now returns null for engines that
+        // failed or had no data. Preserving null into the DB lets us
+        // distinguish "engine evaluated and scored neutral" from "engine
+        // had no opinion." engine_metadata also records engines_skipped.
+        sentiment_score: signalData.engine_scores?.sentiment?.score ?? null,
+        trend_score: signalData.engine_scores?.trend?.score ?? null,
+        fundamental_score: signalData.engine_scores?.fundamental?.score ?? null,
+        liquidity_score: signalData.engine_scores?.liquidity?.score ?? null,
+        event_risk_score: signalData.engine_scores?.event_risk?.score ?? null,
         engine_metadata: signalData.engine_scores || {},
       },
     });

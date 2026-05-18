@@ -351,11 +351,14 @@ export class PreBuiltSignalsCronjobService {
           final_score: pythonSignal.final_score,
           action: pythonSignal.action,
           confidence: pythonSignal.confidence,
-          sentiment_score: pythonSignal.engine_scores?.sentiment?.score || 0,
-          trend_score: pythonSignal.engine_scores?.trend?.score || 0,
-          fundamental_score: pythonSignal.engine_scores?.fundamental?.score || 0,
-          liquidity_score: pythonSignal.engine_scores?.liquidity?.score || 0,
-          event_risk_score: pythonSignal.engine_scores?.event_risk?.score || 0,
+          // ?? null preserves Python's "no opinion" signal — see fusion_engine.py
+          // and base_engine.handle_error / handle_no_data. engine_metadata
+          // also records engines_skipped.
+          sentiment_score: pythonSignal.engine_scores?.sentiment?.score ?? null,
+          trend_score: pythonSignal.engine_scores?.trend?.score ?? null,
+          fundamental_score: pythonSignal.engine_scores?.fundamental?.score ?? null,
+          liquidity_score: pythonSignal.engine_scores?.liquidity?.score ?? null,
+          event_risk_score: pythonSignal.engine_scores?.event_risk?.score ?? null,
           engine_metadata: pythonSignal.engine_scores || {},
         },
       });
@@ -794,11 +797,12 @@ export class PreBuiltSignalsCronjobService {
           final_score: pythonSignal.final_score,
           action: pythonSignal.action,
           confidence: pythonSignal.confidence,
-          sentiment_score: pythonSignal.engine_scores?.sentiment?.score || 0,
-          trend_score: pythonSignal.engine_scores?.trend?.score || 0,
-          fundamental_score: pythonSignal.engine_scores?.fundamental?.score || 0,
-          liquidity_score: pythonSignal.engine_scores?.liquidity?.score || 0,
-          event_risk_score: pythonSignal.engine_scores?.event_risk?.score || 0,
+          // ?? null preserves "engine had no opinion" — see fusion_engine.py.
+          sentiment_score: pythonSignal.engine_scores?.sentiment?.score ?? null,
+          trend_score: pythonSignal.engine_scores?.trend?.score ?? null,
+          fundamental_score: pythonSignal.engine_scores?.fundamental?.score ?? null,
+          liquidity_score: pythonSignal.engine_scores?.liquidity?.score ?? null,
+          event_risk_score: pythonSignal.engine_scores?.event_risk?.score ?? null,
           engine_metadata: pythonSignal.engine_scores || {},
         },
       });
