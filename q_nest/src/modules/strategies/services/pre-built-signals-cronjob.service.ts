@@ -23,6 +23,15 @@ const VALID_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 // the custom-strategy skip-if-recent guard. One constant; two call sites.
 const SIGNAL_DEDUP_WINDOW_MS = 10 * 60 * 1000;
 
+// Heartbeat counters: tally what each cron run evaluated even though
+// we only persist BUY signals. Mutated inside the per-asset/strategy paths.
+interface RunHeartbeat {
+  buy: number;
+  hold: number;
+  sell: number;
+  failed: number;
+}
+
 @Injectable()
 export class PreBuiltSignalsCronjobService {
   private readonly logger = new Logger(PreBuiltSignalsCronjobService.name);
@@ -172,6 +181,7 @@ export class PreBuiltSignalsCronjobService {
       // Step 4: Process each asset through sentiment analysis and signal generation
       let processedCount = 0;
       let errorCount = 0;
+      const heartbeat: RunHeartbeat = { buy: 0, hold: 0, sell: 0, failed: 0 };
 
       // Process assets in batches
       for (let i = 0; i < trendingAssets.length; i += this.BATCH_SIZE) {
@@ -180,7 +190,7 @@ export class PreBuiltSignalsCronjobService {
         await Promise.allSettled(
           batch.map(async (asset) => {
             try {
-              await this.processAsset(asset, strategies, connectionInfo);
+              await this.processAsset(asset, strategies, connectionInfo, heartbeat);
               processedCount++;
             } catch (error: any) {
               errorCount++;
@@ -197,7 +207,13 @@ export class PreBuiltSignalsCronjobService {
       // Step 5: Generate LLM explanations for top N signals per strategy
       await this.generateLLMExplanationsForTopSignals(strategies);
 
-      await this.processActiveCustomStrategies(trendingAssets, connectionInfo);
+      await this.processActiveCustomStrategies(trendingAssets, connectionInfo, heartbeat);
+
+      // Heartbeat: how the engine decided across pre-built + custom this run.
+      // Only `buy` rows are persisted to strategy_signals; the rest are visible only here.
+      this.logger.log(
+        `Engine heartbeat (crypto): BUY=${heartbeat.buy} HOLD=${heartbeat.hold} SELL=${heartbeat.sell} failed=${heartbeat.failed} (HOLD/SELL not persisted)`,
+      );
     } catch (error: any) {
       this.logger.error(`Fatal error in pre-built signals generation: ${error.message}`, error.stack);
     } finally {
@@ -212,6 +228,7 @@ export class PreBuiltSignalsCronjobService {
     asset: any,
     strategies: any[],
     connectionInfo: { connectionId: string | null; exchange: string } | null,
+    heartbeat?: RunHeartbeat,
   ): Promise<void> {
     try {
       // Step 1: Run sentiment analysis (this also fetches news)
@@ -226,8 +243,10 @@ export class PreBuiltSignalsCronjobService {
             strategy.strategy_id,
             asset.asset_id,
             connectionInfo,
+            heartbeat,
           );
         } catch (error: any) {
+          if (heartbeat) heartbeat.failed++;
           // Continue with other strategies
         }
       }
@@ -260,6 +279,7 @@ export class PreBuiltSignalsCronjobService {
     strategyId: string,
     assetId: string,
     connectionInfo: { connectionId: string | null; exchange: string } | null,
+    heartbeat?: RunHeartbeat,
   ): Promise<void> {
     // Get strategy
     const strategy = await this.prisma.strategies.findUnique({
@@ -310,6 +330,16 @@ export class PreBuiltSignalsCronjobService {
         exchange: exchange,
         asset_symbol: assetSymbol,
       });
+
+      // BUY-only persistence — see top-of-file comment.
+      if (pythonSignal.action !== 'BUY') {
+        if (heartbeat) {
+          if (pythonSignal.action === 'SELL') heartbeat.sell++;
+          else heartbeat.hold++;
+        }
+        return;
+      }
+      if (heartbeat) heartbeat.buy++;
 
       // Store signal in database (without LLM for now - we'll generate LLM in batch later)
       const signal = await this.prisma.strategy_signals.create({
@@ -526,6 +556,7 @@ export class PreBuiltSignalsCronjobService {
   private async processActiveCustomStrategies(
     trendingAssets: any[],
     connectionInfo: { connectionId: string | null; exchange: string } | null,
+    heartbeat?: RunHeartbeat,
   ): Promise<void> {
     try {
       const customStrategies = await this.prisma.strategies.findMany({
@@ -671,9 +702,11 @@ export class PreBuiltSignalsCronjobService {
                 asset,
                 userConnectionInfo || connectionInfo,
                 marketData, // pre-fetched; skip the getMarketData round-trip inside
+                heartbeat,
               );
               customSignalsGenerated++;
             } catch {
+              if (heartbeat) heartbeat.failed++;
               customErrors++;
             }
           }
@@ -708,6 +741,7 @@ export class PreBuiltSignalsCronjobService {
     asset: any,
     connectionInfo: { connectionId: string | null; exchange: string } | null,
     preFetchedMarketData?: { price: number; volume_24h: number; asset_type: string },
+    heartbeat?: RunHeartbeat,
   ): Promise<void> {
     const marketData =
       preFetchedMarketData ??
@@ -739,6 +773,16 @@ export class PreBuiltSignalsCronjobService {
         exchange: exchange,
         asset_symbol: assetSymbol,
       });
+
+      // BUY-only persistence — see top-of-file comment.
+      if (pythonSignal.action !== 'BUY') {
+        if (heartbeat) {
+          if (pythonSignal.action === 'SELL') heartbeat.sell++;
+          else heartbeat.hold++;
+        }
+        return;
+      }
+      if (heartbeat) heartbeat.buy++;
 
       // Store signal in database with user_id
       const signal = await this.prisma.strategy_signals.create({
