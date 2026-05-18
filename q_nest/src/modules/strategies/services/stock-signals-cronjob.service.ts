@@ -8,6 +8,15 @@ import { StrategyExecutionService } from './strategy-execution.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { ConnectionStatus } from '@prisma/client';
 
+// Heartbeat counters: tally what each cron run evaluated even though
+// we only persist BUY signals. Mutated inside processStock -> executeStrategyForStock.
+interface RunHeartbeat {
+  buy: number;
+  hold: number;
+  sell: number;
+  failed: number;
+}
+
 @Injectable()
 export class StockSignalsCronjobService {
   private readonly logger = new Logger(StockSignalsCronjobService.name);
@@ -127,6 +136,7 @@ export class StockSignalsCronjobService {
       // Step 4: Process each stock through sentiment analysis and signal generation
       let processedCount = 0;
       let errorCount = 0;
+      const heartbeat: RunHeartbeat = { buy: 0, hold: 0, sell: 0, failed: 0 };
 
       // Process stocks in batches
       for (let i = 0; i < stocksToProcess.length; i += this.BATCH_SIZE) {
@@ -139,7 +149,7 @@ export class StockSignalsCronjobService {
         await Promise.allSettled(
           batch.map(async (stock) => {
             try {
-              await this.processStock(stock, stockStrategies, connectionInfo);
+              await this.processStock(stock, stockStrategies, connectionInfo, heartbeat);
               processedCount++;
             } catch (error: any) {
               errorCount++;
@@ -163,6 +173,11 @@ export class StockSignalsCronjobService {
       this.logger.log(
         `Stock signals generation completed: ${processedCount} processed, ${errorCount} errors, ${duration}ms`,
       );
+      // Heartbeat: how the engine decided on each (strategy, stock) pair this run.
+      // Only `buy` rows are persisted to strategy_signals; the rest are visible only here.
+      this.logger.log(
+        `Engine heartbeat: BUY=${heartbeat.buy} HOLD=${heartbeat.hold} SELL=${heartbeat.sell} failed=${heartbeat.failed} (HOLD/SELL not persisted)`,
+      );
     } catch (error: any) {
       this.logger.error(`Fatal error in stock signals generation: ${error.message}`, error.stack);
     } finally {
@@ -177,6 +192,7 @@ export class StockSignalsCronjobService {
     stock: any,
     strategies: any[],
     connectionInfo: { connectionId: string | null; exchange: string } | null,
+    heartbeat?: RunHeartbeat,
   ): Promise<void> {
     try {
       // Step 1: Run sentiment analysis (this also fetches news)
@@ -189,8 +205,10 @@ export class StockSignalsCronjobService {
             strategy.strategy_id,
             stock.asset_id,
             connectionInfo,
+            heartbeat,
           );
         } catch (error: any) {
+          if (heartbeat) heartbeat.failed++;
           this.logger.warn(
             `Error generating signal for strategy ${strategy.name} on stock ${stock.symbol}: ${error.message}`,
           );
@@ -233,6 +251,7 @@ export class StockSignalsCronjobService {
     strategyId: string,
     assetId: string,
     connectionInfo: { connectionId: string | null; exchange: string } | null,
+    heartbeat?: RunHeartbeat,
   ): Promise<void> {
     // Get strategy details first to determine type and user_id
     const strategy = await this.prisma.strategies.findUnique({
@@ -350,6 +369,20 @@ export class StockSignalsCronjobService {
       );
     }
 
+    // BUY-only persistence. Tally HOLD/SELL into the heartbeat and stop here —
+    // no signal row, no signal_details row, no LLM explanation queued.
+    if (signalData.action !== 'BUY') {
+      if (heartbeat) {
+        if (signalData.action === 'SELL') heartbeat.sell++;
+        else heartbeat.hold++;
+      }
+      this.logger.debug(
+        `Skipped persisting ${signalData.action} signal for strategy ${strategy.name} on ${asset.symbol} (final_score=${signalData.final_score}, conf=${signalData.confidence})`,
+      );
+      return;
+    }
+    if (heartbeat) heartbeat.buy++;
+
     // Store signal in database (without LLM for now - we'll generate LLM in batch later)
     const signal = await this.prisma.strategy_signals.create({
       data: {
@@ -360,11 +393,15 @@ export class StockSignalsCronjobService {
         final_score: signalData.final_score,
         action: signalData.action,
         confidence: signalData.confidence,
-        sentiment_score: signalData.engine_scores?.sentiment?.score || 0,
-        trend_score: signalData.engine_scores?.trend?.score || 0,
-        fundamental_score: signalData.engine_scores?.fundamental?.score || 0,
-        liquidity_score: signalData.engine_scores?.liquidity?.score || 0,
-        event_risk_score: signalData.engine_scores?.event_risk?.score || 0,
+        // ?? null (not || 0) — Python now returns null for engines that
+        // failed or had no data. Preserving null into the DB lets us
+        // distinguish "engine evaluated and scored neutral" from "engine
+        // had no opinion." engine_metadata also records engines_skipped.
+        sentiment_score: signalData.engine_scores?.sentiment?.score ?? null,
+        trend_score: signalData.engine_scores?.trend?.score ?? null,
+        fundamental_score: signalData.engine_scores?.fundamental?.score ?? null,
+        liquidity_score: signalData.engine_scores?.liquidity?.score ?? null,
+        event_risk_score: signalData.engine_scores?.event_risk?.score ?? null,
         engine_metadata: signalData.engine_scores || {},
       },
     });

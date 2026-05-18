@@ -60,8 +60,6 @@ export class StrategiesService {
             fundamental_score: true,
             liquidity_score: true,
             event_risk_score: true,
-            macro_score: true,
-            volatility_score: true,
             engine_metadata: true,
           },
           orderBy: { timestamp: 'desc' },

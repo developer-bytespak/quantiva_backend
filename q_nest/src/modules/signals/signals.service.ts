@@ -188,9 +188,13 @@ export class SignalsService {
     fundamental_score?: number;
     liquidity_score?: number;
     event_risk_score?: number;
-    macro_score?: number;
-    volatility_score?: number;
   }) {
+    // BUY-only persistence: HOLD/SELL are evaluated but not written.
+    // Engine liveness is still observable via cron heartbeat logs.
+    if (data.action !== SignalAction.BUY) {
+      return null;
+    }
+
     // Prevent duplicate signals for same strategy + asset within short execution window
     try {
       if (data.strategy_id && data.asset_id) {
@@ -212,7 +216,7 @@ export class SignalsService {
           }
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       // If the duplicate-check fails for any reason, fall back to creating the record
       this.logger.warn(`Duplicate check failed: ${err?.message || err}`);
     }
@@ -231,8 +235,6 @@ export class SignalsService {
         fundamental_score: data.fundamental_score,
         liquidity_score: data.liquidity_score,
         event_risk_score: data.event_risk_score,
-        macro_score: data.macro_score,
-        volatility_score: data.volatility_score,
       },
       include: {
         strategy: true,
@@ -251,8 +253,6 @@ export class SignalsService {
     fundamental_score?: number;
     liquidity_score?: number;
     event_risk_score?: number;
-    macro_score?: number;
-    volatility_score?: number;
   }) {
     return this.prisma.strategy_signals.update({
       where: { signal_id: id },
@@ -312,7 +312,7 @@ export class SignalsService {
           orderBy: { created_at: 'desc' },
         });
         if (existing) return existing;
-      } catch (err) {
+      } catch (err: any) {
         this.logger.warn(`Explanation lookup failed: ${err?.message || err}`);
       }
 
@@ -367,7 +367,9 @@ export class SignalsService {
         portfolio_value: portfolioValue,
       });
 
-      // Store signal in database
+      // Store signal in database (returns null for HOLD/SELL — only BUYs persist)
+      // Score fields use ?? null so engines that returned null (failed or no
+      // data) survive into the DB instead of being coerced to a misleading 0.
       const signal = await this.create({
         strategy_id: strategyId,
         user_id: strategyData.user_id,
@@ -376,12 +378,17 @@ export class SignalsService {
         final_score: pythonSignal.final_score,
         action: pythonSignal.action as SignalAction,
         confidence: pythonSignal.confidence,
-        sentiment_score: pythonSignal.engine_scores?.sentiment || 0,
-        trend_score: pythonSignal.engine_scores?.trend || 0,
-        fundamental_score: pythonSignal.engine_scores?.fundamental || 0,
-        liquidity_score: pythonSignal.engine_scores?.liquidity || 0,
-        event_risk_score: pythonSignal.engine_scores?.event_risk || 0,
+        sentiment_score: pythonSignal.engine_scores?.sentiment?.score ?? pythonSignal.engine_scores?.sentiment ?? null,
+        trend_score: pythonSignal.engine_scores?.trend?.score ?? pythonSignal.engine_scores?.trend ?? null,
+        fundamental_score: pythonSignal.engine_scores?.fundamental?.score ?? pythonSignal.engine_scores?.fundamental ?? null,
+        liquidity_score: pythonSignal.engine_scores?.liquidity?.score ?? pythonSignal.engine_scores?.liquidity ?? null,
+        event_risk_score: pythonSignal.engine_scores?.event_risk?.score ?? pythonSignal.engine_scores?.event_risk ?? null,
       });
+
+      if (!signal) {
+        // Action was HOLD/SELL and the BUY-only filter skipped persistence.
+        return null;
+      }
 
       // Store signal details if position sizing is available
       if (pythonSignal.position_sizing) {

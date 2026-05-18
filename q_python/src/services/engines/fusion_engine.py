@@ -120,42 +120,75 @@ class FusionEngine(BaseEngine):
             # per-strategy differentiation fix.
             active_weights = _normalize_weights(weights)
 
-            # Extract scores (default to 0 if not provided)
-            sentiment_score = engine_scores.get('sentiment', {}).get('score', 0.0)
-            trend_score = engine_scores.get('trend', {}).get('score', 0.0)
-            fundamental_score = engine_scores.get('fundamental', {}).get('score', 0.0)
-            event_risk_score = engine_scores.get('event_risk', {}).get('score', 0.0)
-            liquidity_score = engine_scores.get('liquidity', {}).get('score', 0.0)
+            # Extract scores. An engine that failed or had no data returns
+            # ``score = None`` (see BaseEngine.handle_error / handle_no_data).
+            # We deliberately do NOT coerce None to 0 here — a silent 0 drags
+            # the final score toward HOLD even though the engine had no
+            # opinion. Instead we build a "valid scores" view and re-normalize
+            # the surviving weights to sum to 1.0.
+            raw_scores: Dict[str, Optional[float]] = {
+                key: engine_scores.get(key, {}).get('score') for key in _WEIGHT_KEYS
+            }
 
-            # Calculate weighted final score using the strategy's weights
-            final_score = (
-                active_weights['sentiment'] * sentiment_score +
-                active_weights['trend'] * trend_score +
-                active_weights['fundamental'] * fundamental_score +
-                active_weights['event_risk'] * event_risk_score +
-                active_weights['liquidity'] * liquidity_score
+            valid_scores: Dict[str, float] = {}
+            engines_skipped: list[str] = []
+            for key, val in raw_scores.items():
+                if val is None or (isinstance(val, float) and (val != val)):  # None or NaN
+                    engines_skipped.append(key)
+                else:
+                    try:
+                        valid_scores[key] = float(val)
+                    except (TypeError, ValueError):
+                        engines_skipped.append(key)
+
+            # event_risk_score is used by _determine_action for the safety
+            # override; if it was skipped, treat as 0.0 for that check (i.e.,
+            # no event-risk veto when we have no event-risk data).
+            event_risk_score_for_action = valid_scores.get('event_risk', 0.0)
+
+            if not valid_scores:
+                # Nothing to fuse — surface as no_data instead of a fake 0.
+                return self.handle_no_data(
+                    'all engines returned null',
+                    context=f"asset={asset_id} type={asset_type}",
+                )
+
+            valid_weight_sum = sum(active_weights[k] for k in valid_scores)
+            if valid_weight_sum <= 0:
+                # All non-null engines have zero weight; treat as no_data.
+                return self.handle_no_data(
+                    'no weight assigned to engines with valid scores',
+                    context=f"asset={asset_id} type={asset_type}",
+                )
+
+            rebalanced_weights: Dict[str, float] = {
+                k: active_weights[k] / valid_weight_sum for k in valid_scores
+            }
+
+            final_score = sum(
+                rebalanced_weights[k] * valid_scores[k] for k in valid_scores
             )
 
             # Determine action using per-strategy thresholds (falls back
             # to asset-type defaults when not supplied).
             action = self._determine_action(
                 final_score,
-                event_risk_score,
+                event_risk_score_for_action,
                 asset_type,
                 buy_threshold=buy_threshold,
                 sell_threshold=sell_threshold,
             )
 
-            # Calculate overall confidence — weighted by the SAME profile
-            # so confidence reflects the strategy's own priorities.
+            # Calculate overall confidence — only across engines that
+            # actually contributed a score. A skipped (None) engine doesn't
+            # have a meaningful confidence to factor in.
             confidences = []
             weight_used = []
-            for key in _WEIGHT_KEYS:
-                if key in engine_scores:
-                    conf = engine_scores[key].get('confidence', 0.0)
-                    if conf and conf > 0:
-                        confidences.append(conf)
-                        weight_used.append(active_weights[key])
+            for key in valid_scores:
+                conf = engine_scores.get(key, {}).get('confidence', 0.0)
+                if conf and conf > 0:
+                    confidences.append(conf)
+                    weight_used.append(rebalanced_weights[key])
 
             if confidences and weight_used:
                 total_weight = sum(weight_used)
@@ -167,16 +200,23 @@ class FusionEngine(BaseEngine):
             else:
                 overall_confidence = 0.5
 
+            # When less than half of the engines contributed, knock confidence
+            # down — even a fused score from 1-2 engines is shakier than one
+            # built from all 5.
+            if len(valid_scores) < (len(_WEIGHT_KEYS) / 2.0):
+                overall_confidence *= 0.5
+
             metadata = {
                 'action': action,
-                'score_breakdown': {
-                    'sentiment': sentiment_score,
-                    'trend': trend_score,
-                    'fundamental': fundamental_score,
-                    'event_risk': event_risk_score,
-                    'liquidity': liquidity_score
-                },
+                # Full per-engine view (None for engines that were skipped) —
+                # written to strategy_signals.engine_metadata so a HOLD/BUY
+                # can be inspected to see WHY: which engines voted, which
+                # were missing, and what weight each one carried.
+                'score_breakdown': raw_scores,
+                'engines_used': sorted(valid_scores.keys()),
+                'engines_skipped': sorted(engines_skipped),
                 'weights': active_weights,
+                'rebalanced_weights': rebalanced_weights,
                 'weights_source': 'strategy' if weights else 'default',
             }
 
