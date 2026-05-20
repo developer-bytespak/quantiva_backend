@@ -18,6 +18,7 @@ import { CustomStrategyCronjobService } from './services/custom-strategy-cronjob
 import { StockTrendingService } from './services/stock-trending.service';
 import { AlpacaSyncCronjobService } from './services/alpaca-sync-cronjob.service';
 import { PaperTradingService } from './services/paper-trading.service';
+import { EngineHealthService } from './services/engine-health.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { KycModule } from '../../kyc/kyc.module';
 import { SignalsModule } from '../signals/signals.module';
@@ -75,6 +76,7 @@ import { QhqTokenModule } from '../qhq-token/qhq-token.module';
     CustomStrategyCronjobService,
     StockTrendingService,
     FeatureAccessService,
+    EngineHealthService,
   ],
   exports: [
     StrategiesService,

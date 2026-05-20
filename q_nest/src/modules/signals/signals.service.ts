@@ -235,6 +235,7 @@ export class SignalsService {
         fundamental_score: data.fundamental_score,
         liquidity_score: data.liquidity_score,
         event_risk_score: data.event_risk_score,
+        engine_metadata: { _writer: 'signals-service-create' },
       },
       include: {
         strategy: true,

@@ -10,6 +10,7 @@ import { StrategyExecutionService } from './services/strategy-execution.service'
 import { PreBuiltSignalsCronjobService } from './services/pre-built-signals-cronjob.service';
 import { StockSignalsCronjobService } from './services/stock-signals-cronjob.service';
 import { CustomStrategyCronjobService } from './services/custom-strategy-cronjob.service';
+import { EngineHealthService } from './services/engine-health.service';
 import { NewsCronjobService } from '../news/news-cronjob.service';
 import { NewsService } from '../news/news.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -52,6 +53,7 @@ export class StrategiesController {
     private readonly notificationsService: NotificationsService,
     private readonly qhqService: QhqTokenService,
     private readonly stockQuoteCacheService: StockQuoteCacheService,
+    private readonly engineHealthService: EngineHealthService,
 
   ) {
     this.pythonApiUrl = this.configService.get<string>('PYTHON_API_URL') || 'http://localhost:8000/api/v1';
@@ -2333,6 +2335,20 @@ export class StrategiesController {
   @HttpCode(HttpStatus.OK)
   async triggerPreBuiltSignals(@Body() body?: { connectionId?: string }) {
     return this.preBuiltSignalsCronjobService.triggerManualGeneration(body || undefined);
+  }
+
+  /**
+   * Engine health snapshot. Probes each of the 5 engines against a canary
+   * asset (BTC for crypto, AAPL for stocks) via the Python signal generator,
+   * pings every third-party data source with the same URL/auth the engine
+   * code uses, and checks the signal-generation cron is actually writing
+   * fresh rows. Useful for diagnosing "why are some strategies producing 0
+   * BUYs?" without grepping engine_metadata by hand.
+   */
+  @UseGuards(AdminOrUserJwtGuard)
+  @Get('engine-health')
+  async getEngineHealth() {
+    return this.engineHealthService.getHealth();
   }
 
   /**

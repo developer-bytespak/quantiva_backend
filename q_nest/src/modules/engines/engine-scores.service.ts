@@ -125,6 +125,7 @@ export class EngineScoresService {
             liquidity: engineScores.liquidity?.metadata || {},
             event_risk: engineScores.event_risk?.metadata || {},
             fusion: metadata,
+            _writer: 'engine-scores-snapshot',
           },
         },
       });
