@@ -185,7 +185,13 @@ export class StrategiesController {
       return { assets: [], insights: [] };
     }
 
-    // Get signals for these assets with this strategy (BUY only - we only use buy signals)
+    // Get signals for these assets with this strategy (BUY only - we only use buy signals).
+    // Freshness filter (24h rolling): older BUYs are stale recommendations — the market has
+    // moved on since the engine evaluated. Hiding them prevents users from acting on outdated
+    // signals. If a strategy has no fresh BUYs, the page legitimately shows empty — that's
+    // safer than showing a 30-day-old "BUY BTC" card.
+    const FRESHNESS_WINDOW_MS = 24 * 60 * 60 * 1000;
+    const freshSince = new Date(Date.now() - FRESHNESS_WINDOW_MS);
     const assetIds = assets.map(a => a.asset_id);
     const signals = await this.prisma.strategy_signals.findMany({
       where: {
@@ -193,6 +199,7 @@ export class StrategiesController {
         asset_id: { in: assetIds },
         user_id: null,
         action: 'BUY',
+        timestamp: { gte: freshSince },
       },
       include: {
         details: {
@@ -1953,13 +1960,17 @@ export class StrategiesController {
       };
     }
 
-    // Get signals for these assets with this strategy (BUY only)
+    // Get signals for these assets with this strategy (BUY only).
+    // Same 24h freshness filter as the pre-built path — keep them in sync.
+    const FRESHNESS_WINDOW_MS = 24 * 60 * 60 * 1000;
+    const freshSince = new Date(Date.now() - FRESHNESS_WINDOW_MS);
     const assetIds = assets.map(a => a.asset_id).filter(Boolean);
     const signals = await this.prisma.strategy_signals.findMany({
       where: {
         strategy_id: strategyId,
         asset_id: { in: assetIds },
         action: 'BUY',
+        timestamp: { gte: freshSince },
       },
       include: {
         details: {
