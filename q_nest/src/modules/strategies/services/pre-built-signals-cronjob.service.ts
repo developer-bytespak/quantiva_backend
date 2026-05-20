@@ -359,7 +359,7 @@ export class PreBuiltSignalsCronjobService {
           fundamental_score: pythonSignal.engine_scores?.fundamental?.score ?? null,
           liquidity_score: pythonSignal.engine_scores?.liquidity?.score ?? null,
           event_risk_score: pythonSignal.engine_scores?.event_risk?.score ?? null,
-          engine_metadata: pythonSignal.engine_scores || {},
+          engine_metadata: { ...(pythonSignal.engine_scores || {}), _writer: 'pre-built-cronjob-system' },
         },
       });
 
@@ -803,7 +803,7 @@ export class PreBuiltSignalsCronjobService {
           fundamental_score: pythonSignal.engine_scores?.fundamental?.score ?? null,
           liquidity_score: pythonSignal.engine_scores?.liquidity?.score ?? null,
           event_risk_score: pythonSignal.engine_scores?.event_risk?.score ?? null,
-          engine_metadata: pythonSignal.engine_scores || {},
+          engine_metadata: { ...(pythonSignal.engine_scores || {}), _writer: 'pre-built-cronjob-user' },
         },
       });
 

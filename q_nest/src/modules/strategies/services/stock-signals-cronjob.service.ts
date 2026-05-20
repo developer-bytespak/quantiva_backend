@@ -402,7 +402,7 @@ export class StockSignalsCronjobService {
         fundamental_score: signalData.engine_scores?.fundamental?.score ?? null,
         liquidity_score: signalData.engine_scores?.liquidity?.score ?? null,
         event_risk_score: signalData.engine_scores?.event_risk?.score ?? null,
-        engine_metadata: signalData.engine_scores || {},
+        engine_metadata: { ...(signalData.engine_scores || {}), _writer: 'stock-signals-cronjob' },
       },
     });
 
