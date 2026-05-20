@@ -6,6 +6,7 @@ import { PythonApiService } from '../../../kyc/integrations/python-api.service';
 import { PreBuiltStrategiesService } from './pre-built-strategies.service';
 import { StrategyExecutionService } from './strategy-execution.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
+import { BinanceService } from '../../binance/binance.service';
 import { ConnectionStatus, StrategyType } from '@prisma/client';
 
 // Keep in sync with the default profile in q_python fusion_engine.py.
@@ -47,6 +48,7 @@ export class PreBuiltSignalsCronjobService {
     @Inject(forwardRef(() => ExchangesService))
     private exchangesService: ExchangesService,
     private config: ConfigService,
+    private binanceService: BinanceService,
   ) {}
 
   /**
@@ -323,9 +325,27 @@ export class PreBuiltSignalsCronjobService {
     try {
       // Call Python API to generate signal
       const assetSymbol = asset.symbol || assetId;
+
+      // Pre-fetch order book from Binance public REST so Python's liquidity
+      // engine has data to work with. Without this, liquidity_score is always
+      // 0 (see signal_generator.py:124 — engine bails when order_book missing).
+      // Best-effort: any fetch failure falls back to no order_book, which is
+      // the previous behavior — strictly safer than the current state.
+      let orderBook: any = undefined;
+      try {
+        const ob = await this.binanceService.getOrderBook(assetSymbol, 20);
+        if (ob && ob.bids?.length && ob.asks?.length) {
+          orderBook = { bids: ob.bids, asks: ob.asks };
+        }
+      } catch (_err) {
+        // Symbol probably not on Binance (PEAQ, UB, etc.) — skip silently;
+        // the cron's own logging already records the INVALID-SYMBOL warning.
+      }
+
       const pythonSignal = await this.pythonApi.generateSignal(strategyId, assetId, {
         strategy_data: strategyData,
         market_data: marketData,
+        order_book: orderBook,
         connection_id: connectionId,
         exchange: exchange,
         asset_symbol: assetSymbol,
