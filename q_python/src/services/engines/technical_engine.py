@@ -87,12 +87,12 @@ class TechnicalEngine(BaseEngine):
                 ohlcv_1d = multi_timeframe_data.get('1d')
                 ohlcv_4h = multi_timeframe_data.get('4h')
                 ohlcv_1h = multi_timeframe_data.get('1h')
-                
+
                 # Calculate trend score using multi-timeframe formula
                 trend_score, indicators_by_timeframe = self._calculate_multi_timeframe_trend_score(
                     ohlcv_1d, ohlcv_4h, ohlcv_1h, ohlcv_data
                 )
-                
+
                 # Calculate confidence based on data quality
                 data_points = max(
                     len(ohlcv_1d) if ohlcv_1d is not None else 0,
@@ -106,24 +106,10 @@ class TechnicalEngine(BaseEngine):
             else:
                 # Fallback to single timeframe calculation
                 if ohlcv_data is None or ohlcv_data.empty:
-                    # If no OHLCV data and no connection_id, return neutral score instead of error
-                    # This allows preview to work even without user connection
-                    if not connection_id:
-                        self.logger.warning(
-                            f"No OHLCV data and no connection_id for {asset_id}. "
-                            f"Returning neutral trend score. For real scores, ensure user has active exchange connection."
-                        )
-                        return self.create_result(
-                            0.0,
-                            0.0,
-                            {
-                                'note': 'No OHLCV data available - connection_id required for data fetching',
-                                'indicators': {},
-                                'data_available': False
-                            }
-                        )
-                    else:
-                        return self.handle_error(ValueError("No OHLCV data provided"), "data")
+                    return self.handle_no_data(
+                        "OHLCV data unavailable (Binance/Alpaca fetch returned empty or asset not covered)",
+                        context=f"asset_id={asset_id} asset_type={asset_type}"
+                    )
                 
                 # Ensure required columns exist
                 required_cols = ['open', 'high', 'low', 'close', 'volume']
