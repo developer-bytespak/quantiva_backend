@@ -21,4 +21,11 @@ export class OnboardingController {
   async acknowledgeFreeTier(@CurrentUser() user: TokenPayload) {
     return this.onboardingService.acknowledgeFreeTier(user.sub);
   }
+
+  @Get('free-signal-trades')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  async getFreeSignalTradesQuota(@CurrentUser() user: TokenPayload) {
+    return this.onboardingService.getFreeSignalTradesQuota(user.sub);
+  }
 }

@@ -908,6 +908,8 @@ export class ExchangesController {
         {
           closePosition: placeOrderDto.closePosition,
           cancelOpenOrders: placeOrderDto.cancelOpenOrders,
+          userId: user?.sub,
+          source: placeOrderDto.source,
         },
       );
     } catch (err: any) {
