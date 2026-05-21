@@ -7,6 +7,7 @@ import { PreBuiltStrategiesService } from './pre-built-strategies.service';
 import { StrategyExecutionService } from './strategy-execution.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { BinanceService } from '../../binance/binance.service';
+import { SignalsService } from '../../signals/signals.service';
 import { ConnectionStatus, StrategyType } from '@prisma/client';
 
 // Keep in sync with the default profile in q_python fusion_engine.py.
@@ -49,6 +50,8 @@ export class PreBuiltSignalsCronjobService {
     private exchangesService: ExchangesService,
     private config: ConfigService,
     private binanceService: BinanceService,
+    @Inject(forwardRef(() => SignalsService))
+    private signalsService: SignalsService,
   ) {}
 
   /**
@@ -169,9 +172,14 @@ export class PreBuiltSignalsCronjobService {
         return;
       }
 
-      // Pass false for enrichWithRealtime — the cron only needs asset IDs to process,
-      // not live Binance stats, which would fire 50 × weight-2 calls every 10 minutes.
-      const trendingAssets = await this.preBuiltStrategiesService.getTopTrendingAssets(50, false);
+      // Philosophy 3: merge market_rankings (all tradeable Binance coins) with
+      // trending_assets (LunarCrush social signal). Result is broader coverage
+      // than LunarCrush-only — mainstream Binance coins like BTC/ETH/SOL get
+      // included even when they aren't socially trending that day.
+      //
+      // enrichWithRealtime=false: cron only needs asset IDs to process. Skipping
+      // realtime enrichment saves ~250 Binance API calls per cron tick.
+      const trendingAssets = await this.preBuiltStrategiesService.getMergedTopAssets(250, false);
       if (trendingAssets.length === 0) {
         return;
       }
@@ -314,14 +322,6 @@ export class PreBuiltSignalsCronjobService {
       user_id: null, // System-level execution (overrides strategy.user_id)
     });
 
-    // Phase 2b — app-level dedup: skip if we already wrote a signal for
-    // this (strategy, asset) in the last 10 minutes. Prevents duplicates
-    // when scheduled + manual triggers race, or when two instances each
-    // run the cron (before ENABLE_CRONS is properly set).
-    if (await this.hasRecentSignal(strategyId, assetId, null)) {
-      return;
-    }
-
     try {
       // Call Python API to generate signal
       const assetSymbol = asset.symbol || assetId;
@@ -329,8 +329,7 @@ export class PreBuiltSignalsCronjobService {
       // Pre-fetch order book from Binance public REST so Python's liquidity
       // engine has data to work with. Without this, liquidity_score is always
       // 0 (see signal_generator.py:124 — engine bails when order_book missing).
-      // Best-effort: any fetch failure falls back to no order_book, which is
-      // the previous behavior — strictly safer than the current state.
+      // Best-effort: any fetch failure falls back to no order_book.
       let orderBook: any = undefined;
       try {
         const ob = await this.binanceService.getOrderBook(assetSymbol, 20);
@@ -338,8 +337,7 @@ export class PreBuiltSignalsCronjobService {
           orderBook = { bids: ob.bids, asks: ob.asks };
         }
       } catch (_err) {
-        // Symbol probably not on Binance (PEAQ, UB, etc.) — skip silently;
-        // the cron's own logging already records the INVALID-SYMBOL warning.
+        // Symbol probably not on Binance (PEAQ, UB, etc.) — skip silently.
       }
 
       const pythonSignal = await this.pythonApi.generateSignal(strategyId, assetId, {
@@ -351,54 +349,35 @@ export class PreBuiltSignalsCronjobService {
         asset_symbol: assetSymbol,
       });
 
-      // BUY-only persistence — see top-of-file comment.
-      if (pythonSignal.action !== 'BUY') {
-        if (heartbeat) {
-          if (pythonSignal.action === 'SELL') heartbeat.sell++;
-          else heartbeat.hold++;
-        }
-        return;
-      }
-      if (heartbeat) heartbeat.buy++;
-
-      // Store signal in database (without LLM for now - we'll generate LLM in batch later)
-      const signal = await this.prisma.strategy_signals.create({
-        data: {
-          strategy_id: strategyId,
-          user_id: null, // System-generated signal
-          asset_id: assetId,
-          timestamp: new Date(),
-          final_score: pythonSignal.final_score,
-          action: pythonSignal.action,
-          confidence: pythonSignal.confidence,
-          // ?? null preserves Python's "no opinion" signal — see fusion_engine.py
-          // and base_engine.handle_error / handle_no_data. engine_metadata
-          // also records engines_skipped.
-          sentiment_score: pythonSignal.engine_scores?.sentiment?.score ?? null,
-          trend_score: pythonSignal.engine_scores?.trend?.score ?? null,
-          fundamental_score: pythonSignal.engine_scores?.fundamental?.score ?? null,
-          liquidity_score: pythonSignal.engine_scores?.liquidity?.score ?? null,
-          event_risk_score: pythonSignal.engine_scores?.event_risk?.score ?? null,
-          engine_metadata: { ...(pythonSignal.engine_scores || {}), _writer: 'pre-built-cronjob-system' },
-        },
+      // Upsert/delete: the DB row mirrors the engine's CURRENT opinion.
+      //   BUY  → insert new OR refresh existing (same signal_id, FK-safe)
+      //   HOLD/SELL → delete the existing BUY for this (strategy, asset)
+      const stopLossValue = strategy.stop_loss_value ? Number(strategy.stop_loss_value) : null;
+      const takeProfitValue = strategy.take_profit_value ? Number(strategy.take_profit_value) : null;
+      const result = await this.signalsService.upsertOrDeleteFromEngine({
+        strategy_id: strategyId,
+        asset_id: assetId,
+        user_id: null, // System-generated signal
+        action: pythonSignal.action,
+        final_score: pythonSignal.final_score,
+        confidence: pythonSignal.confidence,
+        engine_scores: pythonSignal.engine_scores,
+        engine_metadata: { ...(pythonSignal.engine_scores || {}), _writer: 'pre-built-cronjob-system' },
+        entry_price: marketData.price,
+        position_size: pythonSignal.position_sizing?.position_size,
+        stop_loss: stopLossValue ? marketData.price * (1 - stopLossValue / 100) : null,
+        take_profit_1: takeProfitValue ? marketData.price * (1 + takeProfitValue / 100) : null,
       });
 
-      // Store signal details if position sizing is available
-      if (pythonSignal.position_sizing) {
-        const stopLossValue = strategy.stop_loss_value ? Number(strategy.stop_loss_value) : null;
-        const takeProfitValue = strategy.take_profit_value ? Number(strategy.take_profit_value) : null;
-
-        await this.prisma.signal_details.create({
-          data: {
-            signal_id: signal.signal_id,
-            entry_price: marketData.price,
-            position_size: pythonSignal.position_sizing.position_size,
-            position_value: pythonSignal.position_sizing.position_size * marketData.price,
-            stop_loss: stopLossValue ? marketData.price * (1 - stopLossValue / 100) : null,
-            take_profit_1: takeProfitValue ? marketData.price * (1 + takeProfitValue / 100) : null,
-            metadata: pythonSignal.metadata || {},
-          },
-        });
+      if (heartbeat) {
+        if (pythonSignal.action === 'BUY') heartbeat.buy++;
+        else if (pythonSignal.action === 'SELL') heartbeat.sell++;
+        else heartbeat.hold++;
+      }
+      if (result.deleted) {
+        this.logger.debug(
+          `Engine flipped — deleted stale BUY for strategy ${strategyId} asset ${assetId} (engine now: ${pythonSignal.action})`,
+        );
       }
     } catch (error: any) {
       throw error;
@@ -776,73 +755,56 @@ export class PreBuiltSignalsCronjobService {
     const strategyData = this.buildStrategyData(strategy);
 
     try {
-      // Phase 2b — same app-level dedup helper as the pre-built branch.
-      if (
-        await this.hasRecentSignal(
-          strategy.strategy_id,
-          asset.asset_id,
-          strategy.user_id ?? null,
-        )
-      ) {
-        return;
-      }
-
       // Call Python API to generate signal
       const assetSymbol = asset.symbol || asset.asset_id;
+
+      // Pre-fetch order book so Python's liquidity engine has data to work with.
+      let orderBook: any = undefined;
+      try {
+        const ob = await this.binanceService.getOrderBook(assetSymbol, 20);
+        if (ob && ob.bids?.length && ob.asks?.length) {
+          orderBook = { bids: ob.bids, asks: ob.asks };
+        }
+      } catch (_err) {
+        // Symbol not on Binance — skip silently.
+      }
+
       const pythonSignal = await this.pythonApi.generateSignal(strategy.strategy_id, asset.asset_id, {
         strategy_data: strategyData,
         market_data: marketData,
+        order_book: orderBook,
         connection_id: connectionId,
         exchange: exchange,
         asset_symbol: assetSymbol,
       });
 
-      // BUY-only persistence — see top-of-file comment.
-      if (pythonSignal.action !== 'BUY') {
-        if (heartbeat) {
-          if (pythonSignal.action === 'SELL') heartbeat.sell++;
-          else heartbeat.hold++;
-        }
-        return;
-      }
-      if (heartbeat) heartbeat.buy++;
-
-      // Store signal in database with user_id
-      const signal = await this.prisma.strategy_signals.create({
-        data: {
-          strategy_id: strategy.strategy_id,
-          user_id: strategy.user_id, // Associate with user
-          asset_id: asset.asset_id,
-          timestamp: new Date(),
-          final_score: pythonSignal.final_score,
-          action: pythonSignal.action,
-          confidence: pythonSignal.confidence,
-          // ?? null preserves "engine had no opinion" — see fusion_engine.py.
-          sentiment_score: pythonSignal.engine_scores?.sentiment?.score ?? null,
-          trend_score: pythonSignal.engine_scores?.trend?.score ?? null,
-          fundamental_score: pythonSignal.engine_scores?.fundamental?.score ?? null,
-          liquidity_score: pythonSignal.engine_scores?.liquidity?.score ?? null,
-          event_risk_score: pythonSignal.engine_scores?.event_risk?.score ?? null,
-          engine_metadata: { ...(pythonSignal.engine_scores || {}), _writer: 'pre-built-cronjob-user' },
-        },
+      // Upsert/delete: DB row mirrors the engine's CURRENT opinion.
+      const stopLossValue = strategy.stop_loss_value ? Number(strategy.stop_loss_value) : null;
+      const takeProfitValue = strategy.take_profit_value ? Number(strategy.take_profit_value) : null;
+      const result = await this.signalsService.upsertOrDeleteFromEngine({
+        strategy_id: strategy.strategy_id,
+        asset_id: asset.asset_id,
+        user_id: strategy.user_id, // Associate with user
+        action: pythonSignal.action,
+        final_score: pythonSignal.final_score,
+        confidence: pythonSignal.confidence,
+        engine_scores: pythonSignal.engine_scores,
+        engine_metadata: { ...(pythonSignal.engine_scores || {}), _writer: 'pre-built-cronjob-user' },
+        entry_price: marketData.price,
+        position_size: pythonSignal.position_sizing?.position_size,
+        stop_loss: stopLossValue ? marketData.price * (1 - stopLossValue / 100) : null,
+        take_profit_1: takeProfitValue ? marketData.price * (1 + takeProfitValue / 100) : null,
       });
 
-      // Store signal details if position sizing is available
-      if (pythonSignal.position_sizing) {
-        const stopLossValue = strategy.stop_loss_value ? Number(strategy.stop_loss_value) : null;
-        const takeProfitValue = strategy.take_profit_value ? Number(strategy.take_profit_value) : null;
-
-        await this.prisma.signal_details.create({
-          data: {
-            signal_id: signal.signal_id,
-            entry_price: marketData.price,
-            position_size: pythonSignal.position_sizing.position_size,
-            position_value: pythonSignal.position_sizing.position_size * marketData.price,
-            stop_loss: stopLossValue ? marketData.price * (1 - stopLossValue / 100) : null,
-            take_profit_1: takeProfitValue ? marketData.price * (1 + takeProfitValue / 100) : null,
-            metadata: pythonSignal.metadata || {},
-          },
-        });
+      if (heartbeat) {
+        if (pythonSignal.action === 'BUY') heartbeat.buy++;
+        else if (pythonSignal.action === 'SELL') heartbeat.sell++;
+        else heartbeat.hold++;
+      }
+      if (result.deleted) {
+        this.logger.debug(
+          `Engine flipped — deleted stale BUY for user-custom strategy ${strategy.strategy_id} asset ${asset.asset_id}`,
+        );
       }
     } catch (error: any) {
       throw error;

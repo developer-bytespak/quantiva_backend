@@ -176,8 +176,11 @@ export class StrategiesController {
         });
       }
     } else {
-      assets = await this.preBuiltStrategiesService.getTopTrendingAssets(limitNum, true, userId);
-      this.logger.log(`Retrieved ${assets.length} crypto assets for ${exchangeLabel}`);
+      // Philosophy 3 — use the merged universe (market_rankings ⨝ trending_assets)
+      // so users see the same coins the signal cron processes. Trending coins
+      // come first, then mainstream Binance coins as fallback coverage.
+      assets = await this.preBuiltStrategiesService.getMergedTopAssets(limitNum, true, userId);
+      this.logger.log(`Retrieved ${assets.length} crypto assets for ${exchangeLabel} (merged universe)`);
     }
     
     if (assets.length === 0) {

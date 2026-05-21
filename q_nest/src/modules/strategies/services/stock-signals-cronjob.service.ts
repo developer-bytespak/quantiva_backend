@@ -6,6 +6,7 @@ import { PreBuiltStrategiesService } from './pre-built-strategies.service';
 import { StockTrendingService } from './stock-trending.service';
 import { StrategyExecutionService } from './strategy-execution.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
+import { SignalsService } from '../../signals/signals.service';
 import { ConnectionStatus } from '@prisma/client';
 
 // Heartbeat counters: tally what each cron run evaluated even though
@@ -33,6 +34,8 @@ export class StockSignalsCronjobService {
     private strategyExecutionService: StrategyExecutionService,
     @Inject(forwardRef(() => ExchangesService))
     private exchangesService: ExchangesService,
+    @Inject(forwardRef(() => SignalsService))
+    private signalsService: SignalsService,
   ) {}
 
   /**
@@ -262,32 +265,6 @@ export class StockSignalsCronjobService {
       throw new Error(`Strategy ${strategyId} not found`);
     }
 
-    // Check if a signal already exists for this strategy+asset within the last 10 minutes
-    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-    const whereClause = {
-      strategy_id: strategyId,
-      asset_id: assetId,
-      timestamp: { gte: tenMinutesAgo },
-    };
-
-    // For custom strategies, check with the specific user_id; for admin strategies, check with null user_id
-    if (strategy.type === 'user') {
-      whereClause['user_id'] = strategy.user_id;
-    } else {
-      whereClause['user_id'] = null;
-    }
-
-    const existingSignal = await this.prisma.strategy_signals.findFirst({
-      where: whereClause,
-    });
-
-    if (existingSignal) {
-      this.logger.debug(
-        `Skipping signal generation for strategy ${strategyId} on asset ${assetId} - recent signal exists`,
-      );
-      return;
-    }
-
     // Get asset details
     const asset = await this.prisma.assets.findUnique({
       where: { asset_id: assetId },
@@ -369,64 +346,40 @@ export class StockSignalsCronjobService {
       );
     }
 
-    // BUY-only persistence. Tally HOLD/SELL into the heartbeat and stop here —
-    // no signal row, no signal_details row, no LLM explanation queued.
-    if (signalData.action !== 'BUY') {
-      if (heartbeat) {
-        if (signalData.action === 'SELL') heartbeat.sell++;
-        else heartbeat.hold++;
-      }
-      this.logger.debug(
-        `Skipped persisting ${signalData.action} signal for strategy ${strategy.name} on ${asset.symbol} (final_score=${signalData.final_score}, conf=${signalData.confidence})`,
-      );
-      return;
-    }
-    if (heartbeat) heartbeat.buy++;
-
-    // Store signal in database (without LLM for now - we'll generate LLM in batch later)
-    const signal = await this.prisma.strategy_signals.create({
-      data: {
-        strategy_id: strategyId,
-        user_id: strategy.type === 'user' ? strategy.user_id : null, // Preserve user_id for custom strategies
-        asset_id: assetId,
-        timestamp: new Date(),
-        final_score: signalData.final_score,
-        action: signalData.action,
-        confidence: signalData.confidence,
-        // ?? null (not || 0) — Python now returns null for engines that
-        // failed or had no data. Preserving null into the DB lets us
-        // distinguish "engine evaluated and scored neutral" from "engine
-        // had no opinion." engine_metadata also records engines_skipped.
-        sentiment_score: signalData.engine_scores?.sentiment?.score ?? null,
-        trend_score: signalData.engine_scores?.trend?.score ?? null,
-        fundamental_score: signalData.engine_scores?.fundamental?.score ?? null,
-        liquidity_score: signalData.engine_scores?.liquidity?.score ?? null,
-        event_risk_score: signalData.engine_scores?.event_risk?.score ?? null,
-        engine_metadata: { ...(signalData.engine_scores || {}), _writer: 'stock-signals-cronjob' },
-      },
-    });
-
-    // Store signal details
+    // Upsert/delete: DB row mirrors the engine's CURRENT opinion.
+    //   BUY  → insert new OR refresh existing (same signal_id)
+    //   HOLD/SELL → delete existing BUY for this (strategy, asset) if any
     const stopLossValue = strategy.stop_loss_value ? Number(strategy.stop_loss_value) : 5;
     const takeProfitValue = strategy.take_profit_value ? Number(strategy.take_profit_value) : 10;
-
-    await this.prisma.signal_details.create({
-      data: {
-        signal_id: signal.signal_id,
-        entry_price: marketData.price,
-        position_size: signalData.position_sizing?.position_size || 1,
-        position_value: signalData.position_sizing?.position_size 
-          ? signalData.position_sizing.position_size * marketData.price 
-          : marketData.price,
-        stop_loss: marketData.price * (1 - stopLossValue / 100),
-        take_profit_1: marketData.price * (1 + takeProfitValue / 100),
-        metadata: {},
-      },
+    const result = await this.signalsService.upsertOrDeleteFromEngine({
+      strategy_id: strategyId,
+      asset_id: assetId,
+      user_id: strategy.type === 'user' ? strategy.user_id : null,
+      action: signalData.action,
+      final_score: signalData.final_score,
+      confidence: signalData.confidence,
+      engine_scores: signalData.engine_scores,
+      engine_metadata: { ...(signalData.engine_scores || {}), _writer: 'stock-signals-cronjob' },
+      entry_price: marketData.price,
+      position_size: signalData.position_sizing?.position_size || 1,
+      stop_loss: marketData.price * (1 - stopLossValue / 100),
+      take_profit_1: marketData.price * (1 + takeProfitValue / 100),
     });
 
-    this.logger.debug(
-      `Stored signal for strategy ${strategy.name} on stock ${asset.symbol}: ${signalData.action}`,
-    );
+    if (heartbeat) {
+      if (signalData.action === 'BUY') heartbeat.buy++;
+      else if (signalData.action === 'SELL') heartbeat.sell++;
+      else heartbeat.hold++;
+    }
+    if (result.deleted) {
+      this.logger.debug(
+        `Engine flipped on ${asset.symbol} (${strategy.name}) — deleted stale BUY`,
+      );
+    } else {
+      this.logger.debug(
+        `Stock signal for ${strategy.name} on ${asset.symbol}: ${signalData.action} (created=${result.created} updated=${result.updated})`,
+      );
+    }
   }
 
   /**

@@ -261,6 +261,121 @@ export class SignalsService {
     });
   }
 
+  /**
+   * Engine-driven upsert/delete used by the signal generation crons.
+   *
+   * The DB now mirrors the engine's CURRENT opinion:
+   *   - Engine says BUY:
+   *       - existing BUY for (strategy, asset, user_id) → UPDATE in place (refresh
+   *         timestamp + scores + signal_details). Same signal_id, so any FK
+   *         references (orders, auto_trade_evaluations) stay intact.
+   *       - no existing BUY → INSERT new row + signal_details
+   *   - Engine says HOLD or SELL:
+   *       - existing BUY → DELETE (signal_details/explanations cascade-delete).
+   *       - no existing BUY → no-op
+   *
+   * Returns a summary describing what happened so the caller can update its
+   * heartbeat / log line without re-querying.
+   */
+  async upsertOrDeleteFromEngine(params: {
+    strategy_id: string;
+    asset_id: string;
+    user_id: string | null;
+    action: SignalAction | string;
+    final_score: number;
+    confidence: number;
+    engine_scores?: any;
+    engine_metadata?: any;
+    entry_price?: number | null;
+    position_size?: number | null;
+    stop_loss?: number | null;
+    take_profit_1?: number | null;
+  }): Promise<{
+    signal_id: string | null;
+    created: boolean;
+    updated: boolean;
+    deleted: boolean;
+  }> {
+    const { strategy_id, asset_id, user_id, action } = params;
+    const isBuy = String(action).toUpperCase() === 'BUY';
+
+    const existing = await this.prisma.strategy_signals.findFirst({
+      where: { strategy_id, asset_id, user_id, action: 'BUY' },
+    });
+
+    if (isBuy) {
+      const scores = params.engine_scores || {};
+      const signalData = {
+        timestamp: new Date(),
+        final_score: params.final_score,
+        confidence: params.confidence,
+        // ?? null preserves "engine had no opinion" — see fusion_engine.py.
+        sentiment_score: scores?.sentiment?.score ?? null,
+        trend_score: scores?.trend?.score ?? null,
+        fundamental_score: scores?.fundamental?.score ?? null,
+        liquidity_score: scores?.liquidity?.score ?? null,
+        event_risk_score: scores?.event_risk?.score ?? null,
+        engine_metadata: params.engine_metadata ?? scores ?? {},
+      };
+
+      if (existing) {
+        // UPDATE in place — keep signal_id stable for FK consumers.
+        await this.prisma.strategy_signals.update({
+          where: { signal_id: existing.signal_id },
+          data: signalData,
+        });
+        // Refresh signal_details to match current price + thresholds.
+        if (params.entry_price && params.position_size) {
+          await this.prisma.signal_details.updateMany({
+            where: { signal_id: existing.signal_id },
+            data: {
+              entry_price: params.entry_price,
+              position_size: params.position_size,
+              position_value: params.position_size * params.entry_price,
+              stop_loss: params.stop_loss ?? null,
+              take_profit_1: params.take_profit_1 ?? null,
+            },
+          });
+        }
+        return { signal_id: existing.signal_id, created: false, updated: true, deleted: false };
+      }
+
+      // INSERT new BUY
+      const created = await this.prisma.strategy_signals.create({
+        data: {
+          strategy_id,
+          asset_id,
+          user_id,
+          action: 'BUY' as SignalAction,
+          ...signalData,
+        },
+      });
+      if (params.entry_price && params.position_size) {
+        await this.prisma.signal_details.create({
+          data: {
+            signal_id: created.signal_id,
+            entry_price: params.entry_price,
+            position_size: params.position_size,
+            position_value: params.position_size * params.entry_price,
+            stop_loss: params.stop_loss ?? null,
+            take_profit_1: params.take_profit_1 ?? null,
+          },
+        });
+      }
+      return { signal_id: created.signal_id, created: true, updated: false, deleted: false };
+    }
+
+    // Engine flipped to HOLD or SELL — engine no longer recommends this asset.
+    if (existing) {
+      await this.prisma.strategy_signals.delete({
+        where: { signal_id: existing.signal_id },
+      });
+      // signal_details + signal_explanations cascade-delete automatically.
+      return { signal_id: existing.signal_id, created: false, updated: false, deleted: true };
+    }
+    return { signal_id: null, created: false, updated: false, deleted: false };
+  }
+
   async delete(id: string) {
     return this.prisma.strategy_signals.delete({
       where: { signal_id: id },
