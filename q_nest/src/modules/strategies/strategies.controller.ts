@@ -73,11 +73,11 @@ export class StrategiesController {
   // Move specific routes BEFORE the generic :id route
   /**
    * Get all pre-built strategies (admin type).
-   * Allowed: admin JWT or user JWT (PRO/ELITE). Same as Top Trades.
+   * Open to all authenticated tiers (Top Trades is open to FREE; quota
+   * enforcement happens at the order-placement layer, not here).
    * Endpoint: GET /strategies/pre-built?asset_type=crypto
    */
-  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
-  @AllowTier('PRO', 'ELITE')
+  @UseGuards(AdminOrUserJwtGuard)
   @Get('pre-built')
   async getPreBuiltStrategies(
     @Req() req: any,
@@ -95,10 +95,10 @@ export class StrategiesController {
 
   /**
    * Get trending assets (crypto). Used by Top Trades page.
-   * Restricted to PRO and ELITE plans (same as stocks/top-trades).
+   * Open to all authenticated tiers — Top Trades is FREE-accessible; the
+   * 5-trade quota is enforced when an order is actually placed.
    */
-  @UseGuards(JwtAuthGuard, TierAccessGuard)
-  @AllowTier('PRO', 'ELITE')
+  @UseGuards(JwtAuthGuard)
   @Get('trending-assets')
   getTrendingAssets(
     @Req() req: any,
@@ -113,11 +113,11 @@ export class StrategiesController {
 
   /**
    * Get trending assets with AI insights for top 2 per strategy.
-   * Allowed: admin JWT or user JWT (PRO/ELITE).
+   * Open to all authenticated tiers (Top Trades is FREE-accessible; the
+   * 5-trade quota is enforced at order placement).
    * Endpoint: GET /strategies/pre-built/:id/trending-with-insights
    */
-  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
-  @AllowTier('PRO', 'ELITE')
+  @UseGuards(AdminOrUserJwtGuard)
   @Get('pre-built/:id/trending-with-insights')
   async getTrendingAssetsWithInsights(
     @Req() req: any,
@@ -270,8 +270,7 @@ export class StrategiesController {
    * the signal's user_id filter is derived from strategy.type.
    * Endpoint: POST /strategies/strategy/:strategyId/assets/:assetId/generate-insight
    */
-  @UseGuards(AdminOrUserJwtGuard, TierAccessGuard)
-  @AllowTier('PRO', 'ELITE')
+  @UseGuards(AdminOrUserJwtGuard)
   @Post('strategy/:strategyId/assets/:assetId/generate-insight')
   async generateAssetInsight(
     @Req() req: any,
