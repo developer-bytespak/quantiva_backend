@@ -172,9 +172,14 @@ export class PreBuiltSignalsCronjobService {
         return;
       }
 
-      // Pass false for enrichWithRealtime — the cron only needs asset IDs to process,
-      // not live Binance stats, which would fire 50 × weight-2 calls every 10 minutes.
-      const trendingAssets = await this.preBuiltStrategiesService.getTopTrendingAssets(50, false);
+      // Philosophy 3: merge market_rankings (all tradeable Binance coins) with
+      // trending_assets (LunarCrush social signal). Result is broader coverage
+      // than LunarCrush-only — mainstream Binance coins like BTC/ETH/SOL get
+      // included even when they aren't socially trending that day.
+      //
+      // enrichWithRealtime=false: cron only needs asset IDs to process. Skipping
+      // realtime enrichment saves ~250 Binance API calls per cron tick.
+      const trendingAssets = await this.preBuiltStrategiesService.getMergedTopAssets(250, false);
       if (trendingAssets.length === 0) {
         return;
       }

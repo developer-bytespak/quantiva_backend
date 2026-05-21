@@ -97,7 +97,13 @@ class SignalGenerator:
                 exchange=exchange,
                 asset_symbol=asset_symbol  # Pass symbol for OHLCV fetching
             )
-            engine_scores['trend'] = technical_result if technical_result is not None else {'score': 0.0, 'confidence': 0.0}
+            # When the engine has no data (e.g. OHLCV unavailable because coin
+            # isn't on Binance), return score=None so fusion EXCLUDES this
+            # engine and redistributes its weight to the engines that did
+            # have data. Coercing to 0.0 silently drags strategies (especially
+            # Trend + Sentiment) below their BUY threshold even when the
+            # engines that DID work all said BUY.
+            engine_scores['trend'] = technical_result if technical_result is not None else {'score': None, 'confidence': 0.0}
             
             # Fundamental Engine
             # Pass asset_symbol for external API calls (CoinGecko, LunarCrush need symbols, not UUIDs)
@@ -115,10 +121,11 @@ class SignalGenerator:
                         asset_type=asset_type,
                         asset_symbol=asset_symbol  # Pass symbol for external API calls
                     )
-                    engine_scores['fundamental'] = fundamental_result if fundamental_result is not None else {'score': 0.0, 'confidence': 0.0}
+                    # See trend-engine comment above — null when no data, not 0.
+                    engine_scores['fundamental'] = fundamental_result if fundamental_result is not None else {'score': None, 'confidence': 0.0}
                 except Exception as e:
                     logger.warning(f"Fundamental engine error for {asset_symbol} (asset_id: {asset_id}): {str(e)}")
-                    engine_scores['fundamental'] = {'score': 0.0, 'confidence': 0.0, 'error': True, 'error_message': str(e)}
+                    engine_scores['fundamental'] = {'score': None, 'confidence': 0.0, 'error': True, 'error_message': str(e)}
             
             # Liquidity Engine
             if order_book and market_data.get('price'):
@@ -132,7 +139,10 @@ class SignalGenerator:
                 )
                 engine_scores['liquidity'] = liquidity_result
             else:
-                engine_scores['liquidity'] = {'score': 0.0, 'confidence': 0.0}
+                # No order_book passed → engine has no data. Return score=None
+                # so fusion redistributes its weight to engines that have data,
+                # instead of dragging the final score toward 0.
+                engine_scores['liquidity'] = {'score': None, 'confidence': 0.0}
             
             # Event Risk Engine
             # Pass asset_symbol for external API calls (LunarCrush needs symbols, not UUIDs)
@@ -262,7 +272,9 @@ class SignalGenerator:
                     asset_id=asset_id,
                     asset_type=asset_type,
                     sentiment_confidence=sentiment_confidence,
-                    trend_strength=abs(engine_scores['trend'].get('score', 0.0)),
+                    # `or 0.0` guards against engine_scores['trend']['score'] being
+                    # None when the trend engine had no data — abs(None) would crash.
+                    trend_strength=abs(engine_scores['trend'].get('score') or 0.0),
                     data_freshness=1.0,  # TODO: Calculate from data timestamps
                     diversification_weight=1.0,  # TODO: Calculate from portfolio
                     risk_level=strategy_data.get('risk_level', 'medium'),

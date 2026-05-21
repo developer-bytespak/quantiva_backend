@@ -252,6 +252,178 @@ export class PreBuiltStrategiesService implements OnModuleInit {
   }
 }
 
+  /**
+   * Philosophy 3 — Merged signal universe.
+   *
+   * getTopTrendingAssets() uses LunarCrush trending as its source, which
+   * surfaces "what's hot socially" but excludes mainstream Binance coins
+   * that aren't currently trending. This method takes the union:
+   *
+   *   - Base universe: market_rankings (top ~500 coins by market cap, all
+   *     tradeable, same source the market page uses)
+   *   - LEFT JOIN trending_assets so coins WITH social attention bubble up,
+   *     coins WITHOUT trending data still get included as backup coverage
+   *
+   * Ordering priority:
+   *   1. Coins WITH a recent LunarCrush rank come first (these have the
+   *      "trending" social signal users care about)
+   *   2. Within each bucket, lower alt_rank = stronger trending signal
+   *   3. Fall back to market cap rank for non-trending coins
+   *
+   * Output is the same shape as getTopTrendingAssets so the cron + controller
+   * can swap call sites with zero downstream changes.
+   */
+  async getMergedTopAssets(
+    limit: number = 250,
+    enrichWithRealtime: boolean = true,
+    userId?: string,
+  ) {
+    // Route Binance.US users to the existing US-specific path — that
+    // pipeline already filters to USD pairs and has its own logic.
+    const signalSource = await this.resolveSignalSource(userId);
+    if (signalSource.key === 'binance_us' && enrichWithRealtime) {
+      this.logger.log(`getMergedTopAssets: routing to Binance.US path for user ${userId || 'unknown'}`);
+      return this._getTopTrendingAssetsForBinanceUS(limit);
+    }
+
+    try {
+      // Fetch ~50% more than `limit` from DB so we have headroom after
+      // filtering out non-Binance-tradeable coins in the realtime step.
+      const dbLimit = enrichWithRealtime ? Math.ceil(limit * 1.5) : limit;
+
+      const rows: any[] = await this.prisma.$queryRaw`
+        WITH latest_market AS (
+          SELECT *
+          FROM market_rankings
+          WHERE rank_timestamp = (SELECT MAX(rank_timestamp) FROM market_rankings)
+        ),
+        latest_trending AS (
+          SELECT DISTINCT ON (asset_id)
+            asset_id,
+            galaxy_score,
+            alt_rank,
+            social_score,
+            market_volume,
+            poll_timestamp
+          FROM trending_assets
+          WHERE alt_rank IS NOT NULL
+          ORDER BY asset_id, poll_timestamp DESC
+        )
+        SELECT
+          a.asset_id,
+          a.symbol,
+          a.name,
+          a.display_name,
+          a.logo_url,
+          a.coingecko_id,
+          a.asset_type,
+          a.market_cap_rank,
+          mr.rank AS market_rank,
+          mr.market_cap,
+          mr.price_usd,
+          mr.volume_24h,
+          mr.change_24h AS price_change_24h_usd,
+          mr.change_percent_24h AS price_change_24h,
+          lt.galaxy_score,
+          lt.alt_rank,
+          lt.social_score,
+          lt.market_volume,
+          lt.poll_timestamp,
+          (lt.asset_id IS NOT NULL) AS is_trending
+        FROM latest_market mr
+        INNER JOIN assets a ON a.asset_id = mr.asset_id
+        LEFT JOIN latest_trending lt ON lt.asset_id = mr.asset_id
+        WHERE
+          a.asset_type = 'crypto'
+          AND a.symbol NOT IN (
+            'USDT','USDC','DAI','PYUSD','USD1',
+            'WBETH','STETH','CBBTC','FBTC',
+            'XAUT','PAXG'
+          )
+        ORDER BY
+          -- Trending coins (LunarCrush ranked) first
+          (lt.asset_id IS NOT NULL) DESC,
+          -- Within trending: lower alt_rank = stronger social signal
+          lt.alt_rank ASC NULLS LAST,
+          -- Non-trending fallback: market cap rank
+          mr.rank ASC
+        LIMIT ${dbLimit}
+      `;
+
+      if (!rows.length) return [];
+
+      const baseResults = rows.map((r: any) => ({
+        asset_id: r.asset_id,
+        symbol: r.symbol,
+        name: r.display_name || r.name || r.symbol,
+        logo_url: r.logo_url,
+        coingecko_id: r.coingecko_id,
+        asset_type: r.asset_type,
+        market_cap_rank: r.market_cap_rank ?? Number(r.market_rank) ?? null,
+        price_usd: Number(r.price_usd || 0),
+        price_change_24h: Number(r.price_change_24h || 0),
+        price_change_24h_usd: Number(r.price_change_24h_usd || 0),
+        market_cap: Number(r.market_cap || 0),
+        volume_24h: Number(r.volume_24h || r.market_volume || 0),
+        high_24h: 0,
+        low_24h: 0,
+        galaxy_score: r.galaxy_score !== null ? Number(r.galaxy_score) : null,
+        alt_rank: r.alt_rank !== null ? Number(r.alt_rank) : null,
+        social_score: r.social_score !== null ? Number(r.social_score) : null,
+        market_volume: Number(r.market_volume || 0),
+        is_trending: r.is_trending === true,
+        poll_timestamp: r.poll_timestamp,
+      }));
+
+      // No realtime enrichment requested — return as-is. The cron path
+      // uses this branch (it doesn't need the extra Binance call per asset).
+      if (!enrichWithRealtime) {
+        return baseResults.slice(0, limit);
+      }
+
+      // Realtime enrichment: confirm each coin is actually tradeable on
+      // Binance and overwrite price/volume with live values. Drop any coin
+      // that Binance doesn't recognize (returns null price).
+      const enriched = await Promise.all(
+        baseResults.map(async (asset) => {
+          try {
+            const realtime = await this.binanceService.getEnrichedMarketData(asset.symbol);
+            const isTradeable = realtime.price !== null && realtime.price > 0;
+            return {
+              ...asset,
+              is_tradeable: isTradeable,
+              price_usd: realtime.price ?? asset.price_usd,
+              price_change_24h: realtime.priceChangePercent ?? asset.price_change_24h,
+              volume_24h: realtime.volume24h ?? asset.volume_24h,
+              high_24h: realtime.high24h ?? asset.high_24h,
+              low_24h: realtime.low24h ?? asset.low_24h,
+              realtime_data: isTradeable ? {
+                price: realtime.price,
+                priceChangePercent: realtime.priceChangePercent,
+                high24h: realtime.high24h,
+                low24h: realtime.low24h,
+                volume24h: realtime.volume24h,
+                quoteVolume24h: realtime.quoteVolume24h,
+              } : null,
+            };
+          } catch (err: any) {
+            this.logger.debug(`Realtime fetch failed for ${asset.symbol}: ${err?.message}`);
+            return { ...asset, is_tradeable: false, realtime_data: null };
+          }
+        }),
+      );
+
+      const tradeable = enriched.filter((a) => a.is_tradeable).slice(0, limit);
+      this.logger.log(
+        `getMergedTopAssets: ${enriched.length} candidates → ${tradeable.length} tradeable on Binance (limit: ${limit})`,
+      );
+      return tradeable;
+    } catch (err: any) {
+      this.logger.error(`getMergedTopAssets error: ${err?.message || err}`);
+      return [];
+    }
+  }
+
   async getSignalSourceLabel(userId?: string): Promise<string> {
     const source = await this.resolveSignalSource(userId);
     return source.label;
