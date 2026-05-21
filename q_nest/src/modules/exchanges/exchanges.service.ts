@@ -1,6 +1,7 @@
 import { ForbiddenException, HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ExchangeType, ConnectionStatus } from '@prisma/client';
+import { FreeSignalTradeQuotaExhaustedException } from '../../common/exceptions/free-signal-trade-quota.exception';
 import { OnboardingStateService } from '../onboarding-emails/services/onboarding-state.service';
 import { OnboardingState } from '../onboarding-emails/types';
 import { EncryptionService } from './services/encryption.service';
@@ -1843,8 +1844,38 @@ export class ExchangesService {
     type: 'MARKET' | 'LIMIT',
     quantity: number,
     price?: number,
-    options: { closePosition?: boolean; cancelOpenOrders?: boolean } = {},
+    options: {
+      closePosition?: boolean;
+      cancelOpenOrders?: boolean;
+      userId?: string;
+      source?: 'top_trade' | 'top_trades_leaderboard_sell' | 'dashboard_sell_button';
+    } = {},
   ): Promise<OrderDto> {
+    // FREE-tier signal-trade quota gate. Counts only signal-driven BUYs from
+    // Top Trades — manual orders, sells, and PRO+ tiers are unmetered. The
+    // pre-check guarantees a 6th attempt never reaches the broker; the
+    // post-success decrement happens just before this method returns.
+    const meterTopTrade =
+      !!options.userId &&
+      options.source === 'top_trade' &&
+      side === 'BUY';
+    if (meterTopTrade) {
+      const user = await this.prisma.users.findUnique({
+        where: { user_id: options.userId! },
+        select: { current_tier: true },
+      });
+      if (user?.current_tier === 'FREE') {
+        const quota = await this.prisma.free_tier_signal_trades.findUnique({
+          where: { user_id: options.userId! },
+        });
+        const granted = quota?.trades_granted ?? 0;
+        const used = quota?.trades_used ?? 0;
+        if (!quota || used >= granted) {
+          throw new FreeSignalTradeQuotaExhaustedException(granted || 5);
+        }
+      }
+    }
+
     const connection = await this.prisma.user_exchange_connections.findUnique({
       where: { connection_id: connectionId },
       include: { exchange: true },
@@ -2201,6 +2232,47 @@ export class ExchangesService {
     this.syncConnectionData(connectionId).catch((err) =>
       this.logger.warn(`Post-order sync failed for ${connectionId}: ${err?.message || err}`),
     );
+
+    // FREE-tier signal-trade meter: post-success decrement. The pre-check at
+    // the top of this method guarantees a slot was free when we entered, so
+    // an exhausted decrement here only happens under concurrent races — log
+    // and move on rather than rolling back the broker fill (over-grant by
+    // one is preferable to a stuck position).
+    if (meterTopTrade && placedOrder) {
+      try {
+        const result = await this.prisma.$transaction(async (tx) => {
+          const updated = await tx.free_tier_signal_trades.updateMany({
+            where: {
+              user_id: options.userId!,
+              trades_used: { lt: this.prisma.free_tier_signal_trades.fields.trades_granted },
+            },
+            data: {
+              trades_used: { increment: 1 },
+              last_used_at: new Date(),
+            },
+          });
+          if (updated.count > 0) {
+            await tx.free_tier_signal_trade_usages.create({
+              data: {
+                user_id: options.userId!,
+                order_id: placedOrder!.orderId ? String(placedOrder!.orderId) : null,
+                symbol,
+              },
+            });
+          }
+          return updated.count;
+        });
+        if (result === 0) {
+          this.logger.warn(
+            `Free signal-trade quota race for user ${options.userId}: order ${placedOrder.orderId} placed but quota already exhausted.`,
+          );
+        }
+      } catch (err: any) {
+        this.logger.error(
+          `Failed to decrement free signal-trade quota for user ${options.userId} (order ${placedOrder.orderId}): ${err?.message || err}`,
+        );
+      }
+    }
 
     return placedOrder!;
   }

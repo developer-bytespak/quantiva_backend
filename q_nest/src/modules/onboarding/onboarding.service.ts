@@ -30,6 +30,15 @@ export interface OnboardingProgressResponse {
   };
 }
 
+export interface FreeSignalTradesQuotaResponse {
+  has_grant: boolean;
+  granted: number;
+  used: number;
+  remaining: number;
+}
+
+export const FREE_SIGNAL_TRADES_GRANT = 5;
+
 @Injectable()
 export class OnboardingService {
   private readonly logger = new Logger(OnboardingService.name);
@@ -107,9 +116,31 @@ export class OnboardingService {
    * Marks the subscription onboarding step as acknowledged when the user
    * explicitly chooses to stay on the FREE tier from the dashboard widget.
    * Idempotent — uses OnboardingStateService.advanceTo, which is one-way.
+   * Also grants the one-time FREE-tier signal-trade quota (5 trades) so the
+   * user can experience Top Trades execution without upgrading.
    */
-  async acknowledgeFreeTier(userId: string): Promise<{ acknowledged: true }> {
+  async acknowledgeFreeTier(userId: string): Promise<{ acknowledged: true; free_signal_trades_granted: number }> {
+    await this.prisma.free_tier_signal_trades.upsert({
+      where: { user_id: userId },
+      create: { user_id: userId, trades_granted: FREE_SIGNAL_TRADES_GRANT, trades_used: 0 },
+      update: {}, // idempotent: never re-grant or top up
+    });
     await this.onboardingStateService.advanceTo(userId, OnboardingState.PAID);
-    return { acknowledged: true };
+    return { acknowledged: true, free_signal_trades_granted: FREE_SIGNAL_TRADES_GRANT };
+  }
+
+  async getFreeSignalTradesQuota(userId: string): Promise<FreeSignalTradesQuotaResponse> {
+    const row = await this.prisma.free_tier_signal_trades.findUnique({
+      where: { user_id: userId },
+    });
+    if (!row) {
+      return { has_grant: false, granted: 0, used: 0, remaining: 0 };
+    }
+    return {
+      has_grant: true,
+      granted: row.trades_granted,
+      used: row.trades_used,
+      remaining: Math.max(0, row.trades_granted - row.trades_used),
+    };
   }
 }

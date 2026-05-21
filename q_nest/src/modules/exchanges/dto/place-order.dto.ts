@@ -39,10 +39,14 @@ export class PlaceOrderDto {
   @IsBoolean()
   autoOco?: boolean;
 
-  /** Source of order: 'top_trade', 'manual', etc. Used to determine auto-OCO behavior. */
+  /**
+   * Source of the order. Used to determine auto-OCO behavior and to meter
+   * FREE-tier signal-trade quota (only 'top_trade' BUYs decrement quota).
+   * Strict allowlist to prevent unknown values from bypassing the meter.
+   */
   @IsOptional()
-  @IsString()
-  source?: string;
+  @IsIn(['top_trade', 'top_trades_leaderboard_sell', 'dashboard_sell_button'])
+  source?: 'top_trade' | 'top_trades_leaderboard_sell' | 'dashboard_sell_button';
 
   /**
    * When true and side=SELL, the backend performs a full position-close:

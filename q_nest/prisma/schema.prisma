@@ -51,6 +51,7 @@ model users {
   trade_fees                  trade_fees[]
   two_factor_codes            two_factor_codes[]
   user_credits                user_credits[]
+  free_tier_signal_trades     free_tier_signal_trades?
   exchange_connections        user_exchange_connections[]
   sessions                    user_sessions[]
   settings                    user_settings?
@@ -832,6 +833,30 @@ model subscription_usage {
   @@index([subscription_id])
   @@index([user_id])
   @@map("subscription_usage")
+}
+
+model free_tier_signal_trades {
+  user_id        String                          @id @db.Uuid
+  trades_granted Int                             @default(5)
+  trades_used    Int                             @default(0)
+  granted_at     DateTime                        @default(now()) @db.Timestamp(6)
+  last_used_at   DateTime?                       @db.Timestamp(6)
+  user           users                           @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  usages         free_tier_signal_trade_usages[]
+
+  @@map("free_tier_signal_trades")
+}
+
+model free_tier_signal_trade_usages {
+  usage_id String                  @id @default(uuid()) @db.Uuid
+  user_id  String                  @db.Uuid
+  order_id String?                 @db.VarChar(255)
+  symbol   String                  @db.VarChar(50)
+  used_at  DateTime                @default(now()) @db.Timestamp(6)
+  parent   free_tier_signal_trades @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([user_id, used_at])
+  @@map("free_tier_signal_trade_usages")
 }
 
 model payment_history {
