@@ -3,6 +3,8 @@ import {
   Controller,
   Delete,
   Get,
+  InternalServerErrorException,
+  Logger,
   Param,
   ParseUUIDPipe,
   Post,
@@ -35,6 +37,8 @@ import {
 @Controller('admin/super-admin')
 @UseGuards(AdminJwtAuthGuard, SuperAdminGuard)
 export class SuperAdminManagementController {
+  private readonly logger = new Logger(SuperAdminManagementController.name);
+
   constructor(
     private readonly superAdminManagementService: SuperAdminManagementService,
     private readonly userSummaryPdfService: UserSummaryPdfService,
@@ -73,16 +77,31 @@ export class SuperAdminManagementController {
       .filter((s) => validSet.has(s)) as SummarySectionKey[];
     const sections = requested.length > 0 ? requested : ALL_SUMMARY_SECTIONS;
 
-    const pdf = await this.userSummaryPdfService.generatePdf({ days, sections });
-    const today = new Date().toISOString().slice(0, 10);
-    const windowSuffix = days ? `-last-${days}d` : '';
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="quantiva-users-summary${windowSuffix}-${today}.pdf"`,
-    );
-    res.setHeader('Content-Length', pdf.length.toString());
-    res.end(pdf);
+    try {
+      const pdf = await this.userSummaryPdfService.generatePdf({
+        days,
+        sections,
+      });
+      const today = new Date().toISOString().slice(0, 10);
+      const windowSuffix = days ? `-last-${days}d` : '';
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="quantiva-users-summary${windowSuffix}-${today}.pdf"`,
+      );
+      res.setHeader('Content-Length', pdf.length.toString());
+      res.end(pdf);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      this.logger.error(
+        `users/summary-pdf failed (days=${days ?? 'all'}, sections=${sections.join(',')}): ${message}`,
+        stack,
+      );
+      throw new InternalServerErrorException(
+        `Failed to generate user summary PDF: ${message}`,
+      );
+    }
   }
 
   @Get('users/lookup')
