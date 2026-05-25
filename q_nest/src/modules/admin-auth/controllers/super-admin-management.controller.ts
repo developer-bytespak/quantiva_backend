@@ -8,9 +8,11 @@ import {
   Post,
   Put,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import type { Response } from 'express';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { CurrentAdmin } from '../decorators/current-admin.decorator';
 import { DeleteVcPoolAdminDto } from '../dto/delete-vc-pool-admin.dto';
@@ -24,12 +26,18 @@ import { AdminJwtAuthGuard } from '../guards/admin-jwt-auth.guard';
 import { SuperAdminGuard } from '../guards/super-admin.guard';
 import { AdminTokenPayload } from '../services/admin-token.service';
 import { SuperAdminManagementService } from '../services/super-admin-management.service';
+import {
+  ALL_SUMMARY_SECTIONS,
+  SummarySectionKey,
+  UserSummaryPdfService,
+} from '../services/user-summary-pdf.service';
 
 @Controller('admin/super-admin')
 @UseGuards(AdminJwtAuthGuard, SuperAdminGuard)
 export class SuperAdminManagementController {
   constructor(
     private readonly superAdminManagementService: SuperAdminManagementService,
+    private readonly userSummaryPdfService: UserSummaryPdfService,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -46,6 +54,35 @@ export class SuperAdminManagementController {
   @Get('users/growth')
   async usersGrowth(@Query() query: SuperAdminUsersGrowthDto) {
     return this.superAdminManagementService.usersGrowthByMonth(query);
+  }
+
+  @Get('users/summary-pdf')
+  async usersSummaryPdf(
+    @Res() res: Response,
+    @Query('days') daysParam?: string,
+    @Query('sections') sectionsParam?: string,
+  ) {
+    const ALLOWED_DAYS = new Set([15, 30, 90]);
+    const parsedDays = daysParam ? parseInt(daysParam, 10) : NaN;
+    const days = ALLOWED_DAYS.has(parsedDays) ? parsedDays : undefined;
+
+    const validSet = new Set<string>(ALL_SUMMARY_SECTIONS);
+    const requested = (sectionsParam ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => validSet.has(s)) as SummarySectionKey[];
+    const sections = requested.length > 0 ? requested : ALL_SUMMARY_SECTIONS;
+
+    const pdf = await this.userSummaryPdfService.generatePdf({ days, sections });
+    const today = new Date().toISOString().slice(0, 10);
+    const windowSuffix = days ? `-last-${days}d` : '';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="quantiva-users-summary${windowSuffix}-${today}.pdf"`,
+    );
+    res.setHeader('Content-Length', pdf.length.toString());
+    res.end(pdf);
   }
 
   @Get('users/lookup')

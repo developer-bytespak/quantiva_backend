@@ -6,7 +6,8 @@
     "deleteOutDir": true,
     "assets": [
       { "include": "firebase/*.json", "watchAssets": true },
-      { "include": "modules/onboarding-emails/templates/**/*.html", "outDir": "./dist/src", "watchAssets": true }
+      { "include": "modules/onboarding-emails/templates/**/*.html", "outDir": "./dist/src", "watchAssets": true },
+      { "include": "modules/admin-auth/templates/**/*.hbs", "outDir": "./dist/src", "watchAssets": true }
     ]
   }
 }

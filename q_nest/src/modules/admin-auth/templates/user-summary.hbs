@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Quantiva — User Summary</title>
+<style>
+  @page { size: A4; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #0f172a;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  .header {
+    border-bottom: 3px solid #fc4f02;
+    padding-bottom: 14px;
+    margin-bottom: 18px;
+  }
+  .brand {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #fc4f02;
+  }
+  .title {
+    font-size: 22px;
+    font-weight: 700;
+    margin-top: 4px;
+    margin-bottom: 6px;
+    color: #0f172a;
+  }
+  .meta {
+    display: flex;
+    gap: 18px;
+    color: #475569;
+    font-size: 11px;
+  }
+  .meta strong { color: #0f172a; }
+  h2 {
+    font-size: 13px;
+    font-weight: 700;
+    margin: 22px 0 8px;
+    color: #0f172a;
+    border-left: 3px solid #fc4f02;
+    padding-left: 8px;
+  }
+  h3 {
+    font-size: 11px;
+    font-weight: 700;
+    margin: 16px 0 6px;
+    color: #334155;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 6px;
+  }
+  th, td {
+    border: 1px solid #e2e8f0;
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: top;
+    font-size: 10px;
+  }
+  th {
+    background: #f8fafc;
+    font-weight: 700;
+    color: #0f172a;
+  }
+  tr.totals td {
+    background: #fff7ed;
+    font-weight: 700;
+  }
+  .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .empty {
+    padding: 10px;
+    border: 1px dashed #cbd5e1;
+    border-radius: 6px;
+    color: #64748b;
+    font-style: italic;
+    font-size: 10px;
+  }
+  .note {
+    font-size: 10px;
+    color: #64748b;
+    margin-top: 4px;
+  }
+  .detail-table th, .detail-table td {
+    font-size: 9.5px;
+    padding: 5px 6px;
+  }
+  .badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 9px;
+    font-weight: 600;
+    background: #f1f5f9;
+    color: #334155;
+  }
+  .badge.ok { background: #dcfce7; color: #166534; }
+  .badge.warn { background: #fef3c7; color: #92400e; }
+  .badge.bad { background: #fee2e2; color: #991b1b; }
+  section { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="brand">Quantiva</div>
+  <div class="title">User Summary Report</div>
+  <div class="meta">
+    <div><strong>Generated:</strong> {{generated_at}}</div>
+    <div><strong>Window:</strong> {{window_label}}</div>
+    <div><strong>Total users:</strong> {{total_users}}</div>
+    <div><strong>Plans:</strong> Free {{plans.free}} · Pro {{plans.pro}} · Elite {{plans.elite}} · Elite+ {{plans.elite_plus}}</div>
+  </div>
+</div>
+
+<section>
+  <h2>1. Onboarding funnel</h2>
+  <table>
+    <thead>
+      <tr><th>Stage</th><th class="num">Users</th><th class="num">Share</th></tr>
+    </thead>
+    <tbody>
+      {{#each onboarding_funnel}}
+      <tr>
+        <td>{{label}}</td>
+        <td class="num">{{users}}</td>
+        <td class="num">{{share}}</td>
+      </tr>
+      {{/each}}
+      <tr class="totals">
+        <td>Total</td>
+        <td class="num">{{total_users}}</td>
+        <td class="num">100%</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>2. KYC status</h2>
+  <table>
+    <thead>
+      <tr><th>Status</th><th class="num">Users</th></tr>
+    </thead>
+    <tbody>
+      {{#each kyc_status}}
+      <tr>
+        <td>{{status}}</td>
+        <td class="num">{{users}}</td>
+      </tr>
+      {{/each}}
+    </tbody>
+  </table>
+</section>
+
+{{#if has_any_section}}
+<h2>3. User detail</h2>
+<p class="note">Showing the newest {{detail_limit}} users in each selected category within the window. Counts in sections 1 and 2 cover the same window.</p>
+
+{{#if show.fully_completed}}
+<section>
+  <h3>3.1 Fully completed onboarding ({{sections.fully_completed.length}})</h3>
+  {{#if sections.fully_completed.length}}
+  <table class="detail-table">
+    <thead>
+      <tr>
+        <th>Created (UTC)</th>
+        <th>Email</th>
+        <th>Username</th>
+        <th>Full name</th>
+        <th>KYC</th>
+        <th>Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#each sections.fully_completed}}
+      <tr>
+        <td>{{created_at}}</td>
+        <td>{{email}}</td>
+        <td>{{username}}</td>
+        <td>{{full_name}}</td>
+        <td><span class="badge ok">{{kyc_status}}</span></td>
+        <td>
+          {{#if email_verified}}<span class="badge ok">Email verified</span>{{else}}<span class="badge warn">Email not verified</span>{{/if}}
+          {{#if profile_pic_set}}<span class="badge ok">Pic set</span>{{else}}<span class="badge">No pic</span>{{/if}}
+          {{#if exchanges_connected}}<span class="badge ok">{{exchanges_connected}} exchange(s)</span>{{/if}}
+        </td>
+      </tr>
+      {{/each}}
+    </tbody>
+  </table>
+  {{else}}<div class="empty">No users in this category.</div>{{/if}}
+</section>
+{{/if}}
+
+{{#if show.kyc_approved}}
+<section>
+  <h3>3.2 KYC approved — post-KYC funnel ({{sections.kyc_approved.length}})</h3>
+  {{#if sections.kyc_approved.length}}
+  <table class="detail-table">
+    <thead>
+      <tr>
+        <th>Created (UTC)</th>
+        <th>Email</th>
+        <th>Username</th>
+        <th>Full name</th>
+        <th class="num">KYC attempts</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#each sections.kyc_approved}}
+      <tr>
+        <td>{{created_at}}</td>
+        <td>{{email}}</td>
+        <td>{{username}}</td>
+        <td>{{full_name}}</td>
+        <td class="num">{{kyc_attempts}}</td>
+      </tr>
+      {{/each}}
+    </tbody>
+  </table>
+  {{else}}<div class="empty">No users in this category.</div>{{/if}}
+</section>
+{{/if}}
+
+{{#if show.kyc_rejected}}
+<section>
+  <h3>3.3 KYC rejected ({{sections.kyc_rejected.length}})</h3>
+  {{#if sections.kyc_rejected.length}}
+  <table class="detail-table">
+    <thead>
+      <tr>
+        <th>Created (UTC)</th>
+        <th>Email</th>
+        <th>Username</th>
+        <th>Full name</th>
+        <th class="num">KYC attempts</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#each sections.kyc_rejected}}
+      <tr>
+        <td>{{created_at}}</td>
+        <td>{{email}}</td>
+        <td>{{username}}</td>
+        <td>{{full_name}}</td>
+        <td class="num">{{kyc_attempts}}</td>
+      </tr>
+      {{/each}}
+    </tbody>
+  </table>
+  {{else}}<div class="empty">No users in this category.</div>{{/if}}
+</section>
+{{/if}}
+
+{{#if show.kyc_pending_active}}
+<section>
+  <h3>3.4 KYC pending — attempt in progress ({{sections.kyc_pending_active.length}})</h3>
+  {{#if sections.kyc_pending_active.length}}
+  <table class="detail-table">
+    <thead>
+      <tr>
+        <th>Created (UTC)</th>
+        <th>Email</th>
+        <th>Username</th>
+        <th>Full name</th>
+        <th class="num">KYC attempts</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#each sections.kyc_pending_active}}
+      <tr>
+        <td>{{created_at}}</td>
+        <td>{{email}}</td>
+        <td>{{username}}</td>
+        <td>{{full_name}}</td>
+        <td class="num">{{kyc_attempts}}</td>
+      </tr>
+      {{/each}}
+    </tbody>
+  </table>
+  {{else}}<div class="empty">No users in this category.</div>{{/if}}
+</section>
+{{/if}}
+
+{{#if show.signed_up_only}}
+<section>
+  <h3>3.5 Signed up only — no profile, no KYC ({{sections.signed_up_only.length}})</h3>
+  {{#if sections.signed_up_only.length}}
+  <table class="detail-table">
+    <thead>
+      <tr>
+        <th>Created (UTC)</th>
+        <th>Email</th>
+        <th>Username</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#each sections.signed_up_only}}
+      <tr>
+        <td>{{created_at}}</td>
+        <td>{{email}}</td>
+        <td>{{username}}</td>
+      </tr>
+      {{/each}}
+    </tbody>
+  </table>
+  {{else}}<div class="empty">No users in this category.</div>{{/if}}
+</section>
+{{/if}}
+{{/if}}
+
+</body>
+</html>
