@@ -50,6 +50,7 @@ interface SummaryData {
   window_label: string;
   total_users: number;
   plans: { free: number; pro: number; elite: number; elite_plus: number };
+  subscription_tiers: SummaryRow[];
   onboarding_funnel: SummaryRow[];
   kyc_status: { status: string; users: number }[];
   sections: {
@@ -249,6 +250,13 @@ export class UserSummaryPdfService implements OnModuleDestroy {
     const share = (n: number) =>
       totalUsers === 0 ? '0%' : `${Math.round((n / totalUsers) * 100)}%`;
 
+    const subscription_tiers: SummaryRow[] = [
+      { label: 'Free', users: plans.free, share: share(plans.free) },
+      { label: 'Pro', users: plans.pro, share: share(plans.pro) },
+      { label: 'Elite', users: plans.elite, share: share(plans.elite) },
+      { label: 'Elite+', users: plans.elite_plus, share: share(plans.elite_plus) },
+    ];
+
     const onboarding_funnel: SummaryRow[] = [
       { label: 'Signed up only (no profile, no KYC)', users: signedUpStage, share: share(signedUpStage) },
       { label: 'Personal info completed', users: personalInfoStage, share: share(personalInfoStage) },
@@ -344,6 +352,7 @@ export class UserSummaryPdfService implements OnModuleDestroy {
       window_label: windowLabel,
       total_users: totalUsers,
       plans,
+      subscription_tiers,
       onboarding_funnel,
       kyc_status,
       sections,
