@@ -166,13 +166,36 @@
   </table>
 </section>
 
+<section>
+  <h2>3. Subscription tiers</h2>
+  <table>
+    <thead>
+      <tr><th>Tier</th><th class="num">Users</th><th class="num">Share</th></tr>
+    </thead>
+    <tbody>
+      {{#each subscription_tiers}}
+      <tr>
+        <td>{{label}}</td>
+        <td class="num">{{users}}</td>
+        <td class="num">{{share}}</td>
+      </tr>
+      {{/each}}
+      <tr class="totals">
+        <td>Total</td>
+        <td class="num">{{total_users}}</td>
+        <td class="num">100%</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
 {{#if has_any_section}}
-<h2>3. User detail</h2>
-<p class="note">Showing the newest {{detail_limit}} users in each selected category within the window. Counts in sections 1 and 2 cover the same window.</p>
+<h2>4. User detail</h2>
+<p class="note">Showing the newest {{detail_limit}} users in each selected category within the window. Counts in sections 1, 2 and 3 cover the same window.</p>
 
 {{#if show.fully_completed}}
 <section>
-  <h3>3.1 Fully completed onboarding ({{sections.fully_completed.length}})</h3>
+  <h3>4.1 Fully completed onboarding ({{sections.fully_completed.length}})</h3>
   {{#if sections.fully_completed.length}}
   <table class="detail-table">
     <thead>
@@ -208,7 +231,7 @@
 
 {{#if show.kyc_approved}}
 <section>
-  <h3>3.2 KYC approved — post-KYC funnel ({{sections.kyc_approved.length}})</h3>
+  <h3>4.2 KYC approved — post-KYC funnel ({{sections.kyc_approved.length}})</h3>
   {{#if sections.kyc_approved.length}}
   <table class="detail-table">
     <thead>
@@ -238,7 +261,7 @@
 
 {{#if show.kyc_rejected}}
 <section>
-  <h3>3.3 KYC rejected ({{sections.kyc_rejected.length}})</h3>
+  <h3>4.3 KYC rejected ({{sections.kyc_rejected.length}})</h3>
   {{#if sections.kyc_rejected.length}}
   <table class="detail-table">
     <thead>
@@ -268,7 +291,7 @@
 
 {{#if show.kyc_pending_active}}
 <section>
-  <h3>3.4 KYC pending — attempt in progress ({{sections.kyc_pending_active.length}})</h3>
+  <h3>4.4 KYC pending — attempt in progress ({{sections.kyc_pending_active.length}})</h3>
   {{#if sections.kyc_pending_active.length}}
   <table class="detail-table">
     <thead>
@@ -298,7 +321,7 @@
 
 {{#if show.signed_up_only}}
 <section>
-  <h3>3.5 Signed up only — no profile, no KYC ({{sections.signed_up_only.length}})</h3>
+  <h3>4.5 Signed up only — no profile, no KYC ({{sections.signed_up_only.length}})</h3>
   {{#if sections.signed_up_only.length}}
   <table class="detail-table">
     <thead>
