@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import Handlebars from 'handlebars';
-import puppeteer, { Browser } from 'puppeteer';
+import puppeteerCore, { Browser } from 'puppeteer-core';
 import { PrismaService } from '../../../prisma/prisma.service';
 
 const DETAIL_LIMIT = 15;
@@ -371,10 +371,46 @@ export class UserSummaryPdfService implements OnModuleDestroy {
     if (this.browser && this.browser.connected) {
       return this.browser;
     }
-    this.browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+
+    // In serverless / stock-Node containers (Render, Heroku, Railway, Lambda)
+    // the host image rarely has Chromium's runtime libs. @sparticuz/chromium
+    // ships a statically-linked Chromium that works in those images.
+    // Locally we fall back to the full `puppeteer` package, which downloads
+    // a matching Chromium during install.
+    const useSparticuz =
+      process.env.NODE_ENV === 'production' ||
+      !!process.env.RENDER ||
+      process.env.USE_SPARTICUZ_CHROMIUM === 'true';
+
+    try {
+      if (useSparticuz) {
+        const chromium = (await import('@sparticuz/chromium')).default;
+        this.browser = await puppeteerCore.launch({
+          args: [
+            ...chromium.args,
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+          ],
+          executablePath: await chromium.executablePath(),
+          headless: true,
+        });
+      } else {
+        const puppeteerFull = (await import('puppeteer')).default;
+        this.browser = (await puppeteerFull.launch({
+          headless: true,
+          args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        })) as unknown as Browser;
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to launch headless browser (useSparticuz=${useSparticuz}): ${
+          err instanceof Error ? err.stack ?? err.message : String(err)
+        }`,
+      );
+      throw err;
+    }
+
     return this.browser;
   }
 
