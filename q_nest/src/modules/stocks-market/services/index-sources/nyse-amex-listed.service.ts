@@ -1,0 +1,58 @@
+import axios from 'axios';
+import { IndexConstituent, IndexSourceResult, IndexSourceService } from './types';
+
+const NASDAQ_TRADER_URL = 'https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt';
+
+const ALLOWED_EXCHANGES = new Set(['N', 'A', 'P']);
+
+export class NyseAmexListedService implements IndexSourceService {
+  readonly indexCode = 'NYSE_AMEX';
+  readonly displayName = 'NYSE / AMEX / NYSE ARCA Listed Stocks';
+
+  async fetchConstituents(): Promise<IndexSourceResult> {
+    const response = await axios.get<string>(NASDAQ_TRADER_URL, {
+      headers: {
+        'User-Agent': 'QuantivaHQ/1.0 (https://quantivahq.com; contact@quantivahq.com)',
+      },
+      timeout: 30_000,
+      responseType: 'text',
+    });
+
+    const lines = response.data.split(/\r?\n/);
+    const symbols: IndexConstituent[] = [];
+    const validSymbol = /^[A-Z][A-Z0-9.-]*$/;
+
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line || line.startsWith('File Creation Time')) continue;
+
+      const parts = line.split('|');
+      if (parts.length < 7) continue;
+
+      const symbol = parts[0].trim();
+      const name = parts[1]?.trim();
+      const exchange = parts[2]?.trim();
+      const etf = parts[4]?.trim();
+      const testIssue = parts[6]?.trim();
+
+      if (testIssue === 'Y') continue;
+      if (etf === 'Y') continue;
+      if (!ALLOWED_EXCHANGES.has(exchange)) continue;
+      if (!validSymbol.test(symbol)) continue;
+
+      symbols.push({ symbol, name: name || undefined });
+    }
+
+    if (symbols.length < 2000) {
+      throw new Error(
+        `NYSE/AMEX listed: expected 3000+ symbols, got ${symbols.length}. File format may have changed.`,
+      );
+    }
+
+    return {
+      symbols,
+      sourceUrl: NASDAQ_TRADER_URL,
+      fetchedAt: new Date(),
+    };
+  }
+}

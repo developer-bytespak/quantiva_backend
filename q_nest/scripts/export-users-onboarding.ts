@@ -10,7 +10,8 @@
 import * as dotenv from "dotenv";
 import * as fs from "fs";
 import * as path from "path";
-import { PrismaClient, OnboardingState } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
+import { OnboardingState } from "../src/modules/onboarding-emails/types";
 
 dotenv.config();
 
