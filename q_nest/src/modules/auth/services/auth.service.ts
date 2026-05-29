@@ -241,6 +241,14 @@ export class AuthService {
       throw new UnauthorizedException('Invalid 2FA code');
     }
 
+    // 2FA code was delivered to user.email — a valid entry proves inbox access
+    if (!user.email_verified) {
+      await this.prisma.users.update({
+        where: { user_id: user.user_id },
+        data: { email_verified: true },
+      });
+    }
+
     const { isAdmin, isSuperAdmin } = await this.getAdminFlagsByEmail(user.email);
 
     // Create session first to get session_id

@@ -697,4 +697,136 @@ export class MarketStocksDbService {
       throw error;
     }
   }
+
+  /**
+   * Paginated stocks query with optional index filter, search, and sector filter.
+   * Used by the Option B paginated stocks endpoint.
+   */
+  async getPaginated(params: {
+    page: number;
+    limit: number;
+    indexCode?: string | null;
+    search?: string;
+    sector?: string;
+  }): Promise<{ stocks: MarketStock[]; total: number }> {
+    const { page, limit, indexCode, search, sector } = params;
+    const offset = Math.max(0, (page - 1) * limit);
+
+    const whereParts: string[] = [
+      `a.asset_type = 'stock'`,
+      `a.is_active = true`,
+    ];
+    if (indexCode) whereParts.push(`a.primary_index_code = '${indexCode.replace(/'/g, "''")}'`);
+    if (sector) whereParts.push(`a.sector = '${sector.replace(/'/g, "''")}'`);
+    if (search) {
+      const safe = search.replace(/'/g, "''");
+      whereParts.push(`(a.symbol ILIKE '%${safe}%' OR a.name ILIKE '%${safe}%')`);
+    }
+    const whereClause = whereParts.join(' AND ');
+
+    try {
+      const rows = (await this.prisma.$queryRawUnsafe(`
+        SELECT
+          a.asset_id,
+          a.symbol,
+          a.name,
+          a.sector,
+          a.market_cap_rank,
+          COALESCE(mr.rank, a.market_cap_rank, 0) as rank,
+          mr.price_usd,
+          mr.market_cap,
+          mr.volume_24h,
+          mr.change_24h,
+          mr.change_percent_24h,
+          COUNT(*) OVER() AS total_count
+        FROM assets a
+        LEFT JOIN LATERAL (
+          SELECT rank, price_usd, market_cap, volume_24h, change_24h, change_percent_24h
+          FROM market_rankings
+          WHERE asset_id = a.asset_id
+          ORDER BY rank_timestamp DESC
+          LIMIT 1
+        ) mr ON true
+        WHERE ${whereClause}
+        ORDER BY a.market_cap_rank ASC NULLS LAST, a.symbol ASC
+        LIMIT ${limit} OFFSET ${offset}
+      `)) as Array<{
+        asset_id: string;
+        symbol: string;
+        name: string;
+        sector: string;
+        market_cap_rank: number | null;
+        rank: number;
+        price_usd: number | null;
+        market_cap: number | null;
+        volume_24h: number | null;
+        change_24h: number | null;
+        change_percent_24h: number | null;
+        total_count: bigint;
+      }>;
+
+      const total = rows.length > 0 ? Number(rows[0].total_count) : 0;
+
+      const stocks: MarketStock[] = rows.map((stock) => ({
+        rank: stock.rank || stock.market_cap_rank || 0,
+        symbol: stock.symbol || '',
+        name: stock.name || stock.symbol || '',
+        sector: stock.sector || 'Unknown',
+        price: Number(stock.price_usd || 0),
+        change24h: Number(stock.change_24h || 0),
+        changePercent24h: Number(stock.change_percent_24h || 0),
+        marketCap: stock.market_cap ? Number(stock.market_cap) : null,
+        volume24h: Number(stock.volume_24h || 0),
+        dataSource: 'alpaca_fmp',
+      }));
+
+      return { stocks, total };
+    } catch (error: any) {
+      this.logger.error('Failed to get paginated stocks', { error: error?.message, params });
+      throw error;
+    }
+  }
+
+  /**
+   * List all indexes with their member counts. Used by /api/stocks-market/indexes endpoint.
+   */
+  async getIndexesWithCounts(): Promise<Array<{
+    code: string;
+    display_name: string;
+    provider: string;
+    is_derived: boolean;
+    stock_count: number;
+  }>> {
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{
+        code: string;
+        display_name: string;
+        provider: string;
+        is_derived: boolean;
+        stock_count: bigint;
+      }>>`
+        SELECT
+          i.code,
+          i.display_name,
+          i.provider,
+          i.is_derived,
+          COUNT(im.asset_id) AS stock_count
+        FROM indexes i
+        LEFT JOIN index_membership im ON im.index_id = i.index_id
+        GROUP BY i.index_id, i.code, i.display_name, i.provider, i.is_derived
+        ORDER BY stock_count DESC, i.code ASC
+      `;
+
+      return rows.map((r) => ({
+        code: r.code,
+        display_name: r.display_name,
+        provider: r.provider,
+        is_derived: r.is_derived,
+        stock_count: Number(r.stock_count),
+      }));
+    } catch (error: any) {
+      this.logger.error('Failed to get indexes with counts', { error: error?.message });
+      throw error;
+    }
+  }
 }

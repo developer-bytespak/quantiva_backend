@@ -15,6 +15,22 @@ export interface GetMarketDataOptions {
   sector?: string;
 }
 
+export interface GetPaginatedStocksOptions {
+  page: number;
+  limit: number;
+  indexCode?: string | null;
+  search?: string;
+  sector?: string;
+}
+
+export interface PaginatedStocksResponse {
+  items: MarketStock[];
+  total: number;
+  page: number;
+  limit: number;
+  timestamp: string;
+}
+
 @Injectable()
 export class StocksMarketService {
   private readonly logger = new Logger(StocksMarketService.name);
@@ -26,6 +42,39 @@ export class StocksMarketService {
     private alpacaService: AlpacaMarketService,
     private fmpService: FmpService,
   ) {}
+
+  /**
+   * Paginated stocks query with optional index filter. Used by the Option B endpoint.
+   * Bypasses cache because pagination keys explode key cardinality.
+   */
+  async getPaginatedStocks(
+    options: GetPaginatedStocksOptions,
+  ): Promise<PaginatedStocksResponse> {
+    const { page, limit, indexCode, search, sector } = options;
+
+    const { stocks, total } = await this.dbService.getPaginated({
+      page,
+      limit,
+      indexCode,
+      search,
+      sector,
+    });
+
+    return {
+      items: stocks,
+      total,
+      page,
+      limit,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * List all indexes with their member counts. Used by the indexes dropdown.
+   */
+  async getIndexes() {
+    return this.dbService.getIndexesWithCounts();
+  }
 
   /**
    * Get market data (from cache or database)

@@ -9,6 +9,9 @@ import {
 } from '@nestjs/common';
 import { StocksMarketService } from './stocks-market.service';
 import { StockQuoteCacheService } from './services/stock-quote-cache.service';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { TokenPayload } from '../auth/services/token.service';
+import { isOptionBEnabled } from '../../common/feature-flags/option-b.util';
 
 @Controller('api/stocks-market')
 export class StocksMarketController {
@@ -93,6 +96,110 @@ export class StocksMarketController {
 
       throw new HttpException(
         error.message || 'Failed to fetch stocks',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/stocks-market/indexes
+   * Returns all 8 indexes (S&P 500, Dow, Nasdaq, etc.) with their member counts.
+   * Used by the frontend index-selector dropdown.
+   *
+   * Feature flag behavior:
+   *  - If the user does NOT have Option B enabled, only S&P 500 is returned.
+   *  - If enabled, all 8 indexes are returned (including the 3 derived Russell ones with 0 stocks).
+   */
+  @Get('indexes')
+  async getIndexes(@CurrentUser() user?: TokenPayload) {
+    try {
+      const all = await this.stocksMarketService.getIndexes();
+      if (!isOptionBEnabled(user?.email)) {
+        return all.filter((i) => i.code === 'SP500');
+      }
+      return all;
+    } catch (error: any) {
+      this.logger.error('Failed to fetch indexes', { error: error?.message });
+      throw new HttpException(
+        error.message || 'Failed to fetch indexes',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/stocks-market/stocks-paginated
+   * Paginated stocks query with optional index filter.
+   *
+   * Query params:
+   *  - page (default 1)
+   *  - limit (default 50, max 100)
+   *  - index (filter by index code, e.g. "RUSSELL_2000")
+   *  - search (search symbol/name)
+   *  - sector (filter by sector)
+   *
+   * Feature flag behavior:
+   *  - Non-Option-B users always see only S&P 500 (index param ignored).
+   *  - Option B users can pass any index code or omit it for the full universe.
+   */
+  @Get('stocks-paginated')
+  async getStocksPaginated(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('index') index?: string,
+    @Query('search') search?: string,
+    @Query('sector') sector?: string,
+    @CurrentUser() user?: TokenPayload,
+  ) {
+    try {
+      const pageNum = page ? Math.max(1, parseInt(page, 10)) : 1;
+      const limitNum = limit ? Math.min(100, Math.max(1, parseInt(limit, 10))) : 50;
+
+      if (isNaN(pageNum) || isNaN(limitNum)) {
+        throw new HttpException('page and limit must be numbers', HttpStatus.BAD_REQUEST);
+      }
+
+      const optionBEnabled = isOptionBEnabled(user?.email);
+      const effectiveIndex = optionBEnabled ? (index ?? null) : 'SP500';
+
+      const result = await this.stocksMarketService.getPaginatedStocks({
+        page: pageNum,
+        limit: limitNum,
+        indexCode: effectiveIndex,
+        search,
+        sector,
+      });
+
+      // Overlay live Alpaca quotes (same pattern as /stocks endpoint)
+      if (result.items.length > 0) {
+        const symbolList = result.items.map((s) => s.symbol).filter((s): s is string => !!s);
+        if (symbolList.length > 0) {
+          const quotes = await this.stockQuoteCacheService.getQuotes(symbolList);
+          result.items = result.items.map((stock) => {
+            const q = quotes.get((stock.symbol || '').toUpperCase());
+            if (!q || !(q.price > 0)) return stock;
+            return {
+              ...stock,
+              price: q.price,
+              change24h: q.change24h,
+              changePercent24h: q.changePercent24h,
+              volume24h: q.volume24h,
+            };
+          });
+        }
+      }
+
+      return result;
+    } catch (error: any) {
+      this.logger.error('Failed to fetch paginated stocks', {
+        error: error?.message,
+        page,
+        limit,
+        index,
+      });
+      if (error instanceof HttpException) throw error;
+      throw new HttpException(
+        error.message || 'Failed to fetch paginated stocks',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
