@@ -1,5 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PythonApiService } from '../../kyc/integrations/python-api.service';
 
@@ -13,10 +12,17 @@ export class EngineScoresService {
   ) {}
 
   /**
-   * Engine Scores Snapshot Cronjob
-   * Runs every 6 hours to snapshot all engine scores for all active assets
+   * Engine Scores Snapshot Cronjob — DISABLED.
+   *
+   * This used to run every 6 hours, looping all active assets and writing one
+   * `action=HOLD, strategy_id=NULL` row per asset. No consumer ever read these
+   * snapshot rows; they only polluted strategy_signals (3.7k+ rows per run).
+   * Under the noticeboard contract, only BUY rows belong here.
+   *
+   * Method kept (not deleted) so any future caller / manual trigger still works.
+   * Re-enable by restoring the every-6-hours @Cron decorator — but first ensure
+   * snapshot data has a real consumer.
    */
-  @Cron('0 */6 * * *') // Every 6 hours
   async snapshotEngineScores(): Promise<void> {
     this.logger.log('Starting engine scores snapshot cronjob');
     const startTime = Date.now();
