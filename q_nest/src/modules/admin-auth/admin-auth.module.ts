@@ -19,6 +19,7 @@ import { BinanceModule } from '../binance/binance.module';
 import { SuperAdminManagementController } from './controllers/super-admin-management.controller';
 import { SuperAdminGuard } from './guards/super-admin.guard';
 import { SuperAdminManagementService } from './services/super-admin-management.service';
+import { UserSummaryPdfService } from './services/user-summary-pdf.service';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 
 @Module({
@@ -58,6 +59,7 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
     AdminBinanceService,
     SuperAdminGuard,
     SuperAdminManagementService,
+    UserSummaryPdfService,
   ],
   exports: [
     JwtModule,
