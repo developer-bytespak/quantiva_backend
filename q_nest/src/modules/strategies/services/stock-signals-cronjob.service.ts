@@ -641,10 +641,21 @@ export class StockSignalsCronjobService {
   }
 
   /**
-   * Get stocks to process for signal generation
-   * Uses rotation strategy: prioritizes stocks with oldest or no signals
-   * Processes a limited number per run (50) to avoid overwhelming the system
-   * Over time, all ~500 stocks will be processed
+   * Get stocks to process for signal generation.
+   *
+   * Two hard requirements, both learned the hard way:
+   *   1. ONLY stocks with live market data (price_usd > 0). Of ~6.7k active
+   *      stock rows, only ~540 (the S&P set) actually have an Alpaca/market
+   *      feed. The rest have no price → Python can't score them → wasted calls
+   *      and zero signals. We INNER JOIN on the market feed to drop them.
+   *   2. TRUE rotation by last_signal_time. The old query used
+   *      `DISTINCT ON (a.asset_id)`, which forces `ORDER BY a.asset_id` first,
+   *      so the rotation sort was dead — it always returned the same lowest-UUID
+   *      stocks and never reached GOOGL/MSFT/etc. We dedupe market/trending rows
+   *      in CTEs instead, leaving the outer ORDER BY free to rotate by oldest
+   *      signal first.
+   *
+   * ~540 tradeable stocks / 50 per run / 10-min cadence ≈ 110-min full cycle.
    */
   private async getStocksToProcess(limit: number = 50): Promise<Array<{
     asset_id: string;
@@ -688,15 +699,25 @@ export class StockSignalsCronjobService {
         poll_timestamp: Date;
         last_signal_time: Date | null;
       }>>`
-        WITH stock_signals AS (
-          SELECT 
-            asset_id,
-            MAX(timestamp) as last_signal_time
+        WITH latest_market AS (
+          SELECT DISTINCT ON (asset_id)
+            asset_id, price_usd, change_percent_24h, change_24h, market_cap, volume_24h
+          FROM market_rankings
+          ORDER BY asset_id, rank_timestamp DESC
+        ),
+        latest_trending AS (
+          SELECT DISTINCT ON (asset_id)
+            asset_id, high_24h, low_24h, market_volume, poll_timestamp
+          FROM trending_assets
+          ORDER BY asset_id, poll_timestamp DESC
+        ),
+        stock_signals AS (
+          SELECT asset_id, MAX(timestamp) as last_signal_time
           FROM strategy_signals
           WHERE user_id IS NULL
           GROUP BY asset_id
         )
-        SELECT DISTINCT ON (a.asset_id)
+        SELECT
           a.asset_id,
           a.symbol,
           a.name,
@@ -704,37 +725,27 @@ export class StockSignalsCronjobService {
           a.logo_url,
           a.asset_type,
           a.sector,
-          COALESCE(mr.price_usd, 0) as price_usd,
-          COALESCE(mr.change_percent_24h, 0) as price_change_24h,
-          COALESCE(mr.change_24h, 0) as price_change_24h_usd,
-          COALESCE(mr.market_cap, NULL) as market_cap,
-          COALESCE(mr.volume_24h, 0) as volume_24h,
-          COALESCE(ta.high_24h, 0) as high_24h,
-          COALESCE(ta.low_24h, 0) as low_24h,
-          COALESCE(ta.market_volume, 0) as market_volume,
+          lm.price_usd,
+          COALESCE(lm.change_percent_24h, 0) as price_change_24h,
+          COALESCE(lm.change_24h, 0) as price_change_24h_usd,
+          lm.market_cap,
+          COALESCE(lm.volume_24h, 0) as volume_24h,
+          COALESCE(lt.high_24h, 0) as high_24h,
+          COALESCE(lt.low_24h, 0) as low_24h,
+          COALESCE(lt.market_volume, 0) as market_volume,
           a.market_cap_rank,
-          COALESCE(ta.poll_timestamp, NOW()) as poll_timestamp,
+          COALESCE(lt.poll_timestamp, NOW()) as poll_timestamp,
           ss.last_signal_time
         FROM assets a
-        LEFT JOIN market_rankings mr ON mr.asset_id = a.asset_id
-          AND mr.rank_timestamp = (
-            SELECT MAX(rank_timestamp) 
-            FROM market_rankings 
-            WHERE asset_id = a.asset_id
-          )
-        LEFT JOIN trending_assets ta ON ta.asset_id = a.asset_id
-          AND ta.poll_timestamp = (
-            SELECT MAX(poll_timestamp) 
-            FROM trending_assets 
-            WHERE asset_id = a.asset_id
-          )
+        -- INNER JOIN drops the ~6.2k stocks with no live price feed.
+        INNER JOIN latest_market lm ON lm.asset_id = a.asset_id AND lm.price_usd > 0
+        LEFT JOIN latest_trending lt ON lt.asset_id = a.asset_id
         LEFT JOIN stock_signals ss ON ss.asset_id = a.asset_id
         WHERE a.asset_type = 'stock'
           AND a.is_active = true
-        ORDER BY 
-          a.asset_id,
-          COALESCE(ss.last_signal_time, '1970-01-01'::timestamp) ASC, -- Oldest signals first (or never processed)
-          a.market_cap_rank ASC NULLS LAST -- Then by market cap
+        ORDER BY
+          COALESCE(ss.last_signal_time, '1970-01-01'::timestamp) ASC, -- oldest / never processed first → real rotation
+          a.market_cap_rank ASC NULLS LAST                            -- tie-break by market cap
         LIMIT ${limit}
       `;
 
