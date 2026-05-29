@@ -5,8 +5,6 @@ import Handlebars from 'handlebars';
 import puppeteerCore, { Browser } from 'puppeteer-core';
 import { PrismaService } from '../../../prisma/prisma.service';
 
-const DETAIL_LIMIT = 15;
-
 export type SummarySectionKey =
   | 'fully_completed'
   | 'kyc_approved'
@@ -62,7 +60,6 @@ interface SummaryData {
   };
   show: Record<SummarySectionKey, boolean>;
   has_any_section: boolean;
-  detail_limit: number;
 }
 
 @Injectable()
@@ -143,7 +140,6 @@ export class UserSummaryPdfService implements OnModuleDestroy {
         ? this.prisma.users.findMany({
             where: { ...dateFilter, onboarding_state: 'COMPLETED' },
             orderBy: { created_at: 'desc' },
-            take: DETAIL_LIMIT,
             select: {
               created_at: true,
               email: true,
@@ -164,7 +160,6 @@ export class UserSummaryPdfService implements OnModuleDestroy {
               onboarding_state: { not: 'COMPLETED' },
             },
             orderBy: { created_at: 'desc' },
-            take: DETAIL_LIMIT,
             select: {
               created_at: true,
               email: true,
@@ -178,7 +173,6 @@ export class UserSummaryPdfService implements OnModuleDestroy {
         ? this.prisma.users.findMany({
             where: { ...dateFilter, kyc_status: 'rejected' },
             orderBy: { created_at: 'desc' },
-            take: DETAIL_LIMIT,
             select: {
               created_at: true,
               email: true,
@@ -196,7 +190,6 @@ export class UserSummaryPdfService implements OnModuleDestroy {
               kyc_verifications: { some: {} },
             },
             orderBy: { created_at: 'desc' },
-            take: DETAIL_LIMIT,
             select: {
               created_at: true,
               email: true,
@@ -210,7 +203,6 @@ export class UserSummaryPdfService implements OnModuleDestroy {
         ? this.prisma.users.findMany({
             where: { ...dateFilter, onboarding_state: 'SIGNED_UP' },
             orderBy: { created_at: 'desc' },
-            take: DETAIL_LIMIT,
             select: {
               created_at: true,
               email: true,
@@ -358,7 +350,6 @@ export class UserSummaryPdfService implements OnModuleDestroy {
       sections,
       show,
       has_any_section,
-      detail_limit: DETAIL_LIMIT,
     };
   }
 
