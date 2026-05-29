@@ -7,6 +7,7 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { BinanceService } from '../exchanges/integrations/binance.service';
 import { AlpacaMarketService } from '../stocks-market/services/alpaca-market.service';
 
@@ -18,7 +19,15 @@ import { AlpacaMarketService } from '../stocks-market/services/alpaca-market.ser
  *
  * Response shape matches what Python technical_engine expects:
  * { success: true, data: [ { openTime, open, high, low, close, volume }, ... ] }
+ *
+ * `@SkipThrottle()` is REQUIRED. The global ThrottlerGuard caps at 30 req/min
+ * per IP, but the Python service makes ~50 stocks × 3 timeframes per cron tick
+ * (plus crypto's 250 × 3) — all from the same Render egress IP. Without this,
+ * ~80% of trend-engine candle fetches 429, every Python signal call throws,
+ * the stock cron's catch block fires its hardcoded fallback, and DB fills
+ * with fake { trend: 0.5, fund: 0, sent: 0, ev: 0, liq: 0.2 } engine scores.
  */
+@SkipThrottle()
 @Controller('candles/system')
 export class SystemCandlesController {
   private readonly logger = new Logger(SystemCandlesController.name);
