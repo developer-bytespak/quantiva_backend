@@ -1921,21 +1921,23 @@ model affiliate_sessions {
 }
 
 model affiliate_applications {
-  application_id       String                     @id @default(uuid()) @db.Uuid
-  affiliate_id         String                     @unique @db.Uuid
-  primary_channel      AffiliateChannel
-  channel_url          String?                    @db.VarChar(500)
-  audience_size        Int?
-  pitch                String                     @db.VarChar(250)
-  status               AffiliateApplicationStatus @default(PENDING)
-  rejection_reason     String?
-  reviewed_by_admin_id String?                    @db.Uuid
-  reviewed_at          DateTime?                  @db.Timestamp(6)
-  ip_address           String?                    @db.VarChar(45)
-  device_id            String?                    @db.VarChar(255)
-  created_at           DateTime                   @default(now()) @db.Timestamp(6)
-  updated_at           DateTime?                  @updatedAt @db.Timestamp(6)
-  affiliate            affiliates                 @relation(fields: [affiliate_id], references: [affiliate_id], onDelete: Cascade)
+  application_id              String                     @id @default(uuid()) @db.Uuid
+  affiliate_id                String                     @unique @db.Uuid
+  primary_channel             AffiliateChannel
+  primary_channel_custom_name String?                    @db.VarChar(120)
+  channel_url                 String?                    @db.VarChar(500)
+  additional_channels         Json?
+  audience_size               Int?
+  pitch                       String                     @db.VarChar(250)
+  status                      AffiliateApplicationStatus @default(PENDING)
+  rejection_reason            String?
+  reviewed_by_admin_id        String?                    @db.Uuid
+  reviewed_at                 DateTime?                  @db.Timestamp(6)
+  ip_address                  String?                    @db.VarChar(45)
+  device_id                   String?                    @db.VarChar(255)
+  created_at                  DateTime                   @default(now()) @db.Timestamp(6)
+  updated_at                  DateTime?                  @updatedAt @db.Timestamp(6)
+  affiliate                   affiliates                 @relation(fields: [affiliate_id], references: [affiliate_id], onDelete: Cascade)
 
   @@index([status])
   @@map("affiliate_applications")
@@ -2072,9 +2074,7 @@ enum AffiliateChannel {
   X
   INSTAGRAM
   TIKTOK
-  NEWSLETTER
-  BLOG
-  DISCORD_TELEGRAM
-  PODCAST
+  DISCORD
+  TELEGRAM
   OTHER
 }

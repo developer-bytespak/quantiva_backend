@@ -63,7 +63,12 @@ export class AffiliateAuthService {
         data: {
           affiliate_id: created.affiliate_id,
           primary_channel: dto.primaryChannel,
+          primary_channel_custom_name: dto.primaryChannelCustomName,
           channel_url: dto.channelUrl,
+          additional_channels:
+            dto.additionalChannels && dto.additionalChannels.length > 0
+              ? (dto.additionalChannels as unknown as object)
+              : undefined,
           audience_size: dto.audienceSize,
           pitch: dto.pitch,
           ip_address: ipAddress,
