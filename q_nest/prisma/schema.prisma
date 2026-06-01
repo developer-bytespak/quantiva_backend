@@ -31,6 +31,8 @@ model users {
   stripe_customer_id          String?                       @db.VarChar(255)
   onboarding_emails_opted_out Boolean                       @default(false)
   onboarding_state            OnboardingState               @default(SIGNED_UP)
+  referred_by_affiliate_id    String?                       @db.Uuid
+  affiliate_referral          affiliate_referrals?
   contact_submissions         contact_submissions[]
   kyc_verifications           kyc_verifications[]
   monthly_fee_summaries       monthly_fee_summaries[]
@@ -1863,4 +1865,216 @@ enum QueuedTradeStatus {
   canceled
   expired
   failed
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Affiliate Marketing Program
+// ─────────────────────────────────────────────────────────────────────────
+
+model affiliates {
+  affiliate_id        String                        @id @default(uuid()) @db.Uuid
+  email               String                        @unique @db.VarChar(255)
+  display_name        String                        @unique @db.VarChar(120)
+  password_hash       String                        @db.VarChar(255)
+  full_name           String?                       @db.VarChar(120)
+  country             String?                       @db.VarChar(100)
+  tax_residency       String?                       @db.VarChar(100)
+  referral_code       String?                       @unique @db.VarChar(60)
+  status              AffiliateStatus               @default(PENDING)
+  commission_tier     AffiliateCommissionTier       @default(DEFAULT)
+  payout_instructions String?
+  tax_form_url        String?
+  pending_balance     Decimal                       @default(0) @db.Decimal(12, 2)
+  paid_total          Decimal                       @default(0) @db.Decimal(12, 2)
+  clawed_back_total   Decimal                       @default(0) @db.Decimal(12, 2)
+  signup_count        Int                           @default(0)
+  conversion_count    Int                           @default(0)
+  revenue_generated   Decimal                       @default(0) @db.Decimal(14, 2)
+  last_activity_at    DateTime?                     @db.Timestamp(6)
+  created_at          DateTime                      @default(now()) @db.Timestamp(6)
+  updated_at          DateTime?                     @updatedAt @db.Timestamp(6)
+  application         affiliate_applications?
+  sessions            affiliate_sessions[]
+  referrals           affiliate_referrals[]
+  commission_events   affiliate_commission_events[]
+  payouts             affiliate_payouts[]
+  audit_logs          affiliate_audit_log[]
+
+  @@index([status])
+  @@index([referral_code])
+  @@map("affiliates")
+}
+
+model affiliate_sessions {
+  session_id         String     @id @default(uuid()) @db.Uuid
+  affiliate_id       String     @db.Uuid
+  issued_at          DateTime   @default(now()) @db.Timestamp(6)
+  expires_at         DateTime   @db.Timestamp(6)
+  revoked            Boolean    @default(false)
+  device_id          String?    @db.VarChar(255)
+  ip_address         String?    @db.VarChar(45)
+  refresh_token_hash String?
+  affiliate          affiliates @relation(fields: [affiliate_id], references: [affiliate_id], onDelete: Cascade)
+
+  @@index([affiliate_id])
+  @@map("affiliate_sessions")
+}
+
+model affiliate_applications {
+  application_id       String                     @id @default(uuid()) @db.Uuid
+  affiliate_id         String                     @unique @db.Uuid
+  primary_channel      AffiliateChannel
+  channel_url          String?                    @db.VarChar(500)
+  audience_size        Int?
+  pitch                String                     @db.VarChar(250)
+  status               AffiliateApplicationStatus @default(PENDING)
+  rejection_reason     String?
+  reviewed_by_admin_id String?                    @db.Uuid
+  reviewed_at          DateTime?                  @db.Timestamp(6)
+  ip_address           String?                    @db.VarChar(45)
+  device_id            String?                    @db.VarChar(255)
+  created_at           DateTime                   @default(now()) @db.Timestamp(6)
+  updated_at           DateTime?                  @updatedAt @db.Timestamp(6)
+  affiliate            affiliates                 @relation(fields: [affiliate_id], references: [affiliate_id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("affiliate_applications")
+}
+
+model affiliate_referrals {
+  referral_id   String     @id @default(uuid()) @db.Uuid
+  affiliate_id  String     @db.Uuid
+  user_id       String     @unique @db.Uuid
+  referral_code String     @db.VarChar(60)
+  source        String     @db.VarChar(30)
+  utm           Json?
+  attributed_at DateTime   @default(now()) @db.Timestamp(6)
+  affiliate     affiliates @relation(fields: [affiliate_id], references: [affiliate_id], onDelete: Cascade)
+  user          users      @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+
+  @@index([affiliate_id])
+  @@map("affiliate_referrals")
+}
+
+model affiliate_commission_events {
+  event_id         String                    @id @default(uuid()) @db.Uuid
+  affiliate_id     String                    @db.Uuid
+  user_id          String                    @db.Uuid
+  event_type       AffiliateCommissionType
+  source_reference String                    @db.VarChar(255)
+  gross_amount_usd Decimal                   @default(0) @db.Decimal(14, 2)
+  commission_rate  Decimal                   @default(0) @db.Decimal(6, 4)
+  commission_usd   Decimal                   @db.Decimal(12, 2)
+  status           AffiliateCommissionStatus @default(ACCRUED)
+  payout_id        String?                   @db.Uuid
+  clawed_back_at   DateTime?                 @db.Timestamp(6)
+  created_at       DateTime                  @default(now()) @db.Timestamp(6)
+  affiliate        affiliates                @relation(fields: [affiliate_id], references: [affiliate_id], onDelete: Cascade)
+  payout           affiliate_payouts?        @relation(fields: [payout_id], references: [payout_id])
+
+  @@unique([event_type, source_reference])
+  @@index([affiliate_id, status])
+  @@index([user_id])
+  @@map("affiliate_commission_events")
+}
+
+model affiliate_payouts {
+  payout_id             String                        @id @default(uuid()) @db.Uuid
+  affiliate_id          String                        @db.Uuid
+  period                String                        @db.VarChar(7)
+  gross_usd             Decimal                       @db.Decimal(12, 2)
+  net_usd               Decimal                       @db.Decimal(12, 2)
+  status                AffiliatePayoutStatus         @default(PENDING)
+  payment_reference     String?
+  processed_by_admin_id String?                       @db.Uuid
+  created_at            DateTime                      @default(now()) @db.Timestamp(6)
+  paid_at               DateTime?                     @db.Timestamp(6)
+  affiliate             affiliates                    @relation(fields: [affiliate_id], references: [affiliate_id], onDelete: Cascade)
+  commission_events     affiliate_commission_events[]
+
+  @@index([affiliate_id, status])
+  @@index([period])
+  @@map("affiliate_payouts")
+}
+
+model affiliate_audit_log {
+  log_id         String      @id @default(uuid()) @db.Uuid
+  affiliate_id   String?     @db.Uuid
+  application_id String?     @db.Uuid
+  actor_admin_id String?     @db.Uuid
+  action         String      @db.VarChar(80)
+  metadata       Json?
+  created_at     DateTime    @default(now()) @db.Timestamp(6)
+  affiliate      affiliates? @relation(fields: [affiliate_id], references: [affiliate_id], onDelete: Cascade)
+
+  @@index([affiliate_id])
+  @@map("affiliate_audit_log")
+}
+
+model affiliate_program_settings {
+  version                       Int      @id @default(autoincrement())
+  is_active                     Boolean  @default(true)
+  subscription_commission_pct   Decimal  @default(0.20) @db.Decimal(6, 4)
+  recurring_months_cap          Int      @default(12)
+  attribution_window_days       Int      @default(30)
+  refund_clawback_days          Int      @default(14)
+  payout_threshold_usd          Decimal  @default(50.00) @db.Decimal(10, 2)
+  payout_cycle                  String   @default("MONTHLY") @db.VarChar(20)
+  premium_tier_multiplier       Decimal  @default(1.50) @db.Decimal(6, 4)
+  affiliate_signup_velocity_24h Int      @default(50)
+  updated_by_admin_id           String?  @db.Uuid
+  created_at                    DateTime @default(now()) @db.Timestamp(6)
+
+  @@map("affiliate_program_settings")
+}
+
+enum AffiliateStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+  PAUSED
+}
+
+enum AffiliateApplicationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  INFO_REQUESTED
+}
+
+enum AffiliateCommissionTier {
+  DEFAULT
+  PREMIUM
+  CUSTOM
+}
+
+enum AffiliateCommissionType {
+  SUBSCRIPTION_PAYMENT
+}
+
+enum AffiliateCommissionStatus {
+  ACCRUED
+  PAID
+  CLAWED_BACK
+  HELD
+}
+
+enum AffiliatePayoutStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum AffiliateChannel {
+  YOUTUBE
+  X
+  INSTAGRAM
+  TIKTOK
+  NEWSLETTER
+  BLOG
+  DISCORD_TELEGRAM
+  PODCAST
+  OTHER
 }

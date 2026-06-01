@@ -25,6 +25,7 @@ import { SubscriptionsService } from '../../subscriptions/subscriptions.service'
 import { SumsubService } from '../../../kyc/integrations/sumsub.service';
 import { OnboardingStateService } from '../../onboarding-emails/services/onboarding-state.service';
 import { OnboardingState } from '../../onboarding-emails/types';
+import { AffiliateAttributionService } from '../../affiliate/services/affiliate-attribution.service';
 
 @Injectable()
 export class AuthService {
@@ -41,6 +42,7 @@ export class AuthService {
     private sumsubService: SumsubService,
     private authEmailService: AuthEmailService,
     private onboardingStateService: OnboardingStateService,
+    private affiliateAttributionService: AffiliateAttributionService,
   ) {}
 
   private getGoogleClient() {
@@ -60,8 +62,11 @@ export class AuthService {
     };
   }
 
-  async register(registerDto: RegisterDto) {
-    const { email, username, password } = registerDto;
+  async register(
+    registerDto: RegisterDto,
+    context?: { ipAddress?: string; deviceId?: string },
+  ) {
+    const { email, username, password, referralCode } = registerDto;
 
     // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\..+$/;
@@ -100,6 +105,15 @@ export class AuthService {
         two_factor_enabled: true,
         two_factor_secret: twoFactorSecret,
       },
+    });
+
+    // Attribute the new user to an affiliate if a referral code was supplied.
+    // Internally try/catch'd — must never block signup.
+    await this.affiliateAttributionService.attribute({
+      userId: user.user_id,
+      referralCode,
+      ipAddress: context?.ipAddress,
+      deviceId: context?.deviceId,
     });
 
     // Kick off onboarding drip — schedules SIGNED_UP-stage reminders.
@@ -491,7 +505,12 @@ export class AuthService {
   }
 
   /** Google Signup: create new user only. If account already exists, throws. */
-  async signupWithGoogle(idToken: string, ipAddress?: string, deviceId?: string) {
+  async signupWithGoogle(
+    idToken: string,
+    ipAddress?: string,
+    deviceId?: string,
+    referralCode?: string,
+  ) {
     const { email, picture } = await this.verifyGoogleIdToken(idToken);
     let user = await this.prisma.users.findUnique({ where: { email } });
     if (user) {
@@ -512,6 +531,14 @@ export class AuthService {
         profile_pic_url: picture,
         kyc_status: 'pending',
       },
+    });
+
+    // Attribute to an affiliate if a referral code was supplied.
+    await this.affiliateAttributionService.attribute({
+      userId: user.user_id,
+      referralCode,
+      ipAddress,
+      deviceId,
     });
 
     // Kick off onboarding drip — same as email/password signup. Google signup users still need to

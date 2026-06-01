@@ -90,8 +90,10 @@ export class AuthController {
   @Public()
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
-  async register(@Body() registerDto: RegisterDto) {
-    return this.authService.register(registerDto);
+  async register(@Body() registerDto: RegisterDto, @Req() req: Request) {
+    const ipAddress = req.ip || req.socket.remoteAddress;
+    const deviceId = req.headers['x-device-id'] as string;
+    return this.authService.register(registerDto, { ipAddress, deviceId });
   }
 
   @Public()
@@ -216,7 +218,7 @@ export class AuthController {
   @Post('signup/google')
   @HttpCode(HttpStatus.OK)
   async googleSignup(
-    @Body() body: { idToken?: string },
+    @Body() body: { idToken?: string; referralCode?: string },
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
@@ -225,7 +227,12 @@ export class AuthController {
     }
     const ipAddress = req.ip || req.socket.remoteAddress;
     const deviceId = req.headers['x-device-id'] as string;
-    const result = await this.authService.signupWithGoogle(body.idToken, ipAddress, deviceId);
+    const result = await this.authService.signupWithGoogle(
+      body.idToken,
+      ipAddress,
+      deviceId,
+      body.referralCode,
+    );
     return {
       user: result.user,
       accessToken: result.accessToken,
