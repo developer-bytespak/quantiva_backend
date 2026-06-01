@@ -6,7 +6,6 @@ interface SettingsSnapshot {
   subscription_commission_pct: Decimal;
   recurring_months_cap: number;
   refund_clawback_days: number;
-  premium_tier_multiplier: Decimal;
 }
 
 @Injectable()
@@ -51,7 +50,7 @@ export class AffiliateCommissionService {
       select: {
         affiliate_id: true,
         status: true,
-        commission_tier: true,
+        commission_pct: true,
       },
     });
     if (!affiliate || affiliate.status !== 'APPROVED') return;
@@ -83,11 +82,12 @@ export class AffiliateCommissionService {
       }
     }
 
-    const tierMultiplier =
-      affiliate.commission_tier === 'PREMIUM'
-        ? settings.premium_tier_multiplier
-        : new Decimal(1);
-    const rate = settings.subscription_commission_pct.times(tierMultiplier);
+    // Every affiliate has their own rate, stamped at approval time and
+    // editable by the super admin. The program default rate is only the
+    // pre-fill in the approve form; it isn't used here.
+    const rate = new Decimal(
+      affiliate.commission_pct ?? settings.subscription_commission_pct,
+    );
     const commission = gross.times(rate).toDecimalPlaces(2);
 
     // Determine if this is the first paying conversion for this user (used
@@ -135,7 +135,6 @@ export class AffiliateCommissionService {
               gross_amount_usd: gross.toString(),
               commission_rate: rate.toString(),
               commission_usd: commission.toString(),
-              tier: affiliate.commission_tier,
               first_conversion: isFirstConversion,
             },
           },
@@ -269,7 +268,6 @@ export class AffiliateCommissionService {
         subscription_commission_pct: true,
         recurring_months_cap: true,
         refund_clawback_days: true,
-        premium_tier_multiplier: true,
       },
     });
     if (!row) return null;
@@ -277,7 +275,6 @@ export class AffiliateCommissionService {
       subscription_commission_pct: new Decimal(row.subscription_commission_pct),
       recurring_months_cap: row.recurring_months_cap,
       refund_clawback_days: row.refund_clawback_days,
-      premium_tier_multiplier: new Decimal(row.premium_tier_multiplier),
     };
   }
 }

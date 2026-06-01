@@ -1,13 +1,14 @@
 import {
-  IsIn,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
   Matches,
+  Max,
   MaxLength,
+  Min,
   MinLength,
 } from 'class-validator';
-import { AFFILIATE_COMMISSION_TIERS } from './commission-tier.constants';
 
 export class ApproveApplicationDto {
   @IsString()
@@ -20,9 +21,14 @@ export class ApproveApplicationDto {
   })
   referral_code: string;
 
-  @IsOptional()
-  @IsIn(AFFILIATE_COMMISSION_TIERS as unknown as string[])
-  commission_tier?: (typeof AFFILIATE_COMMISSION_TIERS)[number];
+  /**
+   * Commission rate to stamp on the affiliate at approval time. Fraction —
+   * 0.20 = 20%. Frontend pre-fills with the current program default.
+   */
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0)
+  @Max(1)
+  commission_pct: number;
 
   @IsOptional()
   @IsString()

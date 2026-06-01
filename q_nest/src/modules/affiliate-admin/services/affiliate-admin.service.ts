@@ -11,7 +11,7 @@ import { AffiliateEmailService } from '../../affiliate/services/affiliate-email.
 import { ApproveApplicationDto } from '../dto/approve-application.dto';
 import { RejectApplicationDto } from '../dto/reject-application.dto';
 import { RequestInfoDto } from '../dto/request-info.dto';
-import { ChangeTierDto } from '../dto/change-tier.dto';
+import { SetCommissionRateDto } from '../dto/set-commission-rate.dto';
 import { AdjustBalanceDto } from '../dto/adjust-balance.dto';
 import { AddNoteDto } from '../dto/add-note.dto';
 import { UpdateProgramSettingsDto } from '../dto/update-program-settings.dto';
@@ -20,7 +20,6 @@ import { MarkPayoutPaidDto } from '../dto/mark-payout-paid.dto';
 export interface ListAffiliatesFilters {
   status?: string;
   country?: string;
-  tier?: string;
   channel?: string;
   search?: string;
   date_from?: string;
@@ -50,7 +49,6 @@ export class AffiliateAdminService {
     const where: any = {};
     if (filters.status) where.status = filters.status;
     if (filters.country) where.country = filters.country;
-    if (filters.tier) where.commission_tier = filters.tier;
     if (filters.channel) {
       where.application = { primary_channel: filters.channel };
     }
@@ -84,7 +82,7 @@ export class AffiliateAdminService {
           country: true,
           referral_code: true,
           status: true,
-          commission_tier: true,
+          commission_pct: true,
           signup_count: true,
           conversion_count: true,
           revenue_generated: true,
@@ -227,7 +225,7 @@ export class AffiliateAdminService {
         data: {
           status: 'APPROVED',
           referral_code: dto.referral_code,
-          commission_tier: (dto.commission_tier ?? 'DEFAULT') as any,
+          commission_pct: dto.commission_pct,
         },
       });
       await tx.affiliate_applications.update({
@@ -246,7 +244,7 @@ export class AffiliateAdminService {
           action: 'AFFILIATE_APPLICATION_APPROVED',
           metadata: {
             referral_code: dto.referral_code,
-            commission_tier: dto.commission_tier ?? 'DEFAULT',
+            commission_pct: dto.commission_pct,
             notes: dto.notes ?? null,
           },
         },
@@ -614,30 +612,33 @@ export class AffiliateAdminService {
     return { ok: true, referral_code: newCode };
   }
 
-  async changeTier(
+  async setCommissionRate(
     affiliateId: string,
-    dto: ChangeTierDto,
+    dto: SetCommissionRateDto,
     adminId: string,
   ) {
     const affiliate = await this.prisma.affiliates.findUnique({
       where: { affiliate_id: affiliateId },
-      select: { commission_tier: true },
+      select: { commission_pct: true },
     });
     if (!affiliate) throw new NotFoundException('Affiliate not found');
 
     await this.prisma.$transaction(async (tx) => {
       await tx.affiliates.update({
         where: { affiliate_id: affiliateId },
-        data: { commission_tier: dto.commission_tier as any },
+        data: { commission_pct: dto.commission_pct },
       });
       await tx.affiliate_audit_log.create({
         data: {
           affiliate_id: affiliateId,
           actor_admin_id: adminId,
-          action: 'AFFILIATE_TIER_CHANGED',
+          action: 'AFFILIATE_COMMISSION_RATE_CHANGED',
           metadata: {
-            previous_tier: affiliate.commission_tier,
-            new_tier: dto.commission_tier,
+            previous_pct:
+              affiliate.commission_pct != null
+                ? Number(affiliate.commission_pct)
+                : null,
+            new_pct: dto.commission_pct,
             reason: dto.reason ?? null,
           },
         },
@@ -911,25 +912,37 @@ export class AffiliateAdminService {
   // ──────────────────────────────────────────────────────────────────────
 
   async getProgramSettings() {
-    const settings = await this.prisma.affiliate_program_settings.findFirst({
+    let settings = await this.prisma.affiliate_program_settings.findFirst({
       where: { is_active: true },
       orderBy: { version: 'desc' },
     });
-    return settings;
+
+    // Auto-create a default row on first read so the settings page always has
+    // something to render. All defaults come from the Prisma @default values.
+    if (!settings) {
+      settings = await this.prisma.affiliate_program_settings.create({
+        data: { is_active: true },
+      });
+      this.logger.log(
+        `Seeded initial affiliate_program_settings row (v${settings.version})`,
+      );
+    }
+
+    return this.serializeSettings(settings);
   }
 
   async updateProgramSettings(
     dto: UpdateProgramSettingsDto,
     adminId: string,
   ) {
+    // getProgramSettings auto-seeds if missing, so we always have a baseline.
+    await this.getProgramSettings();
     const current = await this.prisma.affiliate_program_settings.findFirst({
       where: { is_active: true },
       orderBy: { version: 'desc' },
     });
     if (!current) {
-      throw new BadRequestException(
-        'No current program settings to derive from; seed an initial row first',
-      );
+      throw new BadRequestException('No current program settings');
     }
 
     const next = await this.prisma.$transaction(async (tx) => {
@@ -952,8 +965,6 @@ export class AffiliateAdminService {
           payout_threshold_usd:
             dto.payout_threshold_usd ?? current.payout_threshold_usd,
           payout_cycle: dto.payout_cycle ?? current.payout_cycle,
-          premium_tier_multiplier:
-            dto.premium_tier_multiplier ?? current.premium_tier_multiplier,
           affiliate_signup_velocity_24h:
             dto.affiliate_signup_velocity_24h ??
             current.affiliate_signup_velocity_24h,
@@ -974,7 +985,40 @@ export class AffiliateAdminService {
       return created;
     });
 
-    return next;
+    return this.serializeSettings(next);
+  }
+
+  /**
+   * Prisma `Decimal` columns don't survive JSON serialization as plain numbers
+   * (they ship as `{ s, e, d }` objects), which breaks number inputs on the
+   * frontend. Convert them here so consumers always see numbers / primitives.
+   */
+  private serializeSettings(row: {
+    version: number;
+    is_active: boolean;
+    subscription_commission_pct: Decimal;
+    recurring_months_cap: number;
+    attribution_window_days: number;
+    refund_clawback_days: number;
+    payout_threshold_usd: Decimal;
+    payout_cycle: string;
+    affiliate_signup_velocity_24h: number;
+    updated_by_admin_id: string | null;
+    created_at: Date;
+  }) {
+    return {
+      version: row.version,
+      is_active: row.is_active,
+      subscription_commission_pct: Number(row.subscription_commission_pct),
+      recurring_months_cap: row.recurring_months_cap,
+      attribution_window_days: row.attribution_window_days,
+      refund_clawback_days: row.refund_clawback_days,
+      payout_threshold_usd: Number(row.payout_threshold_usd),
+      payout_cycle: row.payout_cycle,
+      affiliate_signup_velocity_24h: row.affiliate_signup_velocity_24h,
+      updated_by_admin_id: row.updated_by_admin_id,
+      created_at: row.created_at,
+    };
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -996,7 +1040,7 @@ export class AffiliateAdminService {
         'country',
         'referral_code',
         'status',
-        'commission_tier',
+        'commission_pct',
         'signup_count',
         'conversion_count',
         'revenue_generated_usd',
@@ -1016,7 +1060,7 @@ export class AffiliateAdminService {
           this.csvEscape(a.country ?? ''),
           this.csvEscape(a.referral_code ?? ''),
           a.status,
-          a.commission_tier,
+          a.commission_pct != null ? Number(a.commission_pct).toFixed(4) : '',
           a.signup_count,
           a.conversion_count,
           Number(a.revenue_generated).toFixed(2),
