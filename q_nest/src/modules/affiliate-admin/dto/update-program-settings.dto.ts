@@ -43,12 +43,6 @@ export class UpdateProgramSettingsDto {
   payout_cycle?: 'MONTHLY' | 'QUARTERLY';
 
   @IsOptional()
-  @IsNumber({ maxDecimalPlaces: 4 })
-  @Min(0.1)
-  @Max(10)
-  premium_tier_multiplier?: number;
-
-  @IsOptional()
   @IsInt()
   @Min(1)
   @Max(10_000)

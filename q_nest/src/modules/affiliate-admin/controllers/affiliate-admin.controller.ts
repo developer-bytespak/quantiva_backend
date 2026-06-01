@@ -22,7 +22,7 @@ import {
 import { ApproveApplicationDto } from '../dto/approve-application.dto';
 import { RejectApplicationDto } from '../dto/reject-application.dto';
 import { RequestInfoDto } from '../dto/request-info.dto';
-import { ChangeTierDto } from '../dto/change-tier.dto';
+import { SetCommissionRateDto } from '../dto/set-commission-rate.dto';
 import { AdjustBalanceDto } from '../dto/adjust-balance.dto';
 import { AddNoteDto } from '../dto/add-note.dto';
 import { UpdateProgramSettingsDto } from '../dto/update-program-settings.dto';
@@ -254,13 +254,13 @@ export class AffiliateAdminController {
     );
   }
 
-  @Post(':id/change-tier')
-  changeTier(
+  @Post(':id/commission-rate')
+  setCommissionRate(
     @Param('id') id: string,
-    @Body() dto: ChangeTierDto,
+    @Body() dto: SetCommissionRateDto,
     @CurrentAdmin() admin: AdminTokenPayload,
   ) {
-    return this.affiliateAdminService.changeTier(id, dto, admin.sub);
+    return this.affiliateAdminService.setCommissionRate(id, dto, admin.sub);
   }
 
   @Post(':id/adjust-balance')

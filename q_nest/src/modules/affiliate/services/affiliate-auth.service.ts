@@ -209,7 +209,7 @@ export class AffiliateAuthService {
         tax_residency: true,
         referral_code: true,
         status: true,
-        commission_tier: true,
+        commission_pct: true,
         payout_instructions: true,
         pending_balance: true,
         paid_total: true,

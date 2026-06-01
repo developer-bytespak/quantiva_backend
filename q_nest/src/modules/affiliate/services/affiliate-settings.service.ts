@@ -18,7 +18,7 @@ export class AffiliateSettingsService {
         tax_residency: true,
         payout_instructions: true,
         tax_form_url: true,
-        commission_tier: true,
+        commission_pct: true,
         status: true,
       },
     });
