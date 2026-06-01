@@ -10,6 +10,7 @@ import { SubscriptionLoaderMiddleware } from '../../common/middleware/subscripti
 import { OnboardingStateService } from '../onboarding-emails/services/onboarding-state.service';
 import { FreeUpgradeCampaignService } from '../onboarding-emails/services/free-upgrade-campaign.service';
 import { OnboardingState } from '../onboarding-emails/types';
+import { AffiliateCommissionService } from '../affiliate/services/affiliate-commission.service';
 
 export enum PlanTier {
   FREE = 'FREE',
@@ -44,6 +45,7 @@ export class SubscriptionsService implements OnModuleInit {
     private readonly appGateway: AppGateway,
     private readonly onboardingStateService: OnboardingStateService,
     private readonly freeUpgradeCampaignService: FreeUpgradeCampaignService,
+    private readonly affiliateCommissionService: AffiliateCommissionService,
     @Optional() private readonly subscriptionLoader?: SubscriptionLoaderMiddleware,
   ) { }
 
@@ -962,13 +964,32 @@ export class SubscriptionsService implements OnModuleInit {
     receipt_url?: string | null;
     failure_reason?: string | null;
   }) {
-    return this.prisma.payment_history.create({
+    const payment = await this.prisma.payment_history.create({
       data: {
         ...data,
         currency: data.currency || 'USD',
         paid_at: data.status === 'succeeded' ? new Date() : null,
       },
     });
+
+    // Affiliate commission accrual — idempotent, no-ops if user has no
+    // referrer or affiliate is not APPROVED. Try/catch so a bug here cannot
+    // poison the payment write.
+    if (data.status === 'succeeded') {
+      try {
+        await this.affiliateCommissionService.recordSubscriptionPayment({
+          userId: data.user_id,
+          paymentReference: payment.payment_id,
+          grossAmountUsd: data.amount,
+        });
+      } catch (err: any) {
+        this.logger.error(
+          `Affiliate commission accrual failed for payment ${payment.payment_id}: ${err?.message}`,
+        );
+      }
+    }
+
+    return payment;
   }
 
   /**
@@ -1056,7 +1077,26 @@ export class SubscriptionsService implements OnModuleInit {
       existing.expires_at ??
       new Date();
 
-    return this.finalizeCancellationLocal(existing.subscription_id, finalPeriodEnd);
+    const result = await this.finalizeCancellationLocal(
+      existing.subscription_id,
+      finalPeriodEnd,
+    );
+
+    // Affiliate clawback — only fires if the latest succeeded payment is
+    // within the configured refund_clawback_days window. Cancellations
+    // outside that window are treated as normal end-of-life and do not
+    // claw back the commission.
+    try {
+      await this.affiliateCommissionService.clawbackForSubscriptionIfRecent({
+        subscriptionId: existing.subscription_id,
+      });
+    } catch (err: any) {
+      this.logger.error(
+        `Affiliate clawback failed for subscription ${existing.subscription_id}: ${err?.message}`,
+      );
+    }
+
+    return result;
   }
 
   async handleAdminOverrideSubscriptionCancelled(subscriptionId: string) {

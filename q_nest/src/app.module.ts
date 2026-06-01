@@ -6,6 +6,8 @@ import { PrismaModule } from './prisma/prisma.module';
 import { ConfigModule } from './config/config.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { AdminAuthModule } from './modules/admin-auth/admin-auth.module';
+import { AffiliateModule } from './modules/affiliate/affiliate.module';
+import { AffiliateAdminModule } from './modules/affiliate-admin/affiliate-admin.module';
 import { SubscriptionLoaderMiddleware } from './common/middleware/subscription-loader.middleware';
 import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 import { StripeModule } from './modules/stripe/stripe.module';
@@ -53,6 +55,8 @@ import { NewsWarmerModule } from './modules/news-warmer/news-warmer.module';
     }]),
     AuthModule,
     AdminAuthModule,
+    AffiliateModule,
+    AffiliateAdminModule,
 
     KycModule,
     ExchangesModule,
