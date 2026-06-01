@@ -1,4 +1,6 @@
 import {
+  ArrayMaxSize,
+  IsArray,
   IsEmail,
   IsIn,
   IsInt,
@@ -10,20 +12,35 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export const AFFILIATE_CHANNELS = [
   'YOUTUBE',
   'X',
   'INSTAGRAM',
   'TIKTOK',
-  'NEWSLETTER',
-  'BLOG',
-  'DISCORD_TELEGRAM',
-  'PODCAST',
+  'DISCORD',
+  'TELEGRAM',
   'OTHER',
 ] as const;
 export type AffiliateChannel = (typeof AFFILIATE_CHANNELS)[number];
+
+export class AffiliateAdditionalChannelDto {
+  @IsIn(AFFILIATE_CHANNELS as unknown as string[])
+  type: AffiliateChannel;
+
+  @IsOptional()
+  @IsUrl({}, { message: 'Channel URL must be a valid URL' })
+  @MaxLength(500)
+  url?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  customName?: string;
+}
 
 export class AffiliateSignupDto {
   @IsEmail({}, { message: 'Invalid email format' })
@@ -61,9 +78,21 @@ export class AffiliateSignupDto {
   primaryChannel: AffiliateChannel;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  primaryChannelCustomName?: string;
+
+  @IsOptional()
   @IsUrl({}, { message: 'Channel URL must be a valid URL' })
   @MaxLength(500)
   channelUrl?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => AffiliateAdditionalChannelDto)
+  additionalChannels?: AffiliateAdditionalChannelDto[];
 
   @IsOptional()
   @IsInt()
