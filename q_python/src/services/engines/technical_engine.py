@@ -599,7 +599,24 @@ class TechnicalEngine(BaseEngine):
             weighted_score = sum(score * weight for _, score, weight in score_components) / total_weight
         else:
             weighted_score = 0.0
-        
+
+        # Multi-timeframe alignment bonus.
+        # When 1d, 4h, AND 1h all point in the same direction with
+        # non-trivial magnitude, that's stronger evidence than any single
+        # timeframe — a real trend rather than a one-bar fluke. Scale the
+        # weighted score by 1.2x in that case. Symmetric: works on the
+        # downside too (confirmed bear trend gets the same scaling).
+        ALIGN_MIN = 0.10
+        ma_1d  = next((s for k, s, _ in score_components if k == 'ma50_200_1d'), 0.0)
+        ma_4h  = next((s for k, s, _ in score_components if k == 'ma20_50_4h'), 0.0)
+        roc_1h = next((s for k, s, _ in score_components if k == 'roc_1h'), 0.0)
+        mtf_aligned = False
+        if abs(ma_1d) >= ALIGN_MIN and abs(ma_4h) >= ALIGN_MIN and abs(roc_1h) >= ALIGN_MIN:
+            same_sign = (ma_1d > 0 and ma_4h > 0 and roc_1h > 0) or (ma_1d < 0 and ma_4h < 0 and roc_1h < 0)
+            if same_sign:
+                weighted_score *= 1.20
+                mtf_aligned = True
+
         # Store primary indicators (use 1d if available, otherwise 4h, otherwise fallback)
         if ohlcv_1d is not None and not ohlcv_1d.empty:
             indicators_by_timeframe['primary'] = indicators_by_timeframe.get('1d', {})
@@ -609,5 +626,9 @@ class TechnicalEngine(BaseEngine):
             indicators_by_timeframe['primary'] = self._calculate_indicators(fallback_ohlcv)
         else:
             indicators_by_timeframe['primary'] = {}
-        
+
+        # Expose alignment fact so probes / LLM explanations can see WHY a
+        # trend score was boosted.
+        indicators_by_timeframe['mtf_aligned'] = mtf_aligned
+
         return self.clamp_score(weighted_score), indicators_by_timeframe
