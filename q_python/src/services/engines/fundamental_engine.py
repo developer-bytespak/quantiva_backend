@@ -268,15 +268,41 @@ class FundamentalEngine(BaseEngine):
         if not asset_symbol:
             return self.handle_no_data("Missing asset_symbol", context=f"asset_id={asset_id}")
 
+        # Surface the precise failure mode so the next probe can tell us
+        # whether it's "no API key on Render", "request raised", or "request
+        # OK but data empty". Without this the original message ("no
+        # fundamentals for this symbol") collapsed three different bugs into
+        # one indistinguishable null result.
+        if not self.finnhub_service.api_key:
+            return self.handle_no_data(
+                "FINNHUB_API_KEY not configured on this Python service",
+                context=f"symbol={asset_symbol} | check Render env vars",
+            )
+
         try:
             batch = self.finnhub_service.fetch_company_fundamentals_batch([asset_symbol])
         except Exception as e:
             return self.handle_error(e, f"finnhub fundamentals fetch for {asset_symbol}")
 
-        metrics = batch.get(asset_symbol) if isinstance(batch, dict) else None
+        if not isinstance(batch, dict):
+            return self.handle_no_data(
+                "Finnhub service returned non-dict response",
+                context=f"symbol={asset_symbol} type={type(batch).__name__}",
+            )
+
+        metrics = batch.get(asset_symbol)
+        if metrics is None:
+            # FinnhubService swallowed an exception (network, SSL, JSON parse,
+            # raise_for_status). It logs the warning internally but doesn't
+            # surface it to the caller. Best we can do here without changing
+            # FinnhubService is signal which key was tried.
+            return self.handle_no_data(
+                "Finnhub request failed inside FinnhubService (caught, see service logs)",
+                context=f"symbol={asset_symbol} | likely network/SSL/timeout",
+            )
         if not metrics:
             return self.handle_no_data(
-                "Finnhub returned no fundamentals for this symbol",
+                "Finnhub responded but returned empty data",
                 context=f"symbol={asset_symbol}",
             )
 

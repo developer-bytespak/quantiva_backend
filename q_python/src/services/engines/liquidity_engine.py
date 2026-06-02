@@ -157,12 +157,23 @@ class LiquidityEngine(BaseEngine):
 
         dollar_volume = float(volume_24h) * float(current_price)
 
-        # Primary: log-scale dollar volume anchored at $100M/day.
-        #   $100M  → log10(1)    = 0      (neutral)
-        #   $1B    → log10(10)   = 1      (+1 capped)
-        #   $10M   → log10(0.1)  = -1     (-1 capped)
-        #   $1M    → log10(0.01) = -2 → clamped -1
-        anchor = 100_000_000.0
+        # Primary: log-scale dollar volume.
+        #
+        # Anchor calibrated to Alpaca's IEX-only data feed (free/basic plan),
+        # which reports ~2-5% of real consolidated SIP volume. Empirically:
+        #   AAPL real ~$15B/day → Alpaca returns ~$400M (≈2.7%)
+        #   VLO  real ~$500M    → Alpaca returns ~$24M  (≈4.8%)
+        # So $10M IEX volume corresponds to roughly $100M-$500M real → neutral.
+        #
+        # Calibration on Alpaca-IEX:
+        #   $10M   → log10(1)    = 0      (neutral / typical mid-cap)
+        #   $100M  → log10(10)   = 1      (+1 capped, mega-cap)
+        #   $1M    → log10(0.1)  = -1     (illiquid small-cap)
+        #
+        # When the data source upgrades to Alpaca SIP or Finnhub `/quote`
+        # (real consolidated volume), bump this back to 100_000_000 to undo
+        # the ~10x scaling.
+        anchor = 10_000_000.0
         if math is not None:
             dollar_score = math.log10(max(1.0, dollar_volume) / anchor)
         else:
