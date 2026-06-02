@@ -707,6 +707,137 @@ export class AffiliateAdminService {
     return { ok: true };
   }
 
+  /**
+   * Permanently delete an affiliate and every related row (sessions,
+   * application, referrals, commission events, payouts, audit log) via the
+   * schema's `onDelete: Cascade` relations.
+   *
+   * Strict preconditions — refuses to delete unless every dollar earned has
+   * settled:
+   *   - pending_balance must be 0
+   *   - no payouts in PENDING / PROCESSING / FAILED states
+   *   - no commission events in ACCRUED / HELD states
+   *
+   * Anything else (PAID / CLAWED_BACK events, COMPLETED payouts) is allowed
+   * and gets cascade-deleted alongside the affiliate row.
+   *
+   * Referred users are NOT deleted (they're trading-app users who happen to
+   * have a referrer). Their `users.referred_by_affiliate_id` is nulled out so
+   * the dangling denormalized FK doesn't point at a deleted row.
+   */
+  async deleteAffiliate(
+    affiliateId: string,
+    adminId: string,
+    confirmDisplayName?: string,
+  ) {
+    const affiliate = await this.prisma.affiliates.findUnique({
+      where: { affiliate_id: affiliateId },
+      select: {
+        affiliate_id: true,
+        email: true,
+        display_name: true,
+        pending_balance: true,
+      },
+    });
+    if (!affiliate) throw new NotFoundException('Affiliate not found');
+
+    if (
+      confirmDisplayName !== undefined &&
+      confirmDisplayName !== affiliate.display_name
+    ) {
+      throw new BadRequestException(
+        `Confirmation name does not match — type "${affiliate.display_name}" exactly to delete`,
+      );
+    }
+
+    if (!new Decimal(affiliate.pending_balance).eq(0)) {
+      throw new ConflictException(
+        `Cannot delete: pending balance is $${affiliate.pending_balance}. Pay it out or zero it via adjust-balance first.`,
+      );
+    }
+
+    const blockingPayouts = await this.prisma.affiliate_payouts.count({
+      where: {
+        affiliate_id: affiliateId,
+        status: { in: ['PENDING', 'PROCESSING', 'FAILED'] },
+      },
+    });
+    if (blockingPayouts > 0) {
+      throw new ConflictException(
+        `Cannot delete: ${blockingPayouts} payout(s) are not yet COMPLETED. Resolve them first.`,
+      );
+    }
+
+    const blockingEvents =
+      await this.prisma.affiliate_commission_events.count({
+        where: {
+          affiliate_id: affiliateId,
+          status: { in: ['ACCRUED', 'HELD'] },
+        },
+      });
+    if (blockingEvents > 0) {
+      throw new ConflictException(
+        `Cannot delete: ${blockingEvents} commission event(s) are still ACCRUED/HELD. Pay them out or claw them back first.`,
+      );
+    }
+
+    // Snapshot the related-row counts before deletion so the response can
+    // tell the admin (and any later log reader) what got removed.
+    const [
+      referralsCount,
+      paidEventsCount,
+      payoutsCount,
+      auditCount,
+    ] = await Promise.all([
+      this.prisma.affiliate_referrals.count({
+        where: { affiliate_id: affiliateId },
+      }),
+      this.prisma.affiliate_commission_events.count({
+        where: { affiliate_id: affiliateId },
+      }),
+      this.prisma.affiliate_payouts.count({
+        where: { affiliate_id: affiliateId },
+      }),
+      this.prisma.affiliate_audit_log.count({
+        where: { affiliate_id: affiliateId },
+      }),
+    ]);
+
+    const nulled = await this.prisma.$transaction(async (tx) => {
+      // users.referred_by_affiliate_id has no FK constraint (denormalized
+      // scalar) — explicitly null it out so we don't leave dangling pointers.
+      const { count } = await tx.users.updateMany({
+        where: { referred_by_affiliate_id: affiliateId },
+        data: { referred_by_affiliate_id: null },
+      });
+      // Cascading delete handles every affiliate_* relation.
+      await tx.affiliates.delete({ where: { affiliate_id: affiliateId } });
+      return count;
+    });
+
+    this.logger.warn(
+      `Affiliate ${affiliateId} (${affiliate.email} / ${affiliate.display_name}) ` +
+        `permanently deleted by admin ${adminId} — ` +
+        `removed ${referralsCount} referrals, ${paidEventsCount} commission events, ` +
+        `${payoutsCount} payouts, ${auditCount} audit rows; ` +
+        `${nulled} users had referred_by_affiliate_id cleared`,
+    );
+
+    return {
+      ok: true,
+      deleted: {
+        affiliate_id: affiliateId,
+        email: affiliate.email,
+        display_name: affiliate.display_name,
+        referrals: referralsCount,
+        commission_events: paidEventsCount,
+        payouts: payoutsCount,
+        audit_log_rows: auditCount,
+        users_unlinked: nulled,
+      },
+    };
+  }
+
   // ──────────────────────────────────────────────────────────────────────
   // Payouts
   // ──────────────────────────────────────────────────────────────────────
