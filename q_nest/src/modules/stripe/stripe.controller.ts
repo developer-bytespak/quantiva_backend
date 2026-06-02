@@ -401,6 +401,87 @@ export class StripeController {
       }
     }
 
+    // ───────────────────────────────────────────────────────────────
+    // Recurring subscription renewals.
+    //
+    // Stripe fires `invoice.paid` in multiple scenarios:
+    //   - billing_reason: 'subscription_create'  → first invoice (also covered
+    //     by checkout.session.completed above; ignore here to avoid duplicate
+    //     payment_history rows / duplicate commission accrual)
+    //   - billing_reason: 'subscription_cycle'   → recurring renewal — this is
+    //     what we want
+    //   - billing_reason: 'subscription_update'  → mid-cycle proration
+    //   - billing_reason: 'manual'               → admin-created
+    //
+    // For now we only handle the 'subscription_cycle' renewal case. The
+    // affiliate commission engine is wired into recordPayment, so accrual
+    // (and the recurring_months_cap) happen automatically.
+    //
+    // Idempotency: external_payment_id is set to the Stripe invoice.id, and
+    // affiliate_commission_events has @@unique(event_type, source_reference),
+    // so a webhook replay is safe end-to-end.
+    if (event.type === 'invoice.paid') {
+      const invoice: any = event.data.object;
+      const billingReason: string | undefined = invoice?.billing_reason;
+      if (billingReason !== 'subscription_cycle') {
+        return { received: true };
+      }
+
+      const stripeSubscriptionId: string | undefined = invoice?.subscription;
+      const amountPaidCents: number = Number(invoice?.amount_paid ?? 0);
+      const currency: string = (invoice?.currency || 'usd').toUpperCase();
+      const amount = amountPaidCents / 100;
+
+      if (!stripeSubscriptionId || amount <= 0) {
+        return { received: true };
+      }
+
+      try {
+        const userSubscription =
+          await this.prisma.user_subscriptions.findFirst({
+            where: {
+              external_id: stripeSubscriptionId,
+              billing_provider: 'stripe',
+            },
+            select: { subscription_id: true, user_id: true },
+          });
+
+        if (!userSubscription) {
+          this.logger.warn(
+            `invoice.paid for unknown stripe subscription ${stripeSubscriptionId}; skipping`,
+          );
+          return { received: true };
+        }
+
+        const receiptUrl: string | undefined =
+          invoice?.charge?.receipt_url ?? undefined;
+
+        await this.subscriptionsService.recordPayment({
+          subscription_id: userSubscription.subscription_id,
+          user_id: userSubscription.user_id,
+          amount,
+          currency,
+          status: 'succeeded',
+          payment_provider: 'stripe',
+          external_payment_id: invoice.id,
+          payment_method: 'stripe',
+          invoice_url: invoice.hosted_invoice_url || null,
+          receipt_url: receiptUrl || null,
+          failure_reason: null,
+        });
+
+        this.logger.log(
+          `Renewal payment recorded for subscription ${userSubscription.subscription_id}: $${amount} ${currency}`,
+        );
+      } catch (err: any) {
+        this.logger.error(
+          `Failed to record renewal for ${stripeSubscriptionId}: ${err?.message}`,
+        );
+        // Swallow — return 200 so Stripe doesn't retry indefinitely. Logged
+        // for manual recovery.
+      }
+    }
+
     return { received: true };
   }
 }

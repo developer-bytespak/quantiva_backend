@@ -33,9 +33,18 @@ export class AffiliateCommissionService {
     userId: string;
     paymentReference: string;
     grossAmountUsd: number | Decimal;
+    /**
+     * How many months of subscription this payment covers. Used by the
+     * recurring_months_cap check so a yearly invoice consumes 12 months at
+     * once (cap hit after one yearly invoice) instead of counting as a single
+     * event. Defaults to 1 (monthly) so callers that don't yet pass this
+     * behave like before.
+     */
+    billingPeriodMonths?: number;
   }): Promise<void> {
     const { userId, paymentReference } = params;
     const gross = new Decimal(params.grossAmountUsd);
+    const periodMonths = Math.max(1, params.billingPeriodMonths ?? 1);
 
     if (gross.lte(0)) return;
 
@@ -63,20 +72,26 @@ export class AffiliateCommissionService {
       return;
     }
 
-    // Recurring-months cap: count existing SUBSCRIPTION_PAYMENT events for
-    // this affiliate × user pair. cap = 0 means unlimited.
+    // Recurring-months cap: sum the `billing_period_months` of existing
+    // SUBSCRIPTION_PAYMENT events for this affiliate × user pair. This makes
+    // the cap mean what its name says — "months covered" — so monthly,
+    // quarterly, and yearly subscribers all get the same fair eligibility
+    // window. cap = 0 means unlimited.
     if (settings.recurring_months_cap > 0) {
-      const prior = await this.prisma.affiliate_commission_events.count({
-        where: {
-          affiliate_id: affiliate.affiliate_id,
-          user_id: userId,
-          event_type: 'SUBSCRIPTION_PAYMENT',
-          status: { in: ['ACCRUED', 'PAID'] },
-        },
-      });
-      if (prior >= settings.recurring_months_cap) {
+      const prior =
+        await this.prisma.affiliate_commission_events.aggregate({
+          where: {
+            affiliate_id: affiliate.affiliate_id,
+            user_id: userId,
+            event_type: 'SUBSCRIPTION_PAYMENT',
+            status: { in: ['ACCRUED', 'PAID'] },
+          },
+          _sum: { billing_period_months: true },
+        });
+      const monthsCovered = prior._sum.billing_period_months ?? 0;
+      if (monthsCovered >= settings.recurring_months_cap) {
         this.logger.debug(
-          `Skipping commission — cap reached: ${prior}/${settings.recurring_months_cap} for user ${userId}`,
+          `Skipping commission — cap reached: ${monthsCovered}/${settings.recurring_months_cap} months covered for user ${userId}`,
         );
         return;
       }
@@ -112,6 +127,7 @@ export class AffiliateCommissionService {
             gross_amount_usd: gross.toNumber(),
             commission_rate: rate.toNumber(),
             commission_usd: commission.toNumber(),
+            billing_period_months: periodMonths,
           },
         });
         await tx.affiliates.update({
@@ -135,6 +151,7 @@ export class AffiliateCommissionService {
               gross_amount_usd: gross.toString(),
               commission_rate: rate.toString(),
               commission_usd: commission.toString(),
+              billing_period_months: periodMonths,
               first_conversion: isFirstConversion,
             },
           },
