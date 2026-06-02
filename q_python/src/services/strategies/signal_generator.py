@@ -19,6 +19,36 @@ from .strategy_executor import StrategyExecutor
 logger = logging.getLogger(__name__)
 
 
+def _pass_through_engine_result(raw: Any) -> Dict[str, Any]:
+    """
+    Normalize a per-engine result dict for the API response.
+
+    Engines uniformly return ``{score, confidence, metadata, engine?, timestamp?}``
+    via :meth:`BaseEngine.create_result` / ``handle_no_data`` / ``handle_error``.
+    Older callers downstream only read ``.score``, so we keep that key at the
+    same path — but we no longer strip the rest. Key invariants:
+
+      * ``score`` is forwarded as-is (None stays None — fusion + Prisma both
+        understand null as "engine had no opinion").
+      * ``metadata`` is preserved so probes can inspect engine status / error
+        reasons without scraping server logs.
+
+    If the engine slot is missing entirely from the upstream dict (engine never
+    ran), we emit a clear ``status='missing'`` marker instead of an empty 0.
+    """
+    if not isinstance(raw, dict):
+        return {'score': None, 'confidence': 0.0, 'metadata': {'status': 'missing'}}
+    out: Dict[str, Any] = {'score': raw.get('score'), 'confidence': raw.get('confidence', 0.0)}
+    if 'metadata' in raw:
+        out['metadata'] = raw['metadata']
+    # Carry through anything else the engine attached (engine name, timestamp,
+    # legacy 'error' fields), without forcing a schema.
+    for k, v in raw.items():
+        if k not in out:
+            out[k] = v
+    return out
+
+
 class SignalGenerator:
     """
     Orchestrates the signal generation process.
@@ -319,12 +349,20 @@ class SignalGenerator:
                 'final_score': float(fusion_score) if fusion_score is not None else 0.0,
                 'action': final_action,
                 'confidence': float(fusion_confidence) if fusion_confidence is not None else 0.0,
+                # NOTE: engine_scores preserves the full engine output (score,
+                # confidence, metadata) for every engine. Two contracts the
+                # downstream (NestJS noticeboard + LLM explainer) rely on:
+                #   1. `score` is forwarded as-is — None stays None. The old
+                #      `... or 0.0` clobbered "engine couldn't compute" into
+                #      a real 0.0, breaking fusion's null-aware re-normalization
+                #      AND making probes incapable of telling apart "engine
+                #      returned 0" from "engine had no data".
+                #   2. `metadata` is preserved so probes can see status / error /
+                #      reason without parsing logs (e.g. `status='no_data',
+                #      reason='News API 429'`).
                 'engine_scores': {
-                    'sentiment': {'score': float(engine_scores.get('sentiment', {}).get('score', 0.0) or 0.0)},
-                    'trend': {'score': float(engine_scores.get('trend', {}).get('score', 0.0) or 0.0)},
-                    'fundamental': {'score': float(engine_scores.get('fundamental', {}).get('score', 0.0) or 0.0)},
-                    'liquidity': {'score': float(engine_scores.get('liquidity', {}).get('score', 0.0) or 0.0)},
-                    'event_risk': {'score': float(engine_scores.get('event_risk', {}).get('score', 0.0) or 0.0)}
+                    eng: _pass_through_engine_result(engine_scores.get(eng))
+                    for eng in ('sentiment', 'trend', 'fundamental', 'liquidity', 'event_risk')
                 },
                 'strategy_execution': execution_result,
                 'position_sizing': confidence_result,
