@@ -53,14 +53,51 @@ class SentimentEngine(BaseEngine):
         self.consensus_ratio_threshold = 0.55  # 55%+ articles same direction
         self.consensus_boost_multiplier = 1.35  # boost their signed weight
         
-        # Source-specific weights
+        # Source-specific weights — tiered by editorial credibility.
+        #
+        # Tier 1 (1.3-1.4x): wire services and tier-1 financial press whose
+        #   tone is closely tracked by professional traders. A negative
+        #   Reuters headline moves markets more than ten negative blog posts.
+        # Tier 2 (1.1-1.2x): respected mainstream financial media.
+        # Tier 3 (0.9-1.0x): aggregators, syndicators, retail blogs.
+        #
+        # The aggregator inside FinBERT inference applies these multiplicatively
+        # to each article's ML score before averaging. Unknown sources fall
+        # back to `default` so they still count, just at neutral weight.
         self.source_weights = {
+            # Tier 1 — wire services, top financial press
+            'reuters': 1.4,
+            'bloomberg': 1.4,
+            'wall street journal': 1.35,
+            'wsj': 1.35,
+            'financial times': 1.35,
+            'ft': 1.35,
+            'cnbc': 1.3,
+            'barrons': 1.3,
+            'barron\'s': 1.3,
+            # Tier 2 — mainstream financial / tech press
+            'forbes': 1.2,
+            'business insider': 1.15,
+            'marketwatch': 1.15,
+            'investopedia': 1.15,
+            'the motley fool': 1.1,
+            'techcrunch': 1.1,
+            # Tier 3 — aggregators, retail blogs, generic
+            'benzinga': 0.95,
+            '24/7 wall street': 0.9,
+            'cnet': 0.9,
+            'pymnts': 0.9,
+            'proactive investors': 0.85,
+            'marketbeat': 0.85,
+            'finbold': 0.85,
+            'seekingalpha': 0.9,
+            # Legacy categories from the old config — kept for back-compat
             'twitter': 1.0,
             'reddit': 0.8,
             'news': 1.2,
             'stock_news_api': 1.2,
             'lunarcrush': 1.0,
-            'default': 1.0
+            'default': 1.0,
         }
     
     def initialize(self):
