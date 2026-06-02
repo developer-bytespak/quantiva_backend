@@ -74,7 +74,11 @@ class FinnhubService:
                     'token': self.api_key
                 }
                 
-                response = requests.get(metrics_url, params=params, timeout=10)
+                # 30s timeout. Render egress to finnhub.io occasionally exceeds
+                # the old 10s ceiling under load; the fundamentals engine then
+                # got nothing and silently returned a null score, which
+                # propagated all the way through to user strategies as "0".
+                response = requests.get(metrics_url, params=params, timeout=30)
                 response.raise_for_status()
                 data = response.json()
                 
@@ -143,10 +147,10 @@ class FinnhubService:
                 'token': self.api_key
             }
             
-            response = requests.get(url, params=params, timeout=15)
+            response = requests.get(url, params=params, timeout=30)
             response.raise_for_status()
             data = response.json()
-            
+
             # Parse earnings calendar
             earnings_data = data.get('earningsCalendar', [])
             
