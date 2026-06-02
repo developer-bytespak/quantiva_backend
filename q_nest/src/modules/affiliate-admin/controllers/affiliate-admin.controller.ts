@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Header,
   Param,
@@ -27,6 +28,7 @@ import { AdjustBalanceDto } from '../dto/adjust-balance.dto';
 import { AddNoteDto } from '../dto/add-note.dto';
 import { UpdateProgramSettingsDto } from '../dto/update-program-settings.dto';
 import { MarkPayoutPaidDto } from '../dto/mark-payout-paid.dto';
+import { DeleteAffiliateDto } from '../dto/delete-affiliate.dto';
 
 @UseGuards(AdminJwtAuthGuard, SuperAdminGuard)
 @Controller('admin/super-admin/affiliates')
@@ -279,5 +281,28 @@ export class AffiliateAdminController {
     @CurrentAdmin() admin: AdminTokenPayload,
   ) {
     return this.affiliateAdminService.addNote(id, dto, admin.sub);
+  }
+
+  /**
+   * Permanently delete an affiliate + every related row (sessions,
+   * application, referrals, commission events, payouts, audit log).
+   *
+   * Refuses if there's any unpaid money: pending_balance > 0, or any
+   * PENDING/PROCESSING/FAILED payouts, or any ACCRUED/HELD commission events.
+   *
+   * Returns 409 on those failures (clear message naming the blocker) and 200
+   * on success with a summary of what was removed.
+   */
+  @Delete(':id')
+  deleteAffiliate(
+    @Param('id') id: string,
+    @Body() dto: DeleteAffiliateDto,
+    @CurrentAdmin() admin: AdminTokenPayload,
+  ) {
+    return this.affiliateAdminService.deleteAffiliate(
+      id,
+      admin.sub,
+      dto?.confirm_display_name,
+    );
   }
 }
