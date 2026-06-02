@@ -364,8 +364,16 @@ class SentimentEngine(BaseEngine):
             if asset_type == 'stock':
                 # Fetch from StockNewsAPI
                 if news_source in (None, 'stock_news_api', 'auto'):
-                    self.logger.info(f"Fetching stock news for {asset_id} from StockNewsAPI...")
-                    news_items = self.stock_news_service.fetch_news(asset_id, limit=50)
+                    # Critical: stock_news_service.fetch_news expects a TICKER
+                    # (AAPL/MSFT), not the DB UUID. The cron passes both — UUID
+                    # in asset_id, ticker in asset_symbol — and this branch had
+                    # been silently sending the UUID, which the news API
+                    # treated as "unknown symbol" → 0 articles → sentiment 0
+                    # for every stock. Crypto branch already does the same
+                    # `symbol_to_use` fallback; mirror it here.
+                    symbol_to_use = asset_symbol or asset_id
+                    self.logger.info(f"Fetching stock news for {symbol_to_use} from StockNewsAPI...")
+                    news_items = self.stock_news_service.fetch_news(symbol_to_use, limit=50)
                     
                     for item in news_items:
                         # Combine title and text for analysis

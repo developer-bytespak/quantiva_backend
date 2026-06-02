@@ -9,6 +9,7 @@ from .base_engine import BaseEngine
 from src.services.data.lunarcrush_service import get_lunarcrush_service
 from src.services.data.coingecko_service import get_coingecko_service
 from src.services.data.stock_news_service import get_stock_news_service
+from src.services.data.finnhub_service import FinnhubService
 from src.models.finbert import get_finbert_inference
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class FundamentalEngine(BaseEngine):
         self.lunarcrush_service = get_lunarcrush_service()
         self.coingecko_service = get_coingecko_service()
         self.stock_news_service = get_stock_news_service()
+        self.finnhub_service = FinnhubService()
         self.finbert_inference = None  # Lazy initialization
     
     def calculate(
@@ -233,97 +235,159 @@ class FundamentalEngine(BaseEngine):
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Calculate fundamental score for stocks.
-        
-        Analyzes news sentiment for earnings, revenue, and financial performance using FinBERT.
-        
-        Formula:
-        fundamental_score = 0.40 * earnings_sentiment + 0.35 * revenue_sentiment + 0.25 * performance_sentiment
-        
-        Args:
-            asset_id: Stock symbol (e.g., 'AAPL', 'TSLA')
-            **kwargs: Additional parameters
-        
-        Returns:
-            Dictionary with score, confidence, and metadata
+        Compute a fundamental score for a stock from Finnhub's `/stock/metric`
+        endpoint (P/E, ROE, debt/equity, P/B, dividend yield).
+
+        Why this is a complete rewrite:
+            The original path filtered StockNewsAPI for articles containing
+            "earnings"/"revenue"/"performance" keywords, ran FinBERT on those,
+            and returned 0 when no match. For most stocks on most days, NO
+            news matches those keywords (real earnings news is quarterly),
+            so the engine effectively reported `0` for every stock, every day
+            — turning every user strategy that required `fundamental > 0.4`
+            into a structurally unreachable rule.
+
+            News-based "fundamental" was the wrong abstraction. Real
+            fundamentals are the financials. We pay for a Finnhub key that
+            already exposes them; the new path just calls it.
+
+        Composite (each component clamped to [-1, 1] before weighting):
+            * value (35%)   — P/E + P/B + dividend yield
+            * quality (40%) — ROE
+            * leverage(25%) — debt/equity
+
+        Confidence scales with how many metrics Finnhub returned.
+
+        Returns null (handle_no_data) when Finnhub has no metrics — fusion
+        will redistribute weight to engines that do.
         """
+        # asset_id is the DB UUID in the cron path; the actual ticker lives
+        # in kwargs.asset_symbol (the cron always sets it). Fall back to
+        # asset_id for direct API callers that already pass the ticker.
+        asset_symbol = (kwargs.get('asset_symbol') or asset_id or '').upper()
+        if not asset_symbol:
+            return self.handle_no_data("Missing asset_symbol", context=f"asset_id={asset_id}")
+
         try:
-            # Fetch news from Stock News API
-            news_data = self.stock_news_service.fetch_news(asset_id, limit=50)
-            
-            if not news_data:
-                self.logger.warning(f"No news data available for {asset_id}")
-                return self.create_result(
-                    0.0,
-                    0.0,
-                    {
-                        'note': 'No news data available',
-                        'asset_id': asset_id
-                    }
-                )
-            
-            # Analyze earnings news sentiment
-            earnings_sentiment, earnings_count = self._analyze_earnings_news(news_data)
-            
-            # Analyze revenue news sentiment
-            revenue_sentiment, revenue_count = self._analyze_revenue_news(news_data)
-            
-            # Analyze financial performance news
-            performance_sentiment, performance_count = self._analyze_performance_news(news_data)
-            
-            # Calculate weighted fundamental score
-            total_news_count = earnings_count + revenue_count + performance_count
-            
-            if total_news_count == 0:
-                # No relevant news found
-                return self.create_result(
-                    0.0,
-                    0.3,
-                    {
-                        'note': 'No relevant financial news found',
-                        'total_news': len(news_data),
-                        'asset_id': asset_id
-                    }
-                )
-            
-            fundamental_score = (
-                0.40 * earnings_sentiment +
-                0.35 * revenue_sentiment +
-                0.25 * performance_sentiment
-            )
-            
-            # Confidence based on number of relevant articles
-            confidence = min(0.9, 0.5 + (total_news_count / 30) * 0.4)
-            
-            metadata = {
-                'earnings_sentiment': earnings_sentiment,
-                'revenue_sentiment': revenue_sentiment,
-                'performance_sentiment': performance_sentiment,
-                'news_analyzed': len(news_data),
-                'earnings_news_count': earnings_count,
-                'revenue_news_count': revenue_count,
-                'performance_news_count': performance_count,
-                'score_breakdown': {
-                    'earnings_weighted': 0.40 * earnings_sentiment,
-                    'revenue_weighted': 0.35 * revenue_sentiment,
-                    'performance_weighted': 0.25 * performance_sentiment,
-                },
-                'source': 'stock_news_api'
-            }
-            
-            return self.create_result(fundamental_score, confidence, metadata)
-            
+            batch = self.finnhub_service.fetch_company_fundamentals_batch([asset_symbol])
         except Exception as e:
-            self.logger.error(f"Error calculating stock fundamental score: {str(e)}", exc_info=True)
-            return self.create_result(
-                0.0,
-                0.0,
-                {
-                    'error': True,
-                    'error_message': str(e),
-                    'asset_id': asset_id
-                }
+            return self.handle_error(e, f"finnhub fundamentals fetch for {asset_symbol}")
+
+        metrics = batch.get(asset_symbol) if isinstance(batch, dict) else None
+        if not metrics:
+            return self.handle_no_data(
+                "Finnhub returned no fundamentals for this symbol",
+                context=f"symbol={asset_symbol}",
             )
+
+        pe = self._as_float(metrics.get('pe_ratio'))
+        pb = self._as_float(metrics.get('price_to_book'))
+        roe = self._as_float(metrics.get('roe'))
+        de = self._as_float(metrics.get('debt_to_equity'))
+        div_yield = self._as_float(metrics.get('dividend_yield'))
+
+        # --- VALUE component (P/E, P/B, dividend yield) ---
+        value_scores: List[float] = []
+        if pe is not None:
+            if pe <= 0:
+                # Negative or zero earnings — company losing money.
+                value_scores.append(-0.5)
+            else:
+                # Centered at PE 25: <10 = strongly positive, >40 = strongly negative.
+                value_scores.append(self.clamp_score((25.0 - pe) / 15.0, -1.0, 1.0))
+        if pb is not None and pb > 0:
+            # Centered at P/B 2: <1 = positive, >5 = negative.
+            value_scores.append(self.clamp_score((2.0 - pb) / 2.0, -1.0, 1.0))
+        if div_yield is not None and div_yield >= 0:
+            # 0% = 0, 4% = +0.4 (good income), 8%+ = +0.5 cap.
+            value_scores.append(self.clamp_score(div_yield / 8.0 * 0.5, 0.0, 0.5))
+
+        value_score = sum(value_scores) / len(value_scores) if value_scores else None
+
+        # --- QUALITY component (ROE). Finnhub returns ROE as a percentage
+        # number (e.g. 15.5 for 15.5%), not a fraction. ---
+        if roe is not None:
+            # >25% = excellent (+1), 0% = neutral, <0% = -0.8 cap.
+            quality_score = self.clamp_score(roe / 25.0, -0.8, 1.0)
+        else:
+            quality_score = None
+
+        # --- LEVERAGE component (debt/equity, lower is better) ---
+        if de is not None:
+            if de < 0:
+                leverage_score = -0.5  # Negative D/E (negative equity) = warning
+            else:
+                # 0 = +1, 1 = +0.5, 2 = 0, 3 = -0.5, 5+ = -1.
+                leverage_score = self.clamp_score((1.0 - de) / 2.0, -1.0, 1.0)
+        else:
+            leverage_score = None
+
+        # Weighted average, ignoring components we don't have data for.
+        weights = {'value': 0.35, 'quality': 0.40, 'leverage': 0.25}
+        contributions: Dict[str, float] = {}
+        if value_score is not None:
+            contributions['value'] = value_score
+        if quality_score is not None:
+            contributions['quality'] = quality_score
+        if leverage_score is not None:
+            contributions['leverage'] = leverage_score
+
+        if not contributions:
+            return self.handle_no_data(
+                "Finnhub returned no usable metric values",
+                context=f"symbol={asset_symbol}",
+            )
+
+        total_weight = sum(weights[k] for k in contributions)
+        fundamental_score = sum(weights[k] * v for k, v in contributions.items()) / total_weight
+        fundamental_score = self.clamp_score(fundamental_score, -1.0, 1.0)
+
+        # Confidence: how many of the 3 dimensions we could score, dampened
+        # if any metric was clearly stale/missing.
+        dimensions_covered = len(contributions)
+        if dimensions_covered == 3:
+            confidence = 0.85
+        elif dimensions_covered == 2:
+            confidence = 0.7
+        else:
+            confidence = 0.55
+
+        metadata = {
+            'source': 'finnhub_metric',
+            'symbol': asset_symbol,
+            'raw_metrics': {
+                'pe_ratio': pe,
+                'price_to_book': pb,
+                'roe_pct': roe,
+                'debt_to_equity': de,
+                'dividend_yield_pct': div_yield,
+                'market_cap': metrics.get('market_cap'),
+                'eps': metrics.get('eps'),
+            },
+            'component_scores': {
+                'value': value_score,
+                'quality': quality_score,
+                'leverage': leverage_score,
+            },
+            'dimensions_used': list(contributions.keys()),
+        }
+        return self.create_result(fundamental_score, confidence, metadata)
+
+    @staticmethod
+    def _as_float(v: Any) -> Optional[float]:
+        """Coerce a Finnhub response value to float, treating ``None`` / ``"None"`` / unparseable as missing."""
+        if v is None:
+            return None
+        if isinstance(v, str) and v.lower() in ('none', 'null', 'nan', ''):
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        # Finnhub occasionally returns NaN for missing metrics; treat as missing.
+        if f != f:  # NaN check (NaN != NaN)
+            return None
+        return f
     
     def _ensure_finbert_initialized(self) -> bool:
         """Ensure FinBERT inference is initialized."""
