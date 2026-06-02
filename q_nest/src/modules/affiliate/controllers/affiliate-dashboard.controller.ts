@@ -89,11 +89,6 @@ export class AffiliateDashboardController {
     return this.statsService.getPayoutsOverview(me.sub);
   }
 
-  @Get('assets')
-  getAssets() {
-    return this.settingsService.getAssets();
-  }
-
   @Get('settings')
   getSettings(@CurrentAffiliate() me: CurrentAffiliatePayload) {
     return this.settingsService.getSettings(me.sub);

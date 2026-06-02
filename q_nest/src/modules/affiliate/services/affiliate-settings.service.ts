@@ -63,18 +63,4 @@ export class AffiliateSettingsService {
 
     return updated;
   }
-
-  /**
-   * Static marketing-asset catalog for the affiliate /assets page. Empty
-   * collections at v1; real assets uploaded by the team later.
-   */
-  getAssets() {
-    return {
-      logos: [],
-      banners: [],
-      copy_templates: [],
-      videos: [],
-      brand_guidelines_url: null,
-    };
-  }
 }

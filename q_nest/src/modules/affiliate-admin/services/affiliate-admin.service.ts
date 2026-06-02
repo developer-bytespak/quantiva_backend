@@ -6,8 +6,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Decimal } from '@prisma/client/runtime/library';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AffiliateEmailService } from '../../affiliate/services/affiliate-email.service';
+import { SubscriptionsService } from '../../subscriptions/subscriptions.service';
+import { SimulateSubscriptionPaymentDto } from '../dto/simulate-subscription-payment.dto';
 import { ApproveApplicationDto } from '../dto/approve-application.dto';
 import { RejectApplicationDto } from '../dto/reject-application.dto';
 import { RequestInfoDto } from '../dto/request-info.dto';
@@ -36,6 +39,7 @@ export class AffiliateAdminService {
   constructor(
     private prisma: PrismaService,
     private affiliateEmailService: AffiliateEmailService,
+    private subscriptionsService: SubscriptionsService,
   ) {}
 
   // ──────────────────────────────────────────────────────────────────────
@@ -1231,5 +1235,148 @@ export class AffiliateAdminService {
     const needsQuote = /[",\n]/.test(value);
     const escaped = value.replace(/"/g, '""');
     return needsQuote ? `"${escaped}"` : escaped;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Testing helpers (super-admin only)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Fire a fabricated subscription payment for a real user, without involving
+   * Stripe. Calls `subscriptionsService.recordPayment(...)` — the exact same
+   * code path the live Stripe `checkout.session.completed` webhook hits — so
+   * every downstream consequence runs: payment_history row written, affiliate
+   * commission accrued (if the user is referred), affiliate balance updated,
+   * audit trail written.
+   *
+   * Used to verify affiliate accrual end-to-end without spending real money.
+   * Requires the user to have an active subscription so recordPayment has a
+   * subscription_id to attach to.
+   *
+   * The response includes the resulting commission event (if one was created)
+   * and the affiliate's new pending balance — so the admin sees the effect
+   * in one round-trip without needing to refresh another tab.
+   */
+  async simulateSubscriptionPayment(
+    dto: SimulateSubscriptionPaymentDto,
+    adminId: string,
+  ) {
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: dto.user_id },
+      select: {
+        user_id: true,
+        email: true,
+        referred_by_affiliate_id: true,
+      },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    const subscription = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: dto.user_id, status: 'active' },
+      orderBy: { created_at: 'desc' },
+      select: { subscription_id: true, tier: true, billing_period: true },
+    });
+    if (!subscription) {
+      throw new BadRequestException(
+        'User has no active subscription. Upgrade them via the super-admin upgrade-plan flow first.',
+      );
+    }
+
+    const externalPaymentId = `test_${randomUUID()}`;
+
+    const payment = await this.subscriptionsService.recordPayment({
+      subscription_id: subscription.subscription_id,
+      user_id: dto.user_id,
+      amount: dto.amount_usd,
+      currency: 'USD',
+      status: 'succeeded',
+      payment_provider: 'test_simulate',
+      external_payment_id: externalPaymentId,
+      invoice_url: null,
+      receipt_url: null,
+      failure_reason: null,
+    });
+
+    // recordPayment fires the affiliate commission hook synchronously. Look
+    // up the freshly-accrued event (if any) by source_reference so the
+    // response can show the effect in one round-trip.
+    const commissionEvent =
+      await this.prisma.affiliate_commission_events.findFirst({
+        where: {
+          event_type: 'SUBSCRIPTION_PAYMENT',
+          source_reference: payment.payment_id,
+        },
+        select: {
+          event_id: true,
+          commission_usd: true,
+          commission_rate: true,
+          gross_amount_usd: true,
+          status: true,
+          affiliate_id: true,
+          created_at: true,
+        },
+      });
+
+    const affiliate = user.referred_by_affiliate_id
+      ? await this.prisma.affiliates.findUnique({
+          where: { affiliate_id: user.referred_by_affiliate_id },
+          select: {
+            affiliate_id: true,
+            display_name: true,
+            email: true,
+            commission_pct: true,
+            pending_balance: true,
+            paid_total: true,
+            conversion_count: true,
+          },
+        })
+      : null;
+
+    this.logger.warn(
+      `Simulated subscription payment of $${dto.amount_usd} for user ${user.email} (${dto.user_id}) by admin ${adminId} — ` +
+        `payment_id=${payment.payment_id}, ` +
+        `commission=${commissionEvent ? `$${commissionEvent.commission_usd}` : 'none (user not referred or referrer not APPROVED)'}`,
+    );
+
+    return {
+      ok: true,
+      payment: {
+        payment_id: payment.payment_id,
+        subscription_id: payment.subscription_id,
+        amount_usd: Number(payment.amount),
+        external_payment_id: externalPaymentId,
+        paid_at: payment.paid_at,
+      },
+      subscription_tier: subscription.tier,
+      user: {
+        user_id: user.user_id,
+        email: user.email,
+        referred_by_affiliate_id: user.referred_by_affiliate_id,
+      },
+      commission: commissionEvent
+        ? {
+            event_id: commissionEvent.event_id,
+            gross_amount_usd: Number(commissionEvent.gross_amount_usd),
+            commission_rate: Number(commissionEvent.commission_rate),
+            commission_usd: Number(commissionEvent.commission_usd),
+            status: commissionEvent.status,
+            created_at: commissionEvent.created_at,
+          }
+        : null,
+      affiliate: affiliate
+        ? {
+            affiliate_id: affiliate.affiliate_id,
+            display_name: affiliate.display_name,
+            email: affiliate.email,
+            commission_pct:
+              affiliate.commission_pct != null
+                ? Number(affiliate.commission_pct)
+                : null,
+            pending_balance: Number(affiliate.pending_balance),
+            paid_total: Number(affiliate.paid_total),
+            conversion_count: affiliate.conversion_count,
+          }
+        : null,
+    };
   }
 }

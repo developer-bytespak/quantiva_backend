@@ -29,6 +29,7 @@ import { AddNoteDto } from '../dto/add-note.dto';
 import { UpdateProgramSettingsDto } from '../dto/update-program-settings.dto';
 import { MarkPayoutPaidDto } from '../dto/mark-payout-paid.dto';
 import { DeleteAffiliateDto } from '../dto/delete-affiliate.dto';
+import { SimulateSubscriptionPaymentDto } from '../dto/simulate-subscription-payment.dto';
 
 @UseGuards(AdminJwtAuthGuard, SuperAdminGuard)
 @Controller('admin/super-admin/affiliates')
@@ -140,6 +141,25 @@ export class AffiliateAdminController {
     @CurrentAdmin() admin: AdminTokenPayload,
   ) {
     return this.affiliateAdminService.updateProgramSettings(dto, admin.sub);
+  }
+
+  // ── Testing helpers ── (declared before `:id` routes to avoid shadowing)
+
+  /**
+   * Super-admin-only test endpoint that fires a fabricated subscription
+   * payment for a real user. Runs the exact same code path the live Stripe
+   * `checkout.session.completed` webhook hits, including affiliate commission
+   * accrual. Used to verify the affiliate flow end-to-end without Stripe.
+   */
+  @Post('test/simulate-subscription-payment')
+  simulateSubscriptionPayment(
+    @Body() dto: SimulateSubscriptionPaymentDto,
+    @CurrentAdmin() admin: AdminTokenPayload,
+  ) {
+    return this.affiliateAdminService.simulateSubscriptionPayment(
+      dto,
+      admin.sub,
+    );
   }
 
   // ── Per-affiliate detail + actions ──
