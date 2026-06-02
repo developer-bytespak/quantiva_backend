@@ -157,21 +157,37 @@ class SignalGenerator:
                     logger.warning(f"Fundamental engine error for {asset_symbol} (asset_id: {asset_id}): {str(e)}")
                     engine_scores['fundamental'] = {'score': None, 'confidence': 0.0, 'error': True, 'error_message': str(e)}
             
-            # Liquidity Engine
-            if order_book and market_data.get('price'):
+            # Liquidity Engine — branches on asset_type.
+            #
+            #   * crypto: needs the pre-fetched order book (cron supplies it).
+            #             Without it we can't compute spread/depth, so we mark
+            #             it null and let fusion re-normalize.
+            #   * stock:  no order book — the engine has a dollar-volume path
+            #             that uses price + 24h volume (+ optional market cap),
+            #             which the cron always passes in market_data.
+            current_price = market_data.get('price')
+            is_stock = (asset_type or '').lower() == 'stock'
+            if is_stock and current_price:
+                liquidity_result = self.liquidity_engine.calculate(
+                    asset_id=asset_id,
+                    asset_type=asset_type,
+                    current_price=current_price,
+                    volume_24h=market_data.get('volume_24h') or market_data.get('volume'),
+                    avg_volume_30d=market_data.get('avg_volume_30d'),
+                    market_cap=market_data.get('market_cap'),
+                )
+                engine_scores['liquidity'] = liquidity_result
+            elif order_book and current_price:
                 liquidity_result = self.liquidity_engine.calculate(
                     asset_id=asset_id,
                     asset_type=asset_type,
                     order_book=order_book,
-                    current_price=market_data.get('price'),
+                    current_price=current_price,
                     volume_24h=market_data.get('volume_24h'),
                     avg_volume_30d=market_data.get('avg_volume_30d')
                 )
                 engine_scores['liquidity'] = liquidity_result
             else:
-                # No order_book passed → engine has no data. Return score=None
-                # so fusion redistributes its weight to engines that have data,
-                # instead of dragging the final score toward 0.
                 engine_scores['liquidity'] = {'score': None, 'confidence': 0.0}
             
             # Event Risk Engine
