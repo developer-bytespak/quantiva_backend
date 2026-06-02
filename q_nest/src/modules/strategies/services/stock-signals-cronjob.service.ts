@@ -335,15 +335,19 @@ export class StockSignalsCronjobService {
         `Python API signal generated for ${asset.symbol}: ${pythonSignal.action}`,
       );
     } catch (error: any) {
-      // Fallback: Generate basic signal from price data when Python API fails
+      // No more fake fallback. Previously this path called
+      // `generateFallbackSignal` which fabricated hardcoded engine scores
+      // (trend=0.5 / fund=0 / sent=0 / ev=0 / liq=0.2) and a price-momentum
+      // `action`. Those fake rows polluted strategy_signals, masked real
+      // engine bugs, and tricked user strategies into "firing" on
+      // never-computed fundamentals. If Python can't score this stock right
+      // now (timeout, 5xx, engine error), skip it — the next cron tick will
+      // retry. Heartbeat marks the miss for the run summary.
       this.logger.warn(
-        `Python API failed for ${asset.symbol}, using fallback signal generation: ${error.message}`,
+        `Python signal failed for ${asset.symbol} (${strategy.name}): ${error.message} — skipping (no fake fallback).`,
       );
-
-      signalData = this.generateFallbackSignal(marketData);
-      this.logger.debug(
-        `Fallback signal generated for ${asset.symbol}: ${signalData.action}`,
-      );
+      if (heartbeat) heartbeat.failed++;
+      return;
     }
 
     // Upsert/delete: DB row mirrors the engine's CURRENT opinion.
@@ -380,70 +384,6 @@ export class StockSignalsCronjobService {
         `Stock signal for ${strategy.name} on ${asset.symbol}: ${signalData.action} (created=${result.created} updated=${result.updated})`,
       );
     }
-  }
-
-  /**
-   * Generate fallback signal based on price data when Python API fails
-   * Uses simple price change logic to determine action
-   */
-  private generateFallbackSignal(marketData: any): {
-    action: string;
-    confidence: number;
-    final_score: number;
-    engine_scores: any;
-  } {
-    const priceChange = Number(marketData.price_change_24h || 0);
-    const volume = Number(marketData.volume || 0);
-    
-    // Simple logic based on 24h price change
-    let action: string;
-    let confidence: number;
-    let finalScore: number;
-
-    if (priceChange > 3) {
-      // Strong positive momentum
-      action = 'BUY';
-      confidence = Math.min(0.7 + (priceChange / 20), 0.85);
-      finalScore = 0.6 + (priceChange / 30);
-    } else if (priceChange > 1) {
-      // Moderate positive momentum
-      action = 'BUY';
-      confidence = 0.55 + (priceChange / 15);
-      finalScore = 0.4 + (priceChange / 20);
-    } else if (priceChange < -3) {
-      // Strong negative momentum - could be opportunity or warning
-      action = 'HOLD';
-      confidence = 0.5;
-      finalScore = 0.1;
-    } else if (priceChange < -1) {
-      // Moderate negative momentum
-      action = 'HOLD';
-      confidence = 0.45;
-      finalScore = 0.2;
-    } else {
-      // Neutral / low volatility
-      action = 'HOLD';
-      confidence = 0.5;
-      finalScore = 0.3;
-    }
-
-    // Volume boost - higher volume = higher confidence
-    if (volume > 1000000) {
-      confidence = Math.min(confidence + 0.1, 0.9);
-    }
-
-    return {
-      action,
-      confidence: Number(confidence.toFixed(2)),
-      final_score: Number(Math.max(0, Math.min(1, finalScore)).toFixed(2)),
-      engine_scores: {
-        sentiment: { score: 0 },
-        trend: { score: priceChange > 0 ? 0.5 : -0.5 },
-        fundamental: { score: 0 },
-        liquidity: { score: volume > 500000 ? 0.5 : 0.2 },
-        event_risk: { score: 0 },
-      },
-    };
   }
 
   /**
