@@ -977,10 +977,25 @@ export class SubscriptionsService implements OnModuleInit {
     // poison the payment write.
     if (data.status === 'succeeded') {
       try {
+        // Resolve the subscription's billing_period so the commission engine
+        // can credit "months covered" correctly (monthly = 1, quarterly = 3,
+        // yearly = 12). Drives the recurring_months_cap semantics.
+        const sub = await this.prisma.user_subscriptions.findUnique({
+          where: { subscription_id: data.subscription_id },
+          select: { billing_period: true },
+        });
+        const billingPeriodMonths =
+          sub?.billing_period === 'YEARLY'
+            ? 12
+            : sub?.billing_period === 'QUARTERLY'
+              ? 3
+              : 1;
+
         await this.affiliateCommissionService.recordSubscriptionPayment({
           userId: data.user_id,
           paymentReference: payment.payment_id,
           grossAmountUsd: data.amount,
+          billingPeriodMonths,
         });
       } catch (err: any) {
         this.logger.error(
