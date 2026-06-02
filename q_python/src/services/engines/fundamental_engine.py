@@ -311,6 +311,11 @@ class FundamentalEngine(BaseEngine):
         roe = self._as_float(metrics.get('roe'))
         de = self._as_float(metrics.get('debt_to_equity'))
         div_yield = self._as_float(metrics.get('dividend_yield'))
+        # Growth dimension inputs (Finnhub returns these as percentages).
+        eps_growth_q = self._as_float(metrics.get('eps_growth_quarterly_yoy'))
+        eps_growth_5y = self._as_float(metrics.get('eps_growth_5y'))
+        revenue_growth = self._as_float(metrics.get('revenue_growth_ttm_yoy'))
+        gross_margin = self._as_float(metrics.get('gross_margin'))
 
         # --- VALUE component (P/E, P/B, dividend yield) ---
         value_scores: List[float] = []
@@ -330,13 +335,32 @@ class FundamentalEngine(BaseEngine):
 
         value_score = sum(value_scores) / len(value_scores) if value_scores else None
 
-        # --- QUALITY component (ROE). Finnhub returns ROE as a percentage
-        # number (e.g. 15.5 for 15.5%), not a fraction. ---
+        # --- QUALITY component (ROE + gross margin). Finnhub returns these
+        # as percentages (e.g. 15.5 for 15.5%), not fractions. ---
+        quality_subs: List[float] = []
         if roe is not None:
             # >25% = excellent (+1), 0% = neutral, <0% = -0.8 cap.
-            quality_score = self.clamp_score(roe / 25.0, -0.8, 1.0)
-        else:
-            quality_score = None
+            quality_subs.append(self.clamp_score(roe / 25.0, -0.8, 1.0))
+        if gross_margin is not None:
+            # >50% = software-tier margins = +1, 20% = neutral, <0% = -1.
+            quality_subs.append(self.clamp_score((gross_margin - 20.0) / 30.0, -1.0, 1.0))
+        quality_score = sum(quality_subs) / len(quality_subs) if quality_subs else None
+
+        # --- GROWTH component (NEW). Reflects forward earnings power that
+        # the value-only formula missed. A company growing EPS 20%+ YoY
+        # earns a high P/E — the old formula penalized that as "expensive".
+        # Now we credit it directly. ---
+        growth_subs: List[float] = []
+        if eps_growth_q is not None:
+            # 20%+ YoY = +1, 0% = 0, -20%+ = -1
+            growth_subs.append(self.clamp_score(eps_growth_q / 20.0, -1.0, 1.0))
+        if eps_growth_5y is not None:
+            # 15%+ 5y CAGR = +1, 0% = 0, -10% = -1
+            growth_subs.append(self.clamp_score(eps_growth_5y / 15.0, -1.0, 1.0))
+        if revenue_growth is not None:
+            # 15%+ YoY = +1, 0% = 0, -15% = -1
+            growth_subs.append(self.clamp_score(revenue_growth / 15.0, -1.0, 1.0))
+        growth_score = sum(growth_subs) / len(growth_subs) if growth_subs else None
 
         # --- LEVERAGE component (debt/equity, lower is better) ---
         if de is not None:
@@ -349,12 +373,20 @@ class FundamentalEngine(BaseEngine):
             leverage_score = None
 
         # Weighted average, ignoring components we don't have data for.
-        weights = {'value': 0.35, 'quality': 0.40, 'leverage': 0.25}
+        # New 4-dimension breakdown:
+        #   value 30%, quality 25%, growth 25%, leverage 20%
+        # Growth was missing entirely in the old engine. Adding it lets fast-
+        # growers (semis, biotech, software) score above their value-only
+        # reading, which was systematically pessimistic about quality
+        # high-multiple companies.
+        weights = {'value': 0.30, 'quality': 0.25, 'growth': 0.25, 'leverage': 0.20}
         contributions: Dict[str, float] = {}
         if value_score is not None:
             contributions['value'] = value_score
         if quality_score is not None:
             contributions['quality'] = quality_score
+        if growth_score is not None:
+            contributions['growth'] = growth_score
         if leverage_score is not None:
             contributions['leverage'] = leverage_score
 
@@ -368,15 +400,16 @@ class FundamentalEngine(BaseEngine):
         fundamental_score = sum(weights[k] * v for k, v in contributions.items()) / total_weight
         fundamental_score = self.clamp_score(fundamental_score, -1.0, 1.0)
 
-        # Confidence: how many of the 3 dimensions we could score, dampened
-        # if any metric was clearly stale/missing.
+        # Confidence: how many of the 4 dimensions we could score.
         dimensions_covered = len(contributions)
-        if dimensions_covered == 3:
-            confidence = 0.85
+        if dimensions_covered >= 4:
+            confidence = 0.90
+        elif dimensions_covered == 3:
+            confidence = 0.80
         elif dimensions_covered == 2:
-            confidence = 0.7
+            confidence = 0.65
         else:
-            confidence = 0.55
+            confidence = 0.50
 
         metadata = {
             'source': 'finnhub_metric',
@@ -385,14 +418,19 @@ class FundamentalEngine(BaseEngine):
                 'pe_ratio': pe,
                 'price_to_book': pb,
                 'roe_pct': roe,
+                'gross_margin_pct': gross_margin,
                 'debt_to_equity': de,
                 'dividend_yield_pct': div_yield,
+                'eps_growth_quarterly_yoy_pct': eps_growth_q,
+                'eps_growth_5y_pct': eps_growth_5y,
+                'revenue_growth_ttm_yoy_pct': revenue_growth,
                 'market_cap': metrics.get('market_cap'),
                 'eps': metrics.get('eps'),
             },
             'component_scores': {
                 'value': value_score,
                 'quality': quality_score,
+                'growth': growth_score,
                 'leverage': leverage_score,
             },
             'dimensions_used': list(contributions.keys()),

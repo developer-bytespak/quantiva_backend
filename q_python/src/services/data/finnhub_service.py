@@ -95,6 +95,16 @@ class FinnhubService:
                     'price_to_book': metric_data.get('pbAnnual'),
                     'roe': metric_data.get('roeRfy'),  # Return on Equity
                     'debt_to_equity': metric_data.get('totalDebt/totalEquityAnnual'),
+                    # Growth dimension — Finnhub returns these as percentages
+                    # (e.g. 22.04 = 22.04% YoY). Used by FundamentalEngine to
+                    # score companies that are actually growing earnings,
+                    # which the old value-only formula penalized for being
+                    # "expensive" (high P/E) even when the high P/E was
+                    # justified by strong forward growth.
+                    'eps_growth_quarterly_yoy': metric_data.get('epsGrowthQuarterlyYoy'),
+                    'eps_growth_5y': metric_data.get('epsGrowth5Y'),
+                    'revenue_growth_ttm_yoy': metric_data.get('revenueGrowthTTMYoy'),
+                    'gross_margin': metric_data.get('grossMarginAnnual'),
                     'fetched_at': datetime.now().isoformat()
                 }
                 
