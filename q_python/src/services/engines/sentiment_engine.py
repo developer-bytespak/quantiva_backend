@@ -37,7 +37,21 @@ class SentimentEngine(BaseEngine):
         self._initialization_attempted = False
         
         # EMA configuration
-        self.ema_alpha = 0.125  # As specified
+        # Raised from 0.125 to 0.25. The old half-life was ~5.3 ticks which
+        # damped fresh news flow to a trickle — even when 70-80% of the latest
+        # 50 articles were aligned, the EMA was still anchored in last week's
+        # signal. 0.25 gives a ~2.5-tick half-life which lets recent
+        # consensus actually move the score, without making it whipsaw on
+        # individual articles.
+        self.ema_alpha = 0.25
+
+        # Consensus boost — when most fetched articles point the same way,
+        # treat that uniformity as a real signal, not noise. Without this,
+        # the aggregator's "weighted mean" path stayed shy of ±0.5 even on
+        # heavily one-sided news days, because the FinBERT 'neutral' class
+        # (~50% of articles) anchored the mean toward zero.
+        self.consensus_ratio_threshold = 0.55  # 55%+ articles same direction
+        self.consensus_boost_multiplier = 1.35  # boost their signed weight
         
         # Source-specific weights
         self.source_weights = {
@@ -234,9 +248,40 @@ class SentimentEngine(BaseEngine):
             
             # Aggregate ML results (weighted by source)
             ml_aggregated = self.finbert_inference.aggregate_sentiments(ml_results)
+            base_ml_score = ml_aggregated.get('score', 0.0)
+
+            # Consensus boost — measure direction among NON-NEUTRAL articles.
+            # FinBERT marks ~50% of routine financial news as "neutral", which
+            # anchors the mean toward zero. So even when 18 of 23 non-neutral
+            # articles are positive (≈78% consensus), the raw aggregator score
+            # only reaches ~0.22. The boost scales the score (not just the
+            # confidence) to reflect that one-sided news flow is a real signal.
+            breakdown = ml_aggregated.get('breakdown', {}) or {}
+            pos_count = int(breakdown.get('positive', 0))
+            neg_count = int(breakdown.get('negative', 0))
+            non_neutral = pos_count + neg_count
+            consensus_applied = False
+            consensus_direction = None
+            consensus_ratio = 0.0
+            if non_neutral >= 5:
+                if pos_count / non_neutral >= self.consensus_ratio_threshold and base_ml_score > 0:
+                    consensus_ratio = pos_count / non_neutral
+                    consensus_applied = True
+                    consensus_direction = 'positive'
+                elif neg_count / non_neutral >= self.consensus_ratio_threshold and base_ml_score < 0:
+                    consensus_ratio = neg_count / non_neutral
+                    consensus_applied = True
+                    consensus_direction = 'negative'
+            boosted_score = base_ml_score
+            if consensus_applied:
+                boosted_score = max(-1.0, min(1.0, base_ml_score * self.consensus_boost_multiplier))
+
             ml_result = {
-                'score': ml_aggregated.get('score', 0.0),
-                'confidence': ml_aggregated.get('confidence', 0.5)
+                'score': boosted_score,
+                'confidence': ml_aggregated.get('confidence', 0.5),
+                'consensus_applied': consensus_applied,
+                'consensus_direction': consensus_direction,
+                'consensus_ratio': consensus_ratio,
             }
             
             # Aggregate keyword results (for crypto)

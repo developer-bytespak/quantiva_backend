@@ -165,9 +165,39 @@ class FusionEngine(BaseEngine):
                 k: active_weights[k] / valid_weight_sum for k in valid_scores
             }
 
-            final_score = sum(
+            weighted_avg = sum(
                 rebalanced_weights[k] * valid_scores[k] for k in valid_scores
             )
+
+            # Synergy bonus — multi-engine alignment is a real signal that
+            # weighted averaging dilutes. When 3+ engines independently agree
+            # in the same direction (each contributing ≥|0.15|), that's harder
+            # to fake than a single strong signal carrying the average. So we
+            # add a small bonus in the agreed direction.
+            #
+            # Asymmetric on purpose: positive synergy gets the full bump (we
+            # want to surface high-conviction BUYs); negative synergy gets
+            # half (we don't want to chase weak shorts harder than the data
+            # warrants).
+            ALIGN_THRESHOLD = 0.15
+            pos_aligned = sum(1 for v in valid_scores.values() if v >= ALIGN_THRESHOLD)
+            neg_aligned = sum(1 for v in valid_scores.values() if v <= -ALIGN_THRESHOLD)
+            synergy_bonus = 0.0
+            synergy_reason = None
+            if pos_aligned >= 4:
+                synergy_bonus = 0.10
+                synergy_reason = f'{pos_aligned}-engine positive alignment'
+            elif pos_aligned >= 3:
+                synergy_bonus = 0.05
+                synergy_reason = f'{pos_aligned}-engine positive alignment'
+            elif neg_aligned >= 4:
+                synergy_bonus = -0.05
+                synergy_reason = f'{neg_aligned}-engine negative alignment'
+            elif neg_aligned >= 3:
+                synergy_bonus = -0.025
+                synergy_reason = f'{neg_aligned}-engine negative alignment'
+
+            final_score = max(-1.0, min(1.0, weighted_avg + synergy_bonus))
 
             # Determine action using per-strategy thresholds (falls back
             # to asset-type defaults when not supplied).
@@ -218,6 +248,11 @@ class FusionEngine(BaseEngine):
                 'weights': active_weights,
                 'rebalanced_weights': rebalanced_weights,
                 'weights_source': 'strategy' if weights else 'default',
+                'weighted_avg_pre_synergy': weighted_avg,
+                'synergy_bonus': synergy_bonus,
+                'synergy_reason': synergy_reason,
+                'positive_alignments': pos_aligned,
+                'negative_alignments': neg_aligned,
             }
 
             return {

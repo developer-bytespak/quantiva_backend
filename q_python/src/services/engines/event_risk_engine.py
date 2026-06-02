@@ -108,25 +108,25 @@ class EventRiskEngine(BaseEngine):
                         f"overall_risk={economic_risk.get('risk_score', 0.0):.3f}"
                     )
 
-            # No events detected — return NEUTRAL (0.0), not the old hardcoded 1.0.
-
-            # The previous 1.0 ("no events = max safety") was an outright bug:
-            # because event_risk has ~0.2 weight in fusion, every stock got a
-            # silent +0.2 boost from this engine on days with no detected events
-            # (i.e. most days). That pulled final_score up to ~0.2 baseline for
-            # every stock and made event_risk meaningless as a signal.
+            # No events detected — return a MILDLY POSITIVE baseline (+0.20).
             #
-            # Returning 0.0 means: "engine ran, no upcoming events flagged" — the
-            # engine contributes nothing to final_score in either direction.
-            # Fusion handles the rest via its own weighting. If we want to
-            # distinguish "ran, found nothing" from "engine couldn't run", the
-            # latter still goes through handle_error/handle_no_data → null,
-            # which fusion re-normalizes around.
+            # History: this used to be hardcoded 1.0 (max safety), which gave
+            # every stock a silent +0.2 boost on most days and broke the
+            # engine's signal. We then moved to pure 0.0 neutral.
+            #
+            # That's too harsh in the other direction: in finance "no upcoming
+            # earnings or regulatory events in the next 30 days" is genuinely
+            # mildly positive — it means no scheduled catalyst that could
+            # surprise the position. A quiet 30-day window is a stable window.
+            # +0.20 (vs the old +1.0) keeps the engine from dominating but
+            # reflects the real informational content. Confidence stays 0.6
+            # because we never actively verified absence; we only didn't find
+            # anything.
             if not events:
                 return self.create_result(
-                    0.0,
+                    0.20,
                     0.6,
-                    {'events_count': 0, 'note': 'No upcoming events detected', 'status': 'no_events'}
+                    {'events_count': 0, 'note': 'No upcoming events detected (quiet 30d window)', 'status': 'no_events'}
                 )
 
             # Score each event
@@ -139,12 +139,13 @@ class EventRiskEngine(BaseEngine):
                         'score': score
                     })
 
-            # Same fix as above: when events exist but none score, that's a
-            # neutral outcome (e.g. earnings 25 days out, time-decayed to ~0),
-            # not max-safety.
+            # Events exist but all time-decayed to ~0 (e.g. earnings >25 days
+            # out). Same logic — slight positive because at least nothing is
+            # impending. Lower than the truly-empty case (0.20) since there IS
+            # something in the calendar, just not soon.
             if not event_scores:
                 return self.create_result(
-                    0.0,
+                    0.10,
                     0.6,
                     {'events_count': len(events), 'scored_events': 0, 'status': 'no_impactful_events'}
                 )
