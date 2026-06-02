@@ -89,50 +89,46 @@ class EventRiskEngine(BaseEngine):
             Dictionary with score, confidence, and metadata
         """
         try:
-            # #region agent log
-            import json
-            try:
-                with open(r'c:\Users\BYTES PAK\Desktop\Quantiva-hq\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"event_risk_engine.py:89","message":"EventRiskEngine.calculate entry","data":{"asset_id":asset_id,"asset_type":asset_type,"has_kwargs":bool(kwargs),"asset_symbol_in_kwargs":kwargs.get('asset_symbol')},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-            except: pass
-            # #endregion
             if not self.validate_inputs(asset_id, asset_type):
                 return self.handle_error(ValueError("Invalid inputs"), "validation")
-            
+
             # Get upcoming events
             if events is None:
-                asset_symbol = kwargs.get('asset_symbol', asset_id)  # Get asset_symbol from kwargs
-                # #region agent log
-                try:
-                    with open(r'c:\Users\BYTES PAK\Desktop\Quantiva-hq\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"event_risk_engine.py:96","message":"Calling _get_upcoming_events","data":{"asset_id":asset_id,"asset_symbol":asset_symbol},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                except: pass
-                # #endregion
+                asset_symbol = kwargs.get('asset_symbol', asset_id)
                 events = self._get_upcoming_events(asset_id, asset_type, days_ahead=30, asset_symbol=asset_symbol)
-            
+
             # Get economic risk from FRED (for stocks only)
             economic_risk = None
             if asset_type == 'stock' and self.fred_service.is_available():
                 economic_risk = self._get_economic_risk_from_fred(stored_fred_data)
-                
-                # Add FRED-based events to events list
                 events.extend(economic_risk.get('events', []))
-                
-                # Log FRED events
                 if economic_risk.get('events'):
                     self.logger.info(
                         f"FRED economic events for {asset_id}: {len(economic_risk.get('events', []))} events, "
                         f"overall_risk={economic_risk.get('risk_score', 0.0):.3f}"
                     )
-            
+
+            # No events detected — return NEUTRAL (0.0), not the old hardcoded 1.0.
+
+            # The previous 1.0 ("no events = max safety") was an outright bug:
+            # because event_risk has ~0.2 weight in fusion, every stock got a
+            # silent +0.2 boost from this engine on days with no detected events
+            # (i.e. most days). That pulled final_score up to ~0.2 baseline for
+            # every stock and made event_risk meaningless as a signal.
+            #
+            # Returning 0.0 means: "engine ran, no upcoming events flagged" — the
+            # engine contributes nothing to final_score in either direction.
+            # Fusion handles the rest via its own weighting. If we want to
+            # distinguish "ran, found nothing" from "engine couldn't run", the
+            # latter still goes through handle_error/handle_no_data → null,
+            # which fusion re-normalizes around.
             if not events:
-                # No events = low risk
                 return self.create_result(
-                    1.0,  # Low risk
-                    0.8,  # High confidence if no events
-                    {'events_count': 0, 'note': 'No upcoming events detected'}
+                    0.0,
+                    0.6,
+                    {'events_count': 0, 'note': 'No upcoming events detected', 'status': 'no_events'}
                 )
-            
+
             # Score each event
             event_scores = []
             for event in events:
@@ -142,12 +138,15 @@ class EventRiskEngine(BaseEngine):
                         'event': event,
                         'score': score
                     })
-            
+
+            # Same fix as above: when events exist but none score, that's a
+            # neutral outcome (e.g. earnings 25 days out, time-decayed to ~0),
+            # not max-safety.
             if not event_scores:
                 return self.create_result(
-                    1.0,
-                    0.8,
-                    {'events_count': len(events), 'scored_events': 0}
+                    0.0,
+                    0.6,
+                    {'events_count': len(events), 'scored_events': 0, 'status': 'no_impactful_events'}
                 )
             
             # Aggregate scores (negative events have more weight)
@@ -883,6 +882,66 @@ class EventRiskEngine(BaseEngine):
         
         return unique_events
     
+    def _fetch_finnhub_earnings_events(
+        self,
+        asset_symbol: str,
+        days_ahead: int = 30,
+    ) -> List[Dict]:
+        """
+        Fetch upcoming earnings from Finnhub's `/calendar/earnings` endpoint
+        and shape them into the same event dict the rest of this engine
+        consumes (`type`, `date`, `description`, `source`, optional fields).
+
+        Why: news-keyword detection (the old sole path) misses most upcoming
+        earnings because news articles don't always state the next earnings
+        date. Finnhub's earnings calendar IS the structured source of truth
+        for that data — we already pay for an API key, we should just use it.
+
+        Returns an empty list on missing key / network error / no earnings.
+        Logs but does not raise — callers treat absence as "no event".
+        """
+        events: List[Dict] = []
+        if not asset_symbol:
+            return events
+        try:
+            result_map = self.finnhub_service.fetch_earnings_calendar_batch(
+                [asset_symbol], days_ahead=days_ahead
+            )
+        except Exception as e:
+            self.logger.warning(f"Finnhub fetch_earnings_calendar_batch threw for {asset_symbol}: {e}")
+            return events
+
+        earnings = result_map.get(asset_symbol) if isinstance(result_map, dict) else None
+        if not earnings:
+            earnings = result_map.get(asset_symbol.upper()) if isinstance(result_map, dict) else None
+        if not earnings:
+            return events
+
+        earnings_date = earnings.get('earnings_date')
+        days_until = earnings.get('days_until_earnings')
+        if not earnings_date:
+            return events
+
+        # Distinguish "earnings already happened (days_until < 0)" — Finnhub may
+        # also return recent past earnings inside the window. Treat those as
+        # `earnings` (neutral/recent) but anything beyond -7 days is dropped by
+        # downstream `_score_event` already.
+        events.append({
+            'type': 'earnings',  # matches existing event_impacts key (defaults to 0.0 → time-decayed)
+            'date': earnings_date if isinstance(earnings_date, str) else str(earnings_date),
+            'description': (
+                f"Upcoming earnings on {earnings_date}"
+                + (f" ({days_until} days away)" if days_until is not None else "")
+            )[:120],
+            'source': 'finnhub_calendar',
+            # Carry the structured fields through metadata so downstream LLM
+            # explanations or future scoring can reason about EPS surprise.
+            'eps_estimate': earnings.get('eps_estimate'),
+            'revenue_estimate': earnings.get('revenue_estimate'),
+            'days_until_earnings': days_until,
+        })
+        return events
+
     def _get_upcoming_events(
         self,
         asset_id: str,
@@ -906,49 +965,54 @@ class EventRiskEngine(BaseEngine):
         cutoff_date = datetime.now().replace(tzinfo=None) + timedelta(days=days_ahead)
         
         if asset_type == 'stock':
+            # Source 1: Finnhub earnings calendar — structured, reliable, has
+            # exact dates + days_until. Used to be imported but never called;
+            # without it, the engine relied entirely on parsing "earnings"
+            # keywords out of arbitrary news, which mostly missed real upcoming
+            # earnings (news articles don't always state the date plainly).
             try:
-                # Fetch news from StockNewsAPI
+                finnhub_events = self._fetch_finnhub_earnings_events(
+                    asset_symbol or asset_id, days_ahead=days_ahead
+                )
+                if finnhub_events:
+                    events.extend(finnhub_events)
+                    self.logger.info(
+                        f"Finnhub earnings calendar for {asset_id}: {len(finnhub_events)} event(s)"
+                    )
+            except Exception as e:
+                self.logger.warning(f"Finnhub earnings fetch failed for {asset_id}: {e}")
+
+            # Source 2: news-based detection (existing path) — picks up
+            # ad-hoc events Finnhub doesn't cover (SEC filings, regulatory
+            # actions). Keeps the engine useful even when the earnings
+            # calendar is empty.
+            try:
                 news_data = self.stock_news_service.fetch_news(asset_id, limit=100)
-                
                 self.logger.info(f"Fetched {len(news_data) if news_data else 0} news articles for {asset_id}")
-                
                 if news_data:
-                    # Detect different types of events
                     earnings_events = self._detect_earnings_events(news_data, cutoff_date)
                     sec_events = self._detect_sec_filings(news_data, cutoff_date)
                     regulatory_events = self._detect_regulatory_actions(news_data, cutoff_date)
-                    
                     events.extend(earnings_events)
                     events.extend(sec_events)
                     events.extend(regulatory_events)
-                    
                     self.logger.info(
-                        f"Event detection for {asset_id}: "
+                        f"News-based event detection for {asset_id}: "
                         f"earnings={len(earnings_events)}, sec_filings={len(sec_events)}, "
-                        f"regulatory={len(regulatory_events)}, total={len(events)}"
+                        f"regulatory={len(regulatory_events)}"
                     )
-                    
-                    # Deduplicate events
-                    events = self._deduplicate_events(events)
-                    
-                    self.logger.info(f"Detected {len(events)} unique events for {asset_id} from news")
                 else:
                     self.logger.warning(f"No news data available for {asset_id}")
-                    
             except Exception as e:
                 self.logger.error(f"Error fetching stock events from news: {str(e)}", exc_info=True)
+
+            events = self._deduplicate_events(events)
+            self.logger.info(f"Stock event total for {asset_id}: {len(events)} unique events")
         
         elif asset_type == 'crypto':
             try:
                 # Use asset_symbol if provided (for external API calls), otherwise use asset_id
                 symbol_to_use = asset_symbol or asset_id
-                # #region agent log
-                import json
-                try:
-                    with open(r'c:\Users\BYTES PAK\Desktop\Quantiva-hq\.cursor\debug.log', 'a', encoding='utf-8') as f:
-                        f.write(json.dumps({"sessionId":"debug-session","runId":"run1","hypothesisId":"A","location":"event_risk_engine.py:930","message":"_get_upcoming_events crypto branch","data":{"asset_id":asset_id,"asset_symbol_param":asset_symbol,"symbol_to_use":symbol_to_use},"timestamp":int(__import__('time').time()*1000)}) + '\n')
-                except: pass
-                # #endregion
                 # Fetch news from LunarCrush (needs symbol, not UUID)
                 news_data = self.lunarcrush_service.fetch_coin_news(symbol_to_use, limit=100)
                 

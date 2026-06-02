@@ -54,29 +54,45 @@ class LiquidityEngine(BaseEngine):
         try:
             if not self.validate_inputs(asset_id, asset_type):
                 return self.handle_error(ValueError("Invalid inputs"), "validation")
-            
-            if not order_book or not current_price:
-                return self.handle_error(
-                    ValueError("Order book and current price required"),
-                    "data"
+
+            # STOCKS — no order book available (the stock cron doesn't pre-fetch
+            # an L2 book the way the crypto cron does for Binance). Use the
+            # data the cron actually ships: 24h volume + current price (+ market
+            # cap and avg-volume if present) and score by absolute dollar
+            # liquidity. Without this branch, every stock was getting `None`
+            # from the upstream check in signal_generator, which Phase 1 fixed
+            # the null contract for — but no real signal was ever computed.
+            if asset_type == 'stock':
+                return self._calculate_stock_liquidity(
+                    current_price=current_price,
+                    volume_24h=volume_24h,
+                    avg_volume_30d=avg_volume_30d,
+                    market_cap=kwargs.get('market_cap'),
                 )
-            
+
+            # CRYPTO path — needs the order book pre-fetch from the cron.
+            if not order_book or not current_price:
+                return self.handle_no_data(
+                    "Order book and current price required for crypto liquidity",
+                    context=f"asset_id={asset_id}",
+                )
+
             # Calculate spread score (40% weight)
             spread_score = self._calculate_spread_score(order_book, current_price)
-            
+
             # Calculate depth score (30% weight)
             depth_score = self._calculate_depth_score(order_book, current_price)
-            
+
             # Calculate volume score (20% weight)
             volume_score = self._calculate_volume_score(volume_24h, avg_volume_30d)
-            
+
             # Calculate slippage score (10% weight)
             slippage_score = self._calculate_slippage_score(
                 order_book,
                 current_price,
                 volume_24h
             )
-            
+
             # Weighted combination
             liquidity_score = (
                 0.40 * spread_score +
@@ -84,14 +100,14 @@ class LiquidityEngine(BaseEngine):
                 0.20 * volume_score +
                 0.10 * slippage_score
             )
-            
+
             # Calculate confidence
             confidence = self._calculate_confidence(
                 order_book,
                 volume_24h,
                 avg_volume_30d
             )
-            
+
             metadata = {
                 'spread_score': spread_score,
                 'depth_score': depth_score,
@@ -100,11 +116,106 @@ class LiquidityEngine(BaseEngine):
                 'spread_percentage': self._get_spread_percentage(order_book, current_price),
                 'order_book_depth': len(order_book.get('bids', [])) + len(order_book.get('asks', []))
             }
-            
+
             return self.create_result(liquidity_score, confidence, metadata)
-            
+
         except Exception as e:
             return self.handle_error(e, f"calculation for {asset_id}")
+
+    def _calculate_stock_liquidity(
+        self,
+        current_price: Optional[float],
+        volume_24h: Optional[float],
+        avg_volume_30d: Optional[float] = None,
+        market_cap: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Compute a liquidity score for a stock from price, volume, and optional
+        market cap. Order-book–free path (stock cron doesn't pre-fetch L2).
+
+        Signals combined:
+          * Absolute dollar volume — primary. Anchors around $100M/day = ~0
+            (typical liquid mid-cap); log-scale so $1B = saturated +1, $1M = -1.
+          * Volume burst — if 24h volume is well above 30d average, mild +.
+            (Above-average activity = tighter spreads in practice.)
+          * Market-cap reasonableness — if dollar volume is implausibly small
+            relative to market cap (<0.01% turnover), nudge negative.
+
+        Returns null result (handle_no_data) when price+volume are absent —
+        fusion will redistribute the weight.
+        """
+        try:
+            import math
+        except ImportError:  # pragma: no cover
+            math = None
+
+        if not current_price or not volume_24h or volume_24h <= 0 or current_price <= 0:
+            return self.handle_no_data(
+                "Stock liquidity requires positive price and volume",
+                context=f"price={current_price}, volume={volume_24h}",
+            )
+
+        dollar_volume = float(volume_24h) * float(current_price)
+
+        # Primary: log-scale dollar volume anchored at $100M/day.
+        #   $100M  → log10(1)    = 0      (neutral)
+        #   $1B    → log10(10)   = 1      (+1 capped)
+        #   $10M   → log10(0.1)  = -1     (-1 capped)
+        #   $1M    → log10(0.01) = -2 → clamped -1
+        anchor = 100_000_000.0
+        if math is not None:
+            dollar_score = math.log10(max(1.0, dollar_volume) / anchor)
+        else:
+            # Fallback (math always available, but defensive): piecewise.
+            if dollar_volume >= 1_000_000_000: dollar_score = 1.0
+            elif dollar_volume >= 100_000_000: dollar_score = 0.5
+            elif dollar_volume >= 10_000_000: dollar_score = 0.0
+            elif dollar_volume >= 1_000_000: dollar_score = -0.5
+            else: dollar_score = -1.0
+        dollar_score = self.clamp_score(dollar_score, -1.0, 1.0)
+
+        # Secondary: volume burst (24h vs 30d avg). Only applies if we have it.
+        burst_score = 0.0
+        burst_ratio: Optional[float] = None
+        if avg_volume_30d and avg_volume_30d > 0:
+            burst_ratio = float(volume_24h) / float(avg_volume_30d)
+            # 1.0x = neutral, 2.0x = +0.5, 0.5x = -0.5. Capped.
+            burst_score = self.clamp_score((burst_ratio - 1.0), -0.5, 0.5)
+
+        # Tertiary: turnover sanity check. Very low turnover relative to mcap
+        # is suspicious for a mid/large-cap — flag it.
+        turnover_penalty = 0.0
+        turnover: Optional[float] = None
+        if market_cap and market_cap > 0:
+            turnover = dollar_volume / float(market_cap)
+            if turnover < 0.0001:  # <0.01% daily turnover
+                turnover_penalty = -0.2
+
+        # Weighted combination (dollar volume dominates; the rest nudge).
+        liquidity_score = self.clamp_score(
+            0.75 * dollar_score + 0.20 * burst_score + 0.05 * turnover_penalty,
+            -1.0,
+            1.0,
+        )
+
+        # Confidence: full data → 0.8; missing avg_volume_30d → 0.65;
+        # missing market_cap as well → 0.55.
+        confidence = 0.55
+        if avg_volume_30d and avg_volume_30d > 0:
+            confidence += 0.10
+        if market_cap and market_cap > 0:
+            confidence += 0.15
+
+        metadata = {
+            'method': 'stock_dollar_volume',
+            'dollar_volume_usd': dollar_volume,
+            'dollar_volume_score': dollar_score,
+            'burst_ratio': burst_ratio,
+            'burst_score': burst_score,
+            'turnover': turnover,
+            'turnover_penalty': turnover_penalty,
+        }
+        return self.create_result(liquidity_score, confidence, metadata)
     
     def _calculate_spread_score(
         self,
