@@ -10,6 +10,8 @@ import { MarketStocksDbService } from './services/market-stocks-db.service';
 import { CacheManagerService } from './services/cache-manager.service';
 import { MarketSyncCronService } from './services/market-sync-cron.service';
 import { SignalEligibilityService } from './services/signal-eligibility.service';
+import { DelistedStocksService } from './services/delisted-stocks.service';
+import { ReconstitutionAlertService } from './services/reconstitution-alert.service';
 import { PrismaModule } from '../../prisma/prisma.module';
 
 @Module({
@@ -25,6 +27,8 @@ import { PrismaModule } from '../../prisma/prisma.module';
     CacheManagerService,
     MarketSyncCronService,
     SignalEligibilityService,
+    DelistedStocksService,
+    ReconstitutionAlertService,
   ],
   exports: [StocksMarketService, AlpacaMarketService, StockQuoteCacheService, MarketStocksDbService, FmpService],
 })

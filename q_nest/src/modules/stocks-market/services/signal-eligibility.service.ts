@@ -41,6 +41,10 @@ export class SignalEligibilityService {
   /**
    * Recompute signal_eligible for every active stock and return a summary.
    * Idempotent — running multiple times produces the same result.
+   *
+   * Volume check strictness controlled by env var OPTION_B_STRICT_VOLUME_CHECK:
+   *   - false (default): NULL volume passes (most new stocks have NULL until Alpaca data accumulates)
+   *   - true: NULL volume fails (use after 30+ days of Alpaca data is available)
    */
   async recomputeEligibility(): Promise<{
     totalConsidered: number;
@@ -49,6 +53,8 @@ export class SignalEligibilityService {
     failedMarketCap: number;
     failedVolume: number;
   }> {
+    const strictVolume = process.env.OPTION_B_STRICT_VOLUME_CHECK === 'true';
+
     // Single round-trip: compute eligibility for every active stock and
     // bulk-update assets.signal_eligible in one statement.
     const updated = await this.prisma.$executeRaw`
@@ -72,8 +78,13 @@ export class SignalEligibilityService {
         SELECT
           a.asset_id,
           (COALESCE(lm.market_cap, 0) >= ${SignalEligibilityService.MARKET_CAP_FLOOR}::numeric
-           AND (av.avg_dollar_volume IS NULL                              -- volume unknown → don't penalize
-                OR av.avg_dollar_volume >= ${SignalEligibilityService.DOLLAR_VOLUME_FLOOR}::numeric)
+           AND (
+             -- soft mode (default): NULL volume passes
+             (NOT ${strictVolume}::boolean AND (av.avg_dollar_volume IS NULL OR av.avg_dollar_volume >= ${SignalEligibilityService.DOLLAR_VOLUME_FLOOR}::numeric))
+             OR
+             -- strict mode: NULL volume fails
+             (${strictVolume}::boolean AND COALESCE(av.avg_dollar_volume, 0) >= ${SignalEligibilityService.DOLLAR_VOLUME_FLOOR}::numeric)
+           )
           ) AS is_eligible
         FROM assets a
         LEFT JOIN latest_market lm ON lm.asset_id = a.asset_id
