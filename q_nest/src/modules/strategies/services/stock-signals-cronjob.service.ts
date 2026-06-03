@@ -198,11 +198,27 @@ export class StockSignalsCronjobService {
     heartbeat?: RunHeartbeat,
   ): Promise<void> {
     try {
+      // Option B: which Option-B indexes does this stock belong to?
+      // Legacy strategies (target_index_code = NULL) still run against every
+      // rotated stock unchanged. Option-B strategies only run if the stock is
+      // a member of the strategy's target index.
+      const stockIndexCodes = await this.getIndexCodesForStock(stock.asset_id);
+
       // Step 1: Run sentiment analysis (this also fetches news)
       await this.runSentimentAnalysis(stock);
 
-      // Step 2: Generate signals for each stock strategy
+      // Step 2: Generate signals for each stock strategy whose universe
+      // matches this stock.
       for (const strategy of strategies) {
+        if (
+          strategy.target_index_code &&
+          !stockIndexCodes.has(strategy.target_index_code)
+        ) {
+          // Stock isn't in this strategy's target index → skip (no heartbeat
+          // increment, since we never even asked the engine).
+          continue;
+        }
+
         try {
           await this.executeStrategyForStock(
             strategy.strategy_id,
@@ -221,6 +237,23 @@ export class StockSignalsCronjobService {
     } catch (error: any) {
       this.logger.error(`Error processing stock ${stock.symbol}: ${error.message}`);
       throw error;
+    }
+  }
+
+  /**
+   * Returns the set of index codes this stock is a member of.
+   * Used by Option B to gate per-strategy execution by index membership.
+   */
+  private async getIndexCodesForStock(assetId: string): Promise<Set<string>> {
+    try {
+      const rows = await this.prisma.index_membership.findMany({
+        where: { asset_id: assetId },
+        select: { index: { select: { code: true } } },
+      });
+      return new Set(rows.map((r) => r.index.code));
+    } catch (error: any) {
+      this.logger.warn(`Failed to look up index codes for asset ${assetId}: ${error.message}`);
+      return new Set();
     }
   }
 
@@ -683,6 +716,7 @@ export class StockSignalsCronjobService {
         LEFT JOIN stock_signals ss ON ss.asset_id = a.asset_id
         WHERE a.asset_type = 'stock'
           AND a.is_active = true
+          AND a.signal_eligible = true                                -- Option B: skip ineligible stocks (junk tail)
         ORDER BY
           COALESCE(ss.last_signal_time, '1970-01-01'::timestamp) ASC, -- oldest / never processed first → real rotation
           a.market_cap_rank ASC NULLS LAST                            -- tie-break by market cap

@@ -626,22 +626,47 @@ export class MarketStocksDbService {
         }
       }
 
-      // Deactivate stocks no longer in S&P 500
-      const stocksToDeactivate = existingStocks.filter(
+      // Deactivate stocks no longer in S&P 500.
+      // Option B fix: keep stocks that are members of OTHER indexes (Nasdaq,
+      // Russell, etc.) — only deactivate stocks that aren't in any index at all.
+      const candidatesToDeactivate = existingStocks.filter(
         (s) => s.is_active && s.symbol && !newSP500Symbols.has(s.symbol.toUpperCase()),
       );
 
-      if (stocksToDeactivate.length > 0) {
-        await this.prisma.assets.updateMany({
+      if (candidatesToDeactivate.length > 0) {
+        const candidateIds = candidatesToDeactivate.map((s) => s.asset_id);
+        const inOtherIndexes = await this.prisma.index_membership.findMany({
           where: {
-            asset_id: { in: stocksToDeactivate.map((s) => s.asset_id) },
+            asset_id: { in: candidateIds },
+            index: { code: { not: 'SP500' } },
           },
-          data: {
-            is_active: false,
-            last_seen_at: now,
-          },
+          select: { asset_id: true },
+          distinct: ['asset_id'],
         });
-        deactivated = stocksToDeactivate.length;
+        const protectedIds = new Set(inOtherIndexes.map((r) => r.asset_id));
+        const actualToDeactivate = candidatesToDeactivate.filter(
+          (s) => !protectedIds.has(s.asset_id),
+        );
+
+        if (actualToDeactivate.length > 0) {
+          await this.prisma.assets.updateMany({
+            where: {
+              asset_id: { in: actualToDeactivate.map((s) => s.asset_id) },
+            },
+            data: {
+              is_active: false,
+              last_seen_at: now,
+            },
+          });
+          deactivated = actualToDeactivate.length;
+        }
+
+        const skipped = candidatesToDeactivate.length - actualToDeactivate.length;
+        if (skipped > 0) {
+          this.logger.log(
+            `Protected ${skipped} stocks from deactivation (members of other Option B indexes)`,
+          );
+        }
       }
 
       if (deactivated > 0) {

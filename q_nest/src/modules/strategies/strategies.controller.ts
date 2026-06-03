@@ -24,6 +24,7 @@ import { AiInsightsService } from '../../ai-insights/ai-insights.service';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { FeatureAccessService, FeatureType } from 'src/common/feature-access.service';
+import { isOptionBEnabled } from '../../common/feature-flags/option-b.util';
 import { AppGateway } from 'src/gateways/app.gateway';
 import { NotificationsService } from '../notifications/notifications.service';
 import { QhqTokenService } from '../qhq-token/qhq-token.service';
@@ -84,8 +85,19 @@ export class StrategiesController {
     @Query('asset_type') assetType?: 'crypto' | 'stock',
   ) {
     const userId = this.getRequestUserId(req);
+    const userEmail: string | undefined = req?.user?.email;
     const exchangeLabel = await this.preBuiltStrategiesService.getSignalSourceLabel(userId);
-    const strategies = await this.preBuiltStrategiesService.getPreBuiltStrategies(assetType);
+    const all = await this.preBuiltStrategiesService.getPreBuiltStrategies(assetType);
+
+    // Option B feature flag gates the STOCK pre-built strategies:
+    //   - Flag OFF → only legacy stock templates (target_index_code = NULL) are shown
+    //   - Flag ON  → only the 7 new index-scoped templates (target_index_code set) are shown
+    // Crypto strategies are unaffected by Option B.
+    const optionBOn = isOptionBEnabled(userEmail);
+    const strategies = all.filter((s: any) => {
+      if (s.asset_type !== 'stock') return true;
+      return optionBOn ? !!s.target_index_code : !s.target_index_code;
+    });
 
     return strategies.map((strategy: any) => ({
       ...strategy,

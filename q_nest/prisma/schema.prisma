@@ -462,6 +462,7 @@ model strategies {
   engine_weights       Json?
   template_id          String?                   @db.Uuid
   asset_type           String?
+  target_index_code    String?                   @db.VarChar(20)
   template             strategies?               @relation("StrategyTemplate", fields: [template_id], references: [strategy_id])
   clones               strategies[]              @relation("StrategyTemplate")
   user                 users?                    @relation(fields: [user_id], references: [user_id])
@@ -473,6 +474,7 @@ model strategies {
   @@index([user_id])
   @@index([is_active])
   @@index([template_id])
+  @@index([target_index_code])
   @@map("strategies")
 }
 
