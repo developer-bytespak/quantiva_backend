@@ -1,6 +1,7 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import { randomUUID } from 'crypto';
+import { alpacaTradingRateLimiter } from './alpaca-rate-limiter';
 
 /**
  * client_order_id prefixes used to identify orders our backend placed
@@ -353,6 +354,7 @@ export class AlpacaService {
       const headers = this.getAuthHeaders(apiKey, apiSecret);
       this.logger.log(`Placing ${type} ${side} order: ${quantity} ${alpacaSymbol}`);
 
+      await alpacaTradingRateLimiter.acquire();
       const res = await client.post('/v2/orders', orderData, {
         headers,
       });
@@ -542,6 +544,7 @@ export class AlpacaService {
         `Placing bracket order: ${quantity} ${alpacaSymbol}, TP=${takeProfitPrice}, SL=${stopLossPrice}`,
       );
 
+      await alpacaTradingRateLimiter.acquire();
       const res = await client.post('/v2/orders', orderData, {
         headers,
       });
@@ -581,6 +584,7 @@ export class AlpacaService {
     if (!orderId) return;
     const client = this.getClientForKey(apiKey);
     try {
+      await alpacaTradingRateLimiter.acquire();
       await client.delete(`/v2/orders/${orderId}`, {
         headers: this.getAuthHeaders(apiKey, apiSecret),
       });

@@ -124,7 +124,10 @@ export class StockSignalsCronjobService {
       // Step 2: Fetch stocks to process (use rotation strategy to process all stocks over time)
       // Process 50 stocks per run (every 10 minutes) to avoid overwhelming the system
       // This ensures all ~500 stocks get processed over ~100 minutes (10 runs)
-      const stocksToProcess = await this.getStocksToProcess(50);
+      // Option B: at ~2,150 eligible stocks, 50/tick = ~7 hour full cycle.
+      // Bumped to 100 to halve cycle time to ~3.5 hours. Python concurrency
+      // is throttled by BATCH_SIZE below, so 100 here doesn't slam Python.
+      const stocksToProcess = await this.getStocksToProcess(100);
       if (stocksToProcess.length === 0) {
         this.logger.warn('No stocks found to process, skipping signal generation');
         return;

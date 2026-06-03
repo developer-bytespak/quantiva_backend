@@ -9,6 +9,9 @@ import {
 } from '@nestjs/common';
 import { StocksMarketService } from './stocks-market.service';
 import { StockQuoteCacheService } from './services/stock-quote-cache.service';
+import { CacheManagerService } from './services/cache-manager.service';
+import { PrismaService } from '../../prisma/prisma.service';
+import { alpacaTradingRateLimiter } from '../exchanges/integrations/alpaca-rate-limiter';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { TokenPayload } from '../auth/services/token.service';
 import { isOptionBEnabled } from '../../common/feature-flags/option-b.util';
@@ -20,7 +23,78 @@ export class StocksMarketController {
   constructor(
     private readonly stocksMarketService: StocksMarketService,
     private readonly stockQuoteCacheService: StockQuoteCacheService,
+    private readonly cacheManager: CacheManagerService,
+    private readonly prisma: PrismaService,
   ) {}
+
+  /**
+   * GET /api/stocks-market/option-b-health
+   *
+   * Diagnostic snapshot for Option B. Public — no sensitive data exposed,
+   * just aggregate counts and rate-limiter state. Useful for ops checks and
+   * for the support team when investigating user reports.
+   */
+  @Get('option-b-health')
+  async getOptionBHealth() {
+    try {
+      const [activeStocks, eligibleStocks, indexCounts, recentSignals, deactivatedCount] =
+        await Promise.all([
+          this.prisma.assets.count({
+            where: { asset_type: 'stock', is_active: true },
+          }),
+          this.prisma.assets.count({
+            where: { asset_type: 'stock', is_active: true, signal_eligible: true },
+          }),
+          this.prisma.$queryRaw<Array<{ code: string; count: bigint }>>`
+            SELECT i.code, COUNT(im.asset_id)::bigint AS count
+            FROM indexes i
+            LEFT JOIN index_membership im ON im.index_id = i.index_id
+            GROUP BY i.code
+            ORDER BY count DESC
+          `,
+          this.prisma.$queryRaw<Array<{ name: string; target_index_code: string | null; signals_24h: bigint }>>`
+            SELECT s.name, s.target_index_code, COUNT(sig.signal_id)::bigint AS signals_24h
+            FROM strategies s
+            LEFT JOIN strategy_signals sig
+              ON sig.strategy_id = s.strategy_id
+              AND sig.timestamp > NOW() - INTERVAL '24 hours'
+            WHERE s.user_id IS NULL AND s.asset_type = 'stock' AND s.is_active = true
+            GROUP BY s.name, s.target_index_code
+            ORDER BY signals_24h DESC
+          `,
+          this.prisma.assets.count({
+            where: { asset_type: 'stock', is_active: false },
+          }),
+        ]);
+
+      return {
+        timestamp: new Date().toISOString(),
+        universe: {
+          active_stocks: activeStocks,
+          inactive_stocks: deactivatedCount,
+          signal_eligible: eligibleStocks,
+          signal_ineligible: activeStocks - eligibleStocks,
+        },
+        indexes: indexCounts.map((r) => ({
+          code: r.code,
+          stock_count: Number(r.count),
+        })),
+        strategies_24h: recentSignals.map((r) => ({
+          name: r.name,
+          target_index_code: r.target_index_code,
+          signals_24h: Number(r.signals_24h),
+        })),
+        cache: this.cacheManager.getStats(),
+        alpaca_rate_limiter: alpacaTradingRateLimiter.getStats(),
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to get option-b-health', { error: error?.message });
+      throw new HttpException(
+        error.message || 'Failed to get option-b-health',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
 
   /**
    * GET /api/stocks-market/stocks
