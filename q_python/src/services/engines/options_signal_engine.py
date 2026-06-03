@@ -73,7 +73,12 @@ class OptionsSignalEngine(BaseEngine):
             # resulting OCC / Binance symbol references a contract that's
             # actually listed on the venue's chain.
             raw_expiry = datetime.now(timezone.utc) + timedelta(days=DEFAULT_EXPIRY_DAYS)
-            expiry_dt = snap_to_nearest_friday(raw_expiry)
+            # Alpaca (US equities): roll a holiday Friday back to the prior
+            # trading day where contracts actually list. Binance crypto lists
+            # its Friday weekly/monthly regardless of US holidays.
+            expiry_dt = snap_to_nearest_friday(
+                raw_expiry, us_equity_holidays=(venue == "ALPACA")
+            )
             expiry_iso = expiry_dt.strftime("%Y-%m-%dT08:00:00Z")
 
             # Find matching strategies
@@ -211,7 +216,7 @@ class OptionsSignalEngine(BaseEngine):
     ) -> Optional[Dict[str, Any]]:
         """Build a single signal dict from a strategy template."""
         try:
-            legs = resolve_strikes(strat, spot_price, expiry_iso) if spot_price > 0 else []
+            legs = resolve_strikes(strat, spot_price, expiry_iso, venue=venue) if spot_price > 0 else []
 
             # Attach contract symbol to each leg, format depends on venue
             for leg in legs:

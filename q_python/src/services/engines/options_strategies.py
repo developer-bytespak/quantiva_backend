@@ -256,7 +256,89 @@ def snap_strike_to_listed(strike: float) -> float:
     return round(round(strike / step) * step, 2)
 
 
-def snap_to_nearest_friday(dt):
+def _easter(year: int) -> "date":
+    """Gregorian Easter Sunday (anonymous algorithm). Used to derive Good Friday."""
+    from datetime import date
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    L = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * L) // 451
+    month = (h + L - 7 * m + 114) // 31
+    day = ((h + L - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _observed(d: "date") -> "date":
+    """NYSE observance: a holiday on Sat shifts to Fri, on Sun shifts to Mon."""
+    from datetime import timedelta
+    if d.weekday() == 5:        # Saturday -> preceding Friday
+        return d - timedelta(days=1)
+    if d.weekday() == 6:        # Sunday -> following Monday
+        return d + timedelta(days=1)
+    return d
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> "date":
+    """The n-th `weekday` (Mon=0) of a month, e.g. 3rd Monday of January."""
+    from datetime import date, timedelta
+    first = date(year, month, 1)
+    return first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (n - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> "date":
+    """The last `weekday` (Mon=0) of a month, e.g. last Monday of May."""
+    from datetime import date, timedelta
+    last = (date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)) - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+def us_market_full_day_holidays(year: int) -> set:
+    """
+    Full-day NYSE/Nasdaq closures for `year`. Only full closures matter for
+    options-expiry snapping — half-days (day after Thanksgiving, Christmas
+    Eve) are still trading sessions with listed expiries. Half-days are
+    intentionally excluded so we don't roll a valid expiry off them.
+    """
+    from datetime import date, timedelta
+    hols = set()
+    # New Year's Day — NYSE does NOT observe it on Fri Dec 31 when Jan 1 is Sat.
+    ny = date(year, 1, 1)
+    if ny.weekday() == 6:        # Sunday -> Monday Jan 2
+        hols.add(date(year, 1, 2))
+    elif ny.weekday() != 5:      # any weekday except Saturday
+        hols.add(ny)
+    hols.add(_nth_weekday(year, 1, 0, 3))        # MLK — 3rd Mon Jan
+    hols.add(_nth_weekday(year, 2, 0, 3))        # Presidents — 3rd Mon Feb
+    hols.add(_easter(year) - timedelta(days=2))  # Good Friday
+    hols.add(_last_weekday(year, 5, 0))          # Memorial — last Mon May
+    if year >= 2022:
+        hols.add(_observed(date(year, 6, 19)))   # Juneteenth
+    hols.add(_observed(date(year, 7, 4)))        # Independence Day
+    hols.add(_nth_weekday(year, 9, 0, 1))        # Labor — 1st Mon Sep
+    hols.add(_nth_weekday(year, 11, 3, 4))       # Thanksgiving — 4th Thu Nov
+    hols.add(_observed(date(year, 12, 25)))      # Christmas
+    return hols
+
+
+def _previous_trading_day(d: "date") -> "date":
+    """
+    Walk back to the most recent open trading day on/before `d` (skips
+    weekends and full-day holidays). Unions adjacent years so a January
+    rollback can cross into the prior December correctly.
+    """
+    from datetime import timedelta
+    hols = us_market_full_day_holidays(d.year) | us_market_full_day_holidays(d.year - 1)
+    while d.weekday() >= 5 or d in hols:
+        d -= timedelta(days=1)
+    return d
+
+
+def snap_to_nearest_friday(dt, us_equity_holidays: bool = False):
     """
     US equity options (Alpaca) expire on Fridays, and Binance eapi options
     settle at 08:00 UTC on Fridays as well. Given any target datetime, return
@@ -267,13 +349,27 @@ def snap_to_nearest_friday(dt):
     The engine used to emit `now + N days` directly, which on Sundays /
     Mondays produced OCC / dash symbols for contracts nobody lists — the
     resulting bid/ask fetches returned all zeros.
+
+    `us_equity_holidays` (Alpaca only): a Friday that is itself a full-day US
+    market holiday (e.g. Good Friday, or Independence Day observed on Fri
+    Jul 3 2026 when Jul 4 is a Saturday) has no listed equity contracts —
+    the exchange lists that week's expiry on the prior session (Thu). So we
+    roll back to the previous open trading day, where the contracts exist.
+    This is NOT applied for Binance: crypto options list their Friday weekly/
+    monthly regardless of US holidays, and have no Thursday contract 30d out.
     """
     from datetime import timedelta
     # weekday(): Monday=0 ... Friday=4 ... Sunday=6
     offset = (4 - dt.weekday()) % 7  # days forward to Friday (0 if already Fri)
     if offset > 3:
         offset -= 7  # prefer the Friday BEHIND us if it's closer
-    return dt + timedelta(days=offset)
+    snapped = dt + timedelta(days=offset)
+
+    if us_equity_holidays:
+        trading_day = _previous_trading_day(snapped.date())
+        if trading_day != snapped.date():
+            snapped += timedelta(days=(trading_day - snapped.date()).days)
+    return snapped
 
 
 def build_occ_symbol(underlying: str, expiry_iso: str, option_type: str, strike: float) -> str:
@@ -292,11 +388,15 @@ def resolve_strikes(
     spot_price: float,
     expiry_iso: str,
     base_expiry_days: int = 30,
+    venue: str = "BINANCE",
 ) -> List[Dict[str, Any]]:
     """
     Convert strategy legs with offsets to concrete strike prices.
     If a leg has a custom expiry_days (different from the default 30),
-    the expiry is adjusted relative to now.
+    the expiry is adjusted relative to now. `venue` enables US-equity
+    holiday rollback on the per-leg expiry snap for Alpaca (see
+    `snap_to_nearest_friday`); the default-expiry path inherits the
+    already-snapped `expiry_iso` from the caller.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -310,7 +410,9 @@ def resolve_strikes(
         # contract.
         if leg.expiry_days != base_expiry_days:
             raw_dt = datetime.now(timezone.utc) + timedelta(days=leg.expiry_days)
-            leg_expiry = snap_to_nearest_friday(raw_dt).isoformat()
+            leg_expiry = snap_to_nearest_friday(
+                raw_dt, us_equity_holidays=(venue == "ALPACA")
+            ).isoformat()
         else:
             leg_expiry = expiry_iso
 
