@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
-import { DocumentService } from './document.service';
 import { DecisionEngineService } from './decision-engine.service';
 import { SumsubService } from '../integrations/sumsub.service';
 import { OnboardingStateService } from '../../modules/onboarding-emails/services/onboarding-state.service';
@@ -19,7 +18,6 @@ export class KycService {
 
   constructor(
     private prisma: PrismaService,
-    private documentService: DocumentService,
     private decisionEngine: DecisionEngineService,
     private configService: ConfigService,
     private sumsubService: SumsubService,
@@ -116,339 +114,6 @@ export class KycService {
     return verification.kyc_id;
   }
 
-  async uploadDocument(
-    userId: string,
-    file: Express.Multer.File,
-    documentType?: string,
-    documentSide?: string,
-  ): Promise<string> {
-    this.logger.log(`📄 [KYC-SERVICE] uploadDocument() - type: ${documentType}, side: ${documentSide || 'N/A'}`);
-    
-    // Get user info for Sumsub
-    const user = await this.prisma.users.findUnique({
-      where: { user_id: userId },
-    });
-
-    if (!user) {
-      throw new Error('User not found');
-    }
-
-    // Get or create verification
-    let verification = await this.prisma.kyc_verifications.findFirst({
-      where: { user_id: userId },
-      orderBy: { kyc_id: 'desc' },
-    });
-
-    // Create verification record first (even if Sumsub fails later)
-    if (!verification) {
-      const kycId = await this.createVerification(userId);
-      verification = await this.prisma.kyc_verifications.findUnique({
-        where: { kyc_id: kycId },
-      });
-      this.logger.log(`Created verification record: ${kycId}`);
-    }
-
-    if (!verification) {
-      throw new Error('Failed to create verification');
-    }
-
-    // Check if applicant was rejected and needs reset
-    if (verification.sumsub_applicant_id && verification.status === 'rejected') {
-      // Count how many documents we have for this verification
-      const docCount = await this.prisma.kyc_documents.count({
-        where: { kyc_id: verification.kyc_id },
-      });
-      
-      this.logger.log(`⚠️  Applicant was rejected. Current docs in DB: ${docCount}`);
-      
-      // Always reset Sumsub applicant when status is rejected
-      // This ensures we start fresh even if db has old documents
-      try {
-        this.logger.log(`🔄 Resetting Sumsub applicant ${verification.sumsub_applicant_id} for fresh submission...`);
-        await this.sumsubService.resetApplicant(verification.sumsub_applicant_id);
-        
-        // Delete all old documents from database to sync with reset
-        const deleted = await this.prisma.kyc_documents.deleteMany({
-          where: { kyc_id: verification.kyc_id },
-        });
-        this.logger.log(`🗑️  Deleted ${deleted.count} old documents from database`);
-        
-        // Update verification status back to pending
-        verification = await this.prisma.kyc_verifications.update({
-          where: { kyc_id: verification.kyc_id },
-          data: {
-            status: 'pending',
-            decision_reason: 'Resubmitting documents after rejection',
-          },
-        });
-        this.logger.log(`✅ Applicant reset successful, ready for new documents`);
-      } catch (error) {
-        this.logger.error(`Failed to reset applicant: ${error.message}`);
-        // If reset fails, stop here - don't allow upload to rejected applicant
-        throw new Error('Cannot upload to rejected applicant. Please use the clear endpoint first.');
-      }
-    }
-
-    // Try to create Sumsub applicant if not already created
-    if (!verification.sumsub_applicant_id) {
-      try {
-        this.logger.log('Creating new Sumsub applicant...');
-        const sumsubApplicant = await this.sumsubService.createApplicant(
-          userId,
-          user.email,
-          user.phone_number || undefined,
-        );
-
-        // Update verification with Sumsub ID
-        verification = await this.prisma.kyc_verifications.update({
-          where: { kyc_id: verification.kyc_id },
-          data: {
-            sumsub_applicant_id: sumsubApplicant.id,
-            sumsub_external_user_id: userId,
-            verification_provider: 'sumsub',
-          },
-        });
-        this.logger.log(`Sumsub applicant created: ${sumsubApplicant.id}`);
-      } catch (error) {
-        // Handle 409 Conflict - Applicant already exists in Sumsub
-        if (error.status === 409 || error.message?.includes('already exists')) {
-          this.logger.warn(`Applicant already exists in Sumsub for user ${userId}, fetching existing...`);
-          try {
-            const existingApplicant = await this.sumsubService.getApplicantByExternalUserId(userId);
-            if (existingApplicant) {
-              verification = await this.prisma.kyc_verifications.update({
-                where: { kyc_id: verification.kyc_id },
-                data: {
-                  sumsub_applicant_id: existingApplicant.id,
-                  sumsub_external_user_id: userId,
-                  verification_provider: 'sumsub',
-                },
-              });
-              this.logger.log(`✅ Linked existing Sumsub applicant: ${existingApplicant.id}`);
-            }
-          } catch (fetchError) {
-            this.logger.error(`Failed to fetch existing applicant: ${fetchError.message}`);
-          }
-        } else {
-          this.logger.error(`Failed to create Sumsub applicant: ${error.message}`);
-          this.logger.warn('Continuing with verification record, but Sumsub integration failed');
-        }
-      }
-    }
-
-    // Upload document to Sumsub if applicant exists
-    if (verification.sumsub_applicant_id) {
-      try {
-        this.logger.log(`📤 Uploading document to Sumsub: type=${documentType}, side=${documentSide || 'N/A'}`);
-        const sumsubDocType = this.mapDocumentType(documentType);
-        const sumsubResponse = await this.sumsubService.addDocument(
-          verification.sumsub_applicant_id,
-          file.buffer,
-          file.originalname,
-          sumsubDocType,
-          user.nationality || undefined,
-          documentSide,
-        );
-        this.logger.log(`✅ Document uploaded to Sumsub successfully`);
-        this.logger.log(`   🖼️  Sumsub image ID (from header): ${sumsubResponse.imageId || 'N/A'}`);
-        this.logger.log(`   📋 Sumsub metadata: idDocType=${sumsubResponse.idDocType}, country=${sumsubResponse.country}`);
-        this.logger.log(`   🆔 Applicant ID: ${verification.sumsub_applicant_id}`);
-        
-        // Log current document count for this verification
-        const docCount = await this.prisma.kyc_documents.count({
-          where: { 
-            kyc_id: verification.kyc_id,
-            document_type: documentType,
-          },
-        });
-        this.logger.log(`   📊 Total ${documentType} documents in DB: ${docCount}`);
-      } catch (error) {
-        this.logger.error(`Failed to upload document to Sumsub: ${error.message}`);
-        this.logger.warn('📋 Document will need to be uploaded via Sumsub dashboard');
-        this.logger.warn(`🔗 Sumsub Applicant ID: ${verification.sumsub_applicant_id}`);
-        // Continue anyway - document will be uploaded to Cloudinary
-      }
-    } else {
-      this.logger.warn(`⚠️  No Sumsub applicant ID - document will only be saved to Cloudinary`);
-    }
-
-    // Always upload to Cloudinary as backup/audit trail
-    return this.documentService.uploadDocument(verification.kyc_id, file, documentType, documentSide);
-  }
-
-  private mapDocumentType(documentType?: string): string {
-    const typeMap: { [key: string]: string } = {
-      passport: 'PASSPORT',
-      id_card: 'ID_CARD',
-      drivers_license: 'DRIVERS',
-    };
-    return typeMap[documentType?.toLowerCase() || ''] || 'IDENTITY';
-  }
-
-  async uploadSelfie(userId: string, file: Express.Multer.File): Promise<void> {
-    const totalStart = Date.now();
-    this.logger.log('');
-    this.logger.log('╔══════════════════════════════════════════════════════════════════╗');
-    this.logger.log('║  🚀 [KYC-SERVICE] uploadSelfie() - REQUEST STARTED (SUMSUB)      ║');
-    this.logger.log('╚══════════════════════════════════════════════════════════════════╝');
-    this.logger.log(`   User: ${userId}`);
-    this.logger.log(`   File: ${file.originalname} (${file.size} bytes)`);
-    
-    // Step 1: Get verification from DB
-    this.logger.log('📋 [KYC-SERVICE] Step 1: Fetching verification from database...');
-    const step1Start = Date.now();
-    let verification = await this.prisma.kyc_verifications.findFirst({
-      where: { user_id: userId },
-      orderBy: { kyc_id: 'desc' },
-    });
-    this.logger.log(`   DB query completed in ${Date.now() - step1Start}ms`);
-
-    if (!verification) {
-      throw new Error('No KYC verification found. Please upload document first.');
-    }
-    this.logger.log(`   Verification found: ${verification.kyc_id}`);
-
-    // Try to create Sumsub applicant if it doesn't exist yet (failed during document upload)
-    if (!verification.sumsub_applicant_id) {
-      this.logger.warn('⚠️  No Sumsub applicant ID found. Attempting to create now...');
-      
-      try {
-        const user = await this.prisma.users.findUnique({
-          where: { user_id: userId },
-        });
-
-        if (user) {
-          const sumsubApplicant = await this.sumsubService.createApplicant(
-            userId,
-            user.email,
-            user.phone_number || undefined,
-          );
-
-          verification = await this.prisma.kyc_verifications.update({
-            where: { kyc_id: verification.kyc_id },
-            data: {
-              sumsub_applicant_id: sumsubApplicant.id,
-              sumsub_external_user_id: userId,
-              verification_provider: 'sumsub',
-            },
-          });
-          
-          this.logger.log(`✅ Sumsub applicant created: ${sumsubApplicant.id}`);
-        }
-      } catch (error) {
-        // Handle 409 Conflict - Applicant already exists in Sumsub
-        if (error.status === 409 || error.message?.includes('already exists')) {
-          this.logger.warn(`Applicant already exists in Sumsub for user ${userId}, fetching existing...`);
-          try {
-            const existingApplicant = await this.sumsubService.getApplicantByExternalUserId(userId);
-            if (existingApplicant) {
-              verification = await this.prisma.kyc_verifications.update({
-                where: { kyc_id: verification.kyc_id },
-                data: {
-                  sumsub_applicant_id: existingApplicant.id,
-                  sumsub_external_user_id: userId,
-                  verification_provider: 'sumsub',
-                },
-              });
-              this.logger.log(`✅ Linked existing Sumsub applicant: ${existingApplicant.id}`);
-            }
-          } catch (fetchError) {
-            this.logger.error(`Failed to fetch existing applicant: ${fetchError.message}`);
-            this.logger.warn('⚠️  Continuing without Sumsub - verification will need manual review');
-          }
-        } else {
-          this.logger.error(`❌ Failed to create Sumsub applicant: ${error.message}`);
-          this.logger.warn('⚠️  Continuing without Sumsub - verification will need manual review');
-        }
-      }
-    }
-
-    try {
-      // Fetch user for nationality
-      const user = await this.prisma.users.findUnique({
-        where: { user_id: userId },
-        select: { nationality: true },
-      });
-
-      // Step 2: Upload selfie to Sumsub (if applicant exists)
-      if (verification.sumsub_applicant_id) {
-        this.logger.log('🧠 [KYC-SERVICE] Step 2: Uploading selfie to Sumsub...');
-        const step2Start = Date.now();
-        await this.sumsubService.uploadSelfie(
-          verification.sumsub_applicant_id,
-          file.buffer,
-          file.originalname,
-          user?.nationality || undefined,
-        );
-        this.logger.log(`   Selfie upload completed in ${Date.now() - step2Start}ms`);
-
-        // Step 3: Request verification check
-        // Note: Sumsub returns 409 if the applicant is already in pending/queued/prechecked status.
-        // This can happen when Sumsub auto-moves the applicant to pending after all docs are uploaded.
-        this.logger.log('🔍 [KYC-SERVICE] Step 3: Requesting Sumsub verification check...');
-        const step3Start = Date.now();
-        try {
-          await this.sumsubService.requestCheck(verification.sumsub_applicant_id);
-          this.logger.log(`   Check requested in ${Date.now() - step3Start}ms`);
-        } catch (checkError: any) {
-          if (checkError?.status === 409 || checkError?.response?.status === 409) {
-            this.logger.log(`   Applicant already in pending/review state — check not needed (${Date.now() - step3Start}ms)`);
-          } else {
-            throw checkError;
-          }
-        }
-
-        // Step 4: Update database with pending status
-        this.logger.log('💾 [KYC-SERVICE] Step 4: Updating database...');
-        const step4Start = Date.now();
-        
-        await this.prisma.kyc_verifications.update({
-          where: { kyc_id: verification.kyc_id },
-          data: {
-            status: 'pending',
-            decision_reason: 'Verification submitted to Sumsub, awaiting review',
-            sumsub_review_status: 'pending',
-          },
-        });
-      } else {
-        // Fallback: No Sumsub integration - set to review status
-        this.logger.warn('⚠️  [KYC-SERVICE] Step 2-4: Sumsub unavailable - setting to manual review...');
-        
-        await this.prisma.kyc_verifications.update({
-          where: { kyc_id: verification.kyc_id },
-          data: {
-            status: 'review',
-            decision_reason: 'Sumsub integration unavailable - requires manual review',
-          },
-        });
-      }
-
-      // Always upload to Cloudinary as backup/audit trail
-      this.logger.log('📦 [KYC-SERVICE] Uploading selfie to Cloudinary...');
-      await this.documentService.uploadDocument(verification.kyc_id, file, 'selfie');
-
-      const totalTime = Date.now() - totalStart;
-      this.logger.log('');
-      this.logger.log('╔══════════════════════════════════════════════════════════════════╗');
-      this.logger.log(`║  ✅ [KYC-SERVICE] uploadSelfie() COMPLETE                        ║`);
-      this.logger.log('╚══════════════════════════════════════════════════════════════════╝');
-      this.logger.log(`   Total time: ${totalTime}ms (${(totalTime/1000).toFixed(2)}s)`);
-      this.logger.log(`   Status: ${verification.sumsub_applicant_id ? 'PENDING (awaiting Sumsub webhook)' : 'REVIEW (manual review required)'}`);
-      this.logger.log('');
-      
-    } catch (error: any) {
-      const totalTime = Date.now() - totalStart;
-      this.logger.error('');
-      this.logger.error('╔══════════════════════════════════════════════════════════════════╗');
-      this.logger.error(`║  ❌ [KYC-SERVICE] uploadSelfie() FAILED after ${totalTime}ms`);
-      this.logger.error('╚══════════════════════════════════════════════════════════════════╝');
-      this.logger.error(`   Error: ${error?.message}`);
-      throw new Error(
-        `KYC verification failed: ${error?.message || 'Unknown error'}. Please try again.`,
-      );
-    }
-  }
-
   async submitVerification(userId: string): Promise<void> {
     const verification = await this.prisma.kyc_verifications.findFirst({
       where: { user_id: userId },
@@ -503,10 +168,6 @@ export class KycService {
   async getStatus(userId: string) {
     let verification = await this.prisma.kyc_verifications.findFirst({
       where: { user_id: userId },
-      include: {
-        documents: true,
-        face_matches: true,
-      },
       orderBy: { kyc_id: 'desc' },
     });
 
@@ -649,10 +310,6 @@ export class KycService {
                 sumsub_review_result: newReviewResult as any,
                 review_reject_type: polledRejectType,
               },
-              include: {
-                documents: true,
-                face_matches: true,
-              },
             });
 
             // Mirror onto users.kyc_status for ALL outcomes so flow-router,
@@ -786,56 +443,8 @@ export class KycService {
             username: true,
           },
         },
-        documents: true,
-        face_matches: true,
       },
     });
-  }
-
-  async checkDocumentCompleteness(userId: string): Promise<{
-    isComplete: boolean;
-    missingDocuments: string[];
-  }> {
-    const verification = await this.prisma.kyc_verifications.findFirst({
-      where: { user_id: userId },
-      include: { documents: true },
-      orderBy: { kyc_id: 'desc' },
-    });
-
-    if (!verification) {
-      return { isComplete: false, missingDocuments: ['No verification found'] };
-    }
-
-    const documents = verification.documents;
-    
-    if (documents.length === 0) {
-      return { isComplete: false, missingDocuments: ['No documents uploaded'] };
-    }
-
-    // Get the document type being used
-    const documentType = documents[0]?.document_type;
-    if (!documentType) {
-      return { isComplete: false, missingDocuments: ['Invalid document type'] };
-    }
-
-    const hasFront = documents.some(d => d.document_side === 'front');
-    const hasBack = documents.some(d => d.document_side === 'back');
-
-    const missingDocuments: string[] = [];
-
-    // Check requirements based on document type
-    if (documentType === 'passport') {
-      if (!hasFront) missingDocuments.push('Passport bio page');
-    } else {
-      // ID card or driver's license - both sides required
-      if (!hasFront) missingDocuments.push(`${documentType} front side`);
-      if (!hasBack) missingDocuments.push(`${documentType} back side`);
-    }
-
-    return {
-      isComplete: missingDocuments.length === 0,
-      missingDocuments,
-    };
   }
 
   async getVerificationForUser(userId: string) {

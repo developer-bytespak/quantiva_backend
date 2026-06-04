@@ -831,27 +831,12 @@ export class AuthService {
       filesToDelete.push(user.profile_pic_url);
     }
 
-    // Collect KYC documents
+    // Collect Sumsub applicant IDs for post-transaction cleanup.
+    // KYC ID images/selfies are no longer stored by us — Sumsub holds them.
     const kycVerifications = await this.prisma.kyc_verifications.findMany({
       where: { user_id: userId },
-      include: {
-        documents: true,
-        face_matches: true,
-      },
+      select: { sumsub_applicant_id: true },
     });
-
-    for (const kyc of kycVerifications) {
-      for (const doc of kyc.documents) {
-        if (doc.storage_url) {
-          filesToDelete.push(doc.storage_url);
-        }
-      }
-      for (const faceMatch of kyc.face_matches) {
-        if (faceMatch.photo_url) {
-          filesToDelete.push(faceMatch.photo_url);
-        }
-      }
-    }
 
     // ===== ALL SAFETY CHECKS PASSED - Proceed with deletion =====
 
@@ -883,22 +868,7 @@ export class AuthService {
       });
       summary.entities_deleted['user_sessions'] = sessionsDeleted.count;
 
-      // ===== PHASE 2: DELETE KYC AND DOCUMENTS =====
-
-      // Get KYC verification IDs for deletion
-      const kycVerificationIds = kycVerifications.map((k) => k.kyc_id);
-
-      // Delete KYC face matches
-      const faceMatchesDeleted = await tx.kyc_face_matches.deleteMany({
-        where: { kyc_id: { in: kycVerificationIds } },
-      });
-      summary.entities_deleted['kyc_face_matches'] = faceMatchesDeleted.count;
-
-      // Delete KYC documents
-      const kycDocsDeleted = await tx.kyc_documents.deleteMany({
-        where: { kyc_id: { in: kycVerificationIds } },
-      });
-      summary.entities_deleted['kyc_documents'] = kycDocsDeleted.count;
+      // ===== PHASE 2: DELETE KYC =====
 
       // Delete KYC verifications
       const kycDeleted = await tx.kyc_verifications.deleteMany({

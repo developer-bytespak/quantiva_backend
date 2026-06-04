@@ -67,12 +67,6 @@ async function clearDatabase() {
     console.log('Deleting user_exchange_connections...');
     await prisma.user_exchange_connections.deleteMany();
 
-    console.log('Deleting kyc_face_matches...');
-    await prisma.kyc_face_matches.deleteMany();
-
-    console.log('Deleting kyc_documents...');
-    await prisma.kyc_documents.deleteMany();
-
     console.log('Deleting kyc_verifications...');
     await prisma.kyc_verifications.deleteMany();
 

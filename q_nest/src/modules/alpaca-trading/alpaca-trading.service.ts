@@ -195,7 +195,6 @@ export class AlpacaTradingService {
         canWithdraw:      !accountInfo.transfers_blocked,
         canDeposit:       !accountInfo.account_blocked,
         currency:         accountInfo.currency         || 'USD',
-        patternDayTrader: accountInfo.pattern_day_trader,
       },
       balance,
       portfolio,

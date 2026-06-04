@@ -160,8 +160,6 @@ async function main() {
     ['user_settings', () => prisma.user_settings.count({ where: whereUser })],
     ['notifications', () => prisma.notifications.count({ where: whereUser })],
     ['kyc_verifications', () => prisma.kyc_verifications.count({ where: whereUser })],
-    ['kyc_documents', () => prisma.kyc_documents.count({ where: whereViaKyc })],
-    ['kyc_face_matches', () => prisma.kyc_face_matches.count({ where: whereViaKyc })],
     ['user_exchange_connections', () => prisma.user_exchange_connections.count({ where: whereUser })],
     ['strategies', () => prisma.strategies.count({ where: whereUser })],
     ['strategy_parameters', () => prisma.strategy_parameters.count({ where: whereViaStrategy })],
@@ -286,8 +284,6 @@ async function main() {
     await tx.optimization_runs.deleteMany({ where: whereUser });
 
     // KYC
-    await tx.kyc_documents.deleteMany({ where: whereViaKyc });
-    await tx.kyc_face_matches.deleteMany({ where: whereViaKyc });
     await tx.kyc_verifications.deleteMany({ where: whereUser });
 
     // Exchange connections
