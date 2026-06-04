@@ -264,11 +264,30 @@ class StockNewsService:
                         "url": url,
                     }
                     if include_symbol:
-                        tickers = article.get("tickers", article.get("symbols", []))
-                        if isinstance(tickers, str):
-                            tickers = [tickers]
-                        item["symbol"] = tickers[0] if tickers else "GENERAL"
-                    items.append(item)
+                        # StockNewsAPI returns each article with a `tickers` array
+                        # (e.g. ["AAPL","MSFT","GOOGL"]). Previously we only kept
+                        # `tickers[0]`, which caused AAPL/etc. to miss articles
+                        # where they weren't listed first. Now we emit one item
+                        # per ticker so each related stock gets the article. The
+                        # NestJS side dedups by (asset_id, url) so this is safe.
+                        raw_tickers = article.get("tickers", article.get("symbols", []))
+                        if isinstance(raw_tickers, str):
+                            tickers = [raw_tickers]
+                        elif isinstance(raw_tickers, list):
+                            tickers = [str(t) for t in raw_tickers if t]
+                        else:
+                            tickers = []
+
+                        if not tickers:
+                            item["symbol"] = "GENERAL"
+                            items.append(item)
+                        else:
+                            for ticker in tickers:
+                                item_copy = dict(item)
+                                item_copy["symbol"] = ticker.upper()
+                                items.append(item_copy)
+                    else:
+                        items.append(item)
             except Exception as e:
                 self.logger.warning(f"Error parsing article: {e}")
                 continue
