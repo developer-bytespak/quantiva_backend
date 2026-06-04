@@ -223,45 +223,6 @@ export class AlpacaService {
   }
 
   /**
-   * Pattern Day Trader status derived from /v2/account.
-   *
-   * `daytrade_count` is Alpaca's authoritative count of day trades in the
-   * rolling 5-business-day window. The 4th day trade triggers PDT flagging
-   * under SEC rules — Alpaca's PDT protection blocks the order that would
-   * be the 4th, so users below $25K equity can place 3 before being stopped.
-   *
-   * `daytradesRemaining` is null for accounts ≥ $25K (PDT does not apply —
-   * UI should hide the counter). Otherwise it's max(0, 3 - daytrade_count).
-   *
-   * Equity and an `isPdtRestricted` derived flag were intentionally dropped:
-   * equity is already exposed on the dashboard payload as `totals.spot`, and
-   * `isPdtRestricted` collapses to `isPatternDayTrader` whenever the caller
-   * has gated on `daytradesRemaining !== null` (which already encodes the
-   * sub-$25K subject-to-PDT condition).
-   *
-   * Stocks only — crypto is exempt from PDT. Caller is responsible for only
-   * invoking this on Alpaca stock connections.
-   */
-  async getDayTradeStatus(
-    apiKey: string,
-    apiSecret: string,
-  ): Promise<{
-    daytradeCount: number;
-    daytradesRemaining: number | null;
-    isPatternDayTrader: boolean;
-  }> {
-    const account = await this.getAccountInfo(apiKey, apiSecret);
-    const equity = parseFloat(account.equity ?? '0') || 0;
-    const daytradeCount = parseInt(account.daytrade_count ?? '0', 10) || 0;
-    const subjectToPdt = equity < 25_000;
-    return {
-      daytradeCount,
-      daytradesRemaining: subjectToPdt ? Math.max(0, 3 - daytradeCount) : null,
-      isPatternDayTrader: !!account.pattern_day_trader,
-    };
-  }
-
-  /**
    * Get the appropriate API client based on API key prefix
    */
   private getClientForKey(apiKey?: string): AxiosInstance {

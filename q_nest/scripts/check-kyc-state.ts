@@ -61,16 +61,6 @@ async function main() {
       });
     }
 
-    const kycIds = verifications.map((v) => v.kyc_id);
-    if (kycIds.length) {
-      const [docCount, faceCount] = await Promise.all([
-        prisma.kyc_documents.count({ where: { kyc_id: { in: kycIds } } }),
-        prisma.kyc_face_matches.count({ where: { kyc_id: { in: kycIds } } }),
-      ]);
-      console.log(`\n── related ──`);
-      console.log(`  kyc_documents   : ${docCount}`);
-      console.log(`  kyc_face_matches: ${faceCount}`);
-    }
     console.log("");
   } finally {
     await prisma.$disconnect();

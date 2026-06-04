@@ -12,7 +12,6 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { KycService } from './services/kyc.service';
 import { ReviewService } from './services/review.service';
-import { DocumentService } from './services/document.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReviewDecisionDto } from './dto/review-decision.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -27,7 +26,6 @@ export class KycController {
   constructor(
     private readonly kycService: KycService,
     private readonly reviewService: ReviewService,
-    private readonly documentService: DocumentService,
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
   ) {}
@@ -49,69 +47,6 @@ export class KycController {
     return {
       success: true,
       message: 'KYC verification submitted successfully',
-    };
-  }
-
-  @Get('documents/status/:documentType')
-  async getDocumentStatus(
-    @CurrentUser() user: TokenPayload,
-    @Param('documentType') documentType: string,
-  ) {
-    this.logger.log(`Checking document status for type: ${documentType}`);
-    
-    const verification = await this.kycService.getVerificationForUser(user.sub);
-    
-    if (!verification) {
-      return {
-        frontUploaded: false,
-        backUploaded: false,
-        isComplete: false,
-      };
-    }
-
-    return this.documentService.getDocumentUploadStatus(verification.kyc_id, documentType);
-  }
-
-  @Get('documents/completeness')
-  async checkCompleteness(@CurrentUser() user: TokenPayload) {
-    this.logger.log(`Checking document completeness for user: ${user.sub}`);
-    return this.kycService.checkDocumentCompleteness(user.sub);
-  }
-
-  @Get('documents')
-  async getAllDocuments(@CurrentUser() user: TokenPayload) {
-    this.logger.log(`Fetching all documents for user: ${user.sub}`);
-    
-    const verification = await this.kycService.getVerificationForUser(user.sub);
-    if (!verification) {
-      throw new NotFoundException('No KYC verification found');
-    }
-
-    // Fetch all documents from database
-    const documents = await this.prisma.kyc_documents.findMany({
-      where: { kyc_id: verification.kyc_id },
-      orderBy: [
-        { document_type: 'asc' },
-        { document_side: 'asc' },
-        { uploaded_at: 'desc' },
-      ],
-      select: {
-        document_id: true,
-        document_type: true,
-        document_side: true,
-        is_primary: true,
-        storage_url: true,
-        uploaded_at: true,
-        file_size: true,
-        file_type: true,
-      },
-    });
-
-    return {
-      kyc_id: verification.kyc_id,
-      sumsub_applicant_id: verification.sumsub_applicant_id,
-      total_documents: documents.length,
-      documents,
     };
   }
 
@@ -196,41 +131,17 @@ export class KycController {
       // Also fetch what documents we have in our database for this applicant
       const verification = await this.prisma.kyc_verifications.findFirst({
         where: { sumsub_applicant_id: applicantId },
-        include: {
-          documents: {
-            select: {
-              document_id: true,
-              document_type: true,
-              document_side: true,
-              is_primary: true,
-              created_at: true,
-            },
-            orderBy: [
-              { document_type: 'asc' },
-              { document_side: 'asc' },
-            ],
-          },
-        },
       });
 
       const analysis = {
-        database_docs_count: verification?.documents?.length || 0,
         sumsub_identity_images: requiredDocStatus?.IDENTITY?.imageIds?.length || 0,
         sumsub_attempt_id: requiredDocStatus?.IDENTITY?.attemptId || 'N/A',
         issue: null as string | null,
       };
 
-      // Detect issues
-      if (analysis.database_docs_count === 2 && analysis.sumsub_identity_images === 1) {
-        analysis.issue = 'DATABASE HAS 2 DOCS BUT SUMSUB ONLY HAS 1 IMAGE - Both uploads did not reach Sumsub';
-      } else if (analysis.database_docs_count > analysis.sumsub_identity_images) {
-        analysis.issue = `DATABASE HAS ${analysis.database_docs_count} DOCS BUT SUMSUB HAS ${analysis.sumsub_identity_images} IMAGES`;
-      }
-
       return {
         applicant_id: applicantId,
         analysis,
-        database_documents: verification?.documents || [],
         verification_status: verification?.status || 'N/A',
         sumsub_applicant_status: applicantStatus,
         sumsub_required_doc_status: requiredDocStatus,
@@ -279,11 +190,6 @@ export class KycController {
       throw new NotFoundException('No KYC verification found');
     }
 
-    // Delete all documents from database
-    const deletedCount = await this.prisma.kyc_documents.deleteMany({
-      where: { kyc_id: verification.kyc_id },
-    });
-
     // Reset Sumsub applicant if exists
     if (verification.sumsub_applicant_id) {
       this.logger.log(`🔄 Resetting Sumsub applicant: ${verification.sumsub_applicant_id}`);
@@ -303,7 +209,7 @@ export class KycController {
     return {
       success: true,
       message: 'All documents cleared successfully. Ready for fresh upload.',
-      deleted_documents: deletedCount.count,
+      deleted_documents: 0,
       kyc_id: verification.kyc_id,
     };
   }

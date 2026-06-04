@@ -81,8 +81,6 @@ export class ReviewService {
             username: true,
           },
         },
-        documents: true,
-        face_matches: true,
       },
       orderBy: { kyc_id: 'desc' },
     });

@@ -26,10 +26,6 @@ export class DecisionEngineService {
   async makeDecision(kycId: string): Promise<{ status: KycStatus; reason?: string }> {
     const verification = await this.prisma.kyc_verifications.findUnique({
       where: { kyc_id: kycId },
-      include: {
-        documents: true,
-        face_matches: true,
-      },
     });
 
     if (!verification) {

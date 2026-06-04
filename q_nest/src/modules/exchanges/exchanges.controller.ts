@@ -440,42 +440,6 @@ export class ExchangesController {
     };
   }
 
-  /**
-   * Pattern Day Trader counter for an Alpaca stock connection. Always live —
-   * no cache — so the dashboard reflects the latest daytrade_count immediately
-   * after a fill. Alpaca rejects this for non-stock connections (crypto is
-   * PDT-exempt) by way of the 400 below.
-   */
-  @Get('connections/:connectionId/day-trade-status')
-  @UseGuards(ConnectionOwnerGuard)
-  async getDayTradeStatus(@Param('connectionId') connectionId: string) {
-    const connection = await this.exchangesService.getConnectionById(connectionId);
-    if (!connection || !connection.exchange) {
-      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
-    }
-    if (
-      connection.exchange.name.toLowerCase() !== 'alpaca' ||
-      connection.exchange.type !== 'stocks'
-    ) {
-      throw new HttpException(
-        {
-          code: 'UNSUPPORTED_EXCHANGE',
-          message: 'Day-trade status is only available for Alpaca stock connections.',
-        },
-        HttpStatus.BAD_REQUEST,
-      );
-    }
-
-    const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
-    const status = await this.alpacaService.getDayTradeStatus(apiKey, apiSecret);
-    return {
-      success: true,
-      data: status,
-      last_updated: new Date().toISOString(),
-      cached: false,
-    };
-  }
-
   @Get('connections/:connectionId/profile')
   @UseGuards(ConnectionOwnerGuard)
   async getConnectionProfile(@Param('connectionId') connectionId: string) {
@@ -1814,7 +1778,7 @@ export class ExchangesController {
         await this.exchangesService.syncConnectionData(connectionId);
       }
 
-      const [balance, positions, orders, portfolio, optionsAccount, dayTradeStatus] = await Promise.all([
+      const [balance, positions, orders, portfolio, optionsAccount] = await Promise.all([
         this.exchangesService.getConnectionData(connectionId, 'balance'),
         this.exchangesService.getConnectionData(connectionId, 'positions'),
         this.exchangesService.getConnectionData(connectionId, 'orders'),
@@ -1830,24 +1794,6 @@ export class ExchangesController {
               .catch((err) => {
                 this.logger.debug(
                   `Dashboard: skipping options balance for ${connectionId}: ${err?.message ?? err}`,
-                );
-                return null;
-              })
-          : Promise.resolve(null),
-        // PDT day-trade counter — Alpaca stocks connections only. PDT does
-        // not apply to crypto, so an Alpaca crypto connection (or any other
-        // crypto exchange) returns null here. Folded into the dashboard
-        // payload so the frontend doesn't need a second round-trip just for
-        // this badge. Silent-null on failure (non-critical UI element).
-        exchangeName === 'alpaca' && connection.exchange.type === 'stocks'
-          ? this.exchangesService
-              .getDecryptedCredentials(connectionId)
-              .then(({ apiKey, apiSecret }) =>
-                this.alpacaService.getDayTradeStatus(apiKey, apiSecret),
-              )
-              .catch((err) => {
-                this.logger.debug(
-                  `Dashboard: skipping day-trade status for ${connectionId}: ${err?.message ?? err}`,
                 );
                 return null;
               })
@@ -1989,7 +1935,6 @@ export class ExchangesController {
           asset_types: assetTypeMap, // All symbol -> asset type mappings
           optionsAccount, // Binance options margin wallet (null when unavailable)
           totals, // { portfolio, spot, margin } — ready-to-render aggregates
-          dayTradeStatus, // Alpaca PDT counter (null for non-Alpaca or fetch failure)
         },
         last_updated: new Date().toISOString(),
         cached: isCached, // Indicate if data came from cache

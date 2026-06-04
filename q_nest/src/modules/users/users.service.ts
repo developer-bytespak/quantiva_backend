@@ -129,7 +129,6 @@ export class UsersService {
     const whereViaStrategy = { strategy: whereUser };
     const whereViaSignal = { signal: whereUser };
     const whereViaOptimization = { optimization_runs: whereUser };
-    const whereViaKyc = { kyc_verifications: whereUser };
     const whereViaMember = { member: whereUser };
     const whereViaReservation = { reservation: whereUser };
     const whereViaSubscription = { subscription: whereUser };
@@ -179,8 +178,6 @@ export class UsersService {
         await tx.optimization_runs.deleteMany({ where: whereUser });
 
         // ── KYC ──
-        await tx.kyc_documents.deleteMany({ where: whereViaKyc });
-        await tx.kyc_face_matches.deleteMany({ where: whereViaKyc });
         await tx.kyc_verifications.deleteMany({ where: whereUser });
 
         // ── Exchange connections ──

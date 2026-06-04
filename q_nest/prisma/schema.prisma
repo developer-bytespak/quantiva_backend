@@ -145,8 +145,6 @@ model kyc_verifications {
   updated_at              DateTime?          @updatedAt @db.Timestamp(6)
   verification_provider   String             @default("sumsub") @db.VarChar(20)
   review_reject_type      String?            @db.VarChar(10)
-  documents               kyc_documents[]
-  face_matches            kyc_face_matches[]
   user                    users              @relation(fields: [user_id], references: [user_id])
 
   @@index([user_id])
@@ -154,45 +152,6 @@ model kyc_verifications {
   @@index([sumsub_external_user_id])
   @@index([verification_provider])
   @@map("kyc_verifications")
-}
-
-model kyc_documents {
-  document_id        String            @id @default(uuid()) @db.Uuid
-  kyc_id             String            @db.Uuid
-  storage_url        String
-  ocr_name           String?           @db.VarChar(255)
-  ocr_dob            DateTime?         @db.Date
-  ocr_confidence     Decimal?          @db.Decimal(5, 4)
-  created_at         DateTime          @default(now()) @db.Timestamp(6)
-  authenticity_flags Json?             @db.Json
-  document_type      String?           @db.VarChar(50)
-  expiration_date    DateTime?         @db.Date
-  issuing_country    String?           @db.VarChar(100)
-  mrz_text           String?
-  document_side      String?           @db.VarChar(10)
-  is_primary         Boolean           @default(true)
-  kyc_verifications  kyc_verifications @relation(fields: [kyc_id], references: [kyc_id])
-
-  @@index([kyc_id])
-  @@index([kyc_id, document_type, document_side])
-  @@map("kyc_documents")
-}
-
-model kyc_face_matches {
-  match_id            String            @id @default(uuid()) @db.Uuid
-  kyc_id              String            @db.Uuid
-  photo_url           String
-  similarity          Decimal?          @db.Decimal(5, 4)
-  is_match            Boolean           @default(false)
-  created_at          DateTime          @default(now()) @db.Timestamp(6)
-  liveness_confidence Decimal?          @db.Decimal(5, 4)
-  liveness_result     String?           @db.VarChar(20)
-  quality_score       Decimal?          @db.Decimal(5, 4)
-  spoof_type          String?           @db.VarChar(50)
-  kyc_verifications   kyc_verifications @relation(fields: [kyc_id], references: [kyc_id])
-
-  @@index([kyc_id])
-  @@map("kyc_face_matches")
 }
 
 model exchanges {
