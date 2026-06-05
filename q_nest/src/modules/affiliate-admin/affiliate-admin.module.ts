@@ -4,6 +4,7 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 import { AffiliateModule } from '../affiliate/affiliate.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
+import { OnboardingEmailsModule } from '../onboarding-emails/onboarding-emails.module';
 import { AffiliateAdminController } from './controllers/affiliate-admin.controller';
 import { AffiliateAdminService } from './services/affiliate-admin.service';
 import { AffiliateSchedulerService } from './services/affiliate-scheduler.service';
@@ -14,6 +15,7 @@ import { AffiliateSchedulerService } from './services/affiliate-scheduler.servic
     AdminAuthModule,
     AffiliateModule,
     SubscriptionsModule,
+    OnboardingEmailsModule,
     ScheduleModule,
   ],
   controllers: [AffiliateAdminController],
