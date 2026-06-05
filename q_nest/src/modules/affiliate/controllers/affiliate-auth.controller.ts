@@ -25,6 +25,10 @@ import {
 } from '../decorators/current-affiliate.decorator';
 import { AffiliateSignupDto } from '../dto/affiliate-signup.dto';
 import { AffiliateLoginDto } from '../dto/affiliate-login.dto';
+import {
+  SendAffiliateCodeDto,
+  VerifyAffiliateCodeDto,
+} from '../dto/affiliate-email-code.dto';
 
 @Controller('affiliate')
 export class AffiliateAuthController {
@@ -73,6 +77,20 @@ export class AffiliateAuthController {
   }
 
   // ── Auth Endpoints ──
+
+  @Public()
+  @Post('auth/send-code')
+  @HttpCode(HttpStatus.OK)
+  async sendCode(@Body() dto: SendAffiliateCodeDto) {
+    return this.affiliateAuthService.sendEmailCode(dto.email);
+  }
+
+  @Public()
+  @Post('auth/verify-code')
+  @HttpCode(HttpStatus.OK)
+  async verifyCode(@Body() dto: VerifyAffiliateCodeDto) {
+    return this.affiliateAuthService.verifyEmailCode(dto.email, dto.code);
+  }
 
   @Public()
   @Post('auth/signup')

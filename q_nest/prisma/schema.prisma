@@ -33,6 +33,7 @@ model users {
   onboarding_state            OnboardingState               @default(SIGNED_UP)
   referred_by_affiliate_id    String?                       @db.Uuid
   affiliate_referral          affiliate_referrals?
+  affiliate_profile           affiliates?                   @relation("AffiliateLinkedUser")
   contact_submissions         contact_submissions[]
   kyc_verifications           kyc_verifications[]
   monthly_fee_summaries       monthly_fee_summaries[]
@@ -1842,6 +1843,8 @@ model affiliates {
   tax_residency       String?                       @db.VarChar(100)
   referral_code       String?                       @unique @db.VarChar(60)
   status              AffiliateStatus               @default(PENDING)
+  email_verified      Boolean                       @default(false)
+  linked_user_id      String?                       @unique @db.Uuid
   commission_pct      Decimal?                      @db.Decimal(6, 4)
   payout_instructions String?
   tax_form_url        String?
@@ -1860,10 +1863,27 @@ model affiliates {
   commission_events   affiliate_commission_events[]
   payouts             affiliate_payouts[]
   audit_logs          affiliate_audit_log[]
+  linked_user         users?                        @relation("AffiliateLinkedUser", fields: [linked_user_id], references: [user_id], onDelete: SetNull)
 
   @@index([status])
   @@index([referral_code])
   @@map("affiliates")
+}
+
+// One-time email-verification codes for affiliate signup. Keyed by email
+// because no affiliate row exists yet at the time of verification (mirrors the
+// 10-min code pattern in two_factor.service.ts, which is user_id-bound).
+model affiliate_email_codes {
+  code_id    String   @id @default(uuid()) @db.Uuid
+  email      String   @db.VarChar(255)
+  code       String   @db.VarChar(6)
+  verified   Boolean  @default(false)
+  used       Boolean  @default(false)
+  expires_at DateTime @db.Timestamp(6)
+  created_at DateTime @default(now()) @db.Timestamp(6)
+
+  @@index([email])
+  @@map("affiliate_email_codes")
 }
 
 model affiliate_sessions {

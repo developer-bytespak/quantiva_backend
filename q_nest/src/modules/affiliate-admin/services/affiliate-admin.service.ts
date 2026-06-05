@@ -6,10 +6,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Decimal } from '@prisma/client/runtime/library';
-import { randomUUID } from 'crypto';
+import { randomInt, randomUUID } from 'crypto';
+import * as speakeasy from 'speakeasy';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AffiliateEmailService } from '../../affiliate/services/affiliate-email.service';
-import { SubscriptionsService } from '../../subscriptions/subscriptions.service';
+import {
+  BillingPeriod,
+  PlanTier,
+  SubscriptionsService,
+} from '../../subscriptions/subscriptions.service';
 import { SimulateSubscriptionPaymentDto } from '../dto/simulate-subscription-payment.dto';
 import { ApproveApplicationDto } from '../dto/approve-application.dto';
 import { RejectApplicationDto } from '../dto/reject-application.dto';
@@ -261,7 +266,13 @@ export class AffiliateAdminService {
 
     const affiliate = await this.prisma.affiliates.findUnique({
       where: { affiliate_id: app.affiliate_id },
-      select: { email: true, display_name: true },
+      select: {
+        affiliate_id: true,
+        email: true,
+        display_name: true,
+        full_name: true,
+        password_hash: true,
+      },
     });
     if (affiliate) {
       await this.affiliateEmailService.sendApplicationApproved({
@@ -269,9 +280,143 @@ export class AffiliateAdminService {
         displayName: affiliate.display_name,
         referralCode: dto.referral_code,
       });
+
+      // Provision (or upgrade) the affiliate's platform account to ELITE_PLUS so
+      // they can onboard themselves. Fail-safe: the approval itself already
+      // committed above, so a provisioning hiccup is logged, not thrown.
+      try {
+        await this.provisionEliteAccountForAffiliate(affiliate, adminId);
+      } catch (err: any) {
+        this.logger.error(
+          `Approved affiliate ${affiliate.affiliate_id} but failed to provision ELITE_PLUS account: ${err?.message}`,
+          err?.stack,
+        );
+      }
     }
 
     return { ok: true };
+  }
+
+  /**
+   * Create (or locate) the platform user for an approved affiliate and put them
+   * on ELITE_PLUS. If a user already exists for the affiliate's email we upgrade
+   * that user rather than creating a duplicate (and avoid a unique-email crash).
+   * The affiliate's `password_hash` is copied verbatim (both bcrypt-10) so their
+   * existing password keeps working. Stamps `affiliates.linked_user_id` for an
+   * unambiguous reverse link used at delete time.
+   */
+  private async provisionEliteAccountForAffiliate(
+    affiliate: {
+      affiliate_id: string;
+      email: string;
+      display_name: string;
+      full_name: string | null;
+      password_hash: string;
+    },
+    adminId: string,
+  ): Promise<void> {
+    let user = await this.prisma.users.findFirst({
+      where: { email: { equals: affiliate.email, mode: 'insensitive' } },
+      select: { user_id: true },
+    });
+
+    let created = false;
+    if (!user) {
+      const username = await this.generateUniqueUsername(affiliate.email);
+      const twoFactorSecret = speakeasy.generateSecret({
+        name: 'Quantiva',
+        length: 32,
+      }).base32;
+      user = await this.prisma.users.create({
+        data: {
+          email: affiliate.email,
+          username,
+          password_hash: affiliate.password_hash,
+          full_name: affiliate.full_name ?? affiliate.display_name,
+          email_verified: true,
+          two_factor_enabled: true,
+          two_factor_secret: twoFactorSecret,
+        },
+        select: { user_id: true },
+      });
+      created = true;
+    }
+
+    await this.grantTier(user.user_id, PlanTier.ELITE_PLUS);
+
+    await this.prisma.affiliates.update({
+      where: { affiliate_id: affiliate.affiliate_id },
+      data: { linked_user_id: user.user_id },
+    });
+
+    await this.prisma.affiliate_audit_log.create({
+      data: {
+        affiliate_id: affiliate.affiliate_id,
+        actor_admin_id: adminId,
+        action: 'AFFILIATE_USER_PROVISIONED',
+        metadata: {
+          user_id: user.user_id,
+          email: affiliate.email,
+          tier: PlanTier.ELITE_PLUS,
+          user_created: created,
+        },
+      },
+    });
+
+    this.logger.log(
+      `Affiliate ${affiliate.affiliate_id}: ${created ? 'created' : 'linked existing'} user ${user.user_id} and granted ELITE_PLUS`,
+    );
+  }
+
+  /**
+   * Put a user on a tier via a comped (`admin_override`) subscription — the same
+   * primitive used by the super-admin grant tool. Cancels any active sub first,
+   * then delegates to SubscriptionsService.createSubscription which atomically
+   * syncs users.current_tier and seeds usage records. Used for both the
+   * ELITE_PLUS grant on approval and the FREE revert on delete.
+   */
+  private async grantTier(userId: string, tier: PlanTier): Promise<void> {
+    const plan = await this.prisma.subscription_plans.findFirst({
+      where: { tier, billing_period: BillingPeriod.MONTHLY },
+      select: { plan_id: true },
+    });
+    if (!plan) {
+      throw new NotFoundException(
+        `No ${tier} (MONTHLY) plan configured in subscription_plans`,
+      );
+    }
+
+    await this.prisma.user_subscriptions.updateMany({
+      where: { user_id: userId, status: 'active' },
+      data: { status: 'cancelled', cancelled_at: new Date(), auto_renew: false },
+    });
+
+    await this.subscriptionsService.createSubscription({
+      user_id: userId,
+      plan_id: plan.plan_id,
+      status: 'active',
+      billing_provider: 'admin_override',
+      auto_renew: false,
+    });
+  }
+
+  /** Derive a unique, sanitized username from an email local-part. */
+  private async generateUniqueUsername(email: string): Promise<string> {
+    const local = (email.split('@')[0] || 'affiliate').toLowerCase();
+    let base = local.replace(/[^a-z0-9_]/g, '').slice(0, 90);
+    if (base.length < 3) base = `aff_${base}`;
+
+    let candidate = base;
+    for (let i = 0; i < 50; i++) {
+      const clash = await this.prisma.users.findFirst({
+        where: { username: candidate },
+        select: { user_id: true },
+      });
+      if (!clash) return candidate;
+      candidate = `${base}${randomInt(1000, 100000)}`.slice(0, 100);
+    }
+    // Extremely unlikely fallback — guarantee uniqueness with a UUID fragment.
+    return `${base.slice(0, 80)}_${randomUUID().slice(0, 8)}`;
   }
 
   async rejectApplication(
@@ -741,6 +886,7 @@ export class AffiliateAdminService {
         email: true,
         display_name: true,
         pending_balance: true,
+        linked_user_id: true,
       },
     });
     if (!affiliate) throw new NotFoundException('Affiliate not found');
@@ -827,6 +973,21 @@ export class AffiliateAdminService {
         `${nulled} users had referred_by_affiliate_id cleared`,
     );
 
+    // Revert the comped ELITE_PLUS account (if any) back to FREE. Fail-safe:
+    // never let a downgrade hiccup undo the delete the admin just performed.
+    let tierReverted = false;
+    try {
+      tierReverted = await this.revertCompedTierIfApplicable(
+        affiliate.linked_user_id,
+        affiliate.email,
+      );
+    } catch (err: any) {
+      this.logger.error(
+        `Affiliate ${affiliateId} deleted but FREE downgrade failed: ${err?.message}`,
+        err?.stack,
+      );
+    }
+
     return {
       ok: true,
       deleted: {
@@ -838,8 +999,62 @@ export class AffiliateAdminService {
         payouts: payoutsCount,
         audit_log_rows: auditCount,
         users_unlinked: nulled,
+        linked_user_downgraded_to_free: tierReverted,
       },
     };
+  }
+
+  /**
+   * If the deleted affiliate had a linked platform user that we comped to
+   * ELITE_PLUS, revert it to FREE — but ONLY when their current active
+   * subscription is the `admin_override` grant. A real paid (Stripe) plan, or a
+   * tier they reached some other way, is left untouched so we never strip a plan
+   * a customer actually paid for. Returns true iff a downgrade was applied.
+   */
+  private async revertCompedTierIfApplicable(
+    linkedUserId: string | null,
+    fallbackEmail: string,
+  ): Promise<boolean> {
+    let userId = linkedUserId;
+    if (!userId) {
+      // Legacy affiliates predating linked_user_id: fall back to email match.
+      const u = await this.prisma.users.findFirst({
+        where: { email: { equals: fallbackEmail, mode: 'insensitive' } },
+        select: { user_id: true },
+      });
+      userId = u?.user_id ?? null;
+    }
+    if (!userId) return false;
+
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+      select: { current_tier: true },
+    });
+    if (!user || user.current_tier !== PlanTier.ELITE_PLUS) {
+      this.logger.log(
+        `Affiliate delete: linked user ${userId} is not on ELITE_PLUS — leaving tier untouched`,
+      );
+      return false;
+    }
+
+    const activeSub = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: userId, status: 'active' },
+      orderBy: { started_at: 'desc' },
+      select: { billing_provider: true },
+    });
+    if (activeSub?.billing_provider !== 'admin_override') {
+      this.logger.log(
+        `Affiliate delete: linked user ${userId} holds a non-comped subscription ` +
+          `(${activeSub?.billing_provider ?? 'none'}) — not downgrading`,
+      );
+      return false;
+    }
+
+    await this.grantTier(userId, PlanTier.FREE);
+    this.logger.log(
+      `Affiliate delete: linked user ${userId} reverted ELITE_PLUS → FREE`,
+    );
+    return true;
   }
 
   // ──────────────────────────────────────────────────────────────────────
