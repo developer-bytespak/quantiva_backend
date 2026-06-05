@@ -214,6 +214,32 @@ export class AffiliateAdminService {
     });
     if (!app) throw new NotFoundException('Application not found');
     if (app.status === 'APPROVED') {
+      // Already approved — but provisioning of the platform account may have
+      // failed previously (e.g. a transient grant error), leaving the affiliate
+      // approved yet with no linked user. Rather than dead-end the admin, allow
+      // a top-up retry that just (re-)runs the idempotent provisioning step.
+      const aff = await this.prisma.affiliates.findUnique({
+        where: { affiliate_id: app.affiliate_id },
+        select: {
+          affiliate_id: true,
+          email: true,
+          display_name: true,
+          full_name: true,
+          password_hash: true,
+          linked_user_id: true,
+        },
+      });
+      if (aff && !aff.linked_user_id) {
+        try {
+          await this.provisionEliteAccountForAffiliate(aff, adminId);
+          return { ok: true, reprovisioned: true };
+        } catch (err: any) {
+          await this.recordProvisionFailure(aff.affiliate_id, adminId, err);
+          throw new BadRequestException(
+            `Re-provisioning failed: ${err?.message ?? 'unknown error'}`,
+          );
+        }
+      }
       throw new BadRequestException('Application is already approved');
     }
 
@@ -291,6 +317,10 @@ export class AffiliateAdminService {
           `Approved affiliate ${affiliate.affiliate_id} but failed to provision ELITE_PLUS account: ${err?.message}`,
           err?.stack,
         );
+        // Persist the failure so it's recoverable/visible (logs are ephemeral).
+        // The admin can re-trigger by approving again — the guard above detects
+        // the missing linked user and re-runs provisioning.
+        await this.recordProvisionFailure(affiliate.affiliate_id, adminId, err);
       }
     }
 
@@ -317,7 +347,7 @@ export class AffiliateAdminService {
   ): Promise<void> {
     let user = await this.prisma.users.findFirst({
       where: { email: { equals: affiliate.email, mode: 'insensitive' } },
-      select: { user_id: true },
+      select: { user_id: true, current_tier: true },
     });
 
     let created = false;
@@ -337,13 +367,30 @@ export class AffiliateAdminService {
           two_factor_enabled: true,
           two_factor_secret: twoFactorSecret,
         },
-        select: { user_id: true },
+        select: { user_id: true, current_tier: true },
       });
       created = true;
     }
 
-    await this.grantTier(user.user_id, PlanTier.ELITE_PLUS);
+    // Idempotency: if they're already on a comped ELITE_PLUS, don't grant again
+    // (avoids stacking duplicate admin_override subscriptions on a retry).
+    const activeSub = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: user.user_id, status: 'active' },
+      orderBy: { started_at: 'desc' },
+      select: { tier: true, billing_provider: true },
+    });
+    const alreadyComped =
+      user.current_tier === PlanTier.ELITE_PLUS &&
+      activeSub?.tier === PlanTier.ELITE_PLUS &&
+      activeSub?.billing_provider === 'admin_override';
 
+    if (!alreadyComped) {
+      await this.grantTier(user.user_id, PlanTier.ELITE_PLUS);
+    }
+
+    // Stamp the durable reverse link only after the grant has succeeded — its
+    // presence is the signal that provisioning completed, which the approval
+    // retry-path keys off of.
     await this.prisma.affiliates.update({
       where: { affiliate_id: affiliate.affiliate_id },
       data: { linked_user_id: user.user_id },
@@ -359,13 +406,43 @@ export class AffiliateAdminService {
           email: affiliate.email,
           tier: PlanTier.ELITE_PLUS,
           user_created: created,
+          grant_skipped: alreadyComped,
         },
       },
     });
 
     this.logger.log(
-      `Affiliate ${affiliate.affiliate_id}: ${created ? 'created' : 'linked existing'} user ${user.user_id} and granted ELITE_PLUS`,
+      `Affiliate ${affiliate.affiliate_id}: ${created ? 'created' : 'linked existing'} user ${user.user_id}; ELITE_PLUS ${alreadyComped ? 'already active (skipped)' : 'granted'}`,
     );
+  }
+
+  /**
+   * Persist a provisioning failure to the affiliate audit log so it survives
+   * beyond ephemeral process logs and an admin can see/diagnose it. Best-effort:
+   * a failure to write the audit row must not mask the original error.
+   */
+  private async recordProvisionFailure(
+    affiliateId: string,
+    adminId: string,
+    err: any,
+  ): Promise<void> {
+    try {
+      await this.prisma.affiliate_audit_log.create({
+        data: {
+          affiliate_id: affiliateId,
+          actor_admin_id: adminId,
+          action: 'AFFILIATE_USER_PROVISION_FAILED',
+          metadata: {
+            error: String(err?.message ?? err),
+            code: err?.code ?? null,
+          },
+        },
+      });
+    } catch (auditErr: any) {
+      this.logger.error(
+        `Failed to record provision-failure audit for ${affiliateId}: ${auditErr?.message}`,
+      );
+    }
   }
 
   /**
