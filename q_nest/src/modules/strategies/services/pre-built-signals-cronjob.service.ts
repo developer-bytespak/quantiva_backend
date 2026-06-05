@@ -167,7 +167,11 @@ export class PreBuiltSignalsCronjobService {
     this.isRunning = true;
 
     try {
-      const strategies = await this.preBuiltStrategiesService.getPreBuiltStrategies();
+      // CRITICAL: this cron runs against trending CRYPTO assets only. Without
+      // the 'crypto' filter we'd fetch every admin strategy (including stock
+      // strategies like "S&P 500 Stability") and generate bogus crypto signals
+      // for them. See diagnose-crypto-in-stock-signals.ts for the original bug.
+      const strategies = await this.preBuiltStrategiesService.getPreBuiltStrategies('crypto');
       if (strategies.length === 0) {
         return;
       }
