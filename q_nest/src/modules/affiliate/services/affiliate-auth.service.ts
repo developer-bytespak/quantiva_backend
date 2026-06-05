@@ -1,10 +1,12 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
+import { randomInt } from 'crypto';
 import { PrismaService } from '../../../prisma/prisma.service';
 import {
   AffiliateTokenPayload,
@@ -26,11 +28,96 @@ export class AffiliateAuthService {
     private affiliateEmailService: AffiliateEmailService,
   ) {}
 
+  private normalizeEmail(email: string): string {
+    return email.trim().toLowerCase();
+  }
+
+  /**
+   * Generate a 6-digit email-verification code, invalidate any prior unused
+   * codes for this email, persist the new one (10-min expiry), and email it.
+   * Public/unauthenticated — never reveals whether the email is already taken.
+   */
+  async sendEmailCode(email: string): Promise<{ message: string }> {
+    const normalized = this.normalizeEmail(email);
+    const code = randomInt(100000, 1000000).toString();
+    const expiresAt = new Date();
+    expiresAt.setMinutes(expiresAt.getMinutes() + 10);
+
+    // Invalidate any outstanding codes for this email so only the latest works.
+    await this.prisma.affiliate_email_codes.updateMany({
+      where: { email: normalized, used: false },
+      data: { used: true },
+    });
+
+    await this.prisma.affiliate_email_codes.create({
+      data: { email: normalized, code, expires_at: expiresAt },
+    });
+
+    await this.affiliateEmailService.sendVerificationCode({
+      email: normalized,
+      code,
+    });
+
+    return { message: 'Verification code sent. Check your inbox.' };
+  }
+
+  /**
+   * Validate a code for an email. On success, mark the row `verified` and
+   * extend its window so the applicant has time to finish the form; the row is
+   * only consumed (`used=true`) once signup completes.
+   */
+  async verifyEmailCode(
+    email: string,
+    code: string,
+  ): Promise<{ verified: true }> {
+    const normalized = this.normalizeEmail(email);
+    const row = await this.prisma.affiliate_email_codes.findFirst({
+      where: {
+        email: normalized,
+        code,
+        used: false,
+        verified: false,
+        expires_at: { gt: new Date() },
+      },
+      orderBy: { created_at: 'desc' },
+    });
+
+    if (!row) {
+      throw new BadRequestException('Invalid or expired verification code');
+    }
+
+    const extended = new Date();
+    extended.setMinutes(extended.getMinutes() + 30);
+    await this.prisma.affiliate_email_codes.update({
+      where: { code_id: row.code_id },
+      data: { verified: true, expires_at: extended },
+    });
+
+    return { verified: true };
+  }
+
   async signup(
     dto: AffiliateSignupDto,
     ipAddress?: string,
     deviceId?: string,
   ) {
+    // Email must have been verified via sendEmailCode + verifyEmailCode first.
+    const normalizedEmail = this.normalizeEmail(dto.email);
+    const verifiedCode = await this.prisma.affiliate_email_codes.findFirst({
+      where: {
+        email: normalizedEmail,
+        verified: true,
+        used: false,
+        expires_at: { gt: new Date() },
+      },
+      orderBy: { created_at: 'desc' },
+    });
+    if (!verifiedCode) {
+      throw new BadRequestException(
+        'Please verify your email before submitting your application',
+      );
+    }
+
     const existing = await this.prisma.affiliates.findFirst({
       where: {
         OR: [{ email: dto.email }, { display_name: dto.displayName }],
@@ -56,6 +143,7 @@ export class AffiliateAuthService {
           full_name: dto.fullName,
           country: dto.country,
           tax_residency: dto.taxResidency,
+          email_verified: true,
         },
       });
 
@@ -86,6 +174,12 @@ export class AffiliateAuthService {
             audience_size: dto.audienceSize ?? null,
           },
         },
+      });
+
+      // Consume the verification code so it can't be reused for another signup.
+      await tx.affiliate_email_codes.update({
+        where: { code_id: verifiedCode.code_id },
+        data: { used: true },
       });
 
       return created;

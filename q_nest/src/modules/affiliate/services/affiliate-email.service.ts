@@ -83,6 +83,31 @@ export class AffiliateEmailService {
     }
   }
 
+  async sendVerificationCode(args: {
+    email: string;
+    code: string;
+  }): Promise<void> {
+    const html = shell({
+      preheader: `Your QuantivaHQ affiliate verification code is ${args.code}.`,
+      greetingName: 'there',
+      bodyHtml: `
+        <p>Use the code below to verify your email and continue your QuantivaHQ Affiliate application.</p>
+        <table role="presentation" cellpadding="0" cellspacing="0" style="margin:16px 0;width:100%;background:#070d17;border:1px solid #1e293b;border-radius:8px;"><tr>
+          <td style="padding:18px;text-align:center;">
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#64748b;">Verification code</div>
+            <div style="font-family:monospace;font-size:30px;letter-spacing:8px;color:${BRAND_COLOR};font-weight:700;margin-top:6px;">${escape(args.code)}</div>
+          </td>
+        </tr></table>
+        <p style="font-size:13px;color:#94a3b8;">This code expires in 10 minutes. If you didn't request it, you can safely ignore this email.</p>
+      `,
+    });
+    await this.send({
+      to: args.email,
+      subject: `Your QuantivaHQ affiliate verification code is ${args.code}`,
+      html,
+    });
+  }
+
   async sendApplicationReceived(args: {
     email: string;
     displayName: string;
