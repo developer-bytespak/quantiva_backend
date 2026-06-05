@@ -15,6 +15,8 @@ import {
   PlanTier,
   SubscriptionsService,
 } from '../../subscriptions/subscriptions.service';
+import { OnboardingStateService } from '../../onboarding-emails/services/onboarding-state.service';
+import { OnboardingState } from '../../onboarding-emails/types';
 import { SimulateSubscriptionPaymentDto } from '../dto/simulate-subscription-payment.dto';
 import { ApproveApplicationDto } from '../dto/approve-application.dto';
 import { RejectApplicationDto } from '../dto/reject-application.dto';
@@ -45,6 +47,7 @@ export class AffiliateAdminService {
     private prisma: PrismaService,
     private affiliateEmailService: AffiliateEmailService,
     private subscriptionsService: SubscriptionsService,
+    private onboardingStateService: OnboardingStateService,
   ) {}
 
   // ──────────────────────────────────────────────────────────────────────
@@ -385,6 +388,25 @@ export class AffiliateAdminService {
       activeSub?.billing_provider === 'admin_override';
 
     if (!alreadyComped) {
+      // Advance onboarding to PAID *before* the grant. createSubscription wraps
+      // its work in a 30s interactive transaction and internally advances the
+      // user to PAID — for a brand-new affiliate user (state=SIGNED_UP) that
+      // enqueues 5 reminder rows via individual inserts over the Neon pooler,
+      // which pushed the transaction past 30s and failed with P2028. Doing the
+      // advance here (outside any transaction) makes createSubscription's
+      // internal advance a cheap no-op, mirroring the super-admin upgrade case
+      // (existing users already past PAID) that works reliably.
+      try {
+        await this.onboardingStateService.advanceTo(
+          user.user_id,
+          OnboardingState.PAID,
+        );
+      } catch (advErr: any) {
+        this.logger.warn(
+          `Pre-advance onboarding to PAID failed for user ${user.user_id} (continuing): ${advErr?.message}`,
+        );
+      }
+
       await this.grantTier(user.user_id, PlanTier.ELITE_PLUS);
     }
 
