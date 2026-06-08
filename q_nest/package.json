@@ -38,6 +38,7 @@
     "@sendgrid/mail": "^8.1.6",
     "@sparticuz/chromium": "^147.0.0",
     "@types/compression": "^1.8.1",
+    "apple-signin-auth": "^2.0.0",
     "axios": "^1.13.6",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^3.0.3",
