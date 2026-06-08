@@ -244,6 +244,64 @@ export class AuthController {
   }
 
   @Public()
+  @Post('apple')
+  @HttpCode(HttpStatus.OK)
+  async appleLogin(
+    @Body() body: { idToken?: string },
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (!body.idToken || typeof body.idToken !== 'string') {
+      throw new BadRequestException('Apple ID token is required');
+    }
+    const ipAddress = req.ip || req.socket.remoteAddress;
+    const deviceId = req.headers['x-device-id'] as string;
+    const result = await this.authService.loginWithApple(body.idToken, ipAddress, deviceId);
+
+    const notification = await this.notificationsService.createNotification({ user_id: result.user.user_id, type: 'new_login_detected', title: 'New Login', message: 'New login detected from a new device', read: false, metadata: null });
+    this.appGateway.emitNotificationCount(result.user.user_id, 1, notification);
+    this.notificationsService.sendNotification(result.user.user_id, 'New Login', 'New login detected from a new device');
+
+    return {
+      user: result.user,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      sessionId: result.sessionId,
+      isNewUser: result.user.isNewUser,
+      message: 'Authentication successful',
+    };
+  }
+
+  @Public()
+  @Post('signup/apple')
+  @HttpCode(HttpStatus.OK)
+  async appleSignup(
+    @Body() body: { idToken?: string; referralCode?: string },
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    if (!body.idToken || typeof body.idToken !== 'string') {
+      throw new BadRequestException('Apple ID token is required');
+    }
+    const ipAddress = req.ip || req.socket.remoteAddress;
+    const deviceId = req.headers['x-device-id'] as string;
+    const result = await this.authService.signupWithApple(
+      body.idToken,
+      ipAddress,
+      deviceId,
+      body.referralCode,
+    );
+    return {
+      user: result.user,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      sessionId: result.sessionId,
+      isNewUser: result.user.isNewUser,
+      message: 'Signup successful',
+    };
+  }
+
+  @Public()
   @UseGuards(RefreshTokenGuard)
   @Post('refresh')
   @HttpCode(HttpStatus.OK)

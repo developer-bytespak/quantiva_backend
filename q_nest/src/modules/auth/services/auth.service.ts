@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OAuth2Client } from 'google-auth-library';
+import * as appleSignin from 'apple-signin-auth';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { TokenService, TokenPayload } from './token.service';
 import { SessionService } from './session.service';
@@ -551,6 +552,105 @@ export class AuthService {
       await this.subscriptionsService.createInitialFreeSubscription(user.user_id);
     } catch (error) {
       console.error(`[signupWithGoogle] Failed to create initial FREE subscription for ${user.user_id}:`, error);
+    }
+
+    return this.createGoogleAuthResponse(user, ipAddress, deviceId, true);
+  }
+
+  /**
+   * Audiences we accept on Apple id tokens. The `aud` claim is the Services ID
+   * for the website but the app Bundle ID for the Flutter app — both hit the
+   * same backend, so we accept either. Configure via env:
+   *   APPLE_CLIENT_ID  → web Services ID (e.g. com.quantiva.web)
+   *   APPLE_BUNDLE_ID  → mobile app Bundle ID (e.g. com.quantiva.app)
+   */
+  private getAppleAudiences(): string[] {
+    const webId =
+      this.configService.get<string>('APPLE_CLIENT_ID') || process.env.APPLE_CLIENT_ID;
+    const bundleId =
+      this.configService.get<string>('APPLE_BUNDLE_ID') || process.env.APPLE_BUNDLE_ID;
+    return [webId, bundleId].filter((v): v is string => !!v);
+  }
+
+  /** Verify Apple identity token and return payload (email). Throws if invalid. Mirrors verifyGoogleIdToken. */
+  private async verifyAppleIdToken(idToken: string): Promise<{ email: string; name: string | null }> {
+    if (!idToken) throw new BadRequestException('Missing idToken');
+    const audience = this.getAppleAudiences();
+    if (audience.length === 0) {
+      throw new BadRequestException('Apple sign-in is not configured');
+    }
+    let payload: any;
+    try {
+      payload = await appleSignin.verifyIdToken(idToken, { audience });
+    } catch {
+      throw new UnauthorizedException('Invalid Apple id token');
+    }
+    if (!payload || !payload.email) {
+      // Apple omits email if the user never granted the email scope, or on some
+      // re-auths. We key accounts on email, so without it we cannot proceed.
+      throw new UnauthorizedException('Apple account did not provide an email');
+    }
+    // email_verified may arrive as the string "true" or a boolean.
+    const verified = payload.email_verified === true || payload.email_verified === 'true';
+    if (!verified) {
+      throw new UnauthorizedException('Apple account email is not verified');
+    }
+    return { email: payload.email, name: null };
+  }
+
+  /** Apple Login: only existing users. If account does not exist, throws. */
+  async loginWithApple(idToken: string, ipAddress?: string, deviceId?: string) {
+    const { email } = await this.verifyAppleIdToken(idToken);
+    const user = await this.prisma.users.findUnique({ where: { email } });
+    if (!user) {
+      throw new UnauthorizedException('Your account does not exist. Please sign up first.');
+    }
+    return this.createGoogleAuthResponse(user, ipAddress, deviceId, false);
+  }
+
+  /** Apple Signup: create new user only. If account already exists, throws. Mirrors signupWithGoogle. */
+  async signupWithApple(
+    idToken: string,
+    ipAddress?: string,
+    deviceId?: string,
+    referralCode?: string,
+  ) {
+    const { email } = await this.verifyAppleIdToken(idToken);
+    let user = await this.prisma.users.findUnique({ where: { email } });
+    if (user) {
+      throw new ConflictException('Account already exists. Please login.');
+    }
+    const local = email.split('@')[0].replace(/[^a-zA-Z0-9_\-\.]/g, '');
+    let username = local || 'user';
+    let suffix = 0;
+    while (await this.prisma.users.findUnique({ where: { username } })) {
+      suffix += 1;
+      username = `${local}${suffix}`;
+    }
+    user = await this.prisma.users.create({
+      data: {
+        email,
+        username,
+        email_verified: true,
+        kyc_status: 'pending',
+      },
+    });
+
+    // Attribute to an affiliate if a referral code was supplied.
+    await this.affiliateAttributionService.attribute({
+      userId: user.user_id,
+      referralCode,
+      ipAddress,
+      deviceId,
+    });
+
+    // Kick off onboarding drip — same as email/password and Google signup.
+    await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
+
+    try {
+      await this.subscriptionsService.createInitialFreeSubscription(user.user_id);
+    } catch (error) {
+      console.error(`[signupWithApple] Failed to create initial FREE subscription for ${user.user_id}:`, error);
     }
 
     return this.createGoogleAuthResponse(user, ipAddress, deviceId, true);
