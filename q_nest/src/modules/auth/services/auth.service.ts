@@ -108,17 +108,21 @@ export class AuthService {
       },
     });
 
-    // Attribute the new user to an affiliate if a referral code was supplied.
-    // Internally try/catch'd — must never block signup.
-    await this.affiliateAttributionService.attribute({
-      userId: user.user_id,
-      referralCode,
-      ipAddress: context?.ipAddress,
-      deviceId: context?.deviceId,
-    });
-
-    // Kick off onboarding drip — schedules SIGNED_UP-stage reminders.
-    await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
+    // Best-effort onboarding side-effects. A failure here (e.g. affiliate lookup, or
+    // the email scheduler hitting a maxed-out Redis) must NOT fail the signup or
+    // orphan the freshly-created account.
+    try {
+      await this.affiliateAttributionService.attribute({
+        userId: user.user_id,
+        referralCode,
+        ipAddress: context?.ipAddress,
+        deviceId: context?.deviceId,
+      });
+      // Kick off onboarding drip — schedules SIGNED_UP-stage reminders.
+      await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
+    } catch (error) {
+      console.error(`[register] post-create onboarding step failed for ${user.user_id}:`, error);
+    }
 
     // Auto-assign FREE tier so the dashboard-first onboarding flow can render
     // immediately without a hasPlan redirect. Wrapped in try/catch so a missing
@@ -129,13 +133,17 @@ export class AuthService {
       console.error(`[register] Failed to create initial FREE subscription for ${user.user_id}:`, error);
     }
 
-    // 🔔 Send admin notification about new signup
-    await this.authEmailService.sendNewSignupNotification({
-      username: user.username,
-      email: user.email,
-      userId: user.user_id,
-      signupTime: user.created_at,
-    });
+    // 🔔 Send admin notification about new signup — best-effort, never blocks signup.
+    try {
+      await this.authEmailService.sendNewSignupNotification({
+        username: user.username,
+        email: user.email,
+        userId: user.user_id,
+        signupTime: user.created_at,
+      });
+    } catch (error) {
+      console.error(`[register] Failed to send new-signup notification for ${user.user_id}:`, error);
+    }
 
     return {
       user: {
