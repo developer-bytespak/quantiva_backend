@@ -44,7 +44,7 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.05,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.30 },
+      { field: 'final_score', operator: '>', value: 0.25 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
@@ -66,8 +66,8 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.05,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.30 },
-      { field: 'metadata.engine_details.fundamental.score', operator: '>', value: 0.15 },
+      { field: 'final_score', operator: '>', value: 0.25 },
+      { field: 'metadata.engine_details.fundamental.score', operator: '>', value: 0.10 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
@@ -89,7 +89,7 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.15,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.30 },
+      { field: 'final_score', operator: '>', value: 0.25 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
@@ -111,7 +111,7 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.05,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.35 },
+      { field: 'final_score', operator: '>', value: 0.30 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
@@ -122,7 +122,7 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
   {
     name: 'Russell 2000 Small-Cap Momentum',
     description:
-      'High-risk/high-reward momentum strategy on Russell 2000 small caps. Liquidity-aware (small caps have spread risk). Very selective: only fires on strong, tradeable setups.',
+      'High-risk/high-reward momentum strategy on Russell 2000 small caps. Liquidity is already gated upstream by signal_eligible (market_cap and dollar-volume floors), so this strategy itself only checks final_score.',
     risk_level: 'high',
     target_index_code: 'RUSSELL_2000',
     engine_weights: {
@@ -133,8 +133,7 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.20,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.40 },
-      { field: 'metadata.engine_details.liquidity.score', operator: '>', value: 0.15 },
+      { field: 'final_score', operator: '>', value: 0.30 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.15 },
@@ -156,7 +155,7 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.10,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.35 },
+      { field: 'final_score', operator: '>', value: 0.30 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
@@ -178,8 +177,8 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.10,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.30 },
-      { field: 'metadata.engine_details.fundamental.score', operator: '>', value: 0.20 },
+      { field: 'final_score', operator: '>', value: 0.25 },
+      { field: 'metadata.engine_details.fundamental.score', operator: '>', value: 0.10 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
