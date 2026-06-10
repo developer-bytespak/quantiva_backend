@@ -608,7 +608,16 @@ export class AuthService {
     return this.createGoogleAuthResponse(user, ipAddress, deviceId, false);
   }
 
-  /** Apple Signup: create new user only. If account already exists, throws. Mirrors signupWithGoogle. */
+  /**
+   * Apple Signup. Resilient + idempotent:
+   * - If the account already exists (returning user, or a prior attempt that created
+   *   the row but failed on a later step), we just log them in instead of erroring.
+   *   Apple/Google buttons don't distinguish "new" vs "returning", so this is the
+   *   expected one-button behaviour and it prevents orphaned-account lockouts.
+   * - All post-creation side-effects (affiliate attribution, onboarding drip, FREE
+   *   subscription) are best-effort: once the user row exists we must always return a
+   *   valid auth response, never 500 and leave an orphan.
+   */
   async signupWithApple(
     idToken: string,
     ipAddress?: string,
@@ -618,7 +627,8 @@ export class AuthService {
     const { email } = await this.verifyAppleIdToken(idToken);
     let user = await this.prisma.users.findUnique({ where: { email } });
     if (user) {
-      throw new ConflictException('Account already exists. Please login.');
+      // Already registered (or recovered from a half-finished prior attempt) → log in.
+      return this.createGoogleAuthResponse(user, ipAddress, deviceId, false);
     }
     const local = email.split('@')[0].replace(/[^a-zA-Z0-9_\-\.]/g, '');
     let username = local || 'user';
@@ -636,16 +646,20 @@ export class AuthService {
       },
     });
 
-    // Attribute to an affiliate if a referral code was supplied.
-    await this.affiliateAttributionService.attribute({
-      userId: user.user_id,
-      referralCode,
-      ipAddress,
-      deviceId,
-    });
-
-    // Kick off onboarding drip — same as email/password and Google signup.
-    await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
+    // Best-effort onboarding side-effects. A failure here (e.g. affiliate lookup,
+    // the email scheduler, or a transient DB hiccup) must NOT fail the signup or
+    // orphan the freshly-created account.
+    try {
+      await this.affiliateAttributionService.attribute({
+        userId: user.user_id,
+        referralCode,
+        ipAddress,
+        deviceId,
+      });
+      await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
+    } catch (error) {
+      console.error(`[signupWithApple] post-create onboarding step failed for ${user.user_id}:`, error);
+    }
 
     try {
       await this.subscriptionsService.createInitialFreeSubscription(user.user_id);
