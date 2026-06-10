@@ -534,17 +534,22 @@ export class AuthService {
       },
     });
 
-    // Attribute to an affiliate if a referral code was supplied.
-    await this.affiliateAttributionService.attribute({
-      userId: user.user_id,
-      referralCode,
-      ipAddress,
-      deviceId,
-    });
-
-    // Kick off onboarding drip — same as email/password signup. Google signup users still need to
-    // fill personal info, do KYC, etc., so they go through the same funnel reminders.
-    await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
+    // Best-effort onboarding side-effects. A failure here (e.g. affiliate lookup, or
+    // the email scheduler hitting a maxed-out Redis) must NOT fail the signup or
+    // orphan the freshly-created account.
+    try {
+      await this.affiliateAttributionService.attribute({
+        userId: user.user_id,
+        referralCode,
+        ipAddress,
+        deviceId,
+      });
+      // Kick off onboarding drip — Google signup users still need to fill personal
+      // info, do KYC, etc., so they go through the same funnel reminders.
+      await this.onboardingStateService.advanceTo(user.user_id, OnboardingState.SIGNED_UP);
+    } catch (error) {
+      console.error(`[signupWithGoogle] post-create onboarding step failed for ${user.user_id}:`, error);
+    }
 
     // Same auto-assignment as the email/password path — keeps the dashboard
     // accessible immediately for Google signups.
