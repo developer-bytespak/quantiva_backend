@@ -58,38 +58,49 @@ export class OnboardingStateService {
       });
     }
 
-    let cancelled = 0;
-    if (isStateChange) {
-      cancelled = await this.scheduler.cancelByCampaignAndState(
-        userId,
-        ReminderCampaign.FUNNEL,
-        user.onboarding_state,
-      );
-    }
-
-    let queued = 0;
-    if (!user.onboarding_emails_opted_out) {
-      const alreadyQueued = await this.prisma.onboarding_email_reminders.count({
-        where: {
-          user_id: userId,
-          campaign: ReminderCampaign.FUNNEL,
-          onboarding_state: newState,
-          status: ReminderStatus.QUEUED,
-        },
-      });
-      if (alreadyQueued === 0) {
-        queued = await this.scheduler.enqueue(userId, entriesForFunnelStage(newState));
+    // Email-scheduler work below depends on Redis (the BullMQ queue). The onboarding
+    // state has already been persisted above, so a Redis failure here must NOT bubble
+    // up and 500 the caller (signup, personal-info, KYC, exchange-connect, etc.).
+    // We swallow + log it; the only consequence is that reminder emails aren't
+    // (re)scheduled, which self-heals once Redis is healthy again.
+    try {
+      let cancelled = 0;
+      if (isStateChange) {
+        cancelled = await this.scheduler.cancelByCampaignAndState(
+          userId,
+          ReminderCampaign.FUNNEL,
+          user.onboarding_state,
+        );
       }
-    }
 
-    this.logger.log(
-      `User ${userId} advanced ${user.onboarding_state} -> ${newState} (cancelled=${cancelled}, queued=${queued})`,
-    );
+      let queued = 0;
+      if (!user.onboarding_emails_opted_out) {
+        const alreadyQueued = await this.prisma.onboarding_email_reminders.count({
+          where: {
+            user_id: userId,
+            campaign: ReminderCampaign.FUNNEL,
+            onboarding_state: newState,
+            status: ReminderStatus.QUEUED,
+          },
+        });
+        if (alreadyQueued === 0) {
+          queued = await this.scheduler.enqueue(userId, entriesForFunnelStage(newState));
+        }
+      }
 
-    // Engine 2 auto-start: when the funnel completes on the FREE tier, kick off the upgrade drip.
-    // start() internally checks for prior FREE_UPGRADE rows and no-ops if it has already run.
-    if (newState === OnboardingState.COMPLETED && user.current_tier === PlanTier.FREE) {
-      await this.freeUpgradeCampaign.start(userId);
+      this.logger.log(
+        `User ${userId} advanced ${user.onboarding_state} -> ${newState} (cancelled=${cancelled}, queued=${queued})`,
+      );
+
+      // Engine 2 auto-start: when the funnel completes on the FREE tier, kick off the upgrade drip.
+      // start() internally checks for prior FREE_UPGRADE rows and no-ops if it has already run.
+      if (newState === OnboardingState.COMPLETED && user.current_tier === PlanTier.FREE) {
+        await this.freeUpgradeCampaign.start(userId);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Email-scheduler step failed for user ${userId} (state ${newState}); onboarding state was still saved. Error: ${error?.message ?? error}`,
+      );
     }
   }
 }
