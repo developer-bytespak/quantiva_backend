@@ -96,6 +96,19 @@ export class QhqTokenController {
     return this.qhqService.getPendingDiscount(user.sub);
   }
 
+  /** GET /qhq/referral-bonus — can the user claim the referral signup bonus? */
+  @Get('referral-bonus')
+  async getReferralBonus(@CurrentUser() user: any) {
+    return this.qhqService.getReferralBonusStatus(user.sub);
+  }
+
+  /** POST /qhq/referral-bonus/claim — one-time 100 QHQ + 10% first-purchase discount */
+  @Post('referral-bonus/claim')
+  @HttpCode(HttpStatus.OK)
+  async claimReferralBonus(@CurrentUser() user: any) {
+    return this.qhqService.claimReferralBonus(user.sub);
+  }
+
   /** GET /qhq/stats — global token stats */
   @Get('stats')
   async getStats() {

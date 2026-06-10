@@ -20,6 +20,7 @@ export const AFFILIATE_CHANNELS = [
   'YOUTUBE',
   'X',
   'INSTAGRAM',
+  'FACEBOOK',
   'TIKTOK',
   'DISCORD',
   'TELEGRAM',

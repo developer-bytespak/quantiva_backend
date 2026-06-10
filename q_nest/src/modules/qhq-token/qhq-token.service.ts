@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { QhqTokenChainService } from './qhq-token-chain.service';
@@ -18,6 +19,11 @@ const DISCOUNT_TIERS: Record<number, number> = { 50: 5, 100: 10, 200: 15 };
 
 // Daily earning cap per user for trade rewards (anti-farming)
 const DAILY_TRADE_REWARD_CAP = 10;
+
+// One-time signup bonus for users who arrived through an affiliate referral
+const REFERRAL_BONUS_QHQ = 100;
+const REFERRAL_DISCOUNT_PERCENT = 10;
+const REFERRAL_DISCOUNT_VALIDITY_DAYS = 35;
 
 @Injectable()
 export class QhqTokenService {
@@ -221,6 +227,97 @@ export class QhqTokenService {
       },
       orderBy: { created_at: 'desc' },
     });
+  }
+
+  // ─── Referral Signup Bonus ────────────────────────────────────────────────
+
+  /**
+   * Whether the current user can claim the one-time referral signup bonus.
+   * Eligible = signed up through an affiliate referral and hasn't claimed yet.
+   * The EARN_REFERRAL transaction itself is the claimed-flag — it's written
+   * exactly once per user.
+   */
+  async getReferralBonusStatus(userId: string) {
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+      select: { referred_by_affiliate_id: true },
+    });
+    const referred = !!user?.referred_by_affiliate_id;
+    if (!referred) {
+      return {
+        referred: false,
+        claimed: false,
+        eligible: false,
+        amount: REFERRAL_BONUS_QHQ,
+        discount_percent: REFERRAL_DISCOUNT_PERCENT,
+      };
+    }
+    const claimedTx = await this.prisma.qhq_transactions.findFirst({
+      where: { user_id: userId, type: QhqTransactionType.EARN_REFERRAL },
+      select: { id: true },
+    });
+    return {
+      referred: true,
+      claimed: !!claimedTx,
+      eligible: !claimedTx,
+      amount: REFERRAL_BONUS_QHQ,
+      discount_percent: REFERRAL_DISCOUNT_PERCENT,
+    };
+  }
+
+  /**
+   * Claim the one-time referral signup bonus: credits 100 QHQ and grants a
+   * 10% subscription discount that the Stripe checkout flow picks up via
+   * getPendingDiscount().
+   */
+  async claimReferralBonus(userId: string) {
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+      select: {
+        referred_by_affiliate_id: true,
+        affiliate_referral: { select: { referral_id: true } },
+      },
+    });
+    if (!user?.referred_by_affiliate_id) {
+      throw new BadRequestException(
+        'This bonus is only available to accounts created through a referral',
+      );
+    }
+
+    const alreadyClaimed = await this.prisma.qhq_transactions.findFirst({
+      where: { user_id: userId, type: QhqTransactionType.EARN_REFERRAL },
+      select: { id: true },
+    });
+    if (alreadyClaimed) {
+      throw new ConflictException('Referral bonus already claimed');
+    }
+
+    const transaction = await this.earnTokens(
+      userId,
+      QhqTransactionType.EARN_REFERRAL,
+      REFERRAL_BONUS_QHQ,
+      'Referral signup bonus',
+      user.affiliate_referral?.referral_id,
+    );
+
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + REFERRAL_DISCOUNT_VALIDITY_DAYS);
+    await this.prisma.qhq_subscription_discounts.create({
+      data: {
+        user_id: userId,
+        qhq_spent: 0,
+        discount_percent: REFERRAL_DISCOUNT_PERCENT,
+        expires_at: expiresAt,
+      },
+    });
+
+    return {
+      claimed: true,
+      amount: REFERRAL_BONUS_QHQ,
+      balance_after: transaction?.balance_after,
+      discount_percent: REFERRAL_DISCOUNT_PERCENT,
+      discount_expires_at: expiresAt,
+    };
   }
 
   // ─── Wallet Linking ───────────────────────────────────────────────────────
