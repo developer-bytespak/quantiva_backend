@@ -25,6 +25,7 @@ import { RejectApplicationDto } from '../dto/reject-application.dto';
 import { RequestInfoDto } from '../dto/request-info.dto';
 import { SetCommissionRateDto } from '../dto/set-commission-rate.dto';
 import { AdjustBalanceDto } from '../dto/adjust-balance.dto';
+import { GrantQhqDto } from '../dto/grant-qhq.dto';
 import { AddNoteDto } from '../dto/add-note.dto';
 import { UpdateProgramSettingsDto } from '../dto/update-program-settings.dto';
 import { MarkPayoutPaidDto } from '../dto/mark-payout-paid.dto';
@@ -292,6 +293,15 @@ export class AffiliateAdminController {
     @CurrentAdmin() admin: AdminTokenPayload,
   ) {
     return this.affiliateAdminService.adjustBalance(id, dto, admin.sub);
+  }
+
+  @Post(':id/grant-qhq')
+  grantQhq(
+    @Param('id') id: string,
+    @Body() dto: GrantQhqDto,
+    @CurrentAdmin() admin: AdminTokenPayload,
+  ) {
+    return this.affiliateAdminService.grantQhq(id, dto, admin.sub);
   }
 
   @Post(':id/notes')

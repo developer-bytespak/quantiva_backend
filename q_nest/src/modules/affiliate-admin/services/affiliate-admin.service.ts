@@ -15,6 +15,7 @@ import {
   PlanTier,
   SubscriptionsService,
 } from '../../subscriptions/subscriptions.service';
+import { QhqTokenService } from '../../qhq-token/qhq-token.service';
 import { OnboardingStateService } from '../../onboarding-emails/services/onboarding-state.service';
 import { OnboardingState } from '../../onboarding-emails/types';
 import { SimulateSubscriptionPaymentDto } from '../dto/simulate-subscription-payment.dto';
@@ -23,6 +24,7 @@ import { RejectApplicationDto } from '../dto/reject-application.dto';
 import { RequestInfoDto } from '../dto/request-info.dto';
 import { SetCommissionRateDto } from '../dto/set-commission-rate.dto';
 import { AdjustBalanceDto } from '../dto/adjust-balance.dto';
+import { GrantQhqDto } from '../dto/grant-qhq.dto';
 import { AddNoteDto } from '../dto/add-note.dto';
 import { UpdateProgramSettingsDto } from '../dto/update-program-settings.dto';
 import { MarkPayoutPaidDto } from '../dto/mark-payout-paid.dto';
@@ -48,6 +50,7 @@ export class AffiliateAdminService {
     private affiliateEmailService: AffiliateEmailService,
     private subscriptionsService: SubscriptionsService,
     private onboardingStateService: OnboardingStateService,
+    private qhqTokenService: QhqTokenService,
   ) {}
 
   // ──────────────────────────────────────────────────────────────────────
@@ -490,13 +493,24 @@ export class AffiliateAdminService {
       data: { status: 'cancelled', cancelled_at: new Date(), auto_renew: false },
     });
 
-    await this.subscriptionsService.createSubscription({
+    const subscription = await this.subscriptionsService.createSubscription({
       user_id: userId,
       plan_id: plan.plan_id,
       status: 'active',
       billing_provider: 'admin_override',
       auto_renew: false,
     });
+
+    // Comped paid tiers last exactly 30 days (createSubscription writes a
+    // calendar month). The comp-expiry cron downgrades the user when
+    // current_period_end passes. FREE reverts have nothing to expire.
+    if (tier !== PlanTier.FREE && subscription?.subscription_id) {
+      const compEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      await this.prisma.user_subscriptions.update({
+        where: { subscription_id: subscription.subscription_id },
+        data: { current_period_end: compEnd, next_billing_date: compEnd },
+      });
+    }
   }
 
   /** Derive a unique, sanitized username from an email local-part. */
@@ -935,6 +949,51 @@ export class AffiliateAdminService {
     });
 
     return { ok: true };
+  }
+
+  /**
+   * Credit QHQ tokens to the affiliate's linked platform account (ADMIN_GRANT
+   * transaction). The affiliate can then spend them for a subscription
+   * discount from the QHQ page like any other user.
+   */
+  async grantQhq(affiliateId: string, dto: GrantQhqDto, adminId: string) {
+    const affiliate = await this.prisma.affiliates.findUnique({
+      where: { affiliate_id: affiliateId },
+      select: { linked_user_id: true, display_name: true, email: true },
+    });
+    if (!affiliate) throw new NotFoundException('Affiliate not found');
+    if (!affiliate.linked_user_id) {
+      throw new BadRequestException(
+        'Affiliate has no linked platform account — approve the application first',
+      );
+    }
+
+    const transaction = await this.qhqTokenService.adminGrantTokens(
+      affiliate.linked_user_id,
+      dto.amount,
+      `Affiliate grant: ${dto.reason}`,
+    );
+
+    await this.prisma.affiliate_audit_log.create({
+      data: {
+        affiliate_id: affiliateId,
+        actor_admin_id: adminId,
+        action: 'AFFILIATE_QHQ_GRANTED',
+        metadata: {
+          user_id: affiliate.linked_user_id,
+          amount_qhq: dto.amount,
+          reason: dto.reason,
+          balance_after: transaction?.balance_after?.toString() ?? null,
+        },
+      },
+    });
+
+    return {
+      ok: true,
+      amount: dto.amount,
+      user_id: affiliate.linked_user_id,
+      balance_after: transaction?.balance_after?.toString() ?? null,
+    };
   }
 
   async addNote(affiliateId: string, dto: AddNoteDto, adminId: string) {
