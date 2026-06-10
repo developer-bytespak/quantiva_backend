@@ -97,7 +97,7 @@ export class OnboardingStateService {
       if (newState === OnboardingState.COMPLETED && user.current_tier === PlanTier.FREE) {
         await this.freeUpgradeCampaign.start(userId);
       }
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(
         `Email-scheduler step failed for user ${userId} (state ${newState}); onboarding state was still saved. Error: ${error?.message ?? error}`,
       );
