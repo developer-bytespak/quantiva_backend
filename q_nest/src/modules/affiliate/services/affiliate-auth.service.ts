@@ -303,6 +303,7 @@ export class AffiliateAuthService {
         tax_residency: true,
         referral_code: true,
         status: true,
+        linked_user_id: true,
         commission_pct: true,
         payout_instructions: true,
         pending_balance: true,
