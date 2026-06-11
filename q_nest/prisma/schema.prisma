@@ -56,6 +56,7 @@ model users {
   user_credits                user_credits[]
   free_tier_signal_trades     free_tier_signal_trades?
   exchange_connections        user_exchange_connections[]
+  user_holdings               user_holdings[]
   sessions                    user_sessions[]
   settings                    user_settings?
   subscriptions               user_subscriptions[]
@@ -216,6 +217,7 @@ model assets {
   portfolio_positions      portfolio_positions[]
   rebalanceSuggestions     rebalance_suggestions[]
   strategySignals          strategy_signals[]
+  user_holdings            user_holdings[]
   trending_assets          trending_assets[]
   trending_news            trending_news[]
 
@@ -568,6 +570,29 @@ model portfolio_positions {
   @@index([portfolio_id])
   @@index([asset_id])
   @@map("portfolio_positions")
+}
+
+// Real (live) holdings synced from each user's connected broker (Alpaca/Binance/ByBit).
+// NOT paper trading — portfolio_positions is paper. Refreshed by the holdings-sync cron
+// (every ~15 min) so price-move alerts (Idea 1) and new-signal alerts (Idea 3) can find
+// "who holds asset X?" without per-request broker calls. See docs/email-notifications-plan.md §3A.
+model user_holdings {
+  holding_id String   @id @default(uuid()) @db.Uuid
+  user_id    String   @db.Uuid
+  symbol     String   @db.VarChar(50) // broker symbol, e.g. AAPL, BTCUSDT
+  asset_type String   @db.VarChar(20) // 'stock' | 'crypto'
+  asset_id   String?  @db.Uuid // resolved from assets by symbol (for the Idea 3 signal join); null if unmapped
+  quantity   Decimal? @db.Decimal(30, 10)
+  exchange   String   @db.VarChar(20) // 'Alpaca' | 'Binance' | 'Binance.us' | 'ByBit'
+  updated_at DateTime @default(now()) @db.Timestamp(6)
+  user       users    @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  asset      assets?  @relation(fields: [asset_id], references: [asset_id])
+
+  @@unique([user_id, symbol, exchange])
+  @@index([asset_id])
+  @@index([symbol])
+  @@index([user_id])
+  @@map("user_holdings")
 }
 
 model orders {
