@@ -4,14 +4,17 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { OptionsIvService } from './options-iv.service';
 import { OptionsAlpacaService } from './options-alpaca.service';
+import { AlpacaMarketService } from '../../stocks-market/services/alpaca-market.service';
 import { OptionCredentials } from './options-venue.interface';
 import { ALPACA_CONTRACT_MULTIPLIER } from './alpaca/alpaca-contract-specs';
 import {
+  computeBreakevens,
   computeEv,
   computePop,
   relevantDaysToExpiry,
   type PopLeg,
 } from './alpaca/pop-engine';
+import { estimateRiskReward, formatUsd } from './alpaca/risk-reward';
 import axios from 'axios';
 
 type Venue = 'BINANCE' | 'ALPACA';
@@ -47,6 +50,7 @@ export class OptionsSignalService {
     private readonly configService: ConfigService,
     private readonly ivService: OptionsIvService,
     private readonly optionsAlpaca: OptionsAlpacaService,
+    private readonly alpacaMarket: AlpacaMarketService,
   ) {
     this.pythonApiUrl =
       this.configService.get<string>('PYTHON_API_URL') || 'http://localhost:8000';
@@ -138,12 +142,15 @@ export class OptionsSignalService {
 
     // 2. Spot price + time-series context.
     //    Binance: pulled from Binance public klines (existing path).
-    //    Alpaca:  pulled from the options chain's dailyBar (no separate
-    //             equity klines endpoint wired up yet; price_data/volume_data
-    //             are left null so the engine relies on signal scores).
+    //    Alpaca:  spot from the options chain, closes/volumes from the stock
+    //             bars Data API — without bars the engine's directional score
+    //             is always 0 and stocks only ever get neutral strategies.
     let spotPrice: number | null = null;
     let priceData: number[] | null = null;
     let volumeData: number[] | null = null;
+    let alpacaChain: Awaited<
+      ReturnType<OptionsAlpacaService['fetchOptionsChain']>
+    > | null = null;
 
     if (venue === 'BINANCE') {
       [spotPrice, priceData, volumeData] = await Promise.all([
@@ -152,13 +159,27 @@ export class OptionsSignalService {
         this.ivService.getVolumeData(underlying),
       ]);
     } else if (venue === 'ALPACA' && alpacaCreds) {
-      try {
-        const chain = await this.optionsAlpaca.fetchOptionsChain(alpacaCreds, underlying);
-        spotPrice = chain.underlyingPrice || null;
-      } catch (err: any) {
-        this.logger.warn(
-          `Could not fetch Alpaca spot for ${underlying}: ${err.message}`,
-        );
+      // getHistoricalBars sources creds from env itself and returns [] on
+      // failure, so a bars outage degrades to the old neutral-only behavior.
+      const [chainResult, bars] = await Promise.all([
+        this.optionsAlpaca
+          .fetchOptionsChain(alpacaCreds, underlying)
+          .catch((err: any) => {
+            this.logger.warn(
+              `Could not fetch Alpaca chain for ${underlying}: ${err.message}`,
+            );
+            return null;
+          }),
+        this.alpacaMarket.getHistoricalBars(underlying, '1d', 60),
+      ]);
+      alpacaChain = chainResult;
+      spotPrice = alpacaChain?.underlyingPrice || null;
+      if (bars.length >= 10) {
+        priceData = bars.map((b) => b.c);
+        volumeData = bars.map((b) => b.v);
+        // Off-hours the chain may come back empty — last daily close keeps
+        // signal generation alive instead of skipping the underlying.
+        if (!spotPrice) spotPrice = bars[bars.length - 1].c;
       }
     }
 
@@ -182,12 +203,31 @@ export class OptionsSignalService {
         volume_data: volumeData ?? null,
       },
       {
-        timeout: 30_000,
+        // 60s: the first stock symbol of a run may pay a FinBERT cold load
+        // plus a news fetch for the sentiment input — 30s clipped that and
+        // silently skipped the underlying for the hour.
+        timeout: 60_000,
         headers: { 'X-Internal-Api-Key': process.env.INTERNAL_API_KEY },
       },
     );
 
     if (!data.signals || !Array.isArray(data.signals)) return;
+
+    // Reprice Alpaca signals from real chain quotes before persisting. The
+    // engine's max_profit/max_loss are spot×percent heuristics calibrated
+    // for crypto vol — a $600 SPY straddle gets quoted at ~6% of spot
+    // (~$36/share) when the live market charges ~$15-25. Repricing here
+    // makes the stored strings (and the POP/EV derived from them at read
+    // time) reflect actual fill economics. Unpriceable legs (market closed,
+    // zero quotes) keep the heuristics — same data as today, no regression.
+    if (venue === 'ALPACA' && alpacaCreds) {
+      const quoteMap = new Map(
+        (alpacaChain?.contracts ?? []).map((c) => [c.symbol, c]),
+      );
+      for (const sig of data.signals) {
+        await this.repriceAlpacaSignal(sig, quoteMap, alpacaCreds);
+      }
+    }
 
     for (const sig of data.signals) {
       await this.prisma.options_signals_ai.create({
@@ -214,6 +254,70 @@ export class OptionsSignalService {
     this.logger.log(
       `Generated ${data.signals.length} ${venue} AI signals for ${underlying}`,
     );
+  }
+
+  /**
+   * Overwrite a freshly generated signal's max_profit / max_loss /
+   * risk_reward with values derived from live chain quotes. BUY legs fill
+   * at the ask, SELL legs at the bid — the same worst-case convention as
+   * previewMultiLegOrder, via the same shared `estimateRiskReward` util, so
+   * the card and the order modal agree. Mutates `sig` in place.
+   *
+   * Bails (keeping the engine's heuristic strings) whenever any leg can't
+   * be priced: contract missing from the snapshot AND the per-leg ticker
+   * fallback fails, or bid/ask is zero (market closed, illiquid strike).
+   */
+  private async repriceAlpacaSignal(
+    sig: any,
+    quoteMap: Map<string, { bidPrice?: number; askPrice?: number }>,
+    creds: OptionCredentials,
+  ): Promise<void> {
+    const legs: any[] = Array.isArray(sig?.legs) ? sig.legs : [];
+    if (legs.length === 0) return;
+
+    let netPerUnit = 0;
+    for (const leg of legs) {
+      let quote = leg.symbol ? quoteMap.get(leg.symbol) : undefined;
+      if (!quote && leg.symbol) {
+        // Not in the snapshot (pagination cap, far-dated calendar leg) —
+        // one targeted ticker fetch before giving up. Max 4 legs/signal.
+        try {
+          quote = (await this.optionsAlpaca.fetchOptionTicker(
+            creds,
+            leg.symbol,
+          )) as any;
+        } catch {
+          quote = undefined;
+        }
+      }
+      const isBuy = String(leg.side).toUpperCase() === 'BUY';
+      const fill = isBuy
+        ? Number(quote?.askPrice) || 0
+        : Number(quote?.bidPrice) || 0;
+      if (!(fill > 0)) {
+        this.logger.debug(
+          `Repricing skipped for ${sig.strategy} on ${leg.symbol}: no usable quote`,
+        );
+        return;
+      }
+      netPerUnit += (isBuy ? fill : -fill) * (Number(leg.ratio) || 1);
+    }
+
+    const strikes = legs.map((l) => Number(l.strike));
+    if (strikes.some((k) => !(k > 0))) return;
+
+    // estimateRiskReward also validates debit/credit direction — e.g. an
+    // iron_condor whose live quotes net out to a debit returns null here,
+    // and the heuristic strings win.
+    const risk = estimateRiskReward(sig.strategy, strikes, netPerUnit);
+    if (!risk || !(risk.maxLoss > 0) || !(risk.maxProfit > 0)) return;
+
+    sig.max_profit = formatUsd(risk.maxProfit);
+    sig.max_loss = formatUsd(risk.maxLoss);
+    // Preserve the engine's per-side ratio shapes: debit "X.X:1", credit "1:Y.Y".
+    sig.risk_reward = CREDIT_STRATEGIES.has(sig.strategy)
+      ? `1:${(risk.maxLoss / risk.maxProfit).toFixed(1)}`
+      : `${(risk.maxProfit / risk.maxLoss).toFixed(1)}:1`;
   }
 
   // ── Cron: cleanup expired signals ───────────────────────
@@ -327,10 +431,31 @@ export class OptionsSignalService {
       ? -(maxProfitPerUnit ?? 0)
       : maxLossPerUnit ?? 0;
 
+    // Breakeven levels + required % move. Needs only legs/net/spot — no IV
+    // or expiry — so it also enriches rows that can't get POP, including
+    // historical and Binance heuristic rows. Computed at read time: no
+    // schema change, and repriced rows automatically show real breakevens.
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const breakevens =
+      spot > 0 && netPerUnit !== 0
+        ? computeBreakevens(row.strategy, legs, netPerUnit, spot)
+        : null;
+    const breakevenEnrichment = {
+      breakevenLow:
+        breakevens?.breakevenLow != null ? round2(breakevens.breakevenLow) : null,
+      breakevenHigh:
+        breakevens?.breakevenHigh != null ? round2(breakevens.breakevenHigh) : null,
+      requiredMovePct:
+        breakevens?.requiredMovePct != null
+          ? Math.round(breakevens.requiredMovePct * 1e4) / 1e4
+          : null,
+    };
+
     const nullEnrichment = {
       probabilityOfProfit: null as number | null,
       expectedValuePerUnit: null as number | null,
       expectedValueTotal: null as number | null,
+      ...breakevenEnrichment,
     };
 
     if (!days || spot <= 0 || iv <= 0 || netPerUnit === 0) {
@@ -360,6 +485,7 @@ export class OptionsSignalService {
 
     return {
       ...row,
+      ...breakevenEnrichment,
       probabilityOfProfit: Math.round(pop * 1e4) / 1e4,
       expectedValuePerUnit: Math.round(evPerUnit * 100) / 100,
       expectedValueTotal: Math.round(evTotal * 100) / 100,
