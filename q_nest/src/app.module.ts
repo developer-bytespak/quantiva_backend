@@ -44,6 +44,7 @@ import { OnboardingEmailsModule } from './modules/onboarding-emails/onboarding-e
 import { OnboardingModule } from './modules/onboarding/onboarding.module';
 import { PositionInsightsModule } from './modules/position-insights/position-insights.module';
 import { NewsWarmerModule } from './modules/news-warmer/news-warmer.module';
+import { UserHoldingsModule } from './modules/user-holdings/user-holdings.module';
 
 @Module({
   imports: [
@@ -120,6 +121,7 @@ import { NewsWarmerModule } from './modules/news-warmer/news-warmer.module';
     OnboardingModule,
     PositionInsightsModule,
     NewsWarmerModule,
+    UserHoldingsModule,
   ],
   controllers: [],
   providers: [
