@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
-import redisConfig from '../../config/redis.config';
+import bullRedisConfig from '../../config/bull-redis.config';
 import { QUEUE_NAME } from './config/schedule.config';
 import { OnboardingStateService } from './services/onboarding-state.service';
 import { FreeUpgradeCampaignService } from './services/free-upgrade-campaign.service';
@@ -15,23 +15,28 @@ import { OnboardingEmailsController } from './controllers/onboarding-emails.cont
 
 @Module({
   imports: [
-    ConfigModule.forFeature(redisConfig),
+    ConfigModule.forFeature(bullRedisConfig),
     BullModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (config: ConfigService) => {
+        // Onboarding email queue runs on the Render Redis (BULL_REDIS_*), not Upstash.
+        // Upstash bills per-command, and BullMQ's constant idle polling exhausts that
+        // quota; Render bills by memory, so the queue is safe there.
         const redis = config.get<{
           host: string;
           port: number;
+          username?: string;
           password?: string;
           db: number;
           tls?: object;
           maxRetriesPerRequest: number | null;
           retryStrategy: (times: number) => number;
-        }>('redis')!;
+        }>('bullRedis')!;
         return {
           connection: {
             host: redis.host,
             port: redis.port,
+            username: redis.username,
             password: redis.password,
             db: redis.db,
             tls: redis.tls,
