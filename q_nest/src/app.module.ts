@@ -1,5 +1,7 @@
 import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
+import { BullModule } from '@nestjs/bullmq';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from './prisma/prisma.module';
@@ -49,6 +51,37 @@ import { NewsWarmerModule } from './modules/news-warmer/news-warmer.module';
     PrismaModule,
     GatewaysModule,
     ScheduleModule.forRoot(),
+    // Single global BullMQ connection for ALL queues (onboarding-reminders,
+    // strategy-execution, position-cold-refresh). forRoot is global, so feature
+    // modules only need registerQueue. Do NOT call forRoot per-module — multiple
+    // unnamed forRoots overwrite the same default connection (last-wins).
+    BullModule.forRootAsync({
+      useFactory: (config: ConfigService) => {
+        const redis = config.get<{
+          host: string;
+          port: number;
+          username?: string;
+          password?: string;
+          db: number;
+          tls?: object;
+          maxRetriesPerRequest: number | null;
+          retryStrategy: (times: number) => number;
+        }>('bullRedis')!;
+        return {
+          connection: {
+            host: redis.host,
+            port: redis.port,
+            username: redis.username,
+            password: redis.password,
+            db: redis.db,
+            tls: redis.tls,
+            maxRetriesPerRequest: redis.maxRetriesPerRequest,
+            retryStrategy: redis.retryStrategy,
+          },
+        };
+      },
+      inject: [ConfigService],
+    }),
     ThrottlerModule.forRoot([{
       ttl: 60000,  // 1-minute window
       limit: 30,   // 30 requests per minute per IP (general)
