@@ -3,9 +3,11 @@ Options Signal Engine
 Generates standalone AI options trading signals based on IV analysis,
 directional scoring, and strategy template matching.
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 import logging
+import os
+import time
 import numpy as np
 
 from src.services.engines.base_engine import BaseEngine
@@ -24,6 +26,27 @@ logger = logging.getLogger(__name__)
 DEFAULT_EXPIRY_DAYS = 30
 SIGNAL_VALIDITY_HOURS = 12
 MIN_CONFIDENCE = 0.25
+
+# Premium-buying vol strategies (straddle/strangle) on equities are gated on
+# a known catalyst: without earnings before expiry the position relies on an
+# unscheduled move and decays every quiet day. "penalty" docks confidence so
+# weak setups fall under MIN_CONFIDENCE organically; "drop" suppresses them
+# outright. Read at call time so ops can flip the env without code changes.
+EARNINGS_CACHE_TTL_SECS = int(os.getenv("OPTIONS_EARNINGS_TTL_SECS", 6 * 3600))
+EARNINGS_LOOKAHEAD_DAYS = 45  # default expiry is ~30d; cover the snap window
+
+# Options-specific sentiment cache. The hourly cron hits 8 stock tickers;
+# StockNewsAPI's own 2h cache alone would burn ~2880 req/mo against a 3000/mo
+# budget shared with other consumers. A 4h TTL here caps options usage at
+# ~1440/mo worst case.
+OPTIONS_SENTIMENT_TTL_SECS = int(os.getenv("OPTIONS_SENTIMENT_TTL_SECS", 4 * 3600))
+SENTIMENT_DIRECTION_WEIGHT = 0.15
+
+# Module-level so the cache survives across requests (the API router holds a
+# single engine instance, but module scope keeps this true regardless).
+_earnings_cache: Dict[str, Tuple[str, Optional[Dict[str, Any]], float]] = {}
+_sentiment_cache: Dict[str, Tuple[Optional[float], float]] = {}
+_sentiment_engine = None  # lazy singleton — FinBERT loads on first use
 
 
 class OptionsSignalEngine(BaseEngine):
@@ -64,9 +87,23 @@ class OptionsSignalEngine(BaseEngine):
             venue = kwargs.get("venue", "BINANCE")
             contract_multiplier = float(kwargs.get("contract_multiplier", 0.01))
 
+            # News sentiment joins the directional inputs for equities. Any
+            # failure (quota, FinBERT cold, no news) degrades to None — the
+            # engine never raises over sentiment. Crypto keeps its existing
+            # pure-momentum path unless the caller passes a score explicitly.
+            sentiment_score = kwargs.get("sentiment_score")
+            if sentiment_score is None and asset_type == "stock":
+                sentiment_score = self._fetch_stock_sentiment(asset_id)
+
             # Derive direction and score from available data
-            direction, dir_score, trend_strength, vol_regime = self._compute_direction(
-                iv_rank, price_data, volume_data
+            direction, dir_score, trend_strength, vol_regime, realized_vol = (
+                self._compute_direction(
+                    iv_rank,
+                    price_data,
+                    volume_data,
+                    asset_type=asset_type,
+                    sentiment_score=sentiment_score,
+                )
             )
 
             # Determine default expiry — snap to the nearest Friday so the
@@ -107,6 +144,8 @@ class OptionsSignalEngine(BaseEngine):
                     expiry_iso=expiry_iso,
                     venue=venue,
                     contract_multiplier=contract_multiplier,
+                    realized_vol=realized_vol,
+                    sentiment_score=sentiment_score,
                 )
                 if sig:
                     signals.append(sig)
@@ -131,17 +170,21 @@ class OptionsSignalEngine(BaseEngine):
         iv_rank: Optional[float],
         price_data: Optional[List[float]],
         volume_data: Optional[List[float]] = None,
+        asset_type: str = "crypto",
+        sentiment_score: Optional[float] = None,
     ) -> tuple:
         """
         Determine directional bias and score using multi-timeframe momentum,
         realized volatility regime detection, trend strength, and volume weighting.
-        Returns (direction, score, trend_strength, vol_regime) where score is
-        -1..+1, trend_strength is 0..1 (R² of linear fit), and vol_regime is
-        one of "low" | "normal" | "high".
+        Returns (direction, score, trend_strength, vol_regime, realized_vol)
+        where score is -1..+1, trend_strength is 0..1 (R² of linear fit),
+        vol_regime is one of "low" | "normal" | "high", and realized_vol is
+        the annualized 20-bar realized volatility (0 when unavailable).
         """
         score = 0.0
         trend_strength = 0.0
         vol_regime = "normal"
+        rv = 0.0
 
         if price_data and len(price_data) >= 10:
             arr = np.array(price_data[-60:], dtype=float)
@@ -152,9 +195,16 @@ class OptionsSignalEngine(BaseEngine):
             med_mom = float(np.mean(returns[-20:])) * 100 if len(returns) >= 20 else short_mom
             long_mom = float(np.mean(returns)) * 100
 
-            # 2. Realized volatility regime detection
-            rv = float(np.std(returns[-20:])) * np.sqrt(365) if len(returns) >= 20 else 0
-            vol_regime = "high" if rv > 0.8 else "low" if rv < 0.3 else "normal"
+            # 2. Realized volatility regime detection. Equities trade ~252
+            # sessions/year and run 10-30% annualized vs crypto's 24/7 365 and
+            # 30-100%+ — with crypto thresholds every stock reads "low" and the
+            # high-vol dampening below is dead code for ALPACA.
+            if asset_type == "stock":
+                ann_factor, hi_thr, lo_thr = np.sqrt(252), 0.35, 0.15
+            else:
+                ann_factor, hi_thr, lo_thr = np.sqrt(365), 0.8, 0.3
+            rv = float(np.std(returns[-20:])) * ann_factor if len(returns) >= 20 else 0
+            vol_regime = "high" if rv > hi_thr else "low" if rv < lo_thr else "normal"
 
             # 3. Trend strength via R-squared of linear regression
             if len(arr) >= 20:
@@ -186,6 +236,16 @@ class OptionsSignalEngine(BaseEngine):
 
             score = self.clamp_score(raw_score)
 
+        # News-sentiment blend. Modest weight: sentiment ∈ [-1, 1] vs a
+        # momentum composite that typically lands at ±0.2-0.6, so it tips
+        # borderline-neutral names rather than overruling price action.
+        # Deliberately OUTSIDE the price_data block — if bars are missing,
+        # sentiment alone can still break the neutral lock.
+        if sentiment_score is not None:
+            score = self.clamp_score(
+                score + float(sentiment_score) * SENTIMENT_DIRECTION_WEIGHT
+            )
+
         # IV-based adjustment: high IV favours neutral/selling
         if iv_rank is not None and iv_rank > 0.7:
             score *= 0.5
@@ -197,7 +257,7 @@ class OptionsSignalEngine(BaseEngine):
         else:
             direction = "neutral"
 
-        return direction, round(score, 4), round(trend_strength, 4), vol_regime
+        return direction, round(score, 4), round(trend_strength, 4), vol_regime, round(rv, 4)
 
     def _build_signal(
         self,
@@ -213,6 +273,8 @@ class OptionsSignalEngine(BaseEngine):
         expiry_iso: str,
         venue: str = "BINANCE",
         contract_multiplier: float = 0.01,
+        realized_vol: float = 0.0,
+        sentiment_score: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """Build a single signal dict from a strategy template."""
         try:
@@ -246,6 +308,47 @@ class OptionsSignalEngine(BaseEngine):
                 vol_regime=vol_regime,
             )
 
+            # Catalyst + vol-richness gating for premium-buying volatility
+            # plays on equities. Buying a straddle/strangle on "IV rank is
+            # low" alone loses to theta unless something is scheduled to
+            # move the stock; demand a reason or dock the confidence.
+            reasoning_notes: List[str] = []
+            if venue == "ALPACA" and strat.name in ("long_straddle", "long_strangle"):
+                status, earnings = self._get_earnings(underlying)
+                if status == "ok":
+                    if earnings and self._earnings_before_expiry(
+                        earnings.get("earnings_date"), expiry_iso
+                    ):
+                        conf += 0.10
+                        days = earnings.get("days_until_earnings")
+                        days_txt = f" ({days}d)" if days is not None else ""
+                        reasoning_notes.append(
+                            f"Earnings on {earnings['earnings_date']}{days_txt} "
+                            "falls before expiry — a known catalyst supports "
+                            "this volatility position."
+                        )
+                    else:
+                        mode = os.getenv("OPTIONS_VOL_CATALYST_MODE", "penalty").lower()
+                        if mode == "drop":
+                            return None
+                        conf -= 0.15
+                        reasoning_notes.append(
+                            "No earnings catalyst before expiry — the position "
+                            "relies on an unscheduled move."
+                        )
+                # status == "error" → earnings unknown → no adjustment
+
+                # Even a low IV *rank* can be expensive if the stock isn't
+                # actually moving: paying 25%+ over realized vol means the
+                # market already prices more movement than the tape shows.
+                if iv_value and realized_vol > 0 and iv_value / realized_vol > 1.25:
+                    conf -= 0.10
+                    reasoning_notes.append(
+                        f"Implied vol is rich vs realized "
+                        f"({iv_value:.0%} vs {realized_vol:.0%})."
+                    )
+                conf = self.clamp_score(conf, 0.0, 1.0)
+
             if conf < MIN_CONFIDENCE:
                 return None
 
@@ -266,7 +369,14 @@ class OptionsSignalEngine(BaseEngine):
                 "iv_value": round(iv_value, 6) if iv_value is not None else None,
                 "spot_price": round(spot_price, 2) if spot_price else None,
                 "legs": legs,
-                "reasoning": self._generate_reasoning(strat, direction, iv_rank, dir_score),
+                "reasoning": self._generate_reasoning(
+                    strat,
+                    direction,
+                    iv_rank,
+                    dir_score,
+                    sentiment_score=sentiment_score,
+                    extra_notes=reasoning_notes,
+                ),
                 "risk_reward": risk_reward,
                 "max_profit": max_profit,
                 "max_loss": max_loss,
@@ -451,6 +561,8 @@ class OptionsSignalEngine(BaseEngine):
         direction: str,
         iv_rank: Optional[float],
         score: float,
+        sentiment_score: Optional[float] = None,
+        extra_notes: Optional[List[str]] = None,
     ) -> str:
         """Generate human-readable reasoning for the signal."""
         parts = [strat.description]
@@ -469,4 +581,97 @@ class OptionsSignalEngine(BaseEngine):
         elif abs(score) > 0.2:
             parts.append(f"Moderate {direction} bias (score: {score:+.2f}).")
 
+        if sentiment_score is not None and abs(sentiment_score) > 0.3:
+            tone = "bullish" if sentiment_score > 0 else "bearish"
+            parts.append(f"News sentiment is {tone} ({sentiment_score:+.2f}).")
+
+        if extra_notes:
+            parts.extend(extra_notes)
+
         return " ".join(parts)
+
+    # ── External context: earnings calendar + news sentiment ─────────────
+
+    def _get_earnings(
+        self, symbol: str
+    ) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """
+        Next earnings event for `symbol` within EARNINGS_LOOKAHEAD_DAYS, via
+        the existing Finnhub integration. Returns (status, info):
+
+          ("ok", {...})  — earnings found (Finnhub dict with earnings_date,
+                           days_until_earnings, …)
+          ("ok", None)   — definitively no earnings in the window
+          ("error", None) — fetch failed / no API key → caller must treat
+                            the catalyst as UNKNOWN and apply no adjustment
+
+        Results (including errors) are cached for EARNINGS_CACHE_TTL_SECS so
+        the hourly cron costs ~4 Finnhub calls/day/symbol instead of 24.
+        """
+        now = time.time()
+        cached = _earnings_cache.get(symbol)
+        if cached and now - cached[2] < EARNINGS_CACHE_TTL_SECS:
+            return cached[0], cached[1]
+
+        status: str = "error"
+        info: Optional[Dict[str, Any]] = None
+        try:
+            from src.services.data.finnhub_service import FinnhubService
+
+            batch = FinnhubService().fetch_earnings_calendar_batch(
+                [symbol], days_ahead=EARNINGS_LOOKAHEAD_DAYS
+            )
+            # fetch_earnings_calendar_batch returns {} on error, but maps
+            # every requested symbol (value None = no earnings) on success.
+            if symbol in batch:
+                status, info = "ok", batch.get(symbol)
+        except Exception as e:
+            self.logger.warning(f"Earnings calendar fetch failed for {symbol}: {e}")
+
+        if status == "error":
+            self.logger.warning(
+                f"Earnings unknown for {symbol} — catalyst gate skipped this cycle"
+            )
+        _earnings_cache[symbol] = (status, info, now)
+        return status, info
+
+    @staticmethod
+    def _earnings_before_expiry(
+        earnings_date: Optional[str], expiry_iso: str
+    ) -> bool:
+        """True when the earnings date lands strictly before the option
+        expiry. Both are ISO date strings, so lexicographic compare is safe."""
+        if not earnings_date:
+            return False
+        return str(earnings_date)[:10] < str(expiry_iso)[:10]
+
+    def _fetch_stock_sentiment(self, symbol: str) -> Optional[float]:
+        """
+        FinBERT news sentiment for an equity ticker, cached for
+        OPTIONS_SENTIMENT_TTL_SECS. Failures are cached too (as None) so a
+        quota outage doesn't add a slow doomed call for every underlying in
+        every cron run. Never raises.
+        """
+        now = time.time()
+        cached = _sentiment_cache.get(symbol)
+        if cached and now - cached[1] < OPTIONS_SENTIMENT_TTL_SECS:
+            return cached[0]
+
+        score: Optional[float] = None
+        try:
+            global _sentiment_engine
+            if _sentiment_engine is None:
+                from src.services.engines.sentiment_engine import SentimentEngine
+
+                _sentiment_engine = SentimentEngine()
+            result = _sentiment_engine.calculate(
+                asset_id=symbol, asset_type="stock", asset_symbol=symbol
+            )
+            raw = result.get("score") if isinstance(result, dict) else None
+            if raw is not None:
+                score = float(raw)
+        except Exception as e:
+            self.logger.warning(f"Sentiment fetch failed for {symbol}: {e}")
+
+        _sentiment_cache[symbol] = (score, now)
+        return score

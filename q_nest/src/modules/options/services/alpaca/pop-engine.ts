@@ -236,6 +236,120 @@ export function computeEv(
   return pop * maxProfit - (1 - pop) * maxLoss;
 }
 
+export interface BreakevenResult {
+  // Price levels at expiry where the trade crosses into profit. For
+  // directional trades one side is null; for straddles/strangles both are
+  // set (profit OUTSIDE the band); for condors/butterflies both are set
+  // (profit INSIDE the band).
+  breakevenLow: number | null;
+  breakevenHigh: number | null;
+  // Smallest % move of the underlying needed to reach a breakeven, as a
+  // fraction (0.028 = 2.8%). Null for range strategies (condor/butterfly),
+  // where "stay still" wins and a single move number is meaningless.
+  requiredMovePct: number | null;
+}
+
+/**
+ * Breakeven levels and the required % move for a strategy, given the real
+ * (or estimated) signed net per-unit. Mirrors the per-strategy breakeven
+ * math inside `computePop` — kept separate so the signal read path can
+ * surface "Needs ±2.8% by expiry" on cards without running POP.
+ *
+ * Returns null for unknown strategies, mismatched leg shapes, wrong
+ * debit/credit direction, or calendar spreads (whose expiry P&L depends on
+ * the far leg's remaining value — a single breakeven would be fiction).
+ */
+export function computeBreakevens(
+  strategy: string,
+  legs: PopLeg[],
+  netPerUnit: number,
+  spot: number,
+): BreakevenResult | null {
+  if (!(spot > 0) || !Array.isArray(legs) || legs.length === 0) return null;
+
+  const absNet = Math.abs(netPerUnit);
+  const isDebit = netPerUnit > 0;
+  const strikes = legs.map((l) => l.strike).filter((k) => k > 0);
+  if (strikes.length !== legs.length) return null;
+  const sorted = [...strikes].sort((a, b) => a - b);
+
+  // % move from spot toward a breakeven, floored at 0 (already past it).
+  const moveUp = (be: number) => Math.max(0, (be - spot) / spot);
+  const moveDown = (be: number) => Math.max(0, (spot - be) / spot);
+
+  switch (strategy as StrategyName) {
+    case 'long_call': {
+      if (legs.length !== 1 || !isDebit) return null;
+      const be = legs[0].strike + absNet;
+      return { breakevenLow: null, breakevenHigh: be, requiredMovePct: moveUp(be) };
+    }
+    case 'long_put': {
+      if (legs.length !== 1 || !isDebit) return null;
+      const be = Math.max(0, legs[0].strike - absNet);
+      return { breakevenLow: be, breakevenHigh: null, requiredMovePct: moveDown(be) };
+    }
+    case 'bull_call_spread': {
+      if (legs.length !== 2 || !isDebit) return null;
+      const be = sorted[0] + absNet;
+      return { breakevenLow: null, breakevenHigh: be, requiredMovePct: moveUp(be) };
+    }
+    case 'bear_put_spread': {
+      if (legs.length !== 2 || !isDebit) return null;
+      const be = Math.max(0, sorted[sorted.length - 1] - absNet);
+      return { breakevenLow: be, breakevenHigh: null, requiredMovePct: moveDown(be) };
+    }
+    case 'long_straddle': {
+      if (legs.length !== 2 || !isDebit) return null;
+      const k = sorted[0];
+      const low = Math.max(0, k - absNet);
+      const high = k + absNet;
+      return {
+        breakevenLow: low,
+        breakevenHigh: high,
+        requiredMovePct: Math.min(moveUp(high), moveDown(low)),
+      };
+    }
+    case 'long_strangle': {
+      if (legs.length !== 2 || !isDebit) return null;
+      const low = Math.max(0, sorted[0] - absNet);
+      const high = sorted[1] + absNet;
+      return {
+        breakevenLow: low,
+        breakevenHigh: high,
+        requiredMovePct: Math.min(moveUp(high), moveDown(low)),
+      };
+    }
+    // Range trades: profit INSIDE the band; the UI renders "profit range"
+    // rather than a required move.
+    case 'iron_condor': {
+      if (legs.length !== 4 || isDebit) return null;
+      return {
+        breakevenLow: Math.max(0, sorted[1] - absNet),
+        breakevenHigh: sorted[2] + absNet,
+        requiredMovePct: null,
+      };
+    }
+    case 'long_butterfly': {
+      if (legs.length !== 3 || !isDebit) return null;
+      return {
+        breakevenLow: sorted[0] + absNet,
+        breakevenHigh: Math.max(0, sorted[2] - absNet),
+        requiredMovePct: null,
+      };
+    }
+    case 'short_put': {
+      if (legs.length !== 1 || isDebit) return null;
+      const be = Math.max(0, legs[0].strike - absNet);
+      // Profitable anywhere above the breakeven — usually true at entry,
+      // so the required move is 0 unless spot has fallen below it.
+      return { breakevenLow: be, breakevenHigh: null, requiredMovePct: moveUp(be) };
+    }
+    case 'calendar_spread':
+    default:
+      return null;
+  }
+}
+
 /**
  * Convenience: returns the days-to-expiry the strategy cares about for POP.
  * Calendars use the short leg's expiry; everything else uses the (shared)

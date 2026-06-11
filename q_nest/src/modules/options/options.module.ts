@@ -13,9 +13,10 @@ import { PrismaModule } from '../../prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
 import { ExchangesModule } from '../exchanges/exchanges.module';
 import { TradeFeesModule } from '../trade-fees/trade-fees.module';
+import { StocksMarketModule } from '../stocks-market/stocks-market.module';
 
 @Module({
-  imports: [ConfigModule, PrismaModule, AuthModule, forwardRef(() => ExchangesModule), TradeFeesModule],
+  imports: [ConfigModule, PrismaModule, AuthModule, forwardRef(() => ExchangesModule), TradeFeesModule, StocksMarketModule],
   controllers: [OptionsController],
   providers: [OptionsService, OptionsBinanceService, OptionsBinanceStreamService, OptionsAlpacaService, OptionsGateway, OptionsIvService, OptionsSignalService, OptionsRiskService],
   exports: [OptionsService, OptionsBinanceService, OptionsBinanceStreamService, OptionsAlpacaService, OptionsIvService, OptionsSignalService, OptionsRiskService],
