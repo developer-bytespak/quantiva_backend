@@ -16,7 +16,12 @@ _engine = OptionsSignalEngine()
 
 
 @router.post("/generate")
-async def generate_signals(request_data: Dict[str, Any] = Body(...)):
+def generate_signals(request_data: Dict[str, Any] = Body(...)):
+    # Deliberately sync (`def`, not `async def`): FastAPI runs sync handlers
+    # on its threadpool. The engine's work is blocking (FinBERT inference,
+    # news/earnings fetches can take ~50s cold) — as an async handler it
+    # blocked the event loop, so the concurrent Binance+Alpaca cron calls
+    # starved each other into 60s timeouts on alternating underlyings.
     """
     Generate AI options signals for an underlying.
 
