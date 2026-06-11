@@ -150,9 +150,19 @@ export class StrategiesController {
     const limitNum = limit ? parseInt(limit, 10) : 10000;
     this.logger.log(`getTrendingAssetsWithInsights called with limit=${limit}, parsed=${limitNum} for strategy ${strategyId}`);
     
-    // Detect if this is a stock strategy by checking the name
-    const isStockStrategy = strategy.name?.toLowerCase().includes('(stocks)') || 
-                           strategy.name?.toLowerCase().includes('stock');
+    // Detect if this is a stock strategy. Prefer the structured columns
+    // (asset_type set on Option B + legacy stock templates, target_index_code
+    // present on all Option B index-scoped strategies). Fall back to the
+    // legacy "(Stocks)" suffix and a "stock" substring for any older rows
+    // that haven't been backfilled. Without the asset_type/target_index_code
+    // checks the new Option B templates ("S&P 500 Stability", "Dow Blue Chip
+    // Dividend", "Nasdaq Growth Pulse", etc.) get misclassified as crypto and
+    // the page returns empty.
+    const isStockStrategy =
+      strategy.asset_type === 'stock' ||
+      !!strategy.target_index_code ||
+      strategy.name?.toLowerCase().includes('(stocks)') ||
+      strategy.name?.toLowerCase().includes('stock');
     
     // Get trending assets based on strategy type
     // Use database cached data (synced by cronjob) - no live API calls
