@@ -8,6 +8,7 @@ import { StrategyExecutionService } from './strategy-execution.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { BinanceService } from '../../binance/binance.service';
 import { SignalsService } from '../../signals/signals.service';
+import { SignalAlertsService } from '../../alerts/signal-alerts.service';
 import { ConnectionStatus, StrategyType } from '@prisma/client';
 
 // Keep in sync with the default profile in q_python fusion_engine.py.
@@ -52,6 +53,7 @@ export class PreBuiltSignalsCronjobService {
     private binanceService: BinanceService,
     @Inject(forwardRef(() => SignalsService))
     private signalsService: SignalsService,
+    private signalAlerts: SignalAlertsService,
   ) {}
 
   /**
@@ -372,6 +374,18 @@ export class PreBuiltSignalsCronjobService {
         stop_loss: stopLossValue ? marketData.price * (1 - stopLossValue / 100) : null,
         take_profit_1: takeProfitValue ? marketData.price * (1 + takeProfitValue / 100) : null,
       });
+
+      // Track C — new-signal alert: notify holders of a brand-new BUY (fire-and-forget).
+      if (result.created && pythonSignal.action === 'BUY') {
+        void this.signalAlerts.onNewBuySignal({
+          assetId,
+          symbol: asset.symbol || assetId,
+          name: asset.name,
+          assetType: asset.asset_type || 'crypto',
+          strategyName: strategy.name,
+          confidence: pythonSignal.confidence ?? null,
+        });
+      }
 
       if (heartbeat) {
         if (pythonSignal.action === 'BUY') heartbeat.buy++;
@@ -799,6 +813,18 @@ export class PreBuiltSignalsCronjobService {
         stop_loss: stopLossValue ? marketData.price * (1 - stopLossValue / 100) : null,
         take_profit_1: takeProfitValue ? marketData.price * (1 + takeProfitValue / 100) : null,
       });
+
+      // Track C — new-signal alert: notify holders of a brand-new BUY (fire-and-forget).
+      if (result.created && pythonSignal.action === 'BUY') {
+        void this.signalAlerts.onNewBuySignal({
+          assetId: asset.asset_id,
+          symbol: asset.symbol || asset.asset_id,
+          name: asset.name,
+          assetType: asset.asset_type || 'crypto',
+          strategyName: strategy.name,
+          confidence: pythonSignal.confidence ?? null,
+        });
+      }
 
       if (heartbeat) {
         if (pythonSignal.action === 'BUY') heartbeat.buy++;
