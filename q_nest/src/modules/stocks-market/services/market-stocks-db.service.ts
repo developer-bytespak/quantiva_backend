@@ -741,7 +741,19 @@ export class MarketStocksDbService {
       `a.asset_type = 'stock'`,
       `a.is_active = true`,
     ];
-    if (indexCode) whereParts.push(`a.primary_index_code = '${indexCode.replace(/'/g, "''")}'`);
+    if (indexCode) {
+      // Filter through index_membership instead of the denormalised
+      // primary_index_code. Russell 1000/2000/Midcap were derived AFTER
+      // Stage 1 universe population, so their stocks still carry
+      // primary_index_code='NASDAQ_COMPOSITE' or 'NYSE_AMEX'. Joining
+      // index_membership matches whichever index the user actually picked.
+      const safeIndex = indexCode.replace(/'/g, "''");
+      whereParts.push(
+        `EXISTS (SELECT 1 FROM index_membership im ` +
+        `JOIN indexes i ON i.index_id = im.index_id ` +
+        `WHERE im.asset_id = a.asset_id AND i.code = '${safeIndex}')`,
+      );
+    }
     if (sector) whereParts.push(`a.sector = '${sector.replace(/'/g, "''")}'`);
     if (search) {
       const safe = search.replace(/'/g, "''");
