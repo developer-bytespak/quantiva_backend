@@ -44,7 +44,7 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.05,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.25 },
+      { field: 'final_score', operator: '>', value: 0.18 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
@@ -66,8 +66,8 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.05,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.25 },
-      { field: 'metadata.engine_details.fundamental.score', operator: '>', value: 0.10 },
+      { field: 'final_score', operator: '>', value: 0.18 },
+      { field: 'metadata.engine_details.fundamental.score', operator: '>', value: 0.05 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
@@ -89,7 +89,7 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.15,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.25 },
+      { field: 'final_score', operator: '>', value: 0.18 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
@@ -111,7 +111,7 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.05,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.30 },
+      { field: 'final_score', operator: '>', value: 0.22 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
@@ -133,7 +133,7 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.20,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.30 },
+      { field: 'final_score', operator: '>', value: 0.22 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.15 },
@@ -155,7 +155,7 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.10,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.30 },
+      { field: 'final_score', operator: '>', value: 0.22 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
@@ -177,8 +177,8 @@ export const OPTION_B_STRATEGIES: OptionBStrategyTemplate[] = [
       liquidity: 0.10,
     },
     entry_rules: [
-      { field: 'final_score', operator: '>', value: 0.25 },
-      { field: 'metadata.engine_details.fundamental.score', operator: '>', value: 0.10 },
+      { field: 'final_score', operator: '>', value: 0.18 },
+      { field: 'metadata.engine_details.fundamental.score', operator: '>', value: 0.05 },
     ],
     exit_rules: [
       { field: 'final_score', operator: '<', value: -0.20 },
