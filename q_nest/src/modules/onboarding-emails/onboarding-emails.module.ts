@@ -35,6 +35,12 @@ import { OnboardingEmailsController } from './controllers/onboarding-emails.cont
     UnsubscribeTokenService,
     OnboardingReminderProcessor,
   ],
-  exports: [OnboardingStateService, FreeUpgradeCampaignService, EmailSenderService],
+  exports: [
+    OnboardingStateService,
+    FreeUpgradeCampaignService,
+    EmailSenderService,
+    TemplateRendererService,
+    UnsubscribeTokenService,
+  ],
 })
 export class OnboardingEmailsModule {}
