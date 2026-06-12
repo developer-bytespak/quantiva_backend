@@ -7,6 +7,7 @@ import { StockTrendingService } from './stock-trending.service';
 import { StrategyExecutionService } from './strategy-execution.service';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { SignalsService } from '../../signals/signals.service';
+import { SignalAlertsService } from '../../alerts/signal-alerts.service';
 import { ConnectionStatus } from '@prisma/client';
 
 // Heartbeat counters: tally what each cron run evaluated even though
@@ -36,6 +37,7 @@ export class StockSignalsCronjobService {
     private exchangesService: ExchangesService,
     @Inject(forwardRef(() => SignalsService))
     private signalsService: SignalsService,
+    private signalAlerts: SignalAlertsService,
   ) {}
 
   /**
@@ -411,6 +413,19 @@ export class StockSignalsCronjobService {
       else if (signalData.action === 'SELL') heartbeat.sell++;
       else heartbeat.hold++;
     }
+    // Track C — new-signal alert: notify holders when a brand-new BUY is persisted.
+    // Fire-and-forget so it never blocks or breaks signal generation.
+    if (result.created && signalData.action === 'BUY') {
+      void this.signalAlerts.onNewBuySignal({
+        assetId,
+        symbol: asset.symbol || assetId,
+        name: asset.name,
+        assetType: 'stock',
+        strategyName: strategy.name,
+        confidence: signalData.confidence ?? null,
+      });
+    }
+
     if (result.deleted) {
       this.logger.debug(
         `Engine flipped on ${asset.symbol} (${strategy.name}) — deleted stale BUY`,
