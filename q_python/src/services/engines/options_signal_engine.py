@@ -27,6 +27,20 @@ DEFAULT_EXPIRY_DAYS = 30
 SIGNAL_VALIDITY_HOURS = 12
 MIN_CONFIDENCE = 0.25
 
+# Alpaca (US-equity) signals get a longer validity window than crypto. The
+# hourly NestJS cron still supersedes each (underlying, strategy) row via the
+# read-side `distinct on (underlying, strategy) order by created_at desc`
+# whenever a fresh signal IS produced — so under healthy operation the visible
+# card is always the latest. This longer TTL only changes behaviour when the
+# stock engine goes QUIET: a low-vol large-cap regime can emit nothing for
+# several consecutive ticks, and the US session is closed overnight / weekends.
+# With the crypto-style 2h TTL the "AI Signals" tab empties out within a couple
+# of hours of the last emission; an 8h Alpaca window keeps the most recent
+# signal visible across those gaps. Crypto keeps the tight per-template 2h TTL
+# (24/7 venue, reliably regenerated each tick, faster-drifting strikes).
+# Env-overridable for ops tuning.
+ALPACA_SIGNAL_TTL_HOURS = int(os.getenv("OPTIONS_ALPACA_SIGNAL_TTL_HOURS", 8))
+
 # Premium-buying vol strategies (straddle/strangle) on equities are gated on
 # a known catalyst: without earnings before expiry the position relies on an
 # unscheduled move and decays every quiet day. "penalty" docks confidence so
@@ -34,6 +48,16 @@ MIN_CONFIDENCE = 0.25
 # outright. Read at call time so ops can flip the env without code changes.
 EARNINGS_CACHE_TTL_SECS = int(os.getenv("OPTIONS_EARNINGS_TTL_SECS", 6 * 3600))
 EARNINGS_LOOKAHEAD_DAYS = 45  # default expiry is ~30d; cover the snap window
+
+# Confidence docked from a low-IV vol-buying play (long straddle/strangle on
+# equities) that has NO scheduled catalyst before expiry. Kept as a soft
+# penalty rather than an outright suppression so quiet low-IV regimes — where
+# condors/butterflies can't fire (they need IV rank ≥ 0.5) — still surface a
+# neutral premium-buying play instead of leaving the tab empty. Softened from
+# 0.15 so the dock no longer dominates the per-strategy confidence spread.
+# Env-overridable; set OPTIONS_VOL_CATALYST_MODE=drop to suppress these signals
+# entirely instead of merely docking them.
+NO_CATALYST_VOL_PENALTY = float(os.getenv("OPTIONS_NO_CATALYST_VOL_PENALTY", 0.10))
 
 # Options-specific sentiment cache. The hourly cron hits 8 stock tickers;
 # StockNewsAPI's own 2h cache alone would burn ~2880 req/mo against a 3000/mo
@@ -331,7 +355,7 @@ class OptionsSignalEngine(BaseEngine):
                         mode = os.getenv("OPTIONS_VOL_CATALYST_MODE", "penalty").lower()
                         if mode == "drop":
                             return None
-                        conf -= 0.15
+                        conf -= NO_CATALYST_VOL_PENALTY
                         reasoning_notes.append(
                             "No earnings catalyst before expiry — the position "
                             "relies on an unscheduled move."
@@ -355,8 +379,12 @@ class OptionsSignalEngine(BaseEngine):
             # Risk/reward estimation
             risk_reward, max_profit, max_loss = self._estimate_risk_reward(strat, legs, spot_price)
 
-            # Use strategy-specific TTL, fallback to default
+            # Signal validity window. Equities use a longer Alpaca-only TTL so
+            # the AI Signals tab stays populated through quiet stretches and
+            # closed sessions; crypto keeps the per-template 2h TTL.
             ttl_hours = strat.signal_ttl_hours if hasattr(strat, 'signal_ttl_hours') else SIGNAL_VALIDITY_HOURS
+            if venue == "ALPACA":
+                ttl_hours = ALPACA_SIGNAL_TTL_HOURS
             expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
 
             return {
@@ -414,9 +442,9 @@ class OptionsSignalEngine(BaseEngine):
         # edge is open:
         #   • band hugs 1.0 (e.g. iron_condor, long_butterfly, short_put) →
         #     premium-selling / cheap-debit plays peak at iv=1.0
-        #   • band hugs 0.0 (e.g. long_straddle, long_strangle) →
-        #     premium-buying plays peak at iv=0.0
-        #   • interior bands (e.g. calendar_spread, bull/bear spreads) →
+        #   • band hugs 0.0 (e.g. long_straddle, long_strangle, calendar_spread)
+        #     → premium-buying / net-long-vega plays peak at iv=0.0
+        #   • interior bands (e.g. bull/bear spreads) →
         #     peak at the band midpoint
         # `matches()` already filters out templates whose band excludes this
         # iv_rank, so we only get here if iv_rank ∈ [iv_rank_min, iv_rank_max].

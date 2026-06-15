@@ -97,11 +97,23 @@ c_none = conf_of(res_none, "long_straddle")
 c_earn = conf_of(res_earn, "long_straddle")
 check("straddle present in both runs", c_none is not None and c_earn is not None, f"{c_none} {c_earn}")
 if c_none is not None and c_earn is not None:
-    check("earnings boost > no-catalyst penalty (gap ~0.25)", round(c_earn - c_none, 2) >= 0.20, f"earn={c_earn} none={c_none}")
+    # Gap ~0.20: earnings boost (+0.10) minus the softened no-catalyst dock
+    # (-0.10, was -0.15). The iv-rich penalty applies to both runs so it
+    # cancels in the difference.
+    check("earnings boost > no-catalyst penalty (gap ~0.20)", round(c_earn - c_none, 2) >= 0.15, f"earn={c_earn} none={c_none}")
 earn_sig = next(s for s in res_earn["metadata"]["signals"] if s["strategy"] == "long_straddle")
 none_sig = next(s for s in res_none["metadata"]["signals"] if s["strategy"] == "long_straddle")
 check("earnings reasoning mentions catalyst", "Earnings on 2026-06-25" in earn_sig["reasoning"], earn_sig["reasoning"])
 check("no-catalyst reasoning mentions it", "No earnings catalyst" in none_sig["reasoning"], none_sig["reasoning"])
+
+# Low-IV neutral coverage: a calendar spread is now eligible at iv_rank 0.20
+# (floor lowered from 0.30 to 0.0) and is NOT catalyst-gated, so a quiet
+# low-IV large cap surfaces a neutral play even with no earnings ahead.
+check(
+    "low-IV neutral emits calendar_spread",
+    "calendar_spread" in {s["strategy"] for s in res_none["metadata"]["signals"]},
+    f"strats={ {s['strategy'] for s in res_none['metadata']['signals']} }",
+)
 
 print("\n[6] Catalyst gate drop mode suppresses the signal")
 import os
