@@ -59,6 +59,11 @@ class StrategyTemplate:
 # wake-up), 2h gives one full hour of grace before the stale row falls out
 # of the active list — better than showing a 6-24h-old strategy whose
 # strikes no longer match where spot is now.
+#
+# NOTE: this 2h value governs the CRYPTO (Binance) path. The options engine
+# overrides it to a longer Alpaca-only window (ALPACA_SIGNAL_TTL_HOURS in
+# options_signal_engine.py) because the US-equity session has long closed
+# stretches and a sparser emission cadence — see that constant's docstring.
 SIGNAL_TTL_HOURS = 2
 
 STRATEGY_TEMPLATES: List[StrategyTemplate] = [
@@ -184,7 +189,12 @@ STRATEGY_TEMPLATES: List[StrategyTemplate] = [
             StrategyLeg(type="CALL", side="SELL", strike_offset=0.0, expiry_days=14),
             StrategyLeg(type="CALL", side="BUY", strike_offset=0.0, expiry_days=45),
         ],
-        iv_rank_min=0.30,
+        # Low-to-moderate IV. The floor is 0.0 (not 0.30) so a quiet, low-IV
+        # large cap — where iron_condor/butterfly can't fire (need IV ≥ 0.5)
+        # and a catalyst-less straddle is weak — still surfaces a neutral play.
+        # A calendar is net-long vega and profits from the near/far theta
+        # differential, so cheap front-month IV is favourable, not a problem.
+        iv_rank_min=0.0,
         iv_rank_max=0.70,
         min_score=0.0,
         signal_ttl_hours=SIGNAL_TTL_HOURS,
