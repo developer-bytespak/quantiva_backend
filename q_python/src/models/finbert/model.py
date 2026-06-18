@@ -128,7 +128,22 @@ class FinBERTModel:
                 self.logger.info("Model moved to CUDA")
             else:
                 self._model = self._model.to("cpu")
-                self.logger.info("Model on CPU")
+                # Cap intra-op CPU threads. FinBERT is called from many
+                # concurrent request threads (the signal cron fans out across
+                # underlyings); without a cap each inference spins up nproc
+                # OpenMP threads, oversubscribing the box AND — because every
+                # native thread gets its own glibc malloc arena that is never
+                # returned to the OS — driving the unbounded RSS growth that
+                # OOM-killed the service. One intra-op thread keeps
+                # throughput-under-concurrency high and memory bounded.
+                # Env-overridable (pair with MALLOC_ARENA_MAX=2 / OMP_NUM_THREADS=1).
+                try:
+                    torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS", "1")))
+                except Exception as exc:
+                    self.logger.warning(f"Could not set torch thread count: {exc}")
+                self.logger.info(
+                    f"Model on CPU (torch threads={torch.get_num_threads()})"
+                )
             
             # Set to evaluation mode
             self._model.eval()
