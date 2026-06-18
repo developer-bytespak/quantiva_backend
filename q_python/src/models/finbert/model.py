@@ -3,6 +3,15 @@ FinBERT Model Loading and Management
 Handles loading of the ProsusAI/finbert model for sentiment analysis.
 """
 import os
+
+# Force `transformers` onto the torch backend and stop it from importing
+# TensorFlow/Flax. FinBERT runs 100% on torch; importing TF (which gets pulled
+# in transitively whenever tf-keras is present) wastes ~0.4-0.6GB RSS — fatal
+# on the 4GB instance. These MUST be set before `transformers` is imported.
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("USE_FLAX", "0")
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+
 import logging
 import time
 import torch

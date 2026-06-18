@@ -200,6 +200,40 @@ class StockNewsService:
             "cache_size": len(self._news_cache),
         }
 
+    # Hard ceiling on distinct cached keys. Bounds memory even if the symbol
+    # universe is large; entries past MAX_STALE_SECS are useless anyway since
+    # _read_cache refuses to return them.
+    _CACHE_MAX_ENTRIES = 500
+
+    def _put_cache(self, key: str, items: List[Dict[str, Any]]) -> None:
+        """Write a cache entry and opportunistically evict.
+
+        The old code wrote to a plain dict with no eviction, so the cache grew
+        for the life of the process (every distinct ticker leaked a list of up
+        to 50 article dicts). LunarCrushService already evicts; this brings the
+        stock-news cache to parity.
+        """
+        self._news_cache[key] = (items, time.time())
+        if len(self._news_cache) > self._CACHE_MAX_ENTRIES:
+            self._cleanup_cache()
+
+    def _cleanup_cache(self) -> None:
+        """Drop unusable (beyond-max-stale) entries, then hard-cap the size."""
+        now = time.time()
+        expired = [
+            k for k, (_, ts) in self._news_cache.items()
+            if now - ts > self.MAX_STALE_SECS
+        ]
+        for k in expired:
+            del self._news_cache[k]
+
+        # If still over the ceiling, evict oldest-first until under it.
+        overflow = len(self._news_cache) - self._CACHE_MAX_ENTRIES
+        if overflow > 0:
+            oldest = sorted(self._news_cache.items(), key=lambda kv: kv[1][1])
+            for k, _ in oldest[:overflow]:
+                del self._news_cache[k]
+
     def _read_cache(
         self, key: str
     ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[List[Dict[str, Any]]]]:
@@ -409,7 +443,7 @@ class StockNewsService:
 
         if items:
             self._bump("finnhub_fallbacks_served")
-            self._news_cache[cache_key] = (items, time.time())
+            self._put_cache(cache_key, items)
             return items
 
         if stale is not None:
@@ -474,7 +508,7 @@ class StockNewsService:
             news_items = self._parse_articles(data, limit)
 
             self._bump("calls_made")
-            self._news_cache[cache_key] = (news_items, time.time())
+            self._put_cache(cache_key, news_items)
             self.logger.info(f"Fetched {len(news_items)} news items for {symbol}")
             return news_items
 
@@ -552,7 +586,7 @@ class StockNewsService:
             news_items = self._parse_articles(data, limit, include_symbol=True)
 
             self._bump("calls_made")
-            self._news_cache[cache_key] = (news_items, time.time())
+            self._put_cache(cache_key, news_items)
             self.logger.info(f"Fetched {len(news_items)} general stock news items")
             return news_items
 
