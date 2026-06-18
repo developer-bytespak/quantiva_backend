@@ -37,4 +37,9 @@ psycopg2-binary>=2.9.0
 google-generativeai>=0.3.0  # Gemini (fallback)
 openai>=1.0.0                # OpenAI (primary)
 
-tf-keras>=2.20.0
+# NOTE: tf-keras / TensorFlow intentionally NOT installed.
+# FinBERT inference runs entirely on torch (see models/finbert/inference.py).
+# transformers is pinned to the torch backend via USE_TF=0 (set in
+# models/finbert/model.py before the transformers import). Re-adding
+# tf-keras pulls in a full TensorFlow that is never used and costs
+# ~0.4-0.6GB RSS on the 4GB instance.

@@ -17,6 +17,13 @@ logger.info("Starting FastAPI application...")
 # Keep module import light: router imports are delayed to startup to avoid blocking
 import os
 
+# Pin transformers to the torch backend before any router (and thus FinBERT /
+# transformers) is imported. Mirrors the guard in models/finbert/model.py so it
+# holds regardless of which module imports transformers first. See that file.
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("USE_FLAX", "0")
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+
 def _safe_import_router(import_path, alias_name=None):
     try:
         module = __import__(import_path, fromlist=["router"])  # type: ignore
@@ -30,6 +37,51 @@ def _safe_import_router(import_path, alias_name=None):
 
 app = FastAPI(title="Quantiva Python API", version="1.0.0")
 logger.info("FastAPI app created")
+
+
+def _malloc_trim() -> None:
+    """Return free heap memory held by glibc back to the OS.
+
+    Under the hourly signal-cron burst this process allocates tens of GB of
+    short-lived objects (≈218KB responses × dozens of req/s). glibc keeps that
+    freed memory in its per-arena pools instead of releasing it, so RSS creeps
+    upward until the 4GB cgroup OOM-kills the instance — even though the live
+    Python heap is small. malloc_trim(0) forces the release. No-op on
+    non-glibc platforms (local macOS/Windows dev), where it simply isn't found.
+    """
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
+async def _memory_reclaim_loop() -> None:
+    """Periodically collect garbage and hand freed memory back to the OS.
+
+    Interval is env-tunable via MEMORY_RECLAIM_SECS (default 60s; <=0 disables).
+    Cheap: a gc pass + malloc_trim is a few ms and runs off the event loop's
+    idle time, well between signal bursts.
+    """
+    import asyncio
+    import gc
+
+    try:
+        interval = int(os.environ.get("MEMORY_RECLAIM_SECS", "60"))
+    except ValueError:
+        interval = 60
+    if interval <= 0:
+        logger.info("Memory reclaim loop disabled (MEMORY_RECLAIM_SECS<=0)")
+        return
+
+    logger.info(f"🧹 Memory reclaim loop started (every {interval}s)")
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            gc.collect()
+            _malloc_trim()
+        except Exception as exc:  # never let the housekeeping loop die
+            logger.warning(f"Memory reclaim pass failed: {exc}")
 
 # CORS middleware — internal API only, no browser access needed
 app.add_middleware(
@@ -124,7 +176,11 @@ async def startup_event():
 
     # Port is bound - server is ready to accept requests
     logger.info("✅ Server is ready to accept connections")
-    
+
+    # Start memory housekeeping regardless of ML init — the signal cron churn
+    # that drives RSS growth happens whether or not FinBERT is pre-warmed.
+    asyncio.create_task(_memory_reclaim_loop())
+
     # Background initialization for heavy models
     if skip_bool:
         logger.info("⚠️ SKIP_ML_INIT is enabled - skipping background model pre-loading")

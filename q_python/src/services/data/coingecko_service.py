@@ -172,6 +172,26 @@ class CoinGeckoService:
     # TTL for cached symbol → id mappings from /search (24h; coin IDs never change)
     _SYMBOL_ID_TTL_SECS = 24 * 3600
 
+    # Hard ceiling on cached coin-detail payloads (the large ones). Bounds RSS
+    # regardless of how many distinct coins are queried over the process life.
+    _DETAILS_CACHE_MAX_ENTRIES = 500
+
+    def _cleanup_details_cache(self) -> None:
+        """Evict stale-then-oldest coin-detail entries to bound memory."""
+        now = time.time()
+        expired = [
+            k for k, (_, ts) in self._details_cache.items()
+            if now - ts > self.MAX_STALE_SECS
+        ]
+        for k in expired:
+            del self._details_cache[k]
+
+        overflow = len(self._details_cache) - self._DETAILS_CACHE_MAX_ENTRIES
+        if overflow > 0:
+            oldest = sorted(self._details_cache.items(), key=lambda kv: kv[1][1])
+            for k, _ in oldest[:overflow]:
+                del self._details_cache[k]
+
     def __init__(self) -> None:
         self.logger = logging.getLogger(__name__)
         self.api_key = COINGECKO_API_KEY
@@ -396,6 +416,11 @@ class CoinGeckoService:
 
             self._bump("calls_made")
             self._details_cache[coin_id] = (result, time.time())
+            # Bound the details cache — each entry is a large market_data +
+            # community_data + developer_data payload. Without this it grew for
+            # the life of the process (one entry per coin_id, never evicted).
+            if len(self._details_cache) > self._DETAILS_CACHE_MAX_ENTRIES:
+                self._cleanup_details_cache()
             return result
 
         except requests.exceptions.HTTPError as e:
