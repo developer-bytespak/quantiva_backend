@@ -301,8 +301,10 @@ export class UsersService {
   }
 
   async updatePersonalInfo(userId: string, data: UpdatePersonalInfoDto) {
-    // Convert dob string to Date object
-    const dobDate = data.dob ? new Date(data.dob) : null;
+    // Convert dob string to Date object. dob is optional — when omitted, leave
+    // the existing value untouched (undefined is skipped by Prisma) rather than
+    // wiping it to null.
+    const dobDate = data.dob ? new Date(data.dob) : undefined;
 
     const updated = await this.prisma.users.update({
       where: { user_id: userId },
