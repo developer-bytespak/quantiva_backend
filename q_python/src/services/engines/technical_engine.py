@@ -72,8 +72,14 @@ class TechnicalEngine(BaseEngine):
                 except Exception as e:
                     self.logger.warning(f"Failed to fetch multi-timeframe data: {str(e)}")
                     multi_timeframe_data = None
-            else:
-                # No user connection (e.g. cronjob): use system candles endpoint (Binance/Alpaca from env)
+
+            # Fall back to the public system candles endpoint when there is no
+            # user connection (cronjob) OR the connection-based fetch returned
+            # nothing. The per-user /exchanges/connections/.../candles endpoint
+            # is behind a user-JWT guard, so under the signal cron (no JWT) it
+            # 401s — without this fallback the trend engine silently degrades to
+            # a neutral score for every asset. /candles/system is public.
+            if not multi_timeframe_data:
                 try:
                     multi_timeframe_data = self._fetch_multi_timeframe_ohlcv_from_system(
                         asset_symbol, exchange, asset_type

@@ -13,12 +13,14 @@ export class UpdatePersonalInfoDto {
   @MaxLength(120, { message: 'Full name must not exceed 120 characters' })
   fullName: string;
 
+  @IsOptional()
   @IsDateString({}, { message: 'Date of birth must be a valid date' })
-  dob: string;
+  dob?: string;
 
+  @IsOptional()
   @IsString()
   @MinLength(2, { message: 'Nationality must be at least 2 characters long' })
-  nationality: string;
+  nationality?: string;
 
   @IsOptional()
   @IsEnum(Gender, { message: 'Gender must be one of: male, female, other, prefer-not-to-say' })

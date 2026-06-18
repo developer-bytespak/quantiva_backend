@@ -430,7 +430,13 @@ class EventRiskEngine(BaseEngine):
             
             if not published_at or not isinstance(published_at, datetime):
                 continue
-            
+
+            # Parsed news dates are often timezone-aware; cutoff_date/now are
+            # naive (line ~966). Normalize to naive so the comparison below
+            # doesn't raise "can't compare offset-naive and offset-aware".
+            if published_at.tzinfo is not None:
+                published_at = published_at.replace(tzinfo=None)
+
             # Check for SEC filing keywords
             if any(keyword in combined for keyword in sec_keywords):
                 # Allow recent past events (within 7 days)
@@ -484,7 +490,12 @@ class EventRiskEngine(BaseEngine):
             
             if not published_at or not isinstance(published_at, datetime):
                 continue
-            
+
+            # Normalize to naive (cutoff_date is naive) — avoids
+            # "can't compare offset-naive and offset-aware datetimes".
+            if published_at.tzinfo is not None:
+                published_at = published_at.replace(tzinfo=None)
+
             # Check for regulatory keywords
             if any(keyword in combined for keyword in regulatory_keywords):
                 if published_at <= cutoff_date:

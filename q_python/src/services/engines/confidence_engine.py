@@ -176,6 +176,26 @@ class ConfidenceEngine(BaseEngine):
             Tuple of (position_size, position_percentage, risk_adjusted_size)
         """
         try:
+            # Inputs can arrive as strings from JSON request bodies (e.g.
+            # portfolio_value / stop_loss_distance off strategy_data). Coerce
+            # defensively so the numeric comparisons below don't raise
+            # "'>' not supported between instances of 'str' and 'int'".
+            def _as_float(value, default):
+                try:
+                    if value is None or value == "":
+                        return default
+                    return float(value)
+                except (TypeError, ValueError):
+                    return default
+
+            confidence = _as_float(confidence, 0.0)
+            portfolio_value = _as_float(portfolio_value, 0.0)
+            max_allocation = _as_float(max_allocation, 0.10)
+            stop_loss_distance = (
+                None if stop_loss_distance in (None, "")
+                else _as_float(stop_loss_distance, None)
+            )
+
             # Get base position size based on risk level
             risk_multiplier = self.risk_multipliers.get(risk_level, 0.05)  # Default to medium
             base_size = portfolio_value * risk_multiplier
