@@ -4,7 +4,6 @@ Handles sentiment analysis using the ProsusAI/finbert model.
 """
 import logging
 import torch
-import threading
 import time
 from typing import List, Dict, Any, Optional, Tuple
 from .model import FinBERTModel
@@ -57,46 +56,24 @@ class FinBERTInference:
     
     def _infer_with_timeout(self, model, inputs, device):
         """
-        Run inference with timeout protection.
-        
-        Args:
-            model: The model to use for inference
-            inputs: Tokenized inputs
-            device: Device string ('cuda' or 'cpu')
-            
-        Returns:
-            Model outputs (logits)
-            
-        Raises:
-            TimeoutError: If inference exceeds timeout
+        Run a forward pass under torch.no_grad().
+
+        This used to spawn a daemon thread and join() it with a timeout to bail
+        on a hung inference. That was actively harmful: a Python thread can't be
+        cancelled, so a "timed out" inference kept running in the background
+        holding its input + activation tensors, and the per-inference thread
+        churn spawned a fresh glibc malloc arena on every call — together the
+        dominant driver of the unbounded RSS growth that OOM-killed the service.
+        A FinBERT classification over a (truncated) 512-token input completes in
+        well under a second on CPU, so the timeout guarded a case that doesn't
+        occur in practice. Run synchronously instead.
+
+        The method name and the `TimeoutError` class are kept so existing
+        callers/except-clauses stay valid; the timeout branch simply never
+        fires now.
         """
-        result = [None]
-        exception = [None]
-        
-        def _infer():
-            try:
-                with torch.no_grad():
-                    outputs = model(**inputs)
-                result[0] = outputs
-            except Exception as e:
-                exception[0] = e
-        
-        thread = threading.Thread(target=_infer)
-        thread.daemon = True
-        thread.start()
-        thread.join(timeout=self.inference_timeout)
-        
-        if thread.is_alive():
-            self.logger.error(f"Model inference timed out after {self.inference_timeout}s")
-            raise TimeoutError(f"Model inference exceeded timeout of {self.inference_timeout} seconds")
-        
-        if exception[0]:
-            raise exception[0]
-        
-        if result[0] is None:
-            raise TimeoutError("Model inference did not complete")
-        
-        return result[0]
+        with torch.no_grad():
+            return model(**inputs)
     
     def _parse_sentiment(self, logits: torch.Tensor) -> Tuple[str, float]:
         """

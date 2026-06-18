@@ -241,33 +241,44 @@ class SentimentEngine(BaseEngine):
             # Detect news_type from sources if not already present
             news_type = self._detect_news_type(text_data)
             
-            # Analyze sentiment for each text using FinBERT
+            # Analyze sentiment with FinBERT — BATCHED. We collect the texts and
+            # run a single batched inference instead of one call per article.
+            # The per-article path went through analyze_sentiment ->
+            # _infer_with_timeout, which spawned a daemon thread per inference;
+            # at ~50 articles × dozens of assets per cron cycle that thread
+            # churn fragmented glibc/torch memory and OOM-killed the service.
+            # analyze_batch runs the forward pass directly (no per-item threads)
+            # and preserves input order, so results zip back to their sources
+            # 1:1 and the aggregate score is unchanged.
             ml_results = []
             keyword_results = []
-            
-            for text_item in text_data:
-                text = text_item.get('text', '')
-                source = text_item.get('source', 'unknown')
-                
-                if not text:
-                    continue
-                
-                # FinBERT analysis (ML layer)
-                try:
-                    ml_result = self.finbert_inference.analyze_financial_text(text, source=source)
-                    # Apply source weight to score
-                    source_weight = self._get_source_weight(source)
-                    ml_result['score'] = ml_result.get('score', 0.0) * source_weight
-                    ml_results.append(ml_result)
-                except Exception as e:
-                    self.logger.warning(f"FinBERT analysis failed for text: {str(e)}")
-                    continue
-                
+
+            valid_items = [
+                (item.get('text', ''), item.get('source', 'unknown'))
+                for item in text_data
+                if item.get('text', '')
+            ]
+
+            try:
+                batch_results = self.finbert_inference.analyze_batch(
+                    [text for text, _ in valid_items]
+                )
+            except Exception as e:
+                self.logger.warning(f"FinBERT batch analysis failed: {str(e)}")
+                batch_results = []
+
+            for (text, source), ml_result in zip(valid_items, batch_results):
+                # Apply source weight to score; keep `source` on the result for
+                # metadata parity with the old analyze_financial_text path.
+                source_weight = self._get_source_weight(source)
+                ml_result['score'] = ml_result.get('score', 0.0) * source_weight
+                ml_result['source'] = source
+                ml_results.append(ml_result)
+
                 # Keyword analysis (only for crypto)
                 if asset_type == 'crypto':
                     try:
-                        keyword_result = self.keyword_analyzer.analyze(text)
-                        keyword_results.append(keyword_result)
+                        keyword_results.append(self.keyword_analyzer.analyze(text))
                     except Exception as e:
                         self.logger.warning(f"Keyword analysis failed: {str(e)}")
                         # Continue without keyword analysis
