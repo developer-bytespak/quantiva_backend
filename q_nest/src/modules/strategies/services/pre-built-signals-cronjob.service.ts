@@ -38,7 +38,12 @@ interface RunHeartbeat {
 @Injectable()
 export class PreBuiltSignalsCronjobService {
   private readonly logger = new Logger(PreBuiltSignalsCronjobService.name);
-  private readonly BATCH_SIZE = 10; // Process 10 assets at a time
+  // 5 (was 10): each batch asset fans out ~4 sequential Python /signals/generate
+  // calls, so a batch of N keeps ~N requests in flight at the Python service.
+  // At 10 this sustained ~20 req/s for ~6 min/cycle, pinning Python's RSS near
+  // its 4GB cap and occasionally OOM-killing it. 5 halves the concurrent load
+  // (peak ~−0.5GB) at the cost of a longer cycle.
+  private readonly BATCH_SIZE = 5; // Process 5 assets at a time
   private readonly LLM_LIMIT = 10; // Generate LLM for top 10 signals per strategy
   private isRunning = false; // Prevent concurrent executions
 

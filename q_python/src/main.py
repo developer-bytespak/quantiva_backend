@@ -56,27 +56,24 @@ def _malloc_trim() -> None:
         pass
 
 
+# How often (seconds) to gc + return freed heap to the OS. Fixed at 30s: a
+# full signal-cron cycle churns memory for ~6 min, and reclaiming twice a
+# minute keeps RSS comfortably below the 4GB cap without measurable CPU cost.
+MEMORY_RECLAIM_SECS = 30
+
+
 async def _memory_reclaim_loop() -> None:
     """Periodically collect garbage and hand freed memory back to the OS.
 
-    Interval is env-tunable via MEMORY_RECLAIM_SECS (default 60s; <=0 disables).
     Cheap: a gc pass + malloc_trim is a few ms and runs off the event loop's
     idle time, well between signal bursts.
     """
     import asyncio
     import gc
 
-    try:
-        interval = int(os.environ.get("MEMORY_RECLAIM_SECS", "60"))
-    except ValueError:
-        interval = 60
-    if interval <= 0:
-        logger.info("Memory reclaim loop disabled (MEMORY_RECLAIM_SECS<=0)")
-        return
-
-    logger.info(f"🧹 Memory reclaim loop started (every {interval}s)")
+    logger.info(f"🧹 Memory reclaim loop started (every {MEMORY_RECLAIM_SECS}s)")
     while True:
-        await asyncio.sleep(interval)
+        await asyncio.sleep(MEMORY_RECLAIM_SECS)
         try:
             gc.collect()
             _malloc_trim()

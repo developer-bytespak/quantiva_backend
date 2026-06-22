@@ -13,6 +13,10 @@ function toBaseSymbol(pair: string): string {
   return u;
 }
 
+// Stablecoins / quote currencies have no meaningful self-quoted chart (USDT/USDT)
+// and can't move enough to alert — pricing them just 400s "Invalid symbol".
+const STABLECOINS = new Set(['USDT', 'USDC', 'FDUSD', 'BUSD', 'TUSD', 'USDP', 'DAI', 'USD']);
+
 /**
  * Track A — Holding Price-Move Alerts.
  * Every 15 min: for each DISTINCT asset that some real user holds (from user_holdings),
@@ -79,6 +83,10 @@ export class HoldingAlertsService {
   /** ~15-min % change from the last two completed candles. null if unavailable / market closed. */
   private async percentChange15m(symbol: string, assetType: string): Promise<number | null> {
     if (assetType === 'crypto') {
+      // Stablecoin holdings have no tradable chart — skip rather than 400.
+      if (STABLECOINS.has(symbol.toUpperCase()) || STABLECOINS.has(toBaseSymbol(symbol))) {
+        return null;
+      }
       const candles = await this.binance.getOHLCV(toBaseSymbol(symbol), '15m', 3);
       if (!candles || candles.length < 2) return null;
       const prev = candles[candles.length - 2].close;

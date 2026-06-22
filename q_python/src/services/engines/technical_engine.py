@@ -63,30 +63,21 @@ class TechnicalEngine(BaseEngine):
             # Use asset_symbol if provided (for OHLCV fetching), otherwise use asset_id
             asset_symbol = kwargs.get('asset_symbol', asset_id)
             
+            # Fetch candles straight from the public system endpoint. The
+            # per-user /exchanges/connections/.../candles endpoint is behind a
+            # user-JWT guard this backend service can't satisfy, so attempting
+            # it only ever 401'd before falling back here — a wasted round-trip
+            # (3 failing HTTP calls + 401 log noise per asset). connection_id is
+            # intentionally ignored for candle fetching; /candles/system serves
+            # the same Binance/Alpaca data without auth.
             multi_timeframe_data = None
-            if connection_id:
-                try:
-                    multi_timeframe_data = self._fetch_multi_timeframe_ohlcv(
-                        asset_symbol, exchange, connection_id
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Failed to fetch multi-timeframe data: {str(e)}")
-                    multi_timeframe_data = None
-
-            # Fall back to the public system candles endpoint when there is no
-            # user connection (cronjob) OR the connection-based fetch returned
-            # nothing. The per-user /exchanges/connections/.../candles endpoint
-            # is behind a user-JWT guard, so under the signal cron (no JWT) it
-            # 401s — without this fallback the trend engine silently degrades to
-            # a neutral score for every asset. /candles/system is public.
-            if not multi_timeframe_data:
-                try:
-                    multi_timeframe_data = self._fetch_multi_timeframe_ohlcv_from_system(
-                        asset_symbol, exchange, asset_type
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Failed to fetch system candles: {str(e)}")
-                    multi_timeframe_data = None
+            try:
+                multi_timeframe_data = self._fetch_multi_timeframe_ohlcv_from_system(
+                    asset_symbol, exchange, asset_type
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to fetch system candles: {str(e)}")
+                multi_timeframe_data = None
             
             # Use multi-timeframe data if available, otherwise fallback to provided ohlcv_data
             if multi_timeframe_data:
