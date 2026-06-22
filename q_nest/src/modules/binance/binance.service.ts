@@ -256,8 +256,15 @@ export class BinanceService {
     interval: string = '1h',
     limit: number = 100,
   ): Promise<Candlestick[]> {
+    const formattedSymbol = this.formatSymbol(symbol);
+    // formatSymbol("USDT") === "USDT" — a bare quote currency with no
+    // self-quoted market. Skip; Binance would just 400 "Invalid symbol".
+    if (formattedSymbol.replace(/USDT$/i, '') === '') {
+      this.logger.debug(`Skipping OHLCV for non-tradable quote symbol "${symbol}"`);
+      return [];
+    }
+
     try {
-      const formattedSymbol = this.formatSymbol(symbol);
       const response = await this.apiClient.get('/api/v3/klines', {
         params: {
           symbol: formattedSymbol,
@@ -276,6 +283,15 @@ export class BinanceService {
         closeTime: kline[6],
       }));
     } catch (error: any) {
+      // Unknown / delisted symbol → Binance -1121 "Invalid symbol". Expected
+      // for assets Binance doesn't list; return empty so callers treat it as
+      // no-data instead of cascading a thrown error + error log.
+      const code = error?.response?.data?.code;
+      const msg = error?.response?.data?.msg || error.message;
+      if (code === -1121 || /invalid symbol/i.test(msg || '')) {
+        this.logger.debug(`No Binance market for ${formattedSymbol} (${msg})`);
+        return [];
+      }
       this.logger.error(`Failed to get OHLCV for ${symbol}: ${error.message}`);
       throw new Error(`Failed to fetch OHLCV for ${symbol}`);
     }

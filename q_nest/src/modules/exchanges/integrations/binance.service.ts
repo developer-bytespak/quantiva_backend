@@ -389,9 +389,21 @@ export class BinanceService {
           ? msg
           : `Binance public request failed [status=${status ?? 'n/a'}${code !== undefined ? ` code=${code}` : ''}]. Endpoint: ${endpoint}`;
 
-      this.logger.warn(
-        `makePublicRequest failed [endpoint=${endpoint} status=${status ?? 'n/a'} code=${code ?? 'none'}]: ${msg}`,
-      );
+      // -1121 "Invalid symbol" is an EXPECTED outcome for assets Binance
+      // doesn't list (long-tail / delisted coins, or a bare quote currency).
+      // It's not an operational fault, so keep it out of the warn stream —
+      // otherwise the signal cron, which probes hundreds of symbols, floods
+      // the logs. Genuine failures still warn.
+      const isInvalidSymbol = code === -1121 || /invalid symbol/i.test(msg || '');
+      if (isInvalidSymbol) {
+        this.logger.debug(
+          `makePublicRequest: no Binance market [endpoint=${endpoint} code=${code ?? 'none'}]: ${msg}`,
+        );
+      } else {
+        this.logger.warn(
+          `makePublicRequest failed [endpoint=${endpoint} status=${status ?? 'n/a'} code=${code ?? 'none'}]: ${msg}`,
+        );
+      }
       throw new BinanceApiException(
         humanMsg,
         code !== undefined ? `BINANCE_${code}` : 'BINANCE_PUBLIC_REQUEST_FAILED',
@@ -1016,6 +1028,14 @@ export class BinanceService {
     startTime?: number,
     endTime?: number,
   ): Promise<CandlestickDto[]> {
+    // A bare quote/stablecoin symbol (e.g. "USDT") has no valid self-quoted
+    // market — callers form "USDT"+"USDT"→"USDT", which Binance 400s as
+    // "Invalid symbol". Short-circuit to empty so we don't burn a request or
+    // emit log noise; callers treat [] as "no candles".
+    if ((symbol || '').toUpperCase().replace(/USDT$/i, '') === '') {
+      return [];
+    }
+
     try {
       const params: Record<string, any> = {
         symbol,
@@ -1042,6 +1062,15 @@ export class BinanceService {
         closeTime: kline[6],
       }));
     } catch (error: any) {
+      // Unknown / delisted symbol → Binance -1121 "Invalid symbol". Expected
+      // for assets Binance doesn't cover; return empty instead of throwing so
+      // the signal cron treats it as no-data rather than a 500 cascade.
+      if (
+        error instanceof BinanceApiException &&
+        /invalid symbol/i.test(error.message || '')
+      ) {
+        return [];
+      }
       if (error instanceof BinanceApiException || error instanceof BinanceRateLimitException) {
         throw error;
       }

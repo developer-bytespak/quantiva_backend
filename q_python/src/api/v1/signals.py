@@ -4,6 +4,7 @@ Signal API endpoints for generating trading signals.
 from fastapi import APIRouter, HTTPException, Body
 from typing import Dict, Any, Optional
 import logging
+import os
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
@@ -16,6 +17,16 @@ router = APIRouter(prefix="/signals", tags=["Signals"])
 # Thread pool for CPU-intensive signal generation
 # This prevents blocking the async event loop
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="signal_gen_")
+
+# Back-pressure guard. The 10-min signal cron fans ~1000 calls at this endpoint;
+# if NestJS ever bursts harder (e.g. a retry storm) the queued requests + their
+# 218KB responses + per-request engine state pile up and push RSS past the 4GB
+# cgroup limit -> OOM. Above this many in-flight /generate requests we shed load
+# with HTTP 503 (the cron's Promise.allSettled treats it as a per-asset miss,
+# not a crash) so memory stays bounded. Tunable via SIGNAL_MAX_INFLIGHT.
+_MAX_INFLIGHT = int(os.getenv("SIGNAL_MAX_INFLIGHT", "16"))
+_inflight = 0
+_inflight_lock = asyncio.Lock()
 
 
 def _generate_signal_sync(request_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -71,14 +82,27 @@ async def generate_signal(request_data: Dict[str, Any] = Body(...)):
     Returns:
     Complete signal with all engine scores, action, and position sizing
     """
+    global _inflight
+    # Shed load *before* doing any heavy work if we're already at capacity.
+    async with _inflight_lock:
+        if _inflight >= _MAX_INFLIGHT:
+            raise HTTPException(
+                status_code=503,
+                detail="Signal service at capacity, retry shortly",
+            )
+        _inflight += 1
+
     try:
         # Run CPU-intensive signal generation in thread pool
         # This prevents blocking the event loop so KYC requests can be processed
         loop = asyncio.get_event_loop()
         signal = await loop.run_in_executor(_executor, _generate_signal_sync, request_data)
-        
+
         return signal
-        
+
     except Exception as e:
         logger.error(f"Error generating signal: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        async with _inflight_lock:
+            _inflight -= 1
