@@ -22,6 +22,7 @@
     "kyc:state": "ts-node scripts/check-kyc-state.ts"
   },
   "dependencies": {
+    "@apple/app-store-server-library": "^3.1.0",
     "@google/generative-ai": "^0.24.1",
     "@nestjs/bullmq": "^10.2.3",
     "@nestjs/common": "^10.4.22",

@@ -1133,6 +1133,123 @@ export class SubscriptionsService implements OnModuleInit {
     return this.finalizeCancellationLocal(existing.subscription_id, finalPeriodEnd);
   }
 
+  // ──────────────────────────────────────────────────────────────────────
+  // Apple In-App Purchase lifecycle
+  //
+  // Apple subscriptions are stored in user_subscriptions exactly like Stripe:
+  //   billing_provider = 'apple'
+  //   external_id      = Apple originalTransactionId (stable per subscription)
+  // so feature-gating (users.current_tier) and all downstream side-effects are
+  // shared. These helpers are the Apple analogs of the Stripe handlers above.
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Find the local subscription row backing an Apple originalTransactionId.
+   */
+  async findAppleSubscription(originalTransactionId: string) {
+    return this.prisma.user_subscriptions.findFirst({
+      where: { billing_provider: 'apple', external_id: originalTransactionId },
+    });
+  }
+
+  /**
+   * Revoke an Apple subscription → downgrade to FREE.
+   * Used for EXPIRED / GRACE_PERIOD_EXPIRED / REFUND / REVOKE notifications.
+   * Mirrors handleStripeSubscriptionCancelled, including affiliate clawback.
+   */
+  async handleAppleSubscriptionCancelled(
+    originalTransactionId: string,
+    finalPeriodEnd?: Date | null,
+  ) {
+    const existing = await this.findAppleSubscription(originalTransactionId);
+
+    if (!existing) {
+      return null;
+    }
+
+    if (existing.status === SubscriptionStatus.cancelled) {
+      return existing;
+    }
+
+    const periodEnd =
+      finalPeriodEnd ??
+      existing.current_period_end ??
+      existing.expires_at ??
+      new Date();
+
+    const result = await this.finalizeCancellationLocal(
+      existing.subscription_id,
+      periodEnd,
+    );
+
+    // Affiliate clawback parity with Stripe — only fires if the latest succeeded
+    // payment is within the configured refund_clawback_days window.
+    try {
+      await this.affiliateCommissionService.clawbackForSubscriptionIfRecent({
+        subscriptionId: existing.subscription_id,
+      });
+    } catch (err: any) {
+      this.logger.error(
+        `Affiliate clawback failed for Apple subscription ${existing.subscription_id}: ${err?.message}`,
+      );
+    }
+
+    return result;
+  }
+
+  /**
+   * Extend an Apple subscription on DID_RENEW / SUBSCRIBED. Keeps the tier
+   * active and pushes out the period/expiry to Apple's new expiresDate. Does NOT
+   * change tier (renewals stay on the same product).
+   */
+  async applyAppleRenewal(originalTransactionId: string, expiresDate: Date) {
+    const existing = await this.findAppleSubscription(originalTransactionId);
+    if (!existing) {
+      return null;
+    }
+
+    const now = new Date();
+    const updated = await this.prisma.user_subscriptions.update({
+      where: { subscription_id: existing.subscription_id },
+      data: {
+        status: SubscriptionStatus.active,
+        current_period_start: existing.current_period_end ?? now,
+        current_period_end: expiresDate,
+        expires_at: expiresDate,
+        next_billing_date: expiresDate,
+        last_payment_date: now,
+        cancelled_at: null,
+      },
+    });
+
+    // Re-assert the cached tier in case a prior EXPIRED had dropped it to FREE
+    // (e.g. resubscribe after lapse).
+    await this.prisma.users.update({
+      where: { user_id: updated.user_id },
+      data: { current_tier: updated.tier },
+    });
+
+    this.clearSubscriptionCache(updated.user_id);
+    return updated;
+  }
+
+  /**
+   * Update auto-renew flag on DID_CHANGE_RENEWAL_STATUS. Access is unchanged —
+   * the user keeps the tier until expiry; only the renewal intent changes.
+   */
+  async setAppleAutoRenew(originalTransactionId: string, autoRenew: boolean) {
+    const existing = await this.findAppleSubscription(originalTransactionId);
+    if (!existing) {
+      return null;
+    }
+    const updated = await this.prisma.user_subscriptions.update({
+      where: { subscription_id: existing.subscription_id },
+      data: { auto_renew: autoRenew },
+    });
+    this.clearSubscriptionCache(updated.user_id);
+    return updated;
+  }
+
   private async finalizeCancellationLocal(subscriptionId: string, finalPeriodEnd: Date) {
     const now = new Date();
     const plan = await this.prisma.subscription_plans.findFirst({

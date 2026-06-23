@@ -13,6 +13,7 @@ import { AffiliateAdminModule } from './modules/affiliate-admin/affiliate-admin.
 import { SubscriptionLoaderMiddleware } from './common/middleware/subscription-loader.middleware';
 import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 import { StripeModule } from './modules/stripe/stripe.module';
+import { AppleIapModule } from './modules/apple-iap/apple-iap.module';
 import { KycModule } from './kyc/kyc.module';
 import { ExchangesModule } from './modules/exchanges/exchanges.module';
 import { BinanceTestnetModule } from './modules/binance-testnet/binance-testnet.module';
@@ -114,6 +115,7 @@ import { AlertsModule } from './modules/alerts/alerts.module';
     OptionsModule,
     SubscriptionsModule,
     StripeModule,
+    AppleIapModule,
     TradeFeesModule,
     BinanceModule,
     QhqTokenModule,
