@@ -2100,16 +2100,33 @@ export class ExchangesService {
         // guard applies to this entry point only — the strategies paper-trading
         // flow calls AlpacaService.placeOrder directly and is untouched.
         if (this.alpacaService.isAlpacaCryptoSymbol(symbol)) {
-          throw new HttpException(
-            {
-              success: false,
-              code: 'ALPACA_CRYPTO_NOT_SUPPORTED',
-              message:
-                'Crypto trading is not supported on your Alpaca connection. Use a Binance, Binance.US, or Bybit connection for crypto orders.',
-              symbol,
+          // isAlpacaCryptoSymbol decides purely from the symbol string, so it
+          // false-positives on real stock tickers that collide with crypto base
+          // symbols (e.g. SOL=Emeren, LINK=Interlink, ATOM=Atomera). Confirm
+          // against the asset universe before blocking: if an active stock asset
+          // exists with this symbol, it's a genuine stock order — let it through.
+          // Crypto formats (BTC/USD, BTCUSDT) won't match a bare stock ticker,
+          // so genuine crypto orders stay blocked.
+          const stockAsset = await this.prisma.assets.findFirst({
+            where: {
+              symbol: symbol.toUpperCase(),
+              asset_type: 'stock',
+              is_active: true,
             },
-            HttpStatus.BAD_REQUEST,
-          );
+            select: { asset_id: true },
+          });
+          if (!stockAsset) {
+            throw new HttpException(
+              {
+                success: false,
+                code: 'ALPACA_CRYPTO_NOT_SUPPORTED',
+                message:
+                  'Crypto trading is not supported on your Alpaca connection. Use a Binance, Binance.US, or Bybit connection for crypto orders.',
+                symbol,
+              },
+              HttpStatus.BAD_REQUEST,
+            );
+          }
         }
         placedOrder = await this.alpacaService.placeOrder(
           symbol,

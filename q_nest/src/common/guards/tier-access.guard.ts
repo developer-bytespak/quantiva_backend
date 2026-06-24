@@ -53,11 +53,28 @@ export class TierAccessGuard implements CanActivate {
       : allowedTiers;
 
     if (!effectiveAllowed.includes(userTier)) {
+      const requiredPlans = allowedTiers.map(formatPlanName);
+      const requiredText =
+        requiredPlans.length === 1
+          ? `the ${requiredPlans[0]} subscription plan`
+          : `one of these subscription plans: ${requiredPlans.join(', ')}`;
+
       throw new ForbiddenException(
-        `This feature requires one of: ${allowedTiers.join(', ')}. You have ${userTier}.`,
+        `This feature requires ${requiredText}. You're currently on the ${formatPlanName(userTier)} subscription plan. Please upgrade to continue.`,
       );
     }
 
     return true;
   }
+}
+
+/**
+ * Converts a raw tier identifier (e.g. "ELITE_PLUS") into a human-friendly
+ * subscription plan name (e.g. "Elite Plus").
+ */
+function formatPlanName(tier: string): string {
+  return tier
+    .split('_')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(' ');
 }
