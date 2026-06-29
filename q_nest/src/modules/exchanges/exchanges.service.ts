@@ -2141,13 +2141,15 @@ export class ExchangesService {
         throw new Error(`Unsupported exchange: ${connection.exchange.name}`);
       }
     } catch (err: any) {
-      // In the closePosition flow on Binance, a filter rejection (MIN_NOTIONAL
-      // / LOT_SIZE) just means "position is pure dust, can't use spot order
-      // book". Don't fail — swallow it and let the Convert step below clean
-      // the dust. For any other error, or for non-Binance, rethrow.
+      // In the closePosition flow on Binance / Binance.US, a filter rejection
+      // (MIN_NOTIONAL / LOT_SIZE) just means "position is pure dust, can't use
+      // spot order book". Don't fail — swallow it and let the dust-conversion
+      // step below clean it. For any other error, or for exchanges without a
+      // dust path (Bybit, Alpaca), rethrow.
       const isFilterError =
         isClosePosition &&
-        exchangeService instanceof BinanceService &&
+        (exchangeService instanceof BinanceService ||
+          exchangeService instanceof BinanceUSService) &&
         this.isBinanceFilterError(err);
       if (!isFilterError) throw err;
       sellFailedWithFilterError = err?.message || 'Binance filter rejected';
@@ -2177,24 +2179,33 @@ export class ExchangesService {
       }
     }
 
-    // --- Close-position post-step: sweep LOT_SIZE dust (Binance only) ---
+    // --- Close-position post-step: sweep LOT_SIZE dust (Binance / Binance.US) ---
     // The market SELL above floors quantity to LOT_SIZE step, so a tiny
     // residual always remains. Dashboard and leaderboard are balance-based
     // (any balance > 0 = position still shown), so leftover dust makes the
     // position appear stuck "open" even after a successful close. We always
     // await the sweep — fire-and-forget meant errors went unnoticed and dust
-    // remained unswept. Binance Convert is tried first; if it can't process
-    // the dust (sub-minimum, unsupported asset), Dust-to-BNB is the fallback.
+    // remained unswept.
+    //   - Binance (global): Convert → USDT, falling back to Dust-to-BNB.
+    //   - Binance.US: single /sapi/v1/asset/dust call (no Convert endpoint
+    //     exists there), targeting USDT.
+    // Both expose convertDustToUsdt() with the same contract.
+    const dustService =
+      exchangeService instanceof BinanceService
+        ? this.binanceService
+        : exchangeService instanceof BinanceUSService
+          ? this.binanceUSService
+          : null;
     let convertResult: {
       ok: boolean;
       toAmount?: number;
       reason?: string;
       method?: string;
     } | null = null;
-    if (isClosePosition && exchangeService instanceof BinanceService) {
+    if (isClosePosition && dustService) {
       const baseAsset = this.extractBaseAsset(symbol);
       if (baseAsset) {
-        convertResult = await this.binanceService
+        convertResult = await dustService
           .convertDustToUsdt(apiKey, apiSecret, baseAsset)
           .catch((err) => ({ ok: false, reason: err?.message || 'convert threw' }));
 
@@ -2305,7 +2316,9 @@ export class ExchangesService {
     const body = err?.response ?? err?.getResponse?.() ?? null;
     const code = body && typeof body === 'object' ? (body as any).code : undefined;
     const codeStr = code !== undefined ? String(code) : '';
-    if (codeStr === 'BINANCE_-1013') return true;
+    // -1013 is the spot filter-failure code on both global Binance and
+    // Binance.US (the latter tags it BINANCE_US_-1013).
+    if (codeStr === 'BINANCE_-1013' || codeStr === 'BINANCE_US_-1013') return true;
     const msg = ((body && typeof body === 'object' ? (body as any).message : '') || err?.message || '').toString().toUpperCase();
     return (
       msg.includes('FILTER FAILURE') ||

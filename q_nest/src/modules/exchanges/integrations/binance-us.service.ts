@@ -288,6 +288,172 @@ export class BinanceUSService {
   }
 
   /**
+   * Binance.US dust sweeper used after a close-position market SELL — the
+   * Binance.US counterpart of BinanceService.convertDustToUsdt, but built
+   * against Binance.US's *different* dust API:
+   *   - GET  /sapi/v1/asset/query/dust-assets?toAsset=<target> → which holdings
+   *     are convertible right now. Binance.US only lists assets whose value is
+   *     inside its $0.01–$20 dust window, so this doubles as the eligibility
+   *     gate, and its `withinRestrictedTime` flag reflects the 6h cooldown.
+   *   - POST /sapi/v1/asset/dust  with fromAsset[]=…&toAsset=<target> → convert.
+   *
+   * Unlike global Binance there is NO /sapi/v1/convert endpoint here, so this
+   * single dust call is the only programmatic path — but it CAN target USDT
+   * directly (global can only dust-to-BNB). Mirrors the global method's
+   * contract: returns `{ ok, toAmount, reason, method }` and never throws.
+   *
+   * Note: this clears ordinary residual dust ($0.01–$20). Sub-cent dust (below
+   * Binance.US's $0.01 floor) has no API path on Binance.US either and will
+   * return ok:false with a clear reason.
+   */
+  async convertDustToUsdt(
+    apiKey: string,
+    apiSecret: string,
+    fromAsset: string,
+    toAsset: string = 'USDT',
+  ): Promise<{
+    ok: boolean;
+    toAmount?: number;
+    reason?: string;
+    method?: 'dust' | 'none';
+  }> {
+    const requested = fromAsset.toUpperCase();
+    const target = toAsset.toUpperCase();
+    try {
+      // Step 1: ask Binance.US which assets are convertible to `target` right
+      // now. The response only includes holdings inside the $0.01–$20 dust
+      // window, so membership here IS the eligibility check.
+      const eligible = await this.fetchDustConvertibleAssets(apiKey, apiSecret, target);
+
+      // 6h cooldown: if we're inside the restricted window the POST will be
+      // rejected — bail early with a clear reason rather than burning a doomed
+      // call (and the user's cooldown) on it.
+      if (eligible.withinRestrictedTime) {
+        return {
+          ok: false,
+          method: 'none',
+          reason: 'within Binance.US 6h dust-conversion cooldown',
+        };
+      }
+
+      if (!eligible.assets.some((a) => a.fromAsset === requested)) {
+        this.logger.log(
+          `Dust-convert ${requested}→${target}: not on Binance.US convertible list ` +
+            `(eligible=${eligible.assets.length}). Skipping — value is likely below ` +
+            `Binance.US's $0.01 minimum or above its $20 dust ceiling.`,
+        );
+        return {
+          ok: false,
+          method: 'none',
+          reason: 'asset not dust-convertible per Binance.US (outside $0.01–$20)',
+        };
+      }
+
+      // Step 2: bundle every convertible asset into the single allowed call.
+      // Binance.US gates conversions behind a 6h cooldown, so we clear as much
+      // dust as possible at once — same batching rationale as the global path.
+      const assetList = Array.from(
+        new Set<string>([requested, ...eligible.assets.map((a) => a.fromAsset)]),
+      );
+      this.logger.log(
+        `Dust-convert ${requested}→${target}: eligible=${eligible.assets.length}, batch=[${assetList.join(', ')}]`,
+      );
+
+      const result = await this.postDustConvert(apiKey, apiSecret, assetList, target);
+      const transferred = parseFloat(result?.totalTransferred ?? '0') || 0;
+      this.logger.log(
+        `Dust-convert success: [${assetList.join(', ')}] → ${transferred} ${target} (after fees)`,
+      );
+      return { ok: true, toAmount: transferred, method: 'dust' };
+    } catch (err: any) {
+      // Surface auth / rate-limit distinctly so the caller doesn't misread them
+      // as "dust simply unavailable".
+      const reason = err?.message || 'unknown error';
+      this.logger.warn(`convertDustToUsdt(${requested}) failed: ${reason}`);
+      return { ok: false, method: 'none', reason };
+    }
+  }
+
+  /**
+   * GET /sapi/v1/asset/query/dust-assets — lists the assets currently
+   * convertible to `toAsset` (only those inside Binance.US's $0.01–$20 dust
+   * window) plus the `withinRestrictedTime` cooldown flag. Returns an empty,
+   * non-restricted result on failure so the caller fails closed (treats the
+   * asset as not convertible) rather than attempting a doomed POST.
+   */
+  private async fetchDustConvertibleAssets(
+    apiKey: string,
+    apiSecret: string,
+    toAsset: string,
+  ): Promise<{
+    assets: Array<{ fromAsset: string; usdValue: number }>;
+    withinRestrictedTime: boolean;
+  }> {
+    try {
+      const result = await this.makeSignedRequest(
+        '/sapi/v1/asset/query/dust-assets',
+        apiKey,
+        apiSecret,
+        { toAsset: toAsset.toUpperCase() },
+      );
+      const rows = Array.isArray(result?.convertibleAssets) ? result.convertibleAssets : [];
+      return {
+        assets: rows.map((r: any) => ({
+          fromAsset: String(r?.fromAsset || '').toUpperCase(),
+          usdValue: parseFloat(r?.usdValueConvertedAsset ?? '0') || 0,
+        })),
+        withinRestrictedTime: result?.withinRestrictedTime === true,
+      };
+    } catch (err: any) {
+      this.logger.warn(`fetchDustConvertibleAssets failed: ${err?.message ?? err}`);
+      return { assets: [], withinRestrictedTime: false };
+    }
+  }
+
+  /**
+   * POST /sapi/v1/asset/dust — converts the listed assets' dust to `toAsset`.
+   * `fromAsset` is a repeated query param (fromAsset=BTC&fromAsset=ETH), which
+   * the object form of URLSearchParams used elsewhere can't produce (it would
+   * coerce the array to one comma-joined value), so we build the signed query
+   * manually with append().
+   */
+  private async postDustConvert(
+    apiKey: string,
+    apiSecret: string,
+    fromAssets: string[],
+    toAsset: string,
+  ): Promise<any> {
+    const serverTime = await this.getBinanceServerTime();
+    const params = new URLSearchParams();
+    for (const a of fromAssets) params.append('fromAsset', a);
+    params.append('toAsset', toAsset);
+    params.append('timestamp', serverTime.toString());
+    params.append('recvWindow', '60000');
+
+    const queryString = params.toString();
+    const signature = this.createSignature(queryString, apiSecret);
+    const url = `/sapi/v1/asset/dust?${queryString}&signature=${signature}`;
+
+    try {
+      const response = await this.apiClient.post(url, null, {
+        headers: { 'X-MBX-APIKEY': apiKey },
+      });
+      return response.data;
+    } catch (error: any) {
+      if (error.response?.data?.code) {
+        const code = error.response.data.code;
+        const msg = error.response.data.msg || 'Binance.US dust convert error';
+        if (code === -2015 || code === -1022) throw new InvalidApiKeyException(msg);
+        if (code === -1003) throw new BinanceRateLimitException(msg);
+        throw new BinanceApiException(msg, `BINANCE_US_${code}`);
+      }
+      throw new BinanceApiException(
+        error.response?.data?.msg || error.message || 'Failed to convert dust on Binance.US',
+      );
+    }
+  }
+
+  /**
    * Maps account info to balance DTO (helper to avoid redundant API calls)
    */
   mapAccountToBalance(accountInfo: BinanceAccountInfo): AccountBalanceDto {
