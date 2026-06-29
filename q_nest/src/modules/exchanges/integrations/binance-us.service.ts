@@ -352,19 +352,49 @@ export class BinanceUSService {
       // Step 2: bundle every convertible asset into the single allowed call.
       // Binance.US gates conversions behind a 6h cooldown, so we clear as much
       // dust as possible at once — same batching rationale as the global path.
+      //
+      // NEVER include the target asset itself: the dust-assets list can return
+      // a small balance of the target (a few dollars of USDT is itself "dust"),
+      // but asking Binance.US to convert USDT→USDT is rejected as "This asset is
+      // not supported" — and it fails the WHOLE batch atomically.
       const assetList = Array.from(
         new Set<string>([requested, ...eligible.assets.map((a) => a.fromAsset)]),
-      );
+      ).filter((a) => a && a !== target);
+
+      if (assetList.length === 0) {
+        return {
+          ok: true,
+          toAmount: 0,
+          method: 'none',
+          reason: 'nothing to convert (only the target asset was eligible)',
+        };
+      }
+
       this.logger.log(
         `Dust-convert ${requested}→${target}: eligible=${eligible.assets.length}, batch=[${assetList.join(', ')}]`,
       );
 
-      const result = await this.postDustConvert(apiKey, apiSecret, assetList, target);
-      const transferred = parseFloat(result?.totalTransferred ?? '0') || 0;
-      this.logger.log(
-        `Dust-convert success: [${assetList.join(', ')}] → ${transferred} ${target} (after fees)`,
-      );
-      return { ok: true, toAmount: transferred, method: 'dust' };
+      // Try the full bundle first; if it's rejected (one sibling asset may be
+      // unsupported, and Binance.US fails the batch atomically), fall back to
+      // converting ONLY the asset the user is closing so their position still
+      // clears. A rejected call performs no conversion, so the 6h cooldown is
+      // not consumed and the retry is safe.
+      const batches = assetList.length > 1 ? [assetList, [requested]] : [assetList];
+      let lastReason: string | undefined;
+      for (const batch of batches) {
+        try {
+          const result = await this.postDustConvert(apiKey, apiSecret, batch, target);
+          const transferred = parseFloat(result?.totalTransferred ?? '0') || 0;
+          this.logger.log(
+            `Dust-convert success: [${batch.join(', ')}] → ${transferred} ${target} (after fees)`,
+          );
+          return { ok: true, toAmount: transferred, method: 'dust' };
+        } catch (err: any) {
+          lastReason = err?.message || 'dust convert failed';
+          this.logger.warn(`Dust-convert batch [${batch.join(', ')}] failed: ${lastReason}`);
+        }
+      }
+      return { ok: false, method: 'none', reason: lastReason };
     } catch (err: any) {
       // Surface auth / rate-limit distinctly so the caller doesn't misread them
       // as "dust simply unavailable".
