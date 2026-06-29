@@ -123,9 +123,13 @@ export class AppleIapController {
       );
     }
 
-    // If it's already linked to THIS user, treat as a refresh (the expected
-    // path for restore, and idempotent for a repeated verify).
-    if (linked && linked.user_id === userId) {
+    // If it's already linked to THIS user with the SAME product, treat as a
+    // refresh (the expected path for restore, and idempotent for a repeated
+    // verify). A *different* product on the same originalTransactionId means an
+    // in-group upgrade/crossgrade (e.g. Pro → Elite) — Apple keeps the same
+    // originalTransactionId across that change, so fall through to update the
+    // tier instead of only bumping the expiry.
+    if (linked && linked.user_id === userId && linked.plan_id === plan.plan_id) {
       const refreshed = await this.subscriptionsService.applyAppleRenewal(
         originalTransactionId,
         expiresDate,
@@ -133,18 +137,31 @@ export class AppleIapController {
       return this.buildResponse(refreshed ?? linked, true);
     }
 
-    // 5. Cross-provider overlap guard (decision: same block rule as Stripe).
-    //    Block if the user already has an active non-FREE subscription from any
-    //    provider that isn't this Apple transaction.
-    const activeSub = await this.prisma.user_subscriptions.findFirst({
-      where: { user_id: userId, status: 'active' },
-    });
-    if (activeSub && activeSub.tier !== PlanTier.FREE) {
-      throw new BadRequestException('Cancel your current subscription.');
+    // 5. Cross-provider overlap guard. When a user buys another plan in the same
+    //    Apple subscription group, Apple AUTOMATICALLY cancels the prior plan and
+    //    pro-rates a refund — so an existing Apple subscription is fine to replace
+    //    in place, and an in-group upgrade keeps the same originalTransactionId
+    //    (handled above / via the linked row below). Only a web/Stripe
+    //    subscription must be cancelled by the user first; Apple cannot touch it.
+    //    Skip the guard entirely when this Apple transaction is already linked to
+    //    the user (the upgrade path).
+    if (!linked) {
+      const activeStripeSub = await this.prisma.user_subscriptions.findFirst({
+        where: { user_id: userId, status: 'active', billing_provider: 'stripe' },
+      });
+      if (activeStripeSub && activeStripeSub.tier !== PlanTier.FREE) {
+        throw new BadRequestException(
+          'Please cancel your existing subscription on web first',
+        );
+      }
     }
 
-    // 6. Create or update the subscription (mirrors the Stripe webhook).
-    const existing = await this.subscriptionsService.getActiveSubscriptionWithFeatures(userId);
+    // 6. Create or update the subscription (mirrors the Stripe webhook). Prefer
+    //    the Apple-linked row when it exists (in-group upgrade), otherwise the
+    //    user's current active subscription (e.g. a different-group Apple sub that
+    //    Apple already cancelled, or an existing FREE row), else create a new one.
+    const existing =
+      linked ?? (await this.subscriptionsService.getActiveSubscriptionWithFeatures(userId));
     let subscription;
     if (existing) {
       subscription = await this.subscriptionsService.updateSubscription(existing.subscription_id, {
