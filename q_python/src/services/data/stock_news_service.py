@@ -202,8 +202,12 @@ class StockNewsService:
 
     # Hard ceiling on distinct cached keys. Bounds memory even if the symbol
     # universe is large; entries past MAX_STALE_SECS are useless anyway since
-    # _read_cache refuses to return them.
-    _CACHE_MAX_ENTRIES = 500
+    # _read_cache refuses to return them. Must comfortably exceed the active
+    # stock universe (~540) so the cache doesn't thrash and re-fetch every run —
+    # at 500 it was smaller than the universe, which defeated the 24h TTL and
+    # burned the StockNews monthly quota. (Now keyed by symbol only, so one
+    # entry per ticker.)
+    _CACHE_MAX_ENTRIES = 1500
 
     def _put_cache(self, key: str, items: List[Dict[str, Any]]) -> None:
         """Write a cache entry and opportunistically evict.
@@ -373,13 +377,16 @@ class StockNewsService:
         """
         if not self.finnhub_api_key:
             raise RuntimeError("FINNHUB_API_KEY not configured")
-        # Narrow window: only surface news from the last 2 days so the AI
-        # insights "Latest" feed doesn't show week-old articles. Finnhub
-        # sorts by recency, and callers cap results further via `limit`.
+        # 7-day window. As the fallback (used heavily whenever StockNews is
+        # unavailable — e.g. monthly quota exhausted), a narrow 2-day window
+        # returned 0 items for the many less-covered tickers, leaving the
+        # sentiment/event-risk engines with no news at all. A week is wide
+        # enough that most tickers surface something while still recent; Finnhub
+        # sorts by recency and callers cap results further via `limit`.
         now = datetime.now(timezone.utc)
         window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         from datetime import timedelta as _td
-        window_start = window_start - _td(days=2)
+        window_start = window_start - _td(days=7)
         params = {
             "symbol": symbol.upper(),
             "from": window_start.strftime("%Y-%m-%d"),
@@ -467,24 +474,32 @@ class StockNewsService:
         gate blocking the call. The cache is source-agnostic so callers see
         a consistent shape regardless of which upstream served the data.
         """
-        cache_key = f"{symbol.upper()}_{limit}"
+        # Cache by SYMBOL ONLY (not symbol+limit). The SentimentEngine asks for
+        # limit=50 and the EventRiskEngine for limit=100 on the SAME ticker, so
+        # keying by limit produced two separate cache entries — and therefore
+        # two StockNewsAPI calls per stock per run. Keying by symbol lets the
+        # first fetch serve both callers. We over-fetch a generous fixed count
+        # (StockNews bills per CALL, not per item, so this is free) and slice to
+        # each caller's `limit` on return.
+        cache_key = symbol.upper()
+        fetch_items = max(limit, 100)
 
         # 1. Fresh cache — source-agnostic, works for both SNAPI and Finnhub data
         fresh, stale = self._read_cache(cache_key)
         if fresh is not None:
             self._bump("cache_hits")
-            return fresh
+            return fresh[:limit]
 
         self._bump("cache_misses")
 
-        fallback_fn = lambda: self._fetch_news_via_finnhub_company(symbol, limit)
+        fallback_fn = lambda: self._fetch_news_via_finnhub_company(symbol, fetch_items)
 
         # 2. If StockNewsAPI is unconfigured, go straight to Finnhub
         if not self.api_key:
             self.logger.info(
                 "STOCK_NEWS_API_KEY not configured; using Finnhub fallback directly"
             )
-            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)[:limit]
 
         # 3. Respect our own quota gate. If blocked, go to Finnhub.
         if not self._gate.try_acquire():
@@ -492,25 +507,25 @@ class StockNewsService:
             self.logger.warning(
                 f"StockNews quota exhausted for {symbol}; trying Finnhub fallback"
             )
-            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)[:limit]
 
         # 4. Primary: StockNewsAPI
         try:
             params = {
                 "tickers": symbol.upper(),
-                "items": str(limit) if limit else (items or "10"),
+                "items": str(fetch_items),
                 "token": self.api_key,
             }
             self.logger.info(f"Fetching news for {symbol} from StockNewsAPI...")
             response = requests.get(self.BASE_URL, params=params, timeout=30)
             response.raise_for_status()
             data = response.json()
-            news_items = self._parse_articles(data, limit)
+            news_items = self._parse_articles(data, fetch_items)
 
             self._bump("calls_made")
             self._put_cache(cache_key, news_items)
             self.logger.info(f"Fetched {len(news_items)} news items for {symbol}")
-            return news_items
+            return news_items[:limit]
 
         except requests.exceptions.HTTPError as e:
             status = getattr(e.response, "status_code", None) if hasattr(e, "response") else None
@@ -524,15 +539,15 @@ class StockNewsService:
                 self.logger.error(
                     f"HTTPError fetching stock news for {symbol}: {e}; trying Finnhub fallback"
                 )
-            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)[:limit]
         except requests.exceptions.RequestException as e:
             self.logger.error(
                 f"Network error fetching stock news for {symbol}: {e}; trying Finnhub fallback"
             )
-            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)[:limit]
         except Exception as e:
             self.logger.error(f"Unexpected error fetching stock news: {e}", exc_info=True)
-            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)[:limit]
 
     def fetch_company_news(self, symbol: str, limit: int = 50) -> List[Dict[str, Any]]:
         """Alias for fetch_news."""
@@ -563,14 +578,14 @@ class StockNewsService:
             self.logger.info(
                 "STOCK_NEWS_API_KEY not configured; using Finnhub fallback for general news"
             )
-            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)[:limit]
 
         if not self._gate.try_acquire():
             self._bump("blocked_by_quota")
             self.logger.warning(
                 "StockNews quota exhausted for general news; trying Finnhub fallback"
             )
-            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)[:limit]
 
         try:
             tickers_str = ",".join(t.upper() for t in popular_tickers)
@@ -602,15 +617,15 @@ class StockNewsService:
                 self.logger.error(
                     f"HTTPError fetching general stock news: {e}; trying Finnhub fallback"
                 )
-            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)[:limit]
         except requests.exceptions.RequestException as e:
             self.logger.error(
                 f"Network error fetching general stock news: {e}; trying Finnhub fallback"
             )
-            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)[:limit]
         except Exception as e:
             self.logger.error(f"Unexpected error: {e}", exc_info=True)
-            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)
+            return self._serve_fallback_or_stale(cache_key, stale, fallback_fn)[:limit]
 
 
 # --------------------------------------------------------------------------

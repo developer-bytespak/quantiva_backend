@@ -17,6 +17,11 @@ interface RunHeartbeat {
   hold: number;
   sell: number;
   failed: number;
+  // Every engine final_score this run, for calibrating the stock BUY threshold.
+  // Stocks fire almost no BUYs (the cutoff is 0.5 vs 0.3 for crypto); logging the
+  // distribution shows where scores actually land so the threshold can be set
+  // from data instead of guessed.
+  scores: number[];
 }
 
 @Injectable()
@@ -144,7 +149,7 @@ export class StockSignalsCronjobService {
       // Step 4: Process each stock through sentiment analysis and signal generation
       let processedCount = 0;
       let errorCount = 0;
-      const heartbeat: RunHeartbeat = { buy: 0, hold: 0, sell: 0, failed: 0 };
+      const heartbeat: RunHeartbeat = { buy: 0, hold: 0, sell: 0, failed: 0, scores: [] };
 
       // Process stocks in batches
       for (let i = 0; i < stocksToProcess.length; i += this.BATCH_SIZE) {
@@ -186,6 +191,7 @@ export class StockSignalsCronjobService {
       this.logger.log(
         `Engine heartbeat: BUY=${heartbeat.buy} HOLD=${heartbeat.hold} SELL=${heartbeat.sell} failed=${heartbeat.failed} (HOLD/SELL not persisted)`,
       );
+      this.logScoreDistribution(heartbeat.scores);
     } catch (error: any) {
       this.logger.error(`Fatal error in stock signals generation: ${error.message}`, error.stack);
     } finally {
@@ -412,6 +418,8 @@ export class StockSignalsCronjobService {
       if (signalData.action === 'BUY') heartbeat.buy++;
       else if (signalData.action === 'SELL') heartbeat.sell++;
       else heartbeat.hold++;
+      const fs = Number(signalData.final_score);
+      if (Number.isFinite(fs)) heartbeat.scores.push(fs);
     }
     // Track C — new-signal alert: notify holders when a brand-new BUY is persisted.
     // Fire-and-forget so it never blocks or breaks signal generation.
@@ -592,6 +600,46 @@ export class StockSignalsCronjobService {
       market_cap: 100000000,
       price_change_24h: 0,
     };
+  }
+
+  /**
+   * Logs the distribution of this run's engine final_scores so the stock BUY
+   * threshold can be calibrated from real data. The current cutoff is 0.5
+   * (crypto's is 0.3); the percentiles show where scores actually land, and the
+   * "BUYs at candidate thresholds" line shows exactly how many signals each
+   * candidate cutoff would have produced this run.
+   */
+  private logScoreDistribution(scores: number[]): void {
+    if (!scores.length) {
+      this.logger.log('Stock final_score distribution: no scores this run');
+      return;
+    }
+    const sorted = [...scores].sort((a, b) => a - b);
+    const n = sorted.length;
+    const pct = (p: number) => sorted[Math.min(n - 1, Math.floor((p / 100) * n))];
+    const mean = sorted.reduce((s, v) => s + v, 0) / n;
+    const above = (t: number) => sorted.filter((v) => v > t).length;
+
+    // Coarse histogram across [-1, 1] in 0.2-wide buckets (only non-empty shown).
+    const edges = [-1, -0.8, -0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6, 0.8, 1];
+    const hist: string[] = [];
+    for (let i = 0; i < edges.length - 1; i++) {
+      const lo = edges[i];
+      const hi = edges[i + 1];
+      const last = i === edges.length - 2;
+      const c = sorted.filter((v) => v >= lo && (last ? v <= hi : v < hi)).length;
+      if (c > 0) hist.push(`[${lo.toFixed(1)},${hi.toFixed(1)})=${c}`);
+    }
+
+    this.logger.log(
+      `Stock final_score distribution (n=${n}): min=${sorted[0].toFixed(3)} ` +
+        `p25=${pct(25).toFixed(3)} median=${pct(50).toFixed(3)} mean=${mean.toFixed(3)} ` +
+        `p75=${pct(75).toFixed(3)} p95=${pct(95).toFixed(3)} max=${sorted[n - 1].toFixed(3)}`,
+    );
+    this.logger.log(
+      `Stock BUYs at candidate thresholds: >0.5(current)=${above(0.5)} >0.4=${above(0.4)} ` +
+        `>0.35=${above(0.35)} >0.3(crypto)=${above(0.3)} | histogram: ${hist.join(' ')}`,
+    );
   }
 
   /**
