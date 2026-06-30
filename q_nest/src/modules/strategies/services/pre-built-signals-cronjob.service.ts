@@ -46,6 +46,14 @@ export class PreBuiltSignalsCronjobService {
   private readonly BATCH_SIZE = 5; // Process 5 assets at a time
   private readonly LLM_LIMIT = 10; // Generate LLM for top 10 signals per strategy
   private isRunning = false; // Prevent concurrent executions
+  private runStartedAt = 0; // When the in-flight run started (watchdog)
+  // Watchdog ceiling. A healthy run completes in ~50–60 min, so anything past
+  // this is almost certainly hung. Without it, a single stuck run (e.g. an
+  // untimed DB await) latches isRunning=true forever and the cron silently dies
+  // until the next deploy — exactly the 18h crypto-signal outage on 2026-06-29.
+  // At 120 min we never trip a legitimately slow run, but recover within ~2h
+  // instead of never.
+  private readonly MAX_RUN_MS = 120 * 60 * 1000;
 
   constructor(
     private prisma: PrismaService,
@@ -168,10 +176,25 @@ export class PreBuiltSignalsCronjobService {
       return;
     }
     if (this.isRunning) {
-      return;
+      const elapsed = Date.now() - this.runStartedAt;
+      if (elapsed < this.MAX_RUN_MS) {
+        this.logger.warn(
+          `Pre-built (crypto) run still in progress after ${Math.round(elapsed / 1000)}s — skipping this tick`,
+        );
+        return;
+      }
+      // Watchdog: the previous run has blown past the max runtime and is almost
+      // certainly hung. Clear the latch and start fresh so the cron self-heals
+      // instead of silently dying until the next deploy.
+      this.logger.error(
+        `Pre-built (crypto) run stuck for ${Math.round(elapsed / 1000)}s (> ${this.MAX_RUN_MS / 1000}s) — forcing a fresh run.`,
+      );
     }
 
     this.isRunning = true;
+    this.runStartedAt = Date.now();
+    const startTime = Date.now();
+    this.logger.log('Starting pre-built (crypto) signals generation');
 
     try {
       // CRITICAL: this cron runs against trending CRYPTO assets only. Without
@@ -232,8 +255,9 @@ export class PreBuiltSignalsCronjobService {
 
       // Heartbeat: how the engine decided across pre-built + custom this run.
       // Only `buy` rows are persisted to strategy_signals; the rest are visible only here.
+      const duration = Date.now() - startTime;
       this.logger.log(
-        `Engine heartbeat (crypto): BUY=${heartbeat.buy} HOLD=${heartbeat.hold} SELL=${heartbeat.sell} failed=${heartbeat.failed} (HOLD/SELL not persisted)`,
+        `Engine heartbeat (crypto): BUY=${heartbeat.buy} HOLD=${heartbeat.hold} SELL=${heartbeat.sell} failed=${heartbeat.failed} (HOLD/SELL not persisted) — completed in ${duration}ms`,
       );
     } catch (error: any) {
       this.logger.error(`Fatal error in pre-built signals generation: ${error.message}`, error.stack);
