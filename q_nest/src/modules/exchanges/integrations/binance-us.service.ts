@@ -329,10 +329,14 @@ export class BinanceUSService {
       // rejected — bail early with a clear reason rather than burning a doomed
       // call (and the user's cooldown) on it.
       if (eligible.withinRestrictedTime) {
+        this.logger.log(
+          `Dust-convert ${requested}→${target}: skipped — within Binance.US 6h dust-conversion cooldown (one conversion per 6h per account).`,
+        );
         return {
           ok: false,
           method: 'none',
-          reason: 'within Binance.US 6h dust-conversion cooldown',
+          reason:
+            "Binance.US allows only one dust conversion every 6 hours, and this account's window was used recently — try again later.",
         };
       }
 

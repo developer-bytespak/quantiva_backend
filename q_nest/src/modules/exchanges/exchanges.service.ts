@@ -2236,17 +2236,23 @@ export class ExchangesService {
           time: Date.now(),
         } as OrderDto;
       } else {
-        // No sell, no convert — nothing to return. Throw the original filter
-        // error so the user's modal shows a clear reason.
+        // Spot sell was rejected (dust) AND dust conversion didn't clear it.
+        // When a conversion was actually attempted (Binance / Binance.US),
+        // surface WHY it failed (e.g. the 6h cooldown) instead of the raw
+        // spot-filter "increase your quantity" message, which is misleading for
+        // a sub-minimum dust position the user can't simply size up.
+        const message =
+          convertResult && !convertResult.ok
+            ? `This position is below the exchange's minimum order size, so it can only be cleared by dust conversion — which couldn't run right now: ${
+                convertResult.reason ?? 'unknown reason'
+              }`
+            : sellFailedWithFilterError ||
+              'Could not close position: spot sell was rejected and dust conversion is unavailable.';
         throw new HttpException(
           {
             success: false,
             code: 'CLOSE_POSITION_FAILED',
-            message:
-              sellFailedWithFilterError ||
-              `Could not close position: spot sell was rejected and dust conversion is unavailable${
-                convertResult?.reason ? ` (${convertResult.reason})` : ''
-              }.`,
+            message,
           },
           HttpStatus.BAD_REQUEST,
         );
