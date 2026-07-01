@@ -93,7 +93,7 @@ COINGECKO_QUOTA_STATE_PATH = os.getenv(
 # StockNewsAPI quota & cache (defaults stay safely under the 50k/month Premium plan)
 STOCKNEWS_RPM_LIMIT = int(os.getenv("STOCKNEWS_RPM_LIMIT", "20"))
 STOCKNEWS_MONTHLY_BUDGET = int(os.getenv("STOCKNEWS_MONTHLY_BUDGET", "40000"))
-STOCKNEWS_CACHE_TTL_SECS = int(os.getenv("STOCKNEWS_CACHE_TTL_SECS", "7200"))  # 2h
+STOCKNEWS_CACHE_TTL_SECS = int(os.getenv("STOCKNEWS_CACHE_TTL_SECS", "21600"))  # 6h — matches the ~5-6h stock rotation cycle so each ticker is fetched ~once per rotation instead of every rotation (roughly halves StockNews usage); news stays same-day fresh
 STOCKNEWS_MAX_STALE_SECS = int(os.getenv("STOCKNEWS_MAX_STALE_SECS", "86400"))  # 24h
 STOCKNEWS_QUOTA_STATE_PATH = os.getenv(
     "STOCKNEWS_QUOTA_STATE_PATH",
