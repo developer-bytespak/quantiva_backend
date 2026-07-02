@@ -279,7 +279,8 @@ class FusionEngine(BaseEngine):
         Args:
             final_score: Combined fusion score
             event_risk_score: Event risk score
-            asset_type: 'crypto' or 'stock' (affects default thresholds)
+            asset_type: 'crypto' or 'stock' (retained for logging/context;
+                default BUY/SELL thresholds are the same for both)
             buy_threshold: Optional override; when provided, replaces the
                 asset-type default BUY cutoff.
             sell_threshold: Optional override for the SELL cutoff.
@@ -294,11 +295,15 @@ class FusionEngine(BaseEngine):
             return 'HOLD'
 
         # Per-strategy thresholds take priority; otherwise use asset-type
-        # defaults. Stocks require higher conviction (0.5) vs crypto (0.3).
+        # defaults. Stocks and crypto both use 0.3. The old stock default of 0.5
+        # sat above the 95th percentile (often above the max) of the actual
+        # stock score distribution — median ~0, p95 ~0.2–0.36 — so only 0–4
+        # stocks/run ever qualified. 0.3 lands around the top ~8% of stocks,
+        # scaling BUYs with sentiment strength instead of starving them.
         if buy_threshold is None:
-            buy_threshold = 0.5 if asset_type == 'stock' else 0.3
+            buy_threshold = 0.3
         if sell_threshold is None:
-            sell_threshold = -0.5 if asset_type == 'stock' else -0.3
+            sell_threshold = -0.3
 
         if final_score > buy_threshold:
             return 'BUY'
