@@ -27,7 +27,13 @@ interface RunHeartbeat {
 @Injectable()
 export class StockSignalsCronjobService {
   private readonly logger = new Logger(StockSignalsCronjobService.name);
-  private readonly BATCH_SIZE = 3; // Process 3 stocks at a time
+  // 6 (was 3): the 4 legacy strategies were removed (~58% fewer engine evals
+  // per stock) and the eligible universe roughly tripled after the Finnhub
+  // market-cap backfill, so throughput matters more. 6 concurrent × 200/run
+  // keeps the run time ~flat vs the old 3 × 100 (same batch count) while
+  // doubling coverage per run, ~halving the full-universe refresh cycle. Watch
+  // Python RSS for OOM; dial back to 5 or add FinBERT result caching if it climbs.
+  private readonly BATCH_SIZE = 6; // Process 6 stocks at a time
   private readonly LLM_LIMIT = 10; // Generate LLM for top 10 signals per strategy
   private isRunning = false; // Prevent concurrent executions
   private isMarketDataSyncing = false; // Prevent concurrent market data sync
@@ -94,6 +100,46 @@ export class StockSignalsCronjobService {
   }
 
   /**
+   * Hourly stale-signal cleanup.
+   *
+   * The engine deletes a BUY when it re-evaluates the (strategy, stock) pair and
+   * flips to HOLD/SELL — but with a large eligible universe and a multi-hour
+   * rotation, many pairs aren't re-visited for days, so old BUYs linger. The
+   * top-trades UI already hides signals older than 24h, but the rows pile up in
+   * the DB (hundreds of >7-day-old signals were observed) and read as stale.
+   *
+   * This retires system stock BUYs older than 48h — comfortably past the 24h
+   * display window, so a still-valid signal simply regenerates on the next
+   * rotation. signal_details / signal_explanations cascade-delete; the NOT
+   * EXISTS guards skip any signal referenced by an order/eval/options row so we
+   * never break trade history.
+   */
+  @Cron('0 * * * *') // Hourly, on the hour
+  async cleanupStaleStockSignals(): Promise<void> {
+    try {
+      const deleted = await this.prisma.$executeRawUnsafe(`
+        DELETE FROM strategy_signals ss
+        USING strategies s
+        WHERE ss.strategy_id = s.strategy_id
+          AND s.asset_type = 'stock'
+          AND s.type = 'admin'
+          AND ss.user_id IS NULL
+          AND ss.action = 'BUY'
+          AND ss.timestamp < NOW() - INTERVAL '48 hours'
+          AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.signal_id = ss.signal_id)
+          AND NOT EXISTS (SELECT 1 FROM auto_trade_evaluations e WHERE e.signal_id = ss.signal_id)
+          AND NOT EXISTS (SELECT 1 FROM options_orders oo WHERE oo.signal_id = ss.signal_id)
+          AND NOT EXISTS (SELECT 1 FROM options_signals os WHERE os.signal_id = ss.signal_id)
+      `);
+      if (deleted > 0) {
+        this.logger.log(`Stale-signal cleanup: removed ${deleted} system stock BUY signals older than 48h`);
+      }
+    } catch (error: any) {
+      this.logger.error(`Stale-signal cleanup failed: ${error.message}`);
+    }
+  }
+
+  /**
    * Scheduled job that runs every 10 minutes
    * Processes ALL stock strategies (both pre-built admin strategies and custom user strategies)
    * Fetches stocks, runs sentiment analysis, and generates signals
@@ -128,13 +174,13 @@ export class StockSignalsCronjobService {
         return;
       }
 
-      // Step 2: Fetch stocks to process (use rotation strategy to process all stocks over time)
-      // Process 50 stocks per run (every 10 minutes) to avoid overwhelming the system
-      // This ensures all ~500 stocks get processed over ~100 minutes (10 runs)
-      // Option B: at ~2,150 eligible stocks, 50/tick = ~7 hour full cycle.
-      // Bumped to 100 to halve cycle time to ~3.5 hours. Python concurrency
-      // is throttled by BATCH_SIZE below, so 100 here doesn't slam Python.
-      const stocksToProcess = await this.getStocksToProcess(100);
+      // Step 2: Fetch stocks to process (rotation by oldest-signal-first so all
+      // eligible stocks get covered over time).
+      // 200/run (was 100): after the market-cap backfill the eligible universe
+      // grew to ~2,500, so 100/run would take ~25 rotations for a full pass.
+      // 200/run with BATCH_SIZE=6 keeps the same batch count (200/6 ≈ 100/3) —
+      // i.e. similar run time — while halving the full-cycle rotation length.
+      const stocksToProcess = await this.getStocksToProcess(200);
       if (stocksToProcess.length === 0) {
         this.logger.warn('No stocks found to process, skipping signal generation');
         return;

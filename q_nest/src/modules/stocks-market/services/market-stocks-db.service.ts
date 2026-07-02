@@ -275,6 +275,56 @@ export class MarketStocksDbService {
   }
 
   /**
+   * Get market data for a specific set of asset_ids (any rank).
+   *
+   * Same shape as getAllWithAssetId, but filtered to the given ids instead of
+   * the top-N-by-market-cap. Used by the top-trades signals endpoint so a
+   * strategy's fresh signals surface regardless of the stock's market-cap rank
+   * (the old top-500 cap silently hid mid-cap index members that had signals).
+   */
+  async getStocksByAssetIds(assetIds: string[]): Promise<Array<MarketStock & { asset_id: string }>> {
+    if (!assetIds || assetIds.length === 0) return [];
+    try {
+      const stocks = await this.prisma.$queryRaw<Array<{
+        asset_id: string; symbol: string; name: string; sector: string;
+        market_cap_rank: number | null; rank: number; price_usd: number | null;
+        market_cap: number | null; volume_24h: number | null;
+        change_24h: number | null; change_percent_24h: number | null;
+      }>>`
+        SELECT
+          a.asset_id, a.symbol, a.name, a.sector, a.market_cap_rank,
+          COALESCE(mr.rank, a.market_cap_rank, 0) as rank,
+          mr.price_usd, mr.market_cap, mr.volume_24h, mr.change_24h, mr.change_percent_24h
+        FROM assets a
+        LEFT JOIN LATERAL (
+          SELECT rank, price_usd, market_cap, volume_24h, change_24h, change_percent_24h
+          FROM market_rankings WHERE asset_id = a.asset_id
+          ORDER BY rank_timestamp DESC LIMIT 1
+        ) mr ON true
+        WHERE a.asset_type = 'stock' AND a.is_active = true
+          AND a.asset_id = ANY(${assetIds}::uuid[])
+        ORDER BY a.market_cap_rank ASC NULLS LAST
+      `;
+      return stocks.map((stock) => ({
+        asset_id: stock.asset_id,
+        rank: stock.rank || stock.market_cap_rank || 0,
+        symbol: stock.symbol || '',
+        name: stock.name || stock.symbol || '',
+        sector: stock.sector || 'Unknown',
+        price: Number(stock.price_usd || 0),
+        change24h: Number(stock.change_24h || 0),
+        changePercent24h: Number(stock.change_percent_24h || 0),
+        marketCap: stock.market_cap ? Number(stock.market_cap) : null,
+        volume24h: Number(stock.volume_24h || 0),
+        dataSource: 'alpaca_fmp',
+      }));
+    } catch (error: any) {
+      this.logger.error('Failed to get stocks by asset_ids', { error: error?.message });
+      return [];
+    }
+  }
+
+  /**
    * Get stocks by symbols
    */
   async getBySymbols(symbols: string[]): Promise<MarketStock[]> {

@@ -171,10 +171,30 @@ export class StrategiesController {
     const exchangeLabel = await this.preBuiltStrategiesService.getSignalSourceLabel(userId);
 
     if (isStockStrategy) {
-      this.logger.log(`Fetching stocks for strategy: ${strategy.name} (limit: ${limitNum})`);
-      // Use the same data source as market page (market_rankings table via getAllWithAssetId)
-      // This ensures we get the same stocks available on the market page
-      assets = await this.preBuiltStrategiesService.getTopStocks(limitNum);
+      // Signals-first: load market data ONLY for the stocks that have a fresh
+      // (24h) BUY signal for this strategy. The old approach fetched the top-500
+      // stocks by market cap and then intersected with signals — which silently
+      // hid every signal whose stock ranked outside the top 500 (e.g. Russell
+      // 1000 was showing 2 of 33 real signals). Fetching by the signals' asset
+      // ids surfaces them all, regardless of market-cap rank.
+      const freshSince = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const freshSigAssets = await this.prisma.strategy_signals.findMany({
+        where: {
+          strategy_id: strategyId,
+          user_id: null,
+          action: 'BUY',
+          timestamp: { gte: freshSince },
+        },
+        select: { asset_id: true },
+        distinct: ['asset_id'],
+      });
+      const sigAssetIds = freshSigAssets.map((s) => s.asset_id);
+      this.logger.log(
+        `Strategy ${strategy.name}: ${sigAssetIds.length} stocks with a fresh 24h BUY signal`,
+      );
+      assets = sigAssetIds.length
+        ? await this.preBuiltStrategiesService.getStocksByAssetIds(sigAssetIds)
+        : [];
       this.logger.log(`Retrieved ${assets.length} stocks from market database`);
 
       // Compliance: market_rankings can be stale. Overwrite price/change/volume
