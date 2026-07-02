@@ -4,6 +4,9 @@ Orchestrates engine execution, applies strategy rules, and generates final signa
 """
 from typing import Dict, Any, Optional, List
 import logging
+import os
+import time
+import threading
 
 from ..engines.technical_engine import TechnicalEngine
 from ..engines.fundamental_engine import FundamentalEngine
@@ -17,6 +20,44 @@ from .custom_strategy_parser import CustomStrategyParser
 from .strategy_executor import StrategyExecutor
 
 logger = logging.getLogger(__name__)
+
+
+# --- Per-asset engine-result cache -------------------------------------------
+# The asset-level engines (sentiment, fundamental, event-risk, and trend for a
+# given timeframe) produce the SAME result for an asset regardless of which
+# strategy is being scored — only the fusion weights differ per strategy. The
+# stock signal cron evaluates each stock against ~2-3 index strategies back to
+# back, so previously a stock in 3 strategies ran FinBERT + candle fetches +
+# fundamentals 3× on identical data (each /signals/generate averaged ~44s).
+# Caching these results for a few minutes turns that into 1 engine pass + N
+# cheap fusions per stock — the single biggest lever on cycle time, with no
+# stocks dropped and no per-strategy behaviour change.
+#
+# Only used for SYSTEM signals (connection_id and text_data both None): user /
+# ad-hoc calls can vary the OHLCV source or pass custom text, so they always
+# recompute. Thread-safe for the 2-worker signal pool; compute runs OUTSIDE the
+# lock so a slow engine never blocks other assets.
+_ENGINE_CACHE: Dict[str, tuple] = {}
+_ENGINE_CACHE_LOCK = threading.Lock()
+_ENGINE_CACHE_TTL = float(os.getenv("ENGINE_CACHE_TTL_SECS", "300"))  # 5 min
+
+
+def _cached_engine(cacheable: bool, key: str, compute):
+    """Return a cached engine result if fresh, else compute + store it."""
+    if not cacheable:
+        return compute()
+    now = time.time()
+    with _ENGINE_CACHE_LOCK:
+        hit = _ENGINE_CACHE.get(key)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+    result = compute()  # outside the lock — engines are slow
+    with _ENGINE_CACHE_LOCK:
+        _ENGINE_CACHE[key] = (now + _ENGINE_CACHE_TTL, result)
+        if len(_ENGINE_CACHE) > 8000:  # bound memory: drop expired entries
+            for k in [k for k, (exp, _) in list(_ENGINE_CACHE.items()) if exp <= now]:
+                _ENGINE_CACHE.pop(k, None)
+    return result
 
 
 def _pass_through_engine_result(raw: Any) -> Dict[str, Any]:
@@ -117,15 +158,24 @@ class SignalGenerator:
             exchange = kwargs.get('exchange', 'binance')
             # Use asset_symbol if provided (for OHLCV fetching), otherwise use asset_id
             asset_symbol = kwargs.get('asset_symbol', asset_id)
+            timeframe = strategy_data.get('timeframe')
 
-            technical_result = self.technical_engine.calculate(
-                asset_id=asset_id,
-                asset_type=asset_type,
-                timeframe=strategy_data.get('timeframe'),
-                ohlcv_data=ohlcv_data,
-                connection_id=connection_id,
-                exchange=exchange,
-                asset_symbol=asset_symbol  # Pass symbol for OHLCV fetching
+            # Engine-result reuse (system signals only). trend/sentiment vary by
+            # timeframe; fundamental/event_risk are asset-level. See _cached_engine.
+            _cacheable = (connection_id is None) and (kwargs.get('text_data') is None)
+
+            technical_result = _cached_engine(
+                _cacheable,
+                f"trend:{asset_type}:{asset_id}:{timeframe}",
+                lambda: self.technical_engine.calculate(
+                    asset_id=asset_id,
+                    asset_type=asset_type,
+                    timeframe=timeframe,
+                    ohlcv_data=ohlcv_data,
+                    connection_id=connection_id,
+                    exchange=exchange,
+                    asset_symbol=asset_symbol,
+                ),
             )
             # When the engine has no data (e.g. OHLCV unavailable because coin
             # isn't on Binance), return score=None so fusion EXCLUDES this
@@ -146,10 +196,14 @@ class SignalGenerator:
                 }
             else:
                 try:
-                    fundamental_result = self.fundamental_engine.calculate(
-                        asset_id=asset_id,
-                        asset_type=asset_type,
-                        asset_symbol=asset_symbol  # Pass symbol for external API calls
+                    fundamental_result = _cached_engine(
+                        _cacheable,
+                        f"fund:{asset_type}:{asset_id}",
+                        lambda: self.fundamental_engine.calculate(
+                            asset_id=asset_id,
+                            asset_type=asset_type,
+                            asset_symbol=asset_symbol,
+                        ),
                     )
                     # See trend-engine comment above — null when no data, not 0.
                     engine_scores['fundamental'] = fundamental_result if fundamental_result is not None else {'score': None, 'confidence': 0.0}
@@ -200,25 +254,33 @@ class SignalGenerator:
                     'metadata': {'skipped': True, 'reason': 'skip_external_apis=True'}
                 }
             else:
-                event_risk_result = self.event_risk_engine.calculate(
-                    asset_id=asset_id,
-                    asset_type=asset_type,
-                    asset_symbol=asset_symbol  # Pass symbol for external API calls
+                event_risk_result = _cached_engine(
+                    _cacheable,
+                    f"evr:{asset_type}:{asset_id}",
+                    lambda: self.event_risk_engine.calculate(
+                        asset_id=asset_id,
+                        asset_type=asset_type,
+                        asset_symbol=asset_symbol,
+                    ),
                 )
                 engine_scores['event_risk'] = event_risk_result
-            
+
             # Sentiment Engine
             # Extract text_data from kwargs if provided
             # Also pass connection_id, exchange, and asset_symbol for MarketSignalAnalyzer to fetch OHLCV
             text_data = kwargs.get('text_data', None)
-            sentiment_result = self.sentiment_engine.calculate(
-                asset_id=asset_id,
-                asset_type=asset_type,
-                timeframe=strategy_data.get('timeframe'),
-                text_data=text_data,
-                connection_id=connection_id,
-                exchange=exchange,
-                asset_symbol=asset_symbol  # Pass symbol for OHLCV fetching
+            sentiment_result = _cached_engine(
+                _cacheable,
+                f"sent:{asset_type}:{asset_id}:{timeframe}",
+                lambda: self.sentiment_engine.calculate(
+                    asset_id=asset_id,
+                    asset_type=asset_type,
+                    timeframe=timeframe,
+                    text_data=text_data,
+                    connection_id=connection_id,
+                    exchange=exchange,
+                    asset_symbol=asset_symbol,  # Pass symbol for OHLCV fetching
+                ),
             )
             engine_scores['sentiment'] = sentiment_result
             
