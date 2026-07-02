@@ -572,6 +572,34 @@ export class PreBuiltStrategiesService implements OnModuleInit {
   }
 
   /**
+   * Market data for a specific set of asset_ids (any market-cap rank), in the
+   * same shape as getTopStocks. Used by the top-trades signals endpoint to load
+   * exactly the stocks that have a fresh signal, instead of the top-500 list.
+   */
+  async getStocksByAssetIds(assetIds: string[]) {
+    try {
+      const stocks = await this.marketStocksDbService.getStocksByAssetIds(assetIds);
+      return stocks.map(stock => ({
+        asset_id: stock.asset_id,
+        symbol: stock.symbol,
+        name: stock.name,
+        display_name: stock.name,
+        asset_type: 'stock',
+        sector: stock.sector,
+        price_usd: stock.price,
+        market_cap: stock.marketCap,
+        volume_24h: stock.volume24h,
+        price_change_24h: stock.changePercent24h,
+        price_change_24h_usd: stock.change24h,
+        market_cap_rank: stock.rank,
+      }));
+    } catch (error: any) {
+      this.logger.error(`Failed to get stocks by asset_ids: ${error?.message || error}`);
+      return [];
+    }
+  }
+
+  /**
    * Process preview for a single asset (extracted for parallel processing)
    */
   private async processAssetPreview(

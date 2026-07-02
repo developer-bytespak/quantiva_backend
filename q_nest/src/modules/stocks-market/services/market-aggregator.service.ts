@@ -3,6 +3,7 @@ import { AlpacaMarketService } from './alpaca-market.service';
 import { FmpService } from './fmp.service';
 import { MarketStock } from '../types/market.types';
 import { StockSymbol } from '../data/sp500-symbols';
+import axios from 'axios';
 
 @Injectable()
 export class MarketAggregatorService {
@@ -12,6 +13,49 @@ export class MarketAggregatorService {
     private alpacaService: AlpacaMarketService,
     private fmpService: FmpService,
   ) {}
+
+  /**
+   * Fetch market caps from FINNHUB for the given rotation batch.
+   *
+   * Replaces the old FMP source: FMP's v3 profile/quote endpoints were
+   * deprecated (Aug 2025) and now return legacy/403 errors, so market_cap was
+   * silently going NULL for the whole universe. Finnhub's /stock/profile2 is a
+   * healthy paid endpoint (marketCapitalization is in millions USD → ×1e6).
+   * Per-symbol only, so we pace under Finnhub's 60/min limit; keep the caller's
+   * rotation batch modest (a few hundred).
+   */
+  private async getFinnhubMarketCaps(
+    symbols: string[],
+  ): Promise<Map<string, { marketCap: number | null }>> {
+    const out = new Map<string, { marketCap: number | null }>();
+    const key = process.env.FINNHUB_API_KEY;
+    if (!key) {
+      this.logger.warn('FINNHUB_API_KEY not set — skipping market cap sync');
+      return out;
+    }
+    for (const sym of symbols) {
+      const s = (sym || '').toUpperCase();
+      try {
+        const resp = await axios.get('https://finnhub.io/api/v1/stock/profile2', {
+          params: { symbol: s, token: key },
+          timeout: 10000,
+        });
+        const capM = resp.data?.marketCapitalization; // millions USD
+        if (typeof capM === 'number' && capM > 0) {
+          out.set(s, { marketCap: Math.round(capM * 1e6) });
+        }
+      } catch (err: any) {
+        if (err?.response?.status === 429) await this.sleep(2000); // rate limited
+        // otherwise skip this symbol; DB retains its existing cap
+      }
+      await this.sleep(1100); // ~55/min, safely under Finnhub's 60/min
+    }
+    return out;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
 
   /**
    * Aggregate market data with FMP rotation to respect rate limits
@@ -51,14 +95,15 @@ export class MarketAggregatorService {
       let fmpSynced = 0;
       if (fmpSymbols.length > 0) {
         try {
-          fmpData = await this.fmpService.getBatchProfiles(fmpSymbols);
+          // Market caps now come from Finnhub (FMP's v3 endpoints are deprecated).
+          fmpData = await this.getFinnhubMarketCaps(fmpSymbols);
           fmpSynced = fmpData.size;
           if (fmpData.size > 0) {
-            this.logger.log(`Retrieved FMP data for ${fmpData.size}/${fmpSymbols.length} symbols (rotation batch)`);
+            this.logger.log(`Retrieved Finnhub market caps for ${fmpData.size}/${fmpSymbols.length} symbols (rotation batch)`);
           }
-        } catch (fmpError: any) {
-          this.logger.warn(`FMP data fetch failed: ${fmpError?.message}`);
-          warnings.push(`Market cap data unavailable for rotation batch: ${fmpError?.message || 'FMP API error'}`);
+        } catch (capError: any) {
+          this.logger.warn(`Finnhub market-cap fetch failed: ${capError?.message}`);
+          warnings.push(`Market cap data unavailable for rotation batch: ${capError?.message || 'Finnhub API error'}`);
         }
       }
 
