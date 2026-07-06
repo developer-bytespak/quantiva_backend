@@ -177,6 +177,24 @@ export class SuperAdminManagementService {
     };
   }
 
+  /** Returns every user's email address (deduped, non-empty) for bulk mailing. */
+  async listAllUserEmails() {
+    const users = await this.prisma.users.findMany({
+      orderBy: { created_at: 'desc' },
+      select: { email: true },
+    });
+
+    const emails = Array.from(
+      new Set(
+        users
+          .map((u) => u.email?.trim())
+          .filter((email): email is string => !!email),
+      ),
+    );
+
+    return { emails, total: emails.length };
+  }
+
   async usersAnalytics() {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
