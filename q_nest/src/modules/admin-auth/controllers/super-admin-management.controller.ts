@@ -104,6 +104,28 @@ export class SuperAdminManagementController {
     }
   }
 
+  @Get('users/emails-pdf')
+  async usersEmailsPdf(@Res() res: Response) {
+    try {
+      const pdf = await this.userSummaryPdfService.generateEmailsPdf();
+      const today = new Date().toISOString().slice(0, 10);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="quantiva-user-emails-${today}.pdf"`,
+      );
+      res.setHeader('Content-Length', pdf.length.toString());
+      res.end(pdf);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      this.logger.error(`users/emails-pdf failed: ${message}`, stack);
+      throw new InternalServerErrorException(
+        `Failed to generate user emails PDF: ${message}`,
+      );
+    }
+  }
+
   @Get('users/lookup')
   async lookupUser(@Query('email') email: string) {
     if (!email?.trim()) {

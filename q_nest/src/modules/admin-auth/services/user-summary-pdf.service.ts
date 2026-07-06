@@ -67,6 +67,7 @@ export class UserSummaryPdfService implements OnModuleDestroy {
   private readonly logger = new Logger(UserSummaryPdfService.name);
   private browser: Browser | null = null;
   private templateFn: HandlebarsTemplateDelegate | null = null;
+  private emailsTemplateFn: HandlebarsTemplateDelegate | null = null;
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -85,6 +86,53 @@ export class UserSummaryPdfService implements OnModuleDestroy {
     const summary = await this.buildUserSummary(options);
     const html = await this.renderHtml(summary);
     return this.renderPdf(html);
+  }
+
+  /** Generates a PDF listing every user's full name and email. */
+  async generateEmailsPdf(): Promise<Buffer> {
+    const users = await this.prisma.users.findMany({
+      orderBy: [{ full_name: 'asc' }, { email: 'asc' }],
+      select: { email: true, full_name: true, username: true },
+    });
+
+    const rows = users.map((u, index) => ({
+      index: index + 1,
+      email: u.email,
+      full_name: u.full_name?.trim() || u.username?.trim() || '—',
+    }));
+
+    const html = await this.renderEmailsHtml({
+      generated_at: this.formatUtc(new Date()) + ' UTC',
+      total_users: rows.length,
+      users: rows,
+    });
+    return this.renderPdf(html);
+  }
+
+  private formatUtc(d: Date): string {
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(
+      d.getUTCDate(),
+    ).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}:${String(
+      d.getUTCMinutes(),
+    ).padStart(2, '0')}`;
+  }
+
+  private async renderEmailsHtml(data: {
+    generated_at: string;
+    total_users: number;
+    users: { index: number; email: string; full_name: string }[];
+  }): Promise<string> {
+    if (!this.emailsTemplateFn) {
+      const templatePath = path.join(
+        __dirname,
+        '..',
+        'templates',
+        'user-emails.hbs',
+      );
+      const source = await fs.readFile(templatePath, 'utf-8');
+      this.emailsTemplateFn = Handlebars.compile(source);
+    }
+    return this.emailsTemplateFn(data);
   }
 
   private async buildUserSummary(
