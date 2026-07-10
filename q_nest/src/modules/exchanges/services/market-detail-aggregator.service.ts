@@ -168,7 +168,7 @@ export class MarketDetailAggregatorService {
 
       // Chart data (multi-interval)
       candlesByInterval,
-      candles: dailyCandles.slice(0, 100), // backward compat
+      candles: dailyCandles.slice(-300), // backward compat; 300 so MA200 renders
 
       // CoinGecko metadata
       marketData: coinGeckoData
@@ -235,26 +235,31 @@ export class MarketDetailAggregatorService {
   ): Promise<Record<string, any[]>> {
     const candleTtl = this.cacheService.getTtlForType('candle');
 
+    // 300 candles so the chart's 200-period moving averages have enough
+    // history to render. This is embedded in the coin-detail response, which
+    // the frontend prefers over a separate fetch — 100 was too few for MA200.
+    const CHART_CANDLE_LIMIT = 300;
+
     const results = await Promise.all(
       intervals.map(async (interval) => {
         const cacheKey = CacheKeyManager.candle(connectionId, symbol, interval);
         // Normalize interval for Bybit (8h is not supported, use 6h instead)
         const normalizedInterval = this.normalizeIntervalForExchange(exchangeName, interval);
-        
+
         const candles = await this.cacheService.getOrSet(
           cacheKey,
           async () => {
             if (exchangeName === 'bybit') {
-              return this.bybitService.getCandlestickData(symbol, normalizedInterval, 100);
+              return this.bybitService.getCandlestickData(symbol, normalizedInterval, CHART_CANDLE_LIMIT);
             }
             if (exchangeName === 'alpaca') {
               const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
-              return this.alpacaService.getCandlestickData(apiKey, apiSecret, symbol, interval, 100);
+              return this.alpacaService.getCandlestickData(apiKey, apiSecret, symbol, interval, CHART_CANDLE_LIMIT);
             }
             if (exchangeName === 'binance.us' || exchangeName === 'binanceus' || exchangeName === 'binance-us') {
-              return this.binanceUSService.getCandlestickData(symbol, interval, 100);
+              return this.binanceUSService.getCandlestickData(symbol, interval, CHART_CANDLE_LIMIT);
             }
-            return this.binanceService.getCandlestickData(symbol, interval, 100);
+            return this.binanceService.getCandlestickData(symbol, interval, CHART_CANDLE_LIMIT);
           },
           candleTtl,
         );
