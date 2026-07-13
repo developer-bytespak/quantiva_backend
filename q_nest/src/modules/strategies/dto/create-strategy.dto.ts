@@ -199,6 +199,10 @@ export class CreateStrategyDto {
   target_assets?: string[] | null; // Array of asset symbols, null = all trending assets
 
   @IsOptional()
+  @IsString()
+  target_index_code?: string | null; // Option B: index to scope the strategy to, null = all trending stocks
+
+  @IsOptional()
   @IsNumber()
   @Min(0)
   @Max(1)
