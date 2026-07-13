@@ -1155,6 +1155,7 @@ export class StrategiesController {
         stop_loss_value: updateDto.stop_loss_value,
         take_profit_value: updateDto.take_profit_value,
         target_assets: updateDto.target_assets as any,
+        target_index_code: updateDto.target_index_code,
         is_active: updateDto.is_active,
         updated_at: new Date(),
       },

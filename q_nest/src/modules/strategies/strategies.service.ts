@@ -149,6 +149,7 @@ export class StrategiesService {
         take_profit_value: dto.take_profit_value,
         schedule_cron: dto.schedule_cron,
         target_assets: dto.target_assets as any,
+        target_index_code: dto.target_index_code ?? null,
         auto_trade_threshold: dto.auto_trade_threshold,
         is_active: dto.is_active ?? true,
       },
