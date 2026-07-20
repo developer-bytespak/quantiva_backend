@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { OptionsIvService } from './options-iv.service';
+import { OptionsBinanceService } from './options-binance.service';
 import { OptionsAlpacaService } from './options-alpaca.service';
 import { AlpacaMarketService } from '../../stocks-market/services/alpaca-market.service';
 import { OptionCredentials } from './options-venue.interface';
@@ -49,6 +50,7 @@ export class OptionsSignalService {
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
     private readonly ivService: OptionsIvService,
+    private readonly optionsBinance: OptionsBinanceService,
     private readonly optionsAlpaca: OptionsAlpacaService,
     private readonly alpacaMarket: AlpacaMarketService,
   ) {
@@ -151,13 +153,29 @@ export class OptionsSignalService {
     let alpacaChain: Awaited<
       ReturnType<OptionsAlpacaService['fetchOptionsChain']>
     > | null = null;
+    let binanceChain: Awaited<
+      ReturnType<OptionsBinanceService['fetchOptionsChain']>
+    > | null = null;
 
     if (venue === 'BINANCE') {
-      [spotPrice, priceData, volumeData] = await Promise.all([
+      // Binance options market data is public — no creds needed. A chain
+      // outage (eapi proxy down) returns null and we simply skip snapping,
+      // degrading to the engine's guessed contracts (no regression).
+      const [chainResult, sp, pd, vd] = await Promise.all([
+        this.optionsBinance.fetchOptionsChain(null, underlying).catch((err: any) => {
+          this.logger.warn(
+            `Could not fetch Binance chain for ${underlying}: ${err.message}`,
+          );
+          return null;
+        }),
         this.ivService.getSpotPrice(underlying),
         this.ivService.getPriceData(underlying),
         this.ivService.getVolumeData(underlying),
       ]);
+      binanceChain = chainResult;
+      spotPrice = sp;
+      priceData = pd;
+      volumeData = vd;
     } else if (venue === 'ALPACA' && alpacaCreds) {
       // getHistoricalBars sources creds from env itself and returns [] on
       // failure, so a bars outage degrades to the old neutral-only behavior.
@@ -226,6 +244,17 @@ export class OptionsSignalService {
       );
       for (const sig of data.signals) {
         await this.repriceAlpacaSignal(sig, quoteMap, alpacaCreds);
+      }
+    }
+
+    // Snap Binance signals onto real listed contracts and reprice from live
+    // quotes. The engine guesses strikes/expiries from spot + generic listing
+    // rules, so its contracts often aren't listed (e.g. a 3rd-Friday crypto
+    // weekly) — this makes the card describe a contract the user can actually
+    // trade, and resolves to the SAME contract the front-end order form picks.
+    if (venue === 'BINANCE' && binanceChain) {
+      for (const sig of data.signals) {
+        this.snapAndRepriceBinanceSignal(sig, binanceChain);
       }
     }
 
@@ -315,6 +344,102 @@ export class OptionsSignalService {
     sig.max_profit = formatUsd(risk.maxProfit);
     sig.max_loss = formatUsd(risk.maxLoss);
     // Preserve the engine's per-side ratio shapes: debit "X.X:1", credit "1:Y.Y".
+    sig.risk_reward = CREDIT_STRATEGIES.has(sig.strategy)
+      ? `1:${(risk.maxLoss / risk.maxProfit).toFixed(1)}`
+      : `${(risk.maxProfit / risk.maxLoss).toFixed(1)}:1`;
+  }
+
+  /**
+   * Snap a freshly generated Binance signal's legs onto real listed contracts,
+   * then reprice its economics from live chain quotes. The Python engine derives
+   * strikes/expiries from spot + generic listing rules and never sees Binance's
+   * actual chain, so its contracts frequently don't exist (a crypto 3rd-Friday
+   * weekly is never listed). This rewrites each leg's strike/expiry/symbol to the
+   * closest LISTED contract — nearest expiry first (expiry defines the trade's
+   * risk/reward), then nearest strike — mirroring the front-end order-form
+   * selection so the card and the executed order resolve to the same contract.
+   * Economics (max_profit / max_loss / risk_reward) are recomputed from real
+   * bid/ask via the shared risk-reward util, exactly as the Alpaca path does.
+   *
+   * Degradation is staged: a leg with no listed contract of its type leaves the
+   * whole signal untouched (no snap, engine economics kept). Once legs are
+   * snapped onto real contracts, an unquotable leg (illiquid / zero book) keeps
+   * the engine's heuristic economics but retains the real contracts — strictly
+   * better than today's guessed contract + heuristic. Mutates `sig` in place.
+   */
+  private snapAndRepriceBinanceSignal(
+    sig: any,
+    chain: { contracts?: Array<Record<string, any>> },
+  ): void {
+    const legs: any[] = Array.isArray(sig?.legs) ? sig.legs : [];
+    if (legs.length === 0) return;
+    const contracts = Array.isArray(chain?.contracts) ? chain.contracts : [];
+    if (contracts.length === 0) return;
+
+    const expiryMs = (c: { expiry?: string }) =>
+      c.expiry ? new Date(c.expiry).getTime() : NaN;
+
+    // Phase 1: resolve every leg to a real listed contract (no mutation yet, so
+    // a single untradeable leg can abort the whole signal cleanly).
+    const matches: Array<Record<string, any>> = [];
+    for (const leg of legs) {
+      const legType = String(leg.type).toUpperCase();
+      const sameType = contracts.filter(
+        (c) => String(c.type).toUpperCase() === legType,
+      );
+      if (sameType.length === 0) return; // leg untradeable on the live chain
+
+      const targetExpiryMs = leg.expiry ? new Date(leg.expiry).getTime() : NaN;
+      const nearestExpiry = Number.isNaN(targetExpiryMs)
+        ? sameType[0].expiry
+        : sameType.reduce((best, c) =>
+            Math.abs(expiryMs(c) - targetExpiryMs) <
+            Math.abs(expiryMs(best) - targetExpiryMs)
+              ? c
+              : best,
+          ).expiry;
+
+      const targetStrike = Number(leg.strike);
+      const match = sameType
+        .filter((c) => c.expiry === nearestExpiry)
+        .reduce((best, c) =>
+          Math.abs(Number(c.strike) - targetStrike) <
+          Math.abs(Number(best.strike) - targetStrike)
+            ? c
+            : best,
+        );
+      matches.push(match);
+    }
+
+    // Phase 2: rewrite legs onto the real contracts (always an improvement —
+    // the guessed contract may not exist on Binance at all).
+    legs.forEach((leg, i) => {
+      leg.strike = Number(matches[i].strike);
+      leg.expiry = matches[i].expiry;
+      leg.symbol = matches[i].symbol;
+    });
+
+    // Phase 3: reprice from live quotes — BUY legs fill at the ask, SELL legs at
+    // the bid (worst-case, same convention as the Alpaca path and the order
+    // preview). Any unquotable leg keeps the engine's heuristic economics.
+    let netPerUnit = 0;
+    for (let i = 0; i < legs.length; i++) {
+      const isBuy = String(legs[i].side).toUpperCase() === 'BUY';
+      const fill = isBuy
+        ? Number(matches[i].askPrice) || 0
+        : Number(matches[i].bidPrice) || 0;
+      if (!(fill > 0)) return;
+      netPerUnit += (isBuy ? fill : -fill) * (Number(legs[i].ratio) || 1);
+    }
+
+    const strikes = legs.map((l) => Number(l.strike));
+    if (strikes.some((k) => !(k > 0))) return;
+
+    const risk = estimateRiskReward(sig.strategy, strikes, netPerUnit);
+    if (!risk || !(risk.maxLoss > 0) || !(risk.maxProfit > 0)) return;
+
+    sig.max_profit = formatUsd(risk.maxProfit);
+    sig.max_loss = formatUsd(risk.maxLoss);
     sig.risk_reward = CREDIT_STRATEGIES.has(sig.strategy)
       ? `1:${(risk.maxLoss / risk.maxProfit).toFixed(1)}`
       : `${(risk.maxProfit / risk.maxLoss).toFixed(1)}:1`;
