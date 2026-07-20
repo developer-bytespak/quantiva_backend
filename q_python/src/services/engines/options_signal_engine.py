@@ -318,7 +318,17 @@ class OptionsSignalEngine(BaseEngine):
                     # Binance format: UNDERLYING-YYMMDD-STRIKE-C/P
                     date_part = expiry_date.replace("-", "")[2:]  # YYMMDD
                     cp = "C" if leg["type"].upper().startswith("C") else "P"
-                    leg["symbol"] = f"{underlying.upper()}-{date_part}-{int(leg['strike'])}-{cp}"
+                    # Preserve fractional strikes: int() truncated sub-$1 coins
+                    # (DOGE ~$0.24 → 0) and half-dollar strikes (XRP $0.50 → 0),
+                    # producing malformed symbols. Emit an integer when the strike
+                    # is whole, otherwise a trimmed decimal (0.24, 0.5).
+                    strike_val = leg["strike"]
+                    strike_str = (
+                        str(int(strike_val))
+                        if float(strike_val).is_integer()
+                        else ("%f" % strike_val).rstrip("0").rstrip(".")
+                    )
+                    leg["symbol"] = f"{underlying.upper()}-{date_part}-{strike_str}-{cp}"
 
             # Confidence reflects how well current conditions fit THIS strategy
             # template — not just whether IV data exists. Without per-strategy
