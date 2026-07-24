@@ -1597,15 +1597,47 @@ export class StrategiesController {
         const isStockStrategy = strategy.asset_type === 'stock';
         
         if (isStockStrategy) {
-          this.logger.warn(`Skipping realtime enrichment for stock strategy - Binance API only supports crypto`);
-          // For stock strategies, mark all as tradeable but without realtime data
-          results = results.map(r => ({
-            ...r,
-            is_tradeable: true,
-            realtime_data: null,
-            fallback_reason: 'stock_strategy_no_realtime_data',
-            note: 'Stock strategies use database prices only - realtime=true parameter ignored'
-          }));
+          // Stocks can't be quoted via Binance — use the shared Alpaca quote
+          // cache instead, same source as the pre-built stock strategies page,
+          // so custom stock strategies show the same live price/24h change.
+          const symbols = [
+            ...new Set(
+              results
+                .map((r) => r.asset?.symbol)
+                .filter((s): s is string => !!s)
+                .map((s) => s.toUpperCase()),
+            ),
+          ];
+          const quotes = symbols.length
+            ? await this.stockQuoteCacheService.getQuotes(symbols)
+            : new Map();
+
+          results = results.map((r) => {
+            const q = quotes.get((r.asset?.symbol || '').toUpperCase());
+            if (!q || !(q.price > 0)) {
+              // No live quote (unknown symbol or Alpaca outage) — fall back to
+              // database prices, same behavior as before this enrichment existed.
+              return {
+                ...r,
+                is_tradeable: true,
+                realtime_data: null,
+                fallback_reason: 'stock_quote_unavailable',
+              };
+            }
+            return {
+              ...r,
+              is_tradeable: true,
+              realtime_data: {
+                price: q.price,
+                priceChangePercent: q.changePercent24h,
+                high24h: q.dayHigh ?? null,
+                low24h: q.dayLow ?? null,
+                volume24h: q.volume24h,
+                quoteVolume24h: null,
+              },
+              fallback_reason: null,
+            };
+          });
         } else {
           // Original crypto enrichment logic
           const { BinanceService } = await import('../binance/binance.service');
