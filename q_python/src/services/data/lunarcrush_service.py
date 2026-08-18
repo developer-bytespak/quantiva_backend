@@ -543,24 +543,21 @@ class LunarCrushService:
                 if not title:
                     continue
 
-                # Retry OpenAI up to 3 times for description generation
-                description = ""
-                max_retries = 3
-                for attempt in range(max_retries):
-                    description = self._generate_description_with_openai(title, symbol)
-                    if description:
-                        break
-                    self.logger.warning(
-                        f"OpenAI failed to generate description for '{title}' "
-                        f"(attempt {attempt + 1}/{max_retries})"
-                    )
-                    time.sleep(2 ** attempt)
-
-                if not description:
-                    self.logger.warning(
-                        f"Skipping article for {symbol} (no OpenAI description): {title}"
-                    )
-                    continue
+                # Body text directly from the feed — no OpenAI call. The
+                # per-symbol topic/news endpoint returns the article body
+                # under `post_description` (confirmed via live probe), same
+                # as the general feed. Previously this path generated a
+                # description per article via OpenAI (3 attempts each),
+                # which burned the org's entire requests-per-day quota
+                # (Aug 2026 outage). Fall back to the title so FinBERT
+                # always has text and no article is dropped.
+                description = (
+                    article.get("post_description")
+                    or article.get("post_text")
+                    or article.get("description")
+                    or article.get("text")
+                    or title
+                )
 
                 news_items.append({
                     "title": title,
@@ -591,7 +588,7 @@ class LunarCrushService:
         ``fetch_coin_news``. One call populates the news for the whole AI
         insights feed — dramatically cheaper than looping per-coin.
 
-        Unlike ``fetch_coin_news``, this method does NOT invoke OpenAI to
+        Like ``fetch_coin_news``, this method does NOT invoke OpenAI to
         regenerate article descriptions; the LunarCrush topic feed already
         returns usable titles + body text, and we want to avoid the cost.
         """

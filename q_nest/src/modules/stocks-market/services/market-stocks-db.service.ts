@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { MarketStock } from '../types/market.types';
 
@@ -17,97 +18,145 @@ export class MarketStocksDbService {
    * FMP batch will keep their existing market cap data.
    */
   async upsertBatch(stocks: MarketStock[]): Promise<void> {
+    const now = new Date();
+    const CHUNK_SIZE = 50;
+
+    // One query replaces the old per-stock findFirst (~6,300 round-trips):
+    // the latest known market_cap per stock asset, used to preserve caps
+    // for stocks not covered by today's FMP rotation. Non-fatal on error —
+    // worst case those stocks lose their cached cap for one day instead of
+    // the whole sync failing.
+    const existingCaps = new Map<string, Prisma.Decimal | null>();
     try {
-      const now = new Date();
-
-      // Use longer timeout for large batches (60 seconds)
-      await this.prisma.$transaction(
-        async (tx) => {
-          for (const stock of stocks) {
-            // Upsert into assets table
-            const asset = await tx.assets.upsert({
-              where: {
-                symbol_asset_type: {
-                  symbol: stock.symbol,
-                  asset_type: 'stock',
-                },
-              },
-              update: {
-                name: stock.name,
-                sector: stock.sector,
-                is_active: true,
-                last_seen_at: now,
-                display_name: stock.name,
-                market_cap_rank: stock.rank,
-              },
-              create: {
-                symbol: stock.symbol,
-                name: stock.name,
-                asset_type: 'stock',
-                sector: stock.sector,
-                is_active: true,
-                first_seen_at: now,
-                last_seen_at: now,
-                display_name: stock.name,
-                market_cap_rank: stock.rank,
-              },
-            });
-
-            // Get existing market_rankings to preserve market_cap if new value is null
-            const existingRanking = await tx.market_rankings.findFirst({
-              where: { asset_id: asset.asset_id },
-              orderBy: { rank_timestamp: 'desc' },
-              select: { market_cap: true },
-            });
-
-            // Use new market_cap if provided, otherwise preserve existing
-            const marketCapToStore = stock.marketCap !== null 
-              ? stock.marketCap 
-              : existingRanking?.market_cap ?? null;
-
-            // Upsert into market_rankings table
-            await tx.market_rankings.upsert({
-              where: {
-                rank_timestamp_asset_id: {
-                  rank_timestamp: now,
-                  asset_id: asset.asset_id,
-                },
-              },
-              update: {
-                rank: stock.rank,
-                market_cap: marketCapToStore,
-                price_usd: stock.price,
-                volume_24h: stock.volume24h,
-                change_24h: stock.change24h,
-                change_percent_24h: stock.changePercent24h,
-              },
-              create: {
-                rank_timestamp: now,
-                asset_id: asset.asset_id,
-                rank: stock.rank,
-                market_cap: marketCapToStore,
-                price_usd: stock.price,
-                volume_24h: stock.volume24h,
-                change_24h: stock.change24h,
-                change_percent_24h: stock.changePercent24h,
-              },
-            });
-          }
-        },
-        {
-          maxWait: 60000, // 60 seconds max wait
-          timeout: 60000, // 60 seconds timeout
-        },
-      );
-
-      this.logger.log(`Successfully upserted ${stocks.length} stocks`);
+      const rows = await this.prisma.$queryRaw<
+        Array<{ asset_id: string; market_cap: Prisma.Decimal | null }>
+      >`
+        SELECT DISTINCT ON (mr.asset_id) mr.asset_id, mr.market_cap
+        FROM market_rankings mr
+        JOIN assets a ON a.asset_id = mr.asset_id
+        WHERE a.asset_type = 'stock'
+        ORDER BY mr.asset_id, mr.rank_timestamp DESC
+      `;
+      for (const r of rows) existingCaps.set(r.asset_id, r.market_cap);
     } catch (error: any) {
+      this.logger.warn(
+        `Could not preload existing market caps: ${error?.message}`,
+      );
+    }
+
+    // No global transaction: each stock's rows are independent, so nothing
+    // needs cross-stock atomicity. The previous single 60s interactive
+    // transaction (~19k sequential queries) ran within seconds of its own
+    // timeout and rolled back EVERYTHING when it crossed it — which froze
+    // stock rankings entirely for days (Aug 2026). Chunked writes commit
+    // incrementally: a partial sync beats an all-or-nothing rollback.
+    const rankingRows: Prisma.market_rankingsCreateManyInput[] = [];
+    let failed = 0;
+
+    for (let i = 0; i < stocks.length; i += CHUNK_SIZE) {
+      const chunk = stocks.slice(i, i + CHUNK_SIZE);
+      const results = await Promise.allSettled(
+        chunk.map(async (stock) => {
+          const asset = await this.prisma.assets.upsert({
+            where: {
+              symbol_asset_type: {
+                symbol: stock.symbol,
+                asset_type: 'stock',
+              },
+            },
+            update: {
+              name: stock.name,
+              sector: stock.sector,
+              is_active: true,
+              last_seen_at: now,
+              display_name: stock.name,
+              market_cap_rank: stock.rank,
+            },
+            create: {
+              symbol: stock.symbol,
+              name: stock.name,
+              asset_type: 'stock',
+              sector: stock.sector,
+              is_active: true,
+              first_seen_at: now,
+              last_seen_at: now,
+              display_name: stock.name,
+              market_cap_rank: stock.rank,
+            },
+          });
+
+          // Use new market_cap if provided, otherwise preserve existing
+          const marketCapToStore =
+            stock.marketCap !== null
+              ? stock.marketCap
+              : existingCaps.get(asset.asset_id) ?? null;
+
+          return {
+            rank_timestamp: now,
+            asset_id: asset.asset_id,
+            rank: stock.rank,
+            market_cap: marketCapToStore,
+            price_usd: stock.price,
+            volume_24h: stock.volume24h,
+            change_24h: stock.change24h,
+            change_percent_24h: stock.changePercent24h,
+          } satisfies Prisma.market_rankingsCreateManyInput;
+        }),
+      );
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          rankingRows.push(r.value);
+        } else {
+          failed++;
+          if (failed <= 3) {
+            this.logger.warn(
+              `Asset upsert failed: ${(r.reason as any)?.message}`,
+            );
+          }
+        }
+      }
+    }
+
+    // Bulk-insert today's rankings. Every row shares rank_timestamp = now,
+    // which is part of the primary key, so plain createMany is sufficient —
+    // no upsert semantics needed. skipDuplicates guards against a symbol
+    // appearing twice in the input.
+    let inserted = 0;
+    for (let i = 0; i < rankingRows.length; i += 1000) {
+      const slice = rankingRows.slice(i, i + 1000);
+      try {
+        const res = await this.prisma.market_rankings.createMany({
+          data: slice,
+          skipDuplicates: true,
+        });
+        inserted += res.count;
+      } catch (error: any) {
+        failed += slice.length;
+        this.logger.error(
+          `Failed to insert rankings chunk (${slice.length} rows): ${error?.message}`,
+        );
+      }
+    }
+
+    if (failed > 0) {
+      this.logger.warn(
+        `Stock sync completed partially: ${inserted} rankings written, ${failed} stocks failed`,
+      );
+    }
+    if (inserted === 0 && stocks.length > 0) {
+      const error = new Error(
+        `Stock sync wrote 0 of ${stocks.length} stocks`,
+      );
       this.logger.error('Failed to upsert stocks batch', {
-        error: error?.message,
+        error: error.message,
         stocksCount: stocks.length,
       });
       throw error;
     }
+
+    this.logger.log(
+      `Successfully upserted ${inserted}/${stocks.length} stocks`,
+    );
   }
 
   /**
