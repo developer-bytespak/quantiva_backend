@@ -1,7 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { MarketStock } from '../types/market.types';
+
+// Shape accepted by market_rankings.createMany. Deliberately typed locally
+// (numbers/strings, no Prisma.Decimal) so this file does not depend on the
+// `Prisma` namespace export, which is not available in every generated-client
+// setup (the Aug 2026 deploy build failed on that import).
+type RankingRow = {
+  rank_timestamp: Date;
+  asset_id: string;
+  rank: number;
+  market_cap: number | string | null;
+  price_usd: number;
+  volume_24h: number;
+  change_24h: number;
+  change_percent_24h: number;
+};
 
 @Injectable()
 export class MarketStocksDbService {
@@ -26,10 +40,10 @@ export class MarketStocksDbService {
     // for stocks not covered by today's FMP rotation. Non-fatal on error —
     // worst case those stocks lose their cached cap for one day instead of
     // the whole sync failing.
-    const existingCaps = new Map<string, Prisma.Decimal | null>();
+    const existingCaps = new Map<string, string | null>();
     try {
       const rows = await this.prisma.$queryRaw<
-        Array<{ asset_id: string; market_cap: Prisma.Decimal | null }>
+        Array<{ asset_id: string; market_cap: unknown }>
       >`
         SELECT DISTINCT ON (mr.asset_id) mr.asset_id, mr.market_cap
         FROM market_rankings mr
@@ -37,7 +51,14 @@ export class MarketStocksDbService {
         WHERE a.asset_type = 'stock'
         ORDER BY mr.asset_id, mr.rank_timestamp DESC
       `;
-      for (const r of rows) existingCaps.set(r.asset_id, r.market_cap);
+      // Decimal columns come back as Prisma.Decimal objects; store as strings
+      // (createMany accepts string for Decimal fields) to stay type-agnostic.
+      for (const r of rows) {
+        existingCaps.set(
+          r.asset_id,
+          r.market_cap == null ? null : String(r.market_cap),
+        );
+      }
     } catch (error: any) {
       this.logger.warn(
         `Could not preload existing market caps: ${error?.message}`,
@@ -50,7 +71,7 @@ export class MarketStocksDbService {
     // timeout and rolled back EVERYTHING when it crossed it — which froze
     // stock rankings entirely for days (Aug 2026). Chunked writes commit
     // incrementally: a partial sync beats an all-or-nothing rollback.
-    const rankingRows: Prisma.market_rankingsCreateManyInput[] = [];
+    const rankingRows: RankingRow[] = [];
     let failed = 0;
 
     for (let i = 0; i < stocks.length; i += CHUNK_SIZE) {
@@ -91,7 +112,7 @@ export class MarketStocksDbService {
               ? stock.marketCap
               : existingCaps.get(asset.asset_id) ?? null;
 
-          return {
+          const row: RankingRow = {
             rank_timestamp: now,
             asset_id: asset.asset_id,
             rank: stock.rank,
@@ -100,7 +121,8 @@ export class MarketStocksDbService {
             volume_24h: stock.volume24h,
             change_24h: stock.change24h,
             change_percent_24h: stock.changePercent24h,
-          } satisfies Prisma.market_rankingsCreateManyInput;
+          };
+          return row;
         }),
       );
       for (const r of results) {
