@@ -7,6 +7,7 @@ import logging
 from typing import Dict, Any
 
 from .base_llm_adapter import BaseLLMAdapter
+from .openai_circuit_breaker import breaker
 from .prompt_templates import create_signal_explanation_prompt
 
 # Try importing OpenAI
@@ -38,8 +39,10 @@ class OpenAIAdapter(BaseLLMAdapter):
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set")
         
-        # Initialize OpenAI client
-        self.client = OpenAI(api_key=api_key)
+        # Initialize OpenAI client. max_retries=1: the SDK's default
+        # backoff-retry is pointless against a daily-quota 429 and stacks
+        # seconds of dead wait onto every call.
+        self.client = OpenAI(api_key=api_key, max_retries=1)
         
         # Use gpt-4o-mini (cost-effective, high quality)
         model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -81,6 +84,13 @@ class OpenAIAdapter(BaseLLMAdapter):
         Returns:
             Dictionary with explanation, model, and confidence
         """
+        if breaker.is_open():
+            # Daily quota exhausted — fail fast so SignalExplainer's Gemini
+            # fallback takes over instead of queueing a doomed request.
+            raise RuntimeError(
+                "OpenAI circuit breaker open (daily request quota exhausted); "
+                f"retry in {breaker.seconds_remaining()}s"
+            )
         try:
             # Create prompt using template
             prompt = create_signal_explanation_prompt(
@@ -123,6 +133,7 @@ class OpenAIAdapter(BaseLLMAdapter):
             }
             
         except Exception as e:
+            breaker.record_error(e)
             logger.error(f"Error generating OpenAI explanation: {str(e)}")
             raise
 

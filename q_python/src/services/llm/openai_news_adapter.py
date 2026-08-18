@@ -13,6 +13,8 @@ except ImportError:
     OPENAI_AVAILABLE = False
     logging.getLogger(__name__).warning("OpenAI package not installed. Run: pip install openai")
 
+from .openai_circuit_breaker import breaker
+
 logger = logging.getLogger(__name__)
 
 class OpenAINewsAdapter:
@@ -22,11 +24,15 @@ class OpenAINewsAdapter:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set")
-        self.client = OpenAI(api_key=api_key)
+        # max_retries=1: the SDK's default backoff-retry is pointless against
+        # a daily-quota 429 and stacks seconds of dead wait onto every call.
+        self.client = OpenAI(api_key=api_key, max_retries=1)
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         logger.info(f"Initialized OpenAI news adapter with model: {self.model}")
 
     def generate_description(self, title: str, symbol: str) -> Optional[str]:
+        if breaker.is_open():
+            return None
         prompt = f"""Generate a brief, factual news description (1-2 sentences, max 120 characters) for this cryptocurrency news headline.\n\nCryptocurrency: {symbol}\nTitle: {title}\n\nGuidelines:\n- Be concise and professional\n- Avoid speculation\n- Focus on the main news point\n- Return ONLY the description, no other text"""
         try:
             response = self.client.chat.completions.create(
@@ -41,5 +47,6 @@ class OpenAINewsAdapter:
             description = response.choices[0].message.content.strip()
             return description[:200] if len(description) > 200 else description
         except Exception as e:
+            breaker.record_error(e)
             logger.warning(f"OpenAI failed to generate description for '{title}': {str(e)}")
             return None
