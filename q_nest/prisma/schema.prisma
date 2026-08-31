@@ -209,6 +209,11 @@ model assets {
   exchange                 String?                    @db.VarChar(20)
   signal_eligible          Boolean                    @default(true)
   primary_index_code       String?                    @db.VarChar(20)
+  dividend_yield           Decimal?                   @db.Decimal(10, 6)
+  dividend_frequency       String?                    @db.VarChar(20)
+  last_dividend_amount     Decimal?                   @db.Decimal(18, 6)
+  ex_dividend_date         DateTime?                  @db.Date
+  dividend_synced_at       DateTime?                  @db.Timestamp(6)
   market_data              asset_market_data[]
   index_memberships        index_membership[]
   asset_metrics            asset_metrics[]
@@ -224,6 +229,7 @@ model assets {
   @@unique([symbol, asset_type], name: "symbol_asset_type")
   @@index([asset_type, is_active])
   @@index([primary_index_code])
+  @@index([asset_type, dividend_synced_at])
   @@map("assets")
 }
 

@@ -1448,6 +1448,9 @@ export class ExchangesController {
       volume24h: quote.volume24h,
       marketCap: metadata?.marketCap ?? null,
       sector: metadata?.sector ?? 'Unknown',
+      dividendYield: metadata?.dividendYield ?? null,
+      dividendFrequency: metadata?.dividendFrequency ?? null,
+      exDividendDate: metadata?.exDividendDate ?? null,
       high24h: quote.dayHigh,
       low24h: quote.dayLow,
       prevClose: quote.prevClose,
@@ -1459,6 +1462,55 @@ export class ExchangesController {
       ...(quote.askSize != null && { askSize: quote.askSize }),
       ...(quote.spread != null && { spread: quote.spread }),
       ...(quote.spreadPercent != null && { spreadPercent: quote.spreadPercent }),
+    };
+  }
+
+  /**
+   * Get dividends received on the user's Alpaca account (activity type DIV).
+   * Uses the connection's own credentials; PK-prefix routing handles paper
+   * vs live automatically. Only DIV is requested, so tax-withholding lines
+   * (DIVNRA etc.) are excluded. Only available for Alpaca connections.
+   */
+  @Get('connections/:connectionId/dividends')
+  @UseGuards(ConnectionOwnerGuard)
+  @CacheControl({ maxAge: 300, public: false })
+  async getDividends(@Param('connectionId') connectionId: string) {
+    const connection = await this.exchangesService.getConnectionById(connectionId);
+    if (!connection?.exchange) {
+      throw new HttpException('Connection not found', HttpStatus.NOT_FOUND);
+    }
+    if (connection.exchange.name.toLowerCase() !== 'alpaca') {
+      throw new HttpException(
+        'Dividend history is only available for Alpaca connections',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const { apiKey, apiSecret } = await this.exchangesService.getDecryptedCredentials(connectionId);
+    const activities = await this.alpacaService.getAccountActivitiesForConnection(
+      apiKey,
+      apiSecret,
+      { activity_type: 'DIV', page_size: 100 },
+    );
+
+    // DIV rows are NonTradeActivity entries: date + net_amount, no transaction_time
+    const items = activities
+      .map((a: any) => ({
+        symbol: a.symbol || '',
+        amount: Number(a.net_amount) || 0,
+        date: a.date || null,
+      }))
+      .filter((a) => a.amount !== 0);
+
+    const currentYear = new Date().getUTCFullYear();
+    const ytdTotal = items
+      .filter((a) => a.date && new Date(a.date).getUTCFullYear() === currentYear)
+      .reduce((sum, a) => sum + a.amount, 0);
+
+    return {
+      items,
+      total: items.reduce((sum, a) => sum + a.amount, 0),
+      ytdTotal,
     };
   }
 

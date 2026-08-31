@@ -12,6 +12,12 @@ export interface MarketStock {
   changePercent24h: number;
   marketCap: number | null;
   volume24h: number;
+  /** Annual dividend yield as a percent (2.4 = 2.4%). 0 = confirmed non-payer, null/undefined = unknown. */
+  dividendYield?: number | null;
+  /** Monthly | Quarterly | Semi-Annual | Annual | Irregular */
+  dividendFrequency?: string | null;
+  /** Most recent ex-dividend date, YYYY-MM-DD */
+  exDividendDate?: string | null;
   dataSource?: string;
   timestamp?: Date;
 }

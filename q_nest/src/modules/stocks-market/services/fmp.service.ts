@@ -39,6 +39,17 @@ export interface FmpQuote {
   description?: string;
 }
 
+export interface DividendInfo {
+  /** Annual dividend yield as a percent (2.4 = 2.4%). 0 = confirmed non-payer. */
+  yieldPercent: number;
+  /** Canonical: Monthly | Quarterly | Semi-Annual | Annual | Irregular. Null when unknown. */
+  frequency: string | null;
+  lastAmount: number | null;
+  /** Most recent ex-dividend date, YYYY-MM-DD */
+  exDividendDate: string | null;
+  isPayer: boolean;
+}
+
 @Injectable()
 export class FmpService {
   private readonly logger = new Logger(FmpService.name);
@@ -125,6 +136,119 @@ export class FmpService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Get dividend info for a single symbol from the stable /dividends endpoint.
+   *
+   * Returns:
+   * - DividendInfo with isPayer=false when FMP confirms no dividend history
+   *   (empty array) — callers should still stamp dividend_synced_at so the
+   *   stock isn't refetched daily.
+   * - null on any failure (rate limit exhausted, auth error, no API key) —
+   *   callers must NOT stamp dividend_synced_at in that case.
+   *
+   * Verified Aug 2026: `yield` is already a percent (KO ≈ 2.35) and
+   * `frequency` is populated ("Quarterly", "Monthly", ...).
+   */
+  async getDividendInfo(symbol: string): Promise<DividendInfo | null> {
+    if (!this.apiKey) {
+      return null;
+    }
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await this.apiClient.get<any>('/dividends', {
+          params: { symbol, apikey: this.apiKey },
+        });
+
+        const rows: any[] = Array.isArray(response.data) ? response.data : [];
+        if (rows.length === 0) {
+          // Confirmed non-payer
+          return {
+            yieldPercent: 0,
+            frequency: null,
+            lastAmount: null,
+            exDividendDate: null,
+            isPayer: false,
+          };
+        }
+
+        // Rows come newest-first, but sort defensively by ex-date desc
+        const sorted = [...rows].sort((a, b) =>
+          String(b.date || '').localeCompare(String(a.date || '')),
+        );
+        const latest = sorted[0];
+
+        const yieldPercent = Number(latest.yield) || 0;
+        const lastAmount =
+          Number(latest.adjDividend) || Number(latest.dividend) || null;
+        const exDividendDate = latest.date
+          ? String(latest.date).slice(0, 10)
+          : null;
+
+        let frequency = this.normalizeDividendFrequency(latest.frequency);
+        if (!frequency) {
+          frequency = this.deriveDividendFrequency(sorted);
+        }
+
+        return {
+          yieldPercent,
+          frequency,
+          lastAmount,
+          exDividendDate,
+          isPayer: true,
+        };
+      } catch (err: any) {
+        const status = err?.response?.status;
+        if (status === 429 && attempt < 3) {
+          await this.sleep(Math.min(2000 * Math.pow(2, attempt - 1), 15000));
+          continue;
+        }
+        this.logger.warn(
+          `FMP dividend fetch failed for ${symbol}: ${status || err?.message}`,
+        );
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  /** Map FMP frequency strings onto the canonical set; null when unrecognized. */
+  private normalizeDividendFrequency(raw: unknown): string | null {
+    if (typeof raw !== 'string' || !raw.trim()) return null;
+    const value = raw.trim().toLowerCase();
+    if (value.startsWith('month')) return 'Monthly';
+    if (value.startsWith('quarter')) return 'Quarterly';
+    if (value.startsWith('semi')) return 'Semi-Annual';
+    if (value.startsWith('annual') || value.startsWith('year')) return 'Annual';
+    return null;
+  }
+
+  /**
+   * Fallback when FMP omits frequency: median spacing of the last 4 ex-dates.
+   * Needs at least 2 dated rows, otherwise null (yield-only display).
+   */
+  private deriveDividendFrequency(rowsNewestFirst: any[]): string | null {
+    const dates = rowsNewestFirst
+      .slice(0, 4)
+      .map((r) => new Date(r.date).getTime())
+      .filter((t) => Number.isFinite(t));
+    if (dates.length < 2) return null;
+
+    const gaps: number[] = [];
+    for (let i = 0; i < dates.length - 1; i++) {
+      gaps.push(Math.abs(dates[i] - dates[i + 1]) / (24 * 60 * 60 * 1000));
+    }
+    gaps.sort((a, b) => a - b);
+    const median = gaps[Math.floor(gaps.length / 2)];
+
+    if (median <= 45) return 'Monthly';
+    if (median <= 120) return 'Quarterly';
+    if (median <= 240) return 'Semi-Annual';
+    if (median <= 400) return 'Annual';
+    return 'Irregular';
   }
 
   /**
