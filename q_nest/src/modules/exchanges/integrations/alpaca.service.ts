@@ -978,15 +978,23 @@ export class AlpacaService {
     },
   ): Promise<any[]> {
     const client = this.getClientForKey(apiKey);
-    const res = await client.get('/v2/account/activities', {
-      headers: this.getAuthHeaders(apiKey, apiSecret),
-      params: {
-        activity_type: params?.activity_type || 'FILL',
-        direction: params?.direction || 'desc',
-        page_size: params?.page_size || 100,
-        ...params,
+    // The type filter MUST be the path segment (or `activity_types` plural).
+    // A singular `activity_type` query param is silently ignored by Alpaca
+    // and returns the FULL activity feed (fills, fees, ACH transfers) —
+    // verified Aug 2026 against a live account.
+    const activityType = params?.activity_type || 'FILL';
+    const res = await client.get(
+      `/v2/account/activities/${activityType}`,
+      {
+        headers: this.getAuthHeaders(apiKey, apiSecret),
+        params: {
+          direction: params?.direction || 'desc',
+          page_size: params?.page_size || 100,
+          ...(params?.date ? { date: params.date } : {}),
+          ...(params?.until ? { until: params.until } : {}),
+        },
       },
-    });
+    );
     return res.data || [];
   }
 
