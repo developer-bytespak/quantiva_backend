@@ -10,6 +10,7 @@ import {
 import { StocksMarketService } from './stocks-market.service';
 import { StockQuoteCacheService } from './services/stock-quote-cache.service';
 import { CacheManagerService } from './services/cache-manager.service';
+import { DividendSyncService } from './services/dividend-sync.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { alpacaTradingRateLimiter } from '../exchanges/integrations/alpaca-rate-limiter';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -25,6 +26,7 @@ export class StocksMarketController {
     private readonly stockQuoteCacheService: StockQuoteCacheService,
     private readonly cacheManager: CacheManagerService,
     private readonly prisma: PrismaService,
+    private readonly dividendSyncService: DividendSyncService,
   ) {}
 
   /**
@@ -223,6 +225,7 @@ export class StocksMarketController {
     @Query('index') index?: string,
     @Query('search') search?: string,
     @Query('sector') sector?: string,
+    @Query('payersOnly') payersOnly?: string,
     @CurrentUser() user?: TokenPayload,
   ) {
     try {
@@ -242,6 +245,7 @@ export class StocksMarketController {
         indexCode: effectiveIndex,
         search,
         sector,
+        payersOnly: payersOnly === 'true' || payersOnly === '1',
       });
 
       // Overlay live Alpaca quotes (same pattern as /stocks endpoint)
@@ -347,6 +351,33 @@ export class StocksMarketController {
 
       throw new HttpException(
         error.message || 'Failed to force sync',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * GET /api/stocks-market/force-dividend-sync
+   * Force immediate dividend data sync (for testing/admin use).
+   * Processes the next batch of stocks with missing/stale dividend data.
+   */
+  @Get('force-dividend-sync')
+  async forceDividendSync() {
+    try {
+      const result = await this.dividendSyncService.syncDividends();
+
+      return {
+        message: 'Dividend sync completed',
+        ...result,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to force dividend sync', {
+        error: error?.message,
+      });
+
+      throw new HttpException(
+        error.message || 'Failed to force dividend sync',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }

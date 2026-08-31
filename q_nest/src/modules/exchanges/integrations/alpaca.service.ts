@@ -961,6 +961,36 @@ export class AlpacaService {
   }
 
   /**
+   * Get account activities using a specific connection's credentials
+   * (per-user, unlike getAccountActivities which uses env-level keys).
+   * PK-prefix key routing picks the paper vs live base URL automatically.
+   * Used for per-user dividend history (activity_type: 'DIV').
+   */
+  async getAccountActivitiesForConnection(
+    apiKey: string,
+    apiSecret: string,
+    params?: {
+      activity_type?: string;
+      date?: string;
+      until?: string;
+      direction?: 'asc' | 'desc';
+      page_size?: number;
+    },
+  ): Promise<any[]> {
+    const client = this.getClientForKey(apiKey);
+    const res = await client.get('/v2/account/activities', {
+      headers: this.getAuthHeaders(apiKey, apiSecret),
+      params: {
+        activity_type: params?.activity_type || 'FILL',
+        direction: params?.direction || 'desc',
+        page_size: params?.page_size || 100,
+        ...params,
+      },
+    });
+    return res.data || [];
+  }
+
+  /**
    * Alpaca Data API client with given credentials (used for market data, not trading).
    * Same API keys work for data.alpaca.markets.
    */

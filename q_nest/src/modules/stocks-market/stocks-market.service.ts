@@ -21,6 +21,7 @@ export interface GetPaginatedStocksOptions {
   indexCode?: string | null;
   search?: string;
   sector?: string;
+  payersOnly?: boolean;
 }
 
 export interface PaginatedStocksResponse {
@@ -50,7 +51,7 @@ export class StocksMarketService {
   async getPaginatedStocks(
     options: GetPaginatedStocksOptions,
   ): Promise<PaginatedStocksResponse> {
-    const { page, limit, indexCode, search, sector } = options;
+    const { page, limit, indexCode, search, sector, payersOnly } = options;
 
     const { stocks, total } = await this.dbService.getPaginated({
       page,
@@ -58,6 +59,7 @@ export class StocksMarketService {
       indexCode,
       search,
       sector,
+      payersOnly,
     });
 
     return {

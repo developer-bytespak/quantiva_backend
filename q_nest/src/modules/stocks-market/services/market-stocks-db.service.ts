@@ -516,6 +516,12 @@ export class MarketStocksDbService {
       changePercent24h,
       marketCap,
       volume24h,
+      dividendYield:
+        asset.dividend_yield == null ? null : Number(asset.dividend_yield),
+      dividendFrequency: asset.dividend_frequency ?? null,
+      exDividendDate: asset.ex_dividend_date
+        ? new Date(asset.ex_dividend_date).toISOString().slice(0, 10)
+        : null,
       dataSource: 'alpaca_fmp',
     };
   }
@@ -652,6 +658,76 @@ export class MarketStocksDbService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Get stocks whose dividend data is missing or stale.
+   * Ordered by dividend_synced_at (nulls first) so the sync rotates through
+   * the universe; deliberately independent of last_seen_at, which the daily
+   * market sync bumps for every stock and so cannot drive a rotation.
+   */
+  async getStocksNeedingDividendSync(
+    limit: number = 150,
+    staleDays: number = 14,
+  ): Promise<Array<{ symbol: string }>> {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - staleDays);
+
+    try {
+      const assets = await this.prisma.assets.findMany({
+        where: {
+          asset_type: 'stock',
+          is_active: true,
+          OR: [
+            { dividend_synced_at: null },
+            { dividend_synced_at: { lt: cutoff } },
+          ],
+        },
+        select: { symbol: true },
+        orderBy: [
+          { dividend_synced_at: { sort: 'asc', nulls: 'first' } },
+          { market_cap_rank: 'asc' },
+        ],
+        take: limit,
+      });
+
+      return assets
+        .filter((a) => a.symbol)
+        .map((a) => ({ symbol: a.symbol! }));
+    } catch (error: any) {
+      this.logger.error('Failed to get stocks needing dividend sync', {
+        error: error?.message,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Store dividend info for one stock and stamp dividend_synced_at.
+   * Yield stored as a percent (2.4 = 2.4%); 0 = confirmed non-payer,
+   * NULL = never synced.
+   */
+  async updateDividendInfo(
+    symbol: string,
+    info: {
+      yieldPercent: number;
+      frequency: string | null;
+      lastAmount: number | null;
+      exDividendDate: string | null;
+    },
+  ): Promise<void> {
+    await this.prisma.assets.updateMany({
+      where: { symbol, asset_type: 'stock' },
+      data: {
+        dividend_yield: info.yieldPercent,
+        dividend_frequency: info.frequency,
+        last_dividend_amount: info.lastAmount,
+        ex_dividend_date: info.exDividendDate
+          ? new Date(info.exDividendDate)
+          : null,
+        dividend_synced_at: new Date(),
+      },
+    });
   }
 
   /**
@@ -854,8 +930,9 @@ export class MarketStocksDbService {
     indexCode?: string | null;
     search?: string;
     sector?: string;
+    payersOnly?: boolean;
   }): Promise<{ stocks: MarketStock[]; total: number }> {
-    const { page, limit, indexCode, search, sector } = params;
+    const { page, limit, indexCode, search, sector, payersOnly } = params;
     const offset = Math.max(0, (page - 1) * limit);
 
     const whereParts: string[] = [
@@ -876,6 +953,7 @@ export class MarketStocksDbService {
       );
     }
     if (sector) whereParts.push(`a.sector = '${sector.replace(/'/g, "''")}'`);
+    if (payersOnly) whereParts.push(`a.dividend_yield > 0`);
     if (search) {
       const safe = search.replace(/'/g, "''");
       whereParts.push(`(a.symbol ILIKE '%${safe}%' OR a.name ILIKE '%${safe}%')`);
@@ -896,6 +974,8 @@ export class MarketStocksDbService {
           mr.volume_24h,
           mr.change_24h,
           mr.change_percent_24h,
+          a.dividend_yield,
+          a.dividend_frequency,
           COUNT(*) OVER() AS total_count
         FROM assets a
         LEFT JOIN LATERAL (
@@ -920,6 +1000,8 @@ export class MarketStocksDbService {
         volume_24h: number | null;
         change_24h: number | null;
         change_percent_24h: number | null;
+        dividend_yield: unknown;
+        dividend_frequency: string | null;
         total_count: bigint;
       }>;
 
@@ -935,6 +1017,9 @@ export class MarketStocksDbService {
         changePercent24h: Number(stock.change_percent_24h || 0),
         marketCap: stock.market_cap ? Number(stock.market_cap) : null,
         volume24h: Number(stock.volume_24h || 0),
+        dividendYield:
+          stock.dividend_yield == null ? null : Number(stock.dividend_yield),
+        dividendFrequency: stock.dividend_frequency ?? null,
         dataSource: 'alpaca_fmp',
       }));
 
