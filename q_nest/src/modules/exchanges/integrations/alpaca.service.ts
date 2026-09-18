@@ -3,7 +3,8 @@ import axios, { AxiosInstance } from 'axios';
 import { randomUUID } from 'crypto';
 import { alpacaTradingRateLimiter } from './alpaca-rate-limiter';
 import {
-  estimateBarsStart,
+  AlpacaBarsPage,
+  fetchAlpacaBarsDesc,
   toAlpacaTimeframe,
 } from '../../../common/utils/alpaca-timeframe.util';
 
@@ -1091,25 +1092,13 @@ export class AlpacaService {
     limit: number = 100,
   ): Promise<AlpacaBarDto[]> {
     const client = this.getDataApiClient(apiKey, apiSecret);
-    const sym = symbol.toUpperCase();
-    const alpacaTf = toAlpacaTimeframe(timeframe);
-    const end = new Date();
-    const start = estimateBarsStart(alpacaTf, limit, end);
-    const requestLimit = Math.min(10000, Math.max(1, limit));
-    const res = await client.get<{ bars?: Record<string, AlpacaBarDto[]> }>('/v2/stocks/bars', {
-      params: {
-        symbols: sym,
-        timeframe: alpacaTf,
-        start: start.toISOString(),
-        end: end.toISOString(),
-        limit: requestLimit,
-        sort: 'desc',
-        adjustment: 'split',
-        feed: 'iex',
-      },
-    });
-    const bars = res.data?.bars?.[sym] ?? [];
-    return bars.slice().reverse();
+    return fetchAlpacaBarsDesc<AlpacaBarDto>(
+      async (params) =>
+        (await client.get<AlpacaBarsPage<AlpacaBarDto>>('/v2/stocks/bars', { params })).data,
+      symbol,
+      toAlpacaTimeframe(timeframe),
+      limit,
+    );
   }
 
   /**

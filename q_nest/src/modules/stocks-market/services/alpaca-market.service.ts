@@ -2,7 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
 import {
-  estimateBarsStart,
+  AlpacaBarsPage,
+  fetchAlpacaBarsDesc,
   toAlpacaTimeframe,
 } from '../../../common/utils/alpaca-timeframe.util';
 
@@ -386,36 +387,17 @@ export class AlpacaMarketService {
     limit: number = 100,
   ): Promise<AlpacaBar[]> {
     try {
-      const alpacaTimeframe = toAlpacaTimeframe(timeframe);
-      const end = new Date(); // End at "now" so we get bars up to the latest data
-      const start = estimateBarsStart(alpacaTimeframe, limit, end);
-
-      // sort=desc + exact limit returns the NEWEST `limit` bars regardless of
-      // how wide the start window is. (Ascending + a big limit returned the
-      // oldest page whenever the window held more bars than the limit.)
-      const requestLimit = Math.min(10000, Math.max(1, limit));
-
-      // Use multi-symbol endpoint for consistent response format
-      const response = await this.apiClient.get<{
-        bars: Record<string, AlpacaBar[]>;
-        next_page_token?: string;
-      }>(`/v2/stocks/bars`, {
-        params: {
-          symbols: symbol.toUpperCase(),
-          timeframe: alpacaTimeframe,
-          start: start.toISOString(),
-          end: end.toISOString(),
-          limit: requestLimit,
-          sort: 'desc',
-          adjustment: 'split', // Adjust for stock splits
-          feed: 'iex',
-        },
-      });
-
-      // Multi-symbol endpoint returns { bars: { SYMBOL: [...] } }, newest first
-      // because of sort=desc. Flip to ascending for charts and indicators.
-      const bars = response.data?.bars?.[symbol.toUpperCase()] || [];
-      return bars.slice().reverse();
+      // Newest `limit` bars (sort=desc, following pages for the coarse
+      // intraday sizes), returned oldest first. Ascending + a big limit used
+      // to return the OLDEST page whenever the window held more bars than
+      // the limit, which is what made intraday charts show stale data.
+      return await fetchAlpacaBarsDesc<AlpacaBar>(
+        async (params) =>
+          (await this.apiClient.get<AlpacaBarsPage<AlpacaBar>>('/v2/stocks/bars', { params })).data,
+        symbol,
+        toAlpacaTimeframe(timeframe),
+        limit,
+      );
     } catch (error: any) {
       this.logger.error(
         `Failed to fetch historical bars for ${symbol}: ${error?.message}`,

@@ -97,7 +97,8 @@ export function estimateBarsStart(
       break;
     }
     case 'Day':
-      calendarDays = Math.ceil(bars * parsed.n * (7 / 5)) + 10;
+      // ~252 trading days per 365 calendar days once holidays are counted.
+      calendarDays = Math.ceil(bars * parsed.n * 1.5) + 10;
       break;
     case 'Week':
       calendarDays = bars * parsed.n * 7 + 14;
@@ -109,4 +110,63 @@ export function estimateBarsStart(
 
   const startMs = now.getTime() - calendarDays * 86_400_000;
   return new Date(Math.max(startMs, EARLIEST_START));
+}
+
+/** Shape of one page of GET /v2/stocks/bars (multi-symbol form). */
+export interface AlpacaBarsPage<T> {
+  bars?: Record<string, T[]>;
+  next_page_token?: string | null;
+}
+
+/**
+ * Alpaca sizes a page of aggregated bars by the underlying minute data, so a
+ * single hourly page holds roughly 200 bars and a 4-hour page under 60,
+ * regardless of `limit`. Following a few pages is enough for the 300 bars
+ * the charts ask for; the cap keeps a pathological request bounded.
+ */
+export const MAX_ALPACA_BAR_PAGES = 8;
+
+/**
+ * Fetch the newest `limit` bars for one symbol, following `next_page_token`
+ * as needed, and return them oldest first. `fetchPage` performs one request
+ * with the given query params and returns the parsed body; callers supply it
+ * so this works with any authenticated client.
+ */
+export async function fetchAlpacaBarsDesc<T>(
+  fetchPage: (params: Record<string, string | number>) => Promise<AlpacaBarsPage<T>>,
+  symbol: string,
+  alpacaTf: string,
+  limit: number,
+  now: Date = new Date(),
+): Promise<T[]> {
+  const sym = symbol.toUpperCase();
+  const wanted = Math.min(10000, Math.max(1, limit));
+  const start = estimateBarsStart(alpacaTf, wanted, now);
+  const collected: T[] = [];
+  let pageToken: string | undefined;
+
+  for (let page = 0; page < MAX_ALPACA_BAR_PAGES && collected.length < wanted; page++) {
+    const params: Record<string, string | number> = {
+      symbols: sym,
+      timeframe: alpacaTf,
+      start: start.toISOString(),
+      end: now.toISOString(),
+      // Keep the page size constant across pages; the token encodes the
+      // cursor, and we trim any over-fetch below.
+      limit: wanted,
+      sort: 'desc',
+      adjustment: 'split',
+      feed: 'iex',
+    };
+    if (pageToken) params.page_token = pageToken;
+
+    const data = await fetchPage(params);
+    const bars = data?.bars?.[sym] ?? [];
+    collected.push(...bars);
+    if (!data?.next_page_token || bars.length === 0) break;
+    pageToken = data.next_page_token;
+  }
+
+  // Newest first because of sort=desc; keep the newest `wanted`, then flip.
+  return collected.slice(0, wanted).reverse();
 }
