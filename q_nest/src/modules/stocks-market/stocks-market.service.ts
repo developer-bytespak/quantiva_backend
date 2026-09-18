@@ -7,6 +7,7 @@ import { FmpService } from './services/fmp.service';
 import { MarketDataResponse, MarketStock } from './types/market.types';
 import SP500_SYMBOLS from './data/sp500-symbols';
 import SP500_TOP50 from './data/sp500-top50';
+import { isIntradayAlpacaTimeframe } from '../../common/utils/alpaca-timeframe.util';
 
 export interface GetMarketDataOptions {
   limit?: number;
@@ -647,8 +648,9 @@ export class StocksMarketService {
 
   /**
    * Get historical bars for candlestick chart
-   * Uses Alpaca free tier bars API
-   * Timeframes: 1Min, 5Min, 15Min, 1Hour, 1Day
+   * Uses Alpaca free tier bars API (IEX feed)
+   * Timeframes: any Alpaca bar size ([1-59]Min, [1-23]Hour, 1Day, 1Week,
+   * [1-12]Month) or the Binance-style shorthand ('1m', '4h', '1d', '1w', '1M', '1y').
    */
   async getStockBars(
     symbol: string,
@@ -664,12 +666,17 @@ export class StocksMarketService {
       low: number;
       close: number;
       volume: number;
+      /** Per-bar VWAP from Alpaca, when present. */
+      vwap?: number;
     }>;
   }> {
     try {
       const cacheKey = `stock_bars_${symbol.toUpperCase()}_${timeframe}_${limit}`;
 
-      // Check cache (5min TTL)
+      // Intraday bars go stale fast, so cache them briefly; daily and above
+      // keep the standard 5 minute TTL.
+      const ttlSeconds = isIntradayAlpacaTimeframe(timeframe) ? 45 : 300;
+
       const cached = this.cacheManager.get<any>(cacheKey);
       if (cached) {
         this.logger.log(`Returning cached bars for ${symbol}`);
@@ -691,6 +698,7 @@ export class StocksMarketService {
         low: bar.l,
         close: bar.c,
         volume: bar.v,
+        ...(typeof bar.vw === 'number' ? { vwap: bar.vw } : {}),
       }));
 
       const result = {
@@ -699,8 +707,7 @@ export class StocksMarketService {
         bars,
       };
 
-      // Cache for 5 minutes
-      this.cacheManager.setPrice(cacheKey, result);
+      this.cacheManager.set(cacheKey, result, ttlSeconds);
 
       return result;
     } catch (error: any) {

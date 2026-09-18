@@ -1,6 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
+import {
+  estimateBarsStart,
+  toAlpacaTimeframe,
+} from '../../../common/utils/alpaca-timeframe.util';
 
 export interface AlpacaQuote {
   symbol: string;
@@ -372,9 +376,9 @@ export class AlpacaMarketService {
    * Used by Python technical engine for multi-timeframe analysis
    * 
    * @param symbol Stock symbol (e.g., 'AAPL')
-   * @param timeframe Timeframe ('1d', '4h', '1h', '15m', etc.) or Alpaca format ('1Day', '1Hour')
+   * @param timeframe Timeframe ('1d', '4h', '1h', '15m', '1w', '1M', '1y') or Alpaca format ('1Day', '1Hour', '12Month')
    * @param limit Number of bars to fetch (default: 100)
-   * @returns Array of OHLCV bars
+   * @returns Array of OHLCV bars, oldest first
    */
   async getHistoricalBars(
     symbol: string,
@@ -382,14 +386,14 @@ export class AlpacaMarketService {
     limit: number = 100,
   ): Promise<AlpacaBar[]> {
     try {
-      // Map timeframe to Alpaca format (handles both lowercase and already-formatted)
-      const alpacaTimeframe = this.mapTimeframeToAlpaca(timeframe);
-      const start = this.calculateStartDate(alpacaTimeframe.toLowerCase(), limit);
+      const alpacaTimeframe = toAlpacaTimeframe(timeframe);
       const end = new Date(); // End at "now" so we get bars up to the latest data
+      const start = estimateBarsStart(alpacaTimeframe, limit, end);
 
-      // Request more bars than needed so we can slice to the last `limit` (Alpaca returns
-      // bars in ascending order from start; without end we'd get the oldest bars in the range).
-      const requestLimit = Math.min(10000, Math.max(limit, 500));
+      // sort=desc + exact limit returns the NEWEST `limit` bars regardless of
+      // how wide the start window is. (Ascending + a big limit returned the
+      // oldest page whenever the window held more bars than the limit.)
+      const requestLimit = Math.min(10000, Math.max(1, limit));
 
       // Use multi-symbol endpoint for consistent response format
       const response = await this.apiClient.get<{
@@ -402,15 +406,16 @@ export class AlpacaMarketService {
           start: start.toISOString(),
           end: end.toISOString(),
           limit: requestLimit,
+          sort: 'desc',
           adjustment: 'split', // Adjust for stock splits
           feed: 'iex',
         },
       });
 
-      // Multi-symbol endpoint returns { bars: { SYMBOL: [...] } } in ascending time order.
-      // Take the last `limit` bars so we return the most recent data (fixes 8H chart showing old data).
+      // Multi-symbol endpoint returns { bars: { SYMBOL: [...] } }, newest first
+      // because of sort=desc. Flip to ascending for charts and indicators.
       const bars = response.data?.bars?.[symbol.toUpperCase()] || [];
-      return bars.length <= limit ? bars : bars.slice(-limit);
+      return bars.slice().reverse();
     } catch (error: any) {
       this.logger.error(
         `Failed to fetch historical bars for ${symbol}: ${error?.message}`,
@@ -422,69 +427,6 @@ export class AlpacaMarketService {
       }
       return [];
     }
-  }
-
-  /**
-   * Map internal timeframe format to Alpaca API format
-   * Handles both internal format ('1d', '4h') and already-formatted ('1Day', '1Hour')
-   * @param timeframe Internal format ('1d', '4h', '1h', '15m') or Alpaca format ('1Day', '1Hour')
-   * @returns Alpaca API format ('1Day', '4Hour', '1Hour', '15Min')
-   */
-  private mapTimeframeToAlpaca(timeframe: string): string {
-    const mapping: Record<string, string> = {
-      // Lowercase internal format
-      '1d': '1Day',
-      '4h': '4Hour',
-      '1h': '1Hour',
-      '15m': '15Min',
-      '5m': '5Min',
-      '1m': '1Min',
-      // Already formatted (pass through)
-      '1Day': '1Day',
-      '4Hour': '4Hour',
-      '1Hour': '1Hour',
-      '15Min': '15Min',
-      '5Min': '5Min',
-      '1Min': '1Min',
-    };
-    
-    return mapping[timeframe] || timeframe || '1Day';
-  }
-
-  /**
-   * Calculate start date for historical bars query
-   * @param timeframe Timeframe string (lowercase format: '1d', '1h', '1day', '1hour')
-   * @param limit Number of bars
-   * @returns Start date
-   */
-  private calculateStartDate(timeframe: string, limit: number): Date {
-    const now = new Date();
-    let daysBack = 0;
-    
-    // Normalize timeframe to lowercase for comparison
-    const tf = timeframe.toLowerCase();
-
-    // Estimate days needed based on timeframe
-    if (tf === '1d' || tf === '1day') {
-      daysBack = limit + 10; // Add buffer for weekends and holidays
-    } else if (tf === '4h' || tf === '4hour') {
-      daysBack = Math.ceil((limit * 4) / 6) + 10; // ~6 trading hours/day
-    } else if (tf === '1h' || tf === '1hour') {
-      daysBack = Math.ceil(limit / 6) + 10;
-    } else if (tf === '15m' || tf === '15min') {
-      daysBack = Math.ceil(limit / 26) + 10; // ~26 15-min bars/day
-    } else if (tf === '5m' || tf === '5min') {
-      daysBack = Math.ceil(limit / 78) + 10; // ~78 5-min bars/day
-    } else if (tf === '1m' || tf === '1min') {
-      daysBack = Math.ceil(limit / 390) + 10; // ~390 1-min bars/day
-    } else {
-      daysBack = limit + 10; // Default
-    }
-
-    const startDate = new Date(now);
-    startDate.setDate(startDate.getDate() - daysBack);
-    
-    return startDate;
   }
 
   /**

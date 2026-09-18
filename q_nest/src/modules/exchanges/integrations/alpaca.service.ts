@@ -2,6 +2,10 @@ import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import { randomUUID } from 'crypto';
 import { alpacaTradingRateLimiter } from './alpaca-rate-limiter';
+import {
+  estimateBarsStart,
+  toAlpacaTimeframe,
+} from '../../../common/utils/alpaca-timeframe.util';
 
 /**
  * client_order_id prefixes used to identify orders our backend placed
@@ -64,6 +68,10 @@ export interface AlpacaBarDto {
   l: number;
   c: number;
   v: number;
+  /** Number of trades in the bar. */
+  n?: number;
+  /** Volume-weighted average price of the bar. */
+  vw?: number;
 }
 
 /**
@@ -1073,7 +1081,7 @@ export class AlpacaService {
 
   /**
    * Get historical bars for a stock from Alpaca Data API using the user's credentials.
-   * Uses end=now and returns the last `limit` bars so charts (e.g. 8H) show latest data.
+   * Requests the newest `limit` bars (sort=desc) and returns them oldest first.
    */
   async getStockBars(
     apiKey: string,
@@ -1084,10 +1092,10 @@ export class AlpacaService {
   ): Promise<AlpacaBarDto[]> {
     const client = this.getDataApiClient(apiKey, apiSecret);
     const sym = symbol.toUpperCase();
-    const alpacaTf = this.mapDataApiTimeframe(timeframe);
-    const start = this.calculateBarsStart(alpacaTf, limit);
+    const alpacaTf = toAlpacaTimeframe(timeframe);
     const end = new Date();
-    const requestLimit = Math.min(10000, Math.max(limit, 500));
+    const start = estimateBarsStart(alpacaTf, limit, end);
+    const requestLimit = Math.min(10000, Math.max(1, limit));
     const res = await client.get<{ bars?: Record<string, AlpacaBarDto[]> }>('/v2/stocks/bars', {
       params: {
         symbols: sym,
@@ -1095,12 +1103,13 @@ export class AlpacaService {
         start: start.toISOString(),
         end: end.toISOString(),
         limit: requestLimit,
+        sort: 'desc',
         adjustment: 'split',
         feed: 'iex',
       },
     });
     const bars = res.data?.bars?.[sym] ?? [];
-    return bars.length <= limit ? bars : bars.slice(-limit);
+    return bars.slice().reverse();
   }
 
   /**
@@ -1201,31 +1210,4 @@ export class AlpacaService {
     });
   }
 
-  private mapDataApiTimeframe(tf: string): string {
-    // Map Binance/Bybit-style interval strings to Alpaca's CamelCase form.
-    // Covers the full set Alpaca supports so price-performance, market-detail,
-    // and candle endpoints can request any timeframe without a second mapping.
-    const m: Record<string, string> = {
-      '1m': '1Min', '5m': '5Min', '15m': '15Min', '30m': '30Min',
-      '1h': '1Hour', '2h': '2Hour', '4h': '4Hour', '6h': '6Hour', '8h': '8Hour', '12h': '12Hour',
-      '1d': '1Day', '1w': '1Week', '1M': '1Month',
-      // Identity mappings so an already-Alpaca-formatted string passes through.
-      '1Min': '1Min', '5Min': '5Min', '15Min': '15Min', '30Min': '30Min',
-      '1Hour': '1Hour', '2Hour': '2Hour', '4Hour': '4Hour', '6Hour': '6Hour', '8Hour': '8Hour', '12Hour': '12Hour',
-      '1Day': '1Day', '1Week': '1Week', '1Month': '1Month',
-    };
-    return m[tf] ?? tf ?? '1Day';
-  }
-
-  private calculateBarsStart(alpacaTf: string, limit: number): Date {
-    const now = new Date();
-    const tf = alpacaTf.toLowerCase();
-    let daysBack = 30;
-    if (tf === '1day') daysBack = limit + 10;
-    else if (tf === '4hour' || tf === '1hour') daysBack = Math.ceil((limit * 4) / 6) + 10;
-    else if (tf === '15min' || tf === '5min' || tf === '1min') daysBack = Math.ceil((limit * 15) / (6 * 60)) + 5;
-    const d = new Date(now);
-    d.setDate(d.getDate() - daysBack);
-    return d;
-  }
 }
