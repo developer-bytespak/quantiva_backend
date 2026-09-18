@@ -1369,7 +1369,9 @@ export class ExchangesController {
    */
   @Get('connections/:connectionId/stock/:symbol/bars')
   @UseGuards(ConnectionOwnerGuard)
-  @CacheControl({ maxAge: 300, staleWhileRevalidate: 60, public: false })
+  // Short browser cache: the same route serves 1Min charts, which go stale
+  // fast. The decorator is static, so it cannot vary by timeframe.
+  @CacheControl({ maxAge: 30, staleWhileRevalidate: 15, public: false })
   async getStockBars(
     @Param('connectionId') connectionId: string,
     @Param('symbol') symbol: string,
@@ -1405,6 +1407,8 @@ export class ExchangesController {
         low: b.l,
         close: b.c,
         volume: b.v,
+        // Per-bar VWAP from Alpaca; the chart prefers it over (h+l+c)/3.
+        ...(typeof b.vw === 'number' ? { vwap: b.vw } : {}),
       })),
     };
   }

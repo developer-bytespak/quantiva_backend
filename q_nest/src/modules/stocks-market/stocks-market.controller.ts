@@ -436,8 +436,9 @@ export class StocksMarketController {
    * GET /api/stocks-market/stocks/:symbol/bars
    * Get historical bars for candlestick chart
    * Query params:
-   * - timeframe: 1Min, 5Min, 15Min, 1Hour, 1Day (default: 1Day)
-   * - limit: number of bars to return (default: 100)
+   * - timeframe: any Alpaca bar size, e.g. 1Min, 3Min, 5Min, 15Min, 1Hour,
+   *   4Hour, 1Day, 1Week, 1Month, 12Month (default: 1Day)
+   * - limit: number of bars to return, newest first then sorted ascending (default: 100)
    */
   @Get('stocks/:symbol/bars')
   async getStockBars(
