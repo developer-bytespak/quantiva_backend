@@ -39,6 +39,7 @@ function buildDeps(overrides: Partial<Record<string, any>> = {}) {
     cancelSubscriptionAtPeriodEnd: jest.fn(),
     cancelSubscriptionImmediately: jest.fn(),
     resumeSubscription: jest.fn(),
+    switchSubscriptionPrice: jest.fn(),
     getPeriodEnd: jest.fn((sub: any) => {
       const u = sub?.items?.data?.[0]?.current_period_end ?? sub?.current_period_end;
       return typeof u === 'number' ? new Date(u * 1000) : null;
@@ -325,6 +326,66 @@ describe('StripeController cancel / resume', () => {
     d.subscriptionsService.isTrialEligible.mockResolvedValue(false);
     await d.controller.createCheckout({ subscriptionUser: { user_id: USER }, body: {} } as any);
     expect(d.stripeService.createCheckoutSession).toHaveBeenLastCalledWith(expect.objectContaining({ trialDays: 0 }));
+  });
+
+  it('change-period swaps the Stripe price with no proration and syncs the row', async () => {
+    const d = buildDeps();
+    d.prisma.user_subscriptions.findFirst.mockResolvedValue({
+      subscription_id: 's1',
+      tier: 'PREMIUM',
+      billing_period: 'MONTHLY',
+      billing_provider: 'stripe',
+      external_id: 'sub_1',
+      auto_renew: true,
+      cancelled_at: null,
+      current_period_end: new Date('2026-11-01T00:00:00Z'),
+    });
+    d.stripeService.premiumPriceIdFor = jest.fn((p: string) => `price_${p.toLowerCase()}`);
+    d.stripeService.switchSubscriptionPrice = jest.fn().mockResolvedValue({ changed: true, subscription: { id: 'sub_1' } });
+    d.subscriptionsService.getPremiumPlan = jest.fn().mockResolvedValue({ plan_id: 'plan_Y', billing_period: 'YEARLY', price: '299.99' });
+    d.subscriptionsService.syncFromStripeSubscription.mockResolvedValue({
+      subscription_id: 's1',
+      next_billing_date: new Date('2026-11-01T00:00:00Z'),
+    });
+
+    const res = await d.controller.changeBillingPeriod({ subscriptionUser: { user_id: USER }, body: { billing_period: 'YEARLY' } } as any);
+
+    expect(d.stripeService.switchSubscriptionPrice).toHaveBeenCalledWith('sub_1', 'price_yearly');
+    expect(d.subscriptionsService.syncFromStripeSubscription).toHaveBeenCalledWith({ id: 'sub_1' }, expect.objectContaining({ userIdHint: USER }));
+    expect(res).toMatchObject({ billing_period: 'YEARLY', price: '299.99', effective_on: new Date('2026-11-01T00:00:00Z') });
+
+    await expect(
+      d.controller.changeBillingPeriod({ subscriptionUser: { user_id: USER }, body: { billing_period: 'MONTHLY' } } as any),
+    ).rejects.toThrow(/already billed/);
+  });
+
+  it('change-period refuses Free, Apple-billed and cancel-scheduled subscriptions', async () => {
+    const d = buildDeps();
+    d.prisma.user_subscriptions.findFirst.mockResolvedValueOnce({ tier: 'FREE' });
+    await expect(d.controller.changeBillingPeriod({ subscriptionUser: { user_id: USER }, body: { billing_period: 'YEARLY' } } as any)).rejects.toThrow(/Free plan/);
+    d.prisma.user_subscriptions.findFirst.mockResolvedValueOnce({ tier: 'PREMIUM', billing_provider: 'apple', external_id: 'o1', auto_renew: true });
+    await expect(d.controller.changeBillingPeriod({ subscriptionUser: { user_id: USER }, body: { billing_period: 'YEARLY' } } as any)).rejects.toThrow(/App Store/);
+    d.prisma.user_subscriptions.findFirst.mockResolvedValueOnce({ tier: 'PREMIUM', billing_provider: 'stripe', external_id: 'sub_1', auto_renew: false, cancelled_at: new Date(), billing_period: 'MONTHLY' });
+    await expect(d.controller.changeBillingPeriod({ subscriptionUser: { user_id: USER }, body: { billing_period: 'YEARLY' } } as any)).rejects.toThrow(/Resume/);
+    expect(d.stripeService.switchSubscriptionPrice).not.toHaveBeenCalled();
+  });
+
+  it('checkout clears a stale (test-mode or deleted) Stripe customer id and retries without it', async () => {
+    const d = buildDeps();
+    d.prisma.user_subscriptions.findFirst.mockResolvedValue({ tier: 'FREE' });
+    d.prisma.users.findUnique.mockResolvedValue({ email: 'u@example.com', stripe_customer_id: 'cus_test_old' });
+    d.stripeService.createCheckoutSession = jest
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error('No such customer'), { code: 'resource_missing', param: 'customer' }))
+      .mockResolvedValueOnce({ url: 'https://checkout', id: 'cs_3' });
+
+    const res = await d.controller.createCheckout({ subscriptionUser: { user_id: USER }, body: {} } as any);
+
+    expect(d.stripeService.createCheckoutSession).toHaveBeenCalledTimes(2);
+    expect(d.stripeService.createCheckoutSession.mock.calls[0][0]).toMatchObject({ customerId: 'cus_test_old' });
+    expect(d.stripeService.createCheckoutSession.mock.calls[1][0]).toMatchObject({ customerId: null, customerEmail: 'u@example.com' });
+    expect(d.prisma.users.update).toHaveBeenCalledWith({ where: { user_id: USER }, data: { stripe_customer_id: null } });
+    expect(res).toMatchObject({ url: 'https://checkout' });
   });
 
   it('checkout resolves the yearly price and plan when billing_period is YEARLY, and rejects bad periods', async () => {
