@@ -123,12 +123,11 @@ export class StripeController {
       this.qhqService.getPendingDiscount(userId),
     ]);
 
-    const session = await this.stripeService.createCheckoutSession({
+    const checkoutParams = {
       priceId,
       successUrl: success_url,
       cancelUrl: cancel_url,
       clientReferenceId: userId,
-      customerId: user?.stripe_customer_id ?? null,
       customerEmail: user?.email ?? null,
       metadata: {
         user_id: userId,
@@ -138,7 +137,29 @@ export class StripeController {
       },
       discountPercent: pendingDiscount?.discount_percent,
       trialDays: trialEligible ? PREMIUM_TRIAL_DAYS : 0,
-    });
+    };
+
+    let session;
+    try {
+      session = await this.stripeService.createCheckoutSession({
+        ...checkoutParams,
+        customerId: user?.stripe_customer_id ?? null,
+      });
+    } catch (err: any) {
+      // A stored customer id that Stripe does not know in this mode (e.g. one
+      // created in a sandbox before going live, or deleted in the Dashboard).
+      // Forget it and let Checkout create a fresh customer.
+      const staleCustomer =
+        !!user?.stripe_customer_id && err?.code === 'resource_missing' && err?.param === 'customer';
+      if (!staleCustomer) throw err;
+      this.logger.warn(
+        `Stripe customer ${user!.stripe_customer_id} for user ${userId} does not exist in this mode; clearing and retrying checkout`,
+      );
+      await this.prisma.users
+        .update({ where: { user_id: userId }, data: { stripe_customer_id: null } })
+        .catch(() => undefined);
+      session = await this.stripeService.createCheckoutSession({ ...checkoutParams, customerId: null });
+    }
 
     return {
       url: session.url,
@@ -278,6 +299,78 @@ export class StripeController {
       status: updated?.status ?? active.status,
       auto_renew: true,
       current_period_end: renewsOn,
+    };
+  }
+
+  /**
+   * Switch a Premium subscription between monthly / quarterly / yearly.
+   * The Stripe price is swapped with no proration and the billing anchor is
+   * kept, so nothing is charged now: the new amount bills at the current
+   * period end (or at the end of the trial), and the new interval applies
+   * from then on.
+   */
+  @Post('subscription/change-period')
+  async changeBillingPeriod(@Req() req: any) {
+    const userId = req.subscriptionUser?.user_id;
+    if (!userId) {
+      throw new UnauthorizedException('User not authenticated');
+    }
+
+    const requested = req.body?.billing_period;
+    if (!isPremiumBillingPeriod(requested)) {
+      throw new BadRequestException(`billing_period must be one of: ${PREMIUM_BILLING_PERIODS.join(', ')}`);
+    }
+
+    const active = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: userId, status: 'active' },
+    });
+    if (!active || active.tier === 'FREE') {
+      throw new BadRequestException('You are on the Free plan. Start a Premium plan first.');
+    }
+    if (active.billing_provider === 'apple') {
+      throw new BadRequestException(
+        'This subscription is billed through the App Store. Change it in iOS Settings > Subscriptions.',
+      );
+    }
+    if (active.billing_provider !== 'stripe' || !active.external_id) {
+      throw new BadRequestException('This plan cannot be changed here. Contact support.');
+    }
+    if (!active.auto_renew && active.cancelled_at) {
+      throw new BadRequestException('Resume your subscription before changing its billing period.');
+    }
+    if (active.billing_period === requested) {
+      throw new BadRequestException(`You are already billed ${requested.toLowerCase()}.`);
+    }
+
+    const plan = await this.subscriptionsService.getPremiumPlan(requested);
+    if (!plan) {
+      throw new ServiceUnavailableException('The Premium plan is not configured');
+    }
+    let priceId: string;
+    try {
+      priceId = this.stripeService.premiumPriceIdFor(requested);
+    } catch {
+      throw new ServiceUnavailableException('Stripe pricing is not configured');
+    }
+
+    const { subscription: stripeSub } = await this.stripeService.switchSubscriptionPrice(active.external_id, priceId);
+    const row = await this.subscriptionsService.syncFromStripeSubscription(stripeSub, this.syncOpts(userId));
+
+    const effectiveOn = row?.next_billing_date ?? row?.current_period_end ?? active.current_period_end;
+    const label = priceLabel(requested, plan.price as any);
+    await this.notifyUser(
+      userId,
+      'subscription_updated',
+      'Billing period updated',
+      `Your Premium plan switches to ${label} on ${formatDate(effectiveOn)}. Nothing is charged today.`,
+    );
+
+    return {
+      subscription_id: row?.subscription_id ?? active.subscription_id,
+      billing_period: requested,
+      price: plan.price,
+      effective_on: effectiveOn,
+      message: `Your plan switches to ${label} on ${formatDate(effectiveOn)}.`,
     };
   }
 
