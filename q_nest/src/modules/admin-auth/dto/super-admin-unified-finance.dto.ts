@@ -9,8 +9,8 @@ export class SuperAdminUnifiedFinanceDto {
   year?: number;
 
   @IsOptional()
-  @IsIn(['PRO', 'ELITE'])
-  plan_tier?: 'PRO' | 'ELITE';
+  @IsIn(['PREMIUM', 'PRO', 'ELITE', 'ELITE_PLUS'])
+  plan_tier?: 'PREMIUM' | 'PRO' | 'ELITE' | 'ELITE_PLUS';
 
   @IsOptional()
   @IsIn(['MONTHLY', 'QUARTERLY', 'YEARLY'])

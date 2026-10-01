@@ -32,6 +32,8 @@ model users {
   onboarding_emails_opted_out Boolean                       @default(false)
   onboarding_state            OnboardingState               @default(SIGNED_UP)
   referred_by_affiliate_id    String?                       @db.Uuid
+  /// Set the first time this account starts a paid-plan trial (or ever paid). One trial per account.
+  trial_used_at               DateTime?                     @db.Timestamp(6)
   affiliate_referral          affiliate_referrals?
   affiliate_profile           affiliates?                   @relation("AffiliateLinkedUser")
   contact_submissions         contact_submissions[]
@@ -791,6 +793,16 @@ model user_subscriptions {
   next_billing_date    DateTime?            @db.Timestamp(6)
   tier                 PlanTier
   updated_at           DateTime?            @updatedAt @db.Timestamp(6)
+  /// Trial window (Stripe trial_period_days / Apple introductory offer). Access is
+  /// "trialing" while trial_end > now. status stays `active` during a trial.
+  trial_start            DateTime?          @db.Timestamp(6)
+  trial_end              DateTime?          @db.Timestamp(6)
+  /// Idempotency for the trial-ending reminder (customer.subscription.trial_will_end).
+  trial_reminder_sent_at DateTime?          @db.Timestamp(6)
+  /// Raw provider status for diagnostics/UI: trialing | active | past_due | canceled (Stripe), grace | expired (Apple).
+  provider_status        String?            @db.VarChar(32)
+  /// Set by the one-off PREMIUM migration so it never re-notifies the same row.
+  migrated_to_premium_at DateTime?          @db.Timestamp(6)
   payment_history      payment_history[]
   subscription_usage   subscription_usage[]
   plan                 subscription_plans   @relation(fields: [plan_id], references: [plan_id])
@@ -801,6 +813,20 @@ model user_subscriptions {
   @@index([status])
   @@index([current_period_end])
   @@map("user_subscriptions")
+}
+
+/// Billing webhook idempotency ledger (Stripe event.id / Apple notificationUUID).
+/// A row is inserted before any handler runs; a duplicate insert means "already processed".
+model billing_webhook_events {
+  event_id     String    @id @db.VarChar(255)
+  provider     String    @db.VarChar(20)
+  type         String    @db.VarChar(100)
+  received_at  DateTime  @default(now()) @db.Timestamp(6)
+  processed_at DateTime? @db.Timestamp(6)
+  error        String?
+
+  @@index([provider, type])
+  @@map("billing_webhook_events")
 }
 
 model strategy_execution_jobs {
@@ -1692,6 +1718,7 @@ enum PlanTier {
   PRO
   ELITE
   ELITE_PLUS
+  PREMIUM
 }
 
 enum BillingPeriod {

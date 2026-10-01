@@ -2,8 +2,12 @@ import { Injectable, Logger, ForbiddenException, NotFoundException, BadRequestEx
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { tierSatisfies } from '../../../common/tiers';
 import { ExchangesService } from '../../exchanges/exchanges.service';
 import { OptionsBinanceService } from './options-binance.service';
+
+const OPTIONS_ACCESS_MESSAGE =
+  'Options trading requires the Premium plan. Start your 7-day free trial from Settings.';
 import { OptionsAlpacaService } from './options-alpaca.service';
 import { IOptionsVenueService, OptionCredentials } from './options-venue.interface';
 import { parseOccSymbol } from './alpaca/occ-symbol';
@@ -101,13 +105,13 @@ export class OptionsService {
   private eliteTierCache = new Map<string, { tier: string; expiresAt: number }>();
 
   /**
-   * Verify user has ELITE_PLUS subscription (cached for 30s).
+   * Verify the user's tier grants options trading (ELITE_PLUS or PREMIUM), cached for 30s.
    */
   async verifyEliteAccess(userId: string): Promise<void> {
     const cached = this.eliteTierCache.get(userId);
     if (cached && cached.expiresAt > Date.now()) {
-      if (cached.tier !== 'ELITE_PLUS') {
-        throw new ForbiddenException('Options trading is available for ELITE Plus subscribers only');
+      if (!tierSatisfies(cached.tier, 'ELITE_PLUS')) {
+        throw new ForbiddenException(OPTIONS_ACCESS_MESSAGE);
       }
       return;
     }
@@ -122,8 +126,8 @@ export class OptionsService {
       expiresAt: Date.now() + 30_000,
     });
 
-    if (!user || user.current_tier !== 'ELITE_PLUS') {
-      throw new ForbiddenException('Options trading is available for ELITE Plus subscribers only');
+    if (!user || !tierSatisfies(user.current_tier, 'ELITE_PLUS')) {
+      throw new ForbiddenException(OPTIONS_ACCESS_MESSAGE);
     }
   }
 

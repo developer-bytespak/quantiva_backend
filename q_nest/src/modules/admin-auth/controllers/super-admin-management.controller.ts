@@ -1,8 +1,11 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
+  forwardRef,
   Get,
+  Inject,
   InternalServerErrorException,
   Logger,
   Param,
@@ -24,6 +27,12 @@ import { SuperAdminUnifiedFinanceDto } from '../dto/super-admin-unified-finance.
 import { SuperAdminUsersGrowthDto } from '../dto/super-admin-users-growth.dto';
 import { UpdateFeeSettingsDto } from '../dto/update-admin-settings.dto';
 import { PlanTier, BillingPeriod } from '../../subscriptions/subscriptions.service';
+import {
+  PremiumMigrationService,
+  StripePriceSwitcher,
+} from '../../subscriptions/premium-migration.service';
+import { StripeService } from '../../stripe/stripe.service';
+import { ADMIN_GRANTABLE_TIERS, isPremiumBillingPeriod } from '../../../common/tiers';
 import { AdminJwtAuthGuard } from '../guards/admin-jwt-auth.guard';
 import { SuperAdminGuard } from '../guards/super-admin.guard';
 import { AdminTokenPayload } from '../services/admin-token.service';
@@ -43,6 +52,9 @@ export class SuperAdminManagementController {
     private readonly superAdminManagementService: SuperAdminManagementService,
     private readonly userSummaryPdfService: UserSummaryPdfService,
     private readonly prisma: PrismaService,
+    private readonly premiumMigrationService: PremiumMigrationService,
+    @Inject(forwardRef(() => StripeService))
+    private readonly stripeService: StripeService,
   ) {}
 
   @Get('users')
@@ -232,25 +244,67 @@ export class SuperAdminManagementController {
 
   @Post('users/upgrade-subscription')
   async upgradeUserSubscription(
-    @Body() body: { email: string; tier: string; billing_period: string },
+    @Body() body: { email: string; tier: string; billing_period?: string },
   ) {
-    const validTiers = Object.values(PlanTier);
+    // Only FREE and PREMIUM can be granted; legacy tiers are deactivated.
+    const validTiers = ADMIN_GRANTABLE_TIERS;
     const validPeriods = Object.values(BillingPeriod);
+    const billingPeriod = (body.billing_period || BillingPeriod.MONTHLY) as BillingPeriod;
 
     if (!body.email?.trim()) {
-      throw new Error('email is required');
+      throw new BadRequestException('email is required');
     }
-    if (!validTiers.includes(body.tier as PlanTier)) {
-      throw new Error(`tier must be one of: ${validTiers.join(', ')}`);
+    if (!validTiers.includes(body.tier as any)) {
+      throw new BadRequestException(`tier must be one of: ${validTiers.join(', ')}`);
     }
-    if (!validPeriods.includes(body.billing_period as BillingPeriod)) {
-      throw new Error(`billing_period must be one of: ${validPeriods.join(', ')}`);
+    if (!validPeriods.includes(billingPeriod)) {
+      throw new BadRequestException(`billing_period must be one of: ${validPeriods.join(', ')}`);
     }
 
     return this.superAdminManagementService.adminUpgradeUserSubscription({
       email: body.email.trim(),
       tier: body.tier as PlanTier,
-      billing_period: body.billing_period as BillingPeriod,
+      billing_period: billingPeriod,
+    });
+  }
+
+  /**
+   * One-off: move every active legacy-tier subscription (PRO / ELITE / ELITE_PLUS)
+   * to PREMIUM and notify the user once. Stripe-billed rows also have their
+   * Stripe price switched to Premium with no proration (next invoice at the
+   * existing period end is $29.99; nothing is charged now). Apple rows are
+   * local only. Safe to re-run: rows already migrated are skipped.
+   *
+   * Defaults to a dry run that includes a Stripe next-invoice preview per row.
+   * Run only after the new backend is deployed.
+   */
+  @Post('subscriptions/migrate-to-premium')
+  async migrateToPremium(
+    @Body() body: { dry_run?: boolean; user_ids?: string[]; switch_stripe_prices?: boolean },
+    @CurrentAdmin() admin: AdminTokenPayload,
+  ) {
+    const dryRun = body?.dry_run !== false; // default true: explicit { dry_run: false } to execute
+    const switchStripe = body?.switch_stripe_prices !== false; // default true
+    this.logger.log(
+      `Premium migration requested by admin ${admin?.sub ?? 'unknown'} (dry_run=${dryRun}, stripe=${switchStripe})`,
+    );
+
+    let stripe: StripePriceSwitcher | undefined;
+    if (switchStripe) {
+      // Legacy monthly -> Premium monthly, quarterly -> quarterly, yearly -> yearly.
+      // Throws if the matching STRIPE_PREMIUM_PRICE_ID* env var is missing.
+      const priceFor = (period: string) =>
+        this.stripeService.premiumPriceIdFor(isPremiumBillingPeriod(period) ? period : 'MONTHLY');
+      stripe = {
+        preview: (id, period) => this.stripeService.previewPriceSwitch(id, priceFor(period)),
+        switchPrice: (id, period) => this.stripeService.switchSubscriptionPrice(id, priceFor(period)),
+      };
+    }
+
+    return this.premiumMigrationService.run({
+      dryRun,
+      userIds: Array.isArray(body?.user_ids) ? body.user_ids : undefined,
+      stripe,
     });
   }
 }

@@ -11,12 +11,18 @@ import { OnboardingStateService } from '../onboarding-emails/services/onboarding
 import { FreeUpgradeCampaignService } from '../onboarding-emails/services/free-upgrade-campaign.service';
 import { OnboardingState } from '../onboarding-emails/types';
 import { AffiliateCommissionService } from '../affiliate/services/affiliate-commission.service';
+import { isPaidTier } from '../../common/tiers';
 
 export enum PlanTier {
   FREE = 'FREE',
+  /** Legacy tier (plans deactivated 2026-10). Rows kept for history. */
   PRO = 'PRO',
+  /** Legacy tier (plans deactivated 2026-10). Rows kept for history. */
   ELITE = 'ELITE',
+  /** Legacy tier (plans deactivated 2026-10). Rows kept for history. */
   ELITE_PLUS = 'ELITE_PLUS',
+  /** The single paid plan: $29.99/month, every feature. */
+  PREMIUM = 'PREMIUM',
 }
 
 export enum BillingPeriod {
@@ -52,7 +58,7 @@ export class SubscriptionsService implements OnModuleInit {
   /**
    * Clear the cached subscription for a user so the next request fetches fresh from DB.
    */
-  private clearSubscriptionCache(userId: string): void {
+  clearSubscriptionCache(userId: string): void {
     this.subscriptionLoader?.clearUserCache(userId);
   }
 
@@ -100,12 +106,67 @@ export class SubscriptionsService implements OnModuleInit {
     return periods;
   }
 
-  async findAllPlans() {
-    if (this.plansCache) {
-      return this.plansCache;
+  /**
+   * Plans available for purchase. Legacy plans are kept in the table with
+   * is_active=false and are only returned when `includeInactive` is set
+   * (admin/reporting callers).
+   */
+  async findAllPlans(includeInactive = false) {
+    if (!this.plansCache) {
+      await this.refreshPlansCache();
     }
-    await this.refreshPlansCache();
-    return this.plansCache!;
+    const all = this.plansCache!;
+    return includeInactive ? all : all.filter((p: any) => p.is_active);
+  }
+
+  /** The purchasable Premium plan for a billing period (default MONTHLY), with its features. */
+  async getPremiumPlan(period: BillingPeriod | string = BillingPeriod.MONTHLY) {
+    const billingPeriod = (Object.values(BillingPeriod) as string[]).includes(period)
+      ? (period as BillingPeriod)
+      : BillingPeriod.MONTHLY;
+    return this.prisma.subscription_plans.findFirst({
+      where: { tier: PlanTier.PREMIUM, billing_period: billingPeriod, is_active: true },
+      include: { plan_features: true },
+    });
+  }
+
+  /** All active Premium plans (MONTHLY, QUARTERLY, YEARLY). */
+  async getPremiumPlans() {
+    return this.prisma.subscription_plans.findMany({
+      where: { tier: PlanTier.PREMIUM, is_active: true },
+      include: { plan_features: true },
+      orderBy: { billing_period: 'asc' },
+    });
+  }
+
+  /**
+   * One free trial per account, and only for accounts that have never paid.
+   * `users.trial_used_at` is the primary flag (set when a trial starts, by the
+   * Premium migration, and backfilled for historical payers); the two queries
+   * below are belt-and-braces against rows that predate the flag.
+   */
+  async isTrialEligible(userId: string): Promise<boolean> {
+    const user = await this.prisma.users.findUnique({
+      where: { user_id: userId },
+      select: { trial_used_at: true },
+    });
+    if (!user || user.trial_used_at) return false;
+
+    const paid = await this.prisma.payment_history.findFirst({
+      where: { user_id: userId, status: 'succeeded', amount: { gt: 0 } },
+      select: { payment_id: true },
+    });
+    if (paid) return false;
+
+    const everPaidPlan = await this.prisma.user_subscriptions.findFirst({
+      where: {
+        user_id: userId,
+        tier: { not: PlanTier.FREE },
+        billing_provider: { in: ['stripe', 'apple'] },
+      },
+      select: { subscription_id: true },
+    });
+    return !everPaidPlan;
   }
 
   /**
@@ -897,18 +958,6 @@ export class SubscriptionsService implements OnModuleInit {
   }
 
   /**
-   * Validate before checkout: Elite → Pro downgrade allowed only if user has ≤ 5 custom strategies.
-   * Call this before creating Stripe checkout session; throws if invalid.
-   */
-  async validateDowngradeToProBeforeCheckout(
-    userId: string,
-    newPlanId: string,
-  ): Promise<void> {
-    // No longer blocking Elite→Pro; updateSubscription will set top N strategies active, rest inactive
-    return;
-  }
-
-  /**
  * Get active subscription with all features
  */
   async getActiveSubscriptionWithFeatures(userId: string) {
@@ -1057,16 +1106,34 @@ export class SubscriptionsService implements OnModuleInit {
       active.expires_at ??
       null;
 
+    // Cancel-at-period-end: access, tier and plan are untouched until Stripe
+    // sends customer.subscription.deleted at the period (or trial) end.
     const updated = await this.prisma.user_subscriptions.update({
       where: { subscription_id: active.subscription_id },
       data: {
         auto_renew: false,
+        cancelled_at: active.cancelled_at ?? new Date(),
         current_period_end: periodEnd,
         expires_at: periodEnd,
         status: active.status,
       },
     });
 
+    this.clearSubscriptionCache(userId);
+    return updated;
+  }
+
+  /** Undo a pending cancel-at-period-end (local side; Stripe is updated by the caller). */
+  async resumeStripeSubscriptionLocal(userId: string, stripeSubscriptionId: string) {
+    const row = await this.prisma.user_subscriptions.findFirst({
+      where: { user_id: userId, status: 'active', billing_provider: 'stripe', external_id: stripeSubscriptionId },
+    });
+    if (!row) return null;
+    const updated = await this.prisma.user_subscriptions.update({
+      where: { subscription_id: row.subscription_id },
+      data: { auto_renew: true, cancelled_at: null, expires_at: null },
+    });
+    this.clearSubscriptionCache(userId);
     return updated;
   }
 
@@ -1202,13 +1269,30 @@ export class SubscriptionsService implements OnModuleInit {
    * active and pushes out the period/expiry to Apple's new expiresDate. Does NOT
    * change tier (renewals stay on the same product).
    */
-  async applyAppleRenewal(originalTransactionId: string, expiresDate: Date) {
+  async applyAppleRenewal(
+    originalTransactionId: string,
+    expiresDate: Date,
+    opts: {
+      /** Introductory free-trial window reported by Apple; `null` clears any trial (paid renewal). */
+      trial?: { start: Date | null; end: Date } | null;
+      providerStatus?: string;
+      /** When false (free trial), last_payment_date is left untouched. */
+      paid?: boolean;
+    } = {},
+  ) {
     const existing = await this.findAppleSubscription(originalTransactionId);
     if (!existing) {
       return null;
     }
 
     const now = new Date();
+    const trialData =
+      opts.trial === undefined
+        ? {}
+        : opts.trial === null
+          ? { trial_end: null }
+          : { trial_start: opts.trial.start ?? now, trial_end: opts.trial.end };
+
     const updated = await this.prisma.user_subscriptions.update({
       where: { subscription_id: existing.subscription_id },
       data: {
@@ -1217,10 +1301,19 @@ export class SubscriptionsService implements OnModuleInit {
         current_period_end: expiresDate,
         expires_at: expiresDate,
         next_billing_date: expiresDate,
-        last_payment_date: now,
+        ...(opts.paid === false ? {} : { last_payment_date: now }),
         cancelled_at: null,
+        provider_status: opts.providerStatus ?? 'active',
+        ...trialData,
       },
     });
+
+    if (opts.trial && opts.trial.end) {
+      await this.prisma.users.updateMany({
+        where: { user_id: updated.user_id, trial_used_at: null },
+        data: { trial_used_at: opts.trial.start ?? now },
+      });
+    }
 
     // Re-assert the cached tier in case a prior EXPIRED had dropped it to FREE
     // (e.g. resubscribe after lapse).
@@ -1289,6 +1382,334 @@ export class SubscriptionsService implements OnModuleInit {
     return updated;
   }
 
+  // ──────────────────────────────────────────────────────────────────────
+  // Shared plan-change primitives (used by Stripe sync, Apple verify and the
+  // Premium migration). All run inside a caller-provided transaction.
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Rewrite subscription_usage rows for `plan` over [periodStart, periodEnd].
+   * CUSTOM_STRATEGIES = one row per billing period seeded with the user's
+   * existing strategy count (usage never resets on a plan change); other
+   * features get one row per calendar month.
+   */
+  private async reseedUsageTx(
+    tx: any,
+    subscriptionId: string,
+    userId: string,
+    plan: { plan_features?: Array<{ feature_type: any; limit_value: number | null }> | null; tier: string },
+    periodStart: Date,
+    periodEnd: Date,
+  ): Promise<void> {
+    await tx.subscription_usage.deleteMany({ where: { subscription_id: subscriptionId } });
+    const features = plan.plan_features ?? [];
+    if (features.length === 0) return;
+
+    const hasCustom = features.some((f) => f.feature_type === FeatureType.CUSTOM_STRATEGIES);
+    const strategyCount = hasCustom
+      ? await tx.strategies.count({ where: { user_id: userId, type: 'user' } })
+      : 0;
+    const proLimit =
+      features.find((f) => f.feature_type === FeatureType.CUSTOM_STRATEGIES)?.limit_value ?? null;
+
+    const rows: any[] = [];
+    for (const feature of features) {
+      if (feature.feature_type === FeatureType.CUSTOM_STRATEGIES) {
+        rows.push({
+          subscription_id: subscriptionId,
+          user_id: userId,
+          feature_type: feature.feature_type,
+          usage_count:
+            plan.tier === PlanTier.PRO && proLimit
+              ? Math.min(strategyCount, proLimit)
+              : strategyCount,
+          period_start: periodStart,
+          period_end: periodEnd,
+        });
+      } else {
+        for (const period of this.getMonthlyPeriods(periodStart, periodEnd)) {
+          rows.push({
+            subscription_id: subscriptionId,
+            user_id: userId,
+            feature_type: feature.feature_type,
+            usage_count: 0,
+            period_start: period.start,
+            period_end: period.end,
+          });
+        }
+      }
+    }
+    if (rows.length > 0) {
+      await tx.subscription_usage.createMany({ data: rows });
+    }
+  }
+
+  /** Legacy PRO cap: oldest N strategies stay active, the rest are deactivated. No-op for other tiers. */
+  private async applyStrategyCapTx(
+    tx: any,
+    userId: string,
+    plan: { tier: string; plan_features?: Array<{ feature_type: any; limit_value: number | null }> | null },
+  ): Promise<void> {
+    if (plan.tier !== PlanTier.PRO) return;
+    const limit =
+      plan.plan_features?.find((f) => f.feature_type === FeatureType.CUSTOM_STRATEGIES)?.limit_value ?? 5;
+    const rows = await tx.strategies.findMany({
+      where: { user_id: userId, type: 'user' },
+      orderBy: { created_at: 'asc' },
+      select: { strategy_id: true },
+    });
+    const keep = rows.slice(0, limit).map((r: any) => r.strategy_id);
+    const drop = rows.slice(limit).map((r: any) => r.strategy_id);
+    if (keep.length) await tx.strategies.updateMany({ where: { strategy_id: { in: keep } }, data: { is_active: true } });
+    if (drop.length) await tx.strategies.updateMany({ where: { strategy_id: { in: drop } }, data: { is_active: false } });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Stripe: single idempotent sync from a (freshly retrieved) Subscription.
+  // Every Stripe webhook funnels through here so ordering and replays are safe.
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Mirror a Stripe Subscription onto user_subscriptions / users.current_tier.
+   *
+   * - Resolves the local row by external_id, else the user via metadata.user_id
+   *   or users.stripe_customer_id, then that user's active row (e.g. the FREE
+   *   row created at signup).
+   * - trialing | active | past_due  -> status 'active' (access kept on past_due)
+   * - canceled | unpaid | incomplete_expired -> finalizeCancellationLocal (FREE)
+   * - incomplete -> ignored until payment confirms
+   * - Period dates come from the subscription item (Basil+ API shape), with a
+   *   fallback to the legacy top-level fields.
+   * - Plan is resolved from the price id (PREMIUM) or metadata.plan_id; an
+   *   unknown price keeps the current local plan (grandfathered rows).
+   */
+  async syncFromStripeSubscription(
+    stripeSub: any,
+    opts: {
+      /** @deprecated monthly price id; prefer premiumPriceMap */
+      premiumPriceId?: string;
+      /** Stripe price id -> Premium billing period */
+      premiumPriceMap?: Record<string, string>;
+      userIdHint?: string;
+    } = {},
+  ) {
+    const stripeId: string | undefined = stripeSub?.id;
+    if (!stripeId) return null;
+    const toDate = (v: any): Date | null =>
+      typeof v === 'number' ? new Date(v * 1000) : v instanceof Date ? v : null;
+
+    const customerId =
+      typeof stripeSub.customer === 'string' ? stripeSub.customer : stripeSub.customer?.id ?? null;
+
+    let local = await this.prisma.user_subscriptions.findFirst({
+      where: { billing_provider: 'stripe', external_id: stripeId },
+      include: { plan: { include: { plan_features: true } } },
+    });
+
+    let userId: string | undefined = local?.user_id ?? opts.userIdHint ?? stripeSub.metadata?.user_id;
+    if (!userId && customerId) {
+      const u = await this.prisma.users.findFirst({
+        where: { stripe_customer_id: customerId },
+        select: { user_id: true },
+      });
+      userId = u?.user_id;
+    }
+    if (!userId) {
+      this.logger.warn(`Stripe sync: cannot resolve user for subscription ${stripeId}; skipping`);
+      return null;
+    }
+
+    const status: string = stripeSub.status;
+    const item = stripeSub.items?.data?.[0];
+    const periodEnd =
+      toDate(item?.current_period_end) ?? toDate(stripeSub.current_period_end) ?? null;
+
+    if (['canceled', 'unpaid', 'incomplete_expired'].includes(status)) {
+      if (local) {
+        return this.handleStripeSubscriptionCancelled(stripeId, periodEnd);
+      }
+      return null;
+    }
+    if (status === 'incomplete') {
+      return local;
+    }
+
+    if (!local) {
+      local = await this.prisma.user_subscriptions.findFirst({
+        where: { user_id: userId, status: 'active' },
+        orderBy: { created_at: 'desc' },
+        include: { plan: { include: { plan_features: true } } },
+      });
+    }
+
+    // Resolve target plan
+    const priceId: string | undefined = item?.price?.id ?? item?.plan?.id;
+    let plan: any = null;
+    const premiumPeriod =
+      (priceId && opts.premiumPriceMap?.[priceId]) ||
+      (opts.premiumPriceId && priceId === opts.premiumPriceId ? BillingPeriod.MONTHLY : undefined);
+    if (premiumPeriod) {
+      plan = await this.getPremiumPlan(premiumPeriod);
+    }
+    if (!plan && stripeSub.metadata?.plan_id && this.isUuid(stripeSub.metadata.plan_id)) {
+      plan = await this.prisma.subscription_plans.findUnique({
+        where: { plan_id: stripeSub.metadata.plan_id },
+        include: { plan_features: true },
+      });
+    }
+    if (!plan && local?.plan) {
+      plan = local.plan;
+    }
+    if (!plan) {
+      this.logger.warn(
+        `Stripe sync: no plan for subscription ${stripeId} (price ${priceId}); skipping`,
+      );
+      return null;
+    }
+
+    const now = new Date();
+    const periodStart =
+      toDate(item?.current_period_start) ?? toDate(stripeSub.current_period_start) ?? now;
+    const trialStart = toDate(stripeSub.trial_start);
+    const trialEnd = toDate(stripeSub.trial_end);
+    const trialing = !!trialEnd && trialEnd.getTime() > now.getTime();
+    const cancelAtPeriodEnd = !!stripeSub.cancel_at_period_end;
+
+    const common = {
+      status: SubscriptionStatus.active,
+      billing_provider: 'stripe',
+      external_id: stripeId,
+      current_period_start: periodStart,
+      current_period_end: periodEnd,
+      next_billing_date: trialing ? trialEnd : periodEnd,
+      trial_start: trialStart,
+      trial_end: trialEnd,
+      auto_renew: !cancelAtPeriodEnd,
+      cancelled_at: cancelAtPeriodEnd ? (local?.cancelled_at ?? toDate(stripeSub.canceled_at) ?? now) : null,
+      expires_at: cancelAtPeriodEnd ? periodEnd : null,
+      provider_status: status,
+      started_at: local?.started_at ?? now,
+    };
+
+    const planChanged = !local || local.plan_id !== plan.plan_id;
+    const periodRolled = !!local && !planChanged &&
+      (local.current_period_start?.getTime?.() ?? 0) !== periodStart.getTime();
+    const wasFree = !local || local.tier === PlanTier.FREE;
+
+    const row = await this.prisma.$transaction(async (tx) => {
+      let saved;
+      if (!local) {
+        saved = await tx.user_subscriptions.create({
+          data: {
+            user_id: userId!,
+            plan_id: plan.plan_id,
+            tier: plan.tier,
+            billing_period: plan.billing_period,
+            ...common,
+          },
+        });
+      } else {
+        saved = await tx.user_subscriptions.update({
+          where: { subscription_id: local.subscription_id },
+          data: {
+            ...(planChanged
+              ? { plan_id: plan.plan_id, tier: plan.tier, billing_period: plan.billing_period }
+              : {}),
+            ...common,
+          },
+        });
+      }
+
+      await tx.users.update({ where: { user_id: userId! }, data: { current_tier: plan.tier } });
+
+      if (planChanged || periodRolled) {
+        await this.reseedUsageTx(tx, saved.subscription_id, userId!, plan, periodStart, periodEnd ?? periodStart);
+        if (planChanged) await this.applyStrategyCapTx(tx, userId!, plan);
+      }
+
+      if (trialEnd) {
+        await tx.users.updateMany({
+          where: { user_id: userId!, trial_used_at: null },
+          data: { trial_used_at: trialStart ?? now },
+        });
+      }
+      return saved;
+    }, { timeout: 30000 });
+
+    if (isPaidTier(plan.tier) && wasFree) {
+      try {
+        await this.onboardingStateService.advanceTo(userId, OnboardingState.PAID);
+        await this.freeUpgradeCampaignService.stop(userId);
+      } catch (err: any) {
+        this.logger.warn(`Onboarding side-effects failed for ${userId}: ${err?.message}`);
+      }
+    }
+
+    this.clearSubscriptionCache(userId);
+    return row;
+  }
+
+  /**
+   * One-off Premium migration for a single active legacy-tier row. Local only:
+   * never touches Stripe or Apple. Idempotent via migrated_to_premium_at.
+   * Keeps the existing period/expiry so a prepaid or comped window is honoured.
+   */
+  async migrateRowToPremium(subscriptionId: string): Promise<
+    | { migrated: true; user_id: string; old_tier: string; subscription_id: string }
+    | { migrated: false; reason: string; subscription_id: string }
+  > {
+    const sub = await this.prisma.user_subscriptions.findUnique({
+      where: { subscription_id: subscriptionId },
+    });
+    if (!sub) return { migrated: false, reason: 'not_found', subscription_id: subscriptionId };
+    if (sub.status !== 'active') return { migrated: false, reason: 'not_active', subscription_id: subscriptionId };
+    if (sub.tier === PlanTier.FREE) return { migrated: false, reason: 'free_tier', subscription_id: subscriptionId };
+    if (sub.tier === PlanTier.PREMIUM || sub.migrated_to_premium_at) {
+      return { migrated: false, reason: 'already_premium', subscription_id: subscriptionId };
+    }
+
+    // Same billing period as the legacy plan (monthly -> monthly, yearly -> yearly).
+    const premium =
+      (await this.getPremiumPlan(sub.billing_period)) ?? (await this.getPremiumPlan(BillingPeriod.MONTHLY));
+    if (!premium) throw new Error('PREMIUM plan row not found; run migrations first');
+
+    const now = new Date();
+    const periodStart = sub.current_period_start ?? now;
+    const periodEnd = sub.current_period_end ?? sub.expires_at ?? now;
+    const oldTier = sub.tier;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user_subscriptions.update({
+        where: { subscription_id: subscriptionId },
+        data: {
+          plan_id: premium.plan_id,
+          tier: PlanTier.PREMIUM,
+          billing_period: premium.billing_period,
+          migrated_to_premium_at: now,
+        },
+      });
+      await tx.users.update({
+        where: { user_id: sub.user_id },
+        data: { current_tier: PlanTier.PREMIUM },
+      });
+      await tx.users.updateMany({
+        where: { user_id: sub.user_id, trial_used_at: null },
+        data: { trial_used_at: sub.started_at ?? now },
+      });
+      await this.reseedUsageTx(tx, subscriptionId, sub.user_id, premium, periodStart, periodEnd);
+      // Ex-PRO users had strategies beyond the cap force-deactivated; give them back.
+      if (oldTier === PlanTier.PRO) {
+        await tx.strategies.updateMany({
+          where: { user_id: sub.user_id, type: 'user', is_active: false },
+          data: { is_active: true },
+        });
+      }
+    }, { timeout: 30000 });
+
+    this.clearSubscriptionCache(sub.user_id);
+    return { migrated: true, user_id: sub.user_id, old_tier: oldTier, subscription_id: subscriptionId };
+  }
+
   async getMySubscription(userId: string) {
     // Current subscription
     const currentSubscription = await this.prisma.user_subscriptions.findFirst({
@@ -1310,6 +1731,18 @@ export class SubscriptionsService implements OnModuleInit {
       hasPlan = true;
     }
 
+    // Purchasable plans only (FREE + PREMIUM); legacy plans are inactive.
+    const [allSubscriptions, trialEligible] = await Promise.all([
+      this.prisma.subscription_plans.findMany({
+        where: { is_active: true },
+        orderBy: [{ display_order: 'asc' }, { tier: 'asc' }, { billing_period: 'asc' }],
+        include: { plan_features: true },
+      }),
+      this.isTrialEligible(userId),
+    ]);
+    const premiumPlans = allSubscriptions.filter((p) => p.tier === PlanTier.PREMIUM);
+    const premiumPlan =
+      premiumPlans.find((p) => p.billing_period === BillingPeriod.MONTHLY) ?? premiumPlans[0] ?? null;
 
     if(!currentSubscription) {
       const currentTier = await this.prisma.users.findUnique({
@@ -1318,10 +1751,6 @@ export class SubscriptionsService implements OnModuleInit {
       });
 
       if(currentTier?.current_tier === 'FREE') {
-        const allSubscriptions = await this.prisma.subscription_plans.findMany({
-          orderBy: [{ tier: 'asc' }, { billing_period: 'asc' }],
-          include: { plan_features: true },
-        });
         return {
           current: {
             subscription_id: null,
@@ -1330,19 +1759,27 @@ export class SubscriptionsService implements OnModuleInit {
             plan_id: null,
             billing_period: 'MONTHLY',
             status: 'active',
+            billing_provider: null,
             current_period_start: null,
             current_period_end: null,
             next_billing_date: null,
+            trial_start: null,
+            trial_end: null,
+            is_trialing: false,
+            cancel_at_period_end: false,
+            access_until: null,
+            provider_status: null,
+            auto_renew: false,
           },
           usage: null,
           payments: null,
           allSubscriptions: allSubscriptions,
           hasPlan: hasPlan,
+          trial_eligible: trialEligible,
+          premium_plan: premiumPlan,
+          premium_plans: premiumPlans,
         };
       }
-
-
-     
     }
 
     // Payment history
@@ -1404,6 +1841,14 @@ export class SubscriptionsService implements OnModuleInit {
     }
 
     // Format current subscription
+    const nowTs = Date.now();
+    const isTrialing =
+      !!currentSubscription?.trial_end && new Date(currentSubscription.trial_end).getTime() > nowTs;
+    const cancelAtPeriodEnd =
+      !!currentSubscription &&
+      currentSubscription.status === 'active' &&
+      currentSubscription.auto_renew === false &&
+      !!currentSubscription.cancelled_at;
     const current = currentSubscription
       ? {
         subscription_id: currentSubscription.subscription_id,
@@ -1412,6 +1857,7 @@ export class SubscriptionsService implements OnModuleInit {
         plan_id: currentSubscription.plan_id,
         billing_period: currentSubscription.billing_period || 'MONTHLY',
         status: currentSubscription.status,
+        billing_provider: currentSubscription.billing_provider,
         current_period_start: currentSubscription.current_period_start,
         current_period_end: currentSubscription.current_period_end,
         next_billing_date: currentSubscription.next_billing_date,
@@ -1419,16 +1865,20 @@ export class SubscriptionsService implements OnModuleInit {
         auto_renew: currentSubscription.auto_renew || false,
         cancelled_at: currentSubscription.cancelled_at,
         external_id: currentSubscription.external_id,
+        trial_start: currentSubscription.trial_start,
+        trial_end: currentSubscription.trial_end,
+        is_trialing: isTrialing,
+        cancel_at_period_end: cancelAtPeriodEnd,
+        access_until: currentSubscription.expires_at ?? currentSubscription.current_period_end ?? null,
+        provider_status: currentSubscription.provider_status,
       }
       : null;
 
-    const allSubscriptions = await this.prisma.subscription_plans.findMany({
-      orderBy: [{ tier: 'asc' }, { billing_period: 'asc' }],
-      include: { plan_features: true },
-    });
-
     return {
       current,
+      trial_eligible: trialEligible,
+      premium_plan: premiumPlan,
+      premium_plans: premiumPlans,
       usage,
       payments: payments.map((p: any) => ({
         payment_id: p.payment_id,
@@ -1578,62 +2028,6 @@ export class SubscriptionsService implements OnModuleInit {
         },
       },
     });
-  }
-
-  async createSubscriptionUser(data: {
-    user_id: string;
-    plan_id: string;
-    status?: SubscriptionStatus;
-    external_id?: string;
-    billing_provider?: string;
-    auto_renew?: boolean;
-  }) {
-   try {
-    const result = await this.prisma.$transaction(async (tx) => {
-      const plan = await tx.subscription_plans.findFirst({
-        where: { tier: data.plan_id as PlanTier },
-      });
-      if (!plan) {
-        throw new Error('Plan not found');
-      }
-
-      const subscription = await tx.user_subscriptions.create({
-        data: {
-          user_id: data.user_id,
-          plan_id: plan.plan_id,
-          tier: plan.tier,
-          billing_period: plan.billing_period,
-        },
-        include: {
-          user: true,
-          plan: true,
-        },
-      });
-      await tx.users.update({
-        where: { user_id: data.user_id },
-        data: { current_tier: plan.tier },
-      });
-      return subscription;
-    }, { timeout: 30000 });
-
-    // 🔔 Send admin notification about new subscription
-    try {
-      await this.authEmailService.sendNewSubscriptionNotification({
-        username: result.user.username,
-        email: result.user.email,
-        userId: result.user.user_id,
-        tier: result.tier,
-        billingPeriod: result.billing_period,
-        createdAt: result.started_at,
-      });
-    } catch (error) {
-      this.logger.error(`Failed to send subscription notification: ${error instanceof Error ? error.message : String(error)}`);
-    }
-
-    return result;
-   } catch (error) {
-    throw new Error('Failed to create subscription');
-   }
   }
 
 }

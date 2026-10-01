@@ -410,7 +410,7 @@ export class AffiliateAdminService {
         );
       }
 
-      await this.grantTier(user.user_id, PlanTier.ELITE_PLUS);
+      await this.grantTier(user.user_id, PlanTier.PREMIUM);
     }
 
     // Stamp the durable reverse link only after the grant has succeeded — its

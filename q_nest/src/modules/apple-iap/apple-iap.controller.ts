@@ -20,6 +20,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AppGateway } from 'src/gateways/app.gateway';
 import { QhqTokenService } from '../qhq-token/qhq-token.service';
+import { subscriptionQhqRuleKey } from '../../common/tiers';
 
 @Controller()
 export class AppleIapController {
@@ -123,16 +124,34 @@ export class AppleIapController {
       );
     }
 
+    // Legacy products are no longer for sale. Renewals/restores of an existing
+    // (linked) subscription still work; a brand-new purchase of one is refused.
+    if (!linked && !plan.is_active) {
+      throw new BadRequestException('This plan is no longer available. Please choose Quantiva Premium.');
+    }
+
+    // Introductory free trial (configured in App Store Connect). During a trial
+    // no payment is recorded and no QHQ is awarded; Apple charges at trial end
+    // and sends DID_RENEW, which records the first real payment.
+    const freeTrial = this.isFreeTrialTransaction(tx);
+    const purchaseDate = tx.purchaseDate ? new Date(tx.purchaseDate) : null;
+    const renewalOpts = {
+      trial: freeTrial ? { start: purchaseDate, end: expiresDate } : null,
+      paid: !freeTrial,
+      providerStatus: freeTrial ? 'trialing' : 'active',
+    };
+
     // If it's already linked to THIS user with the SAME product, treat as a
     // refresh (the expected path for restore, and idempotent for a repeated
     // verify). A *different* product on the same originalTransactionId means an
-    // in-group upgrade/crossgrade (e.g. Pro → Elite) — Apple keeps the same
+    // in-group upgrade/crossgrade (e.g. legacy -> Premium); Apple keeps the same
     // originalTransactionId across that change, so fall through to update the
     // tier instead of only bumping the expiry.
     if (linked && linked.user_id === userId && linked.plan_id === plan.plan_id) {
       const refreshed = await this.subscriptionsService.applyAppleRenewal(
         originalTransactionId,
         expiresDate,
+        renewalOpts,
       );
       return this.buildResponse(refreshed ?? linked, true);
     }
@@ -187,51 +206,57 @@ export class AppleIapController {
     const synced = await this.subscriptionsService.applyAppleRenewal(
       originalTransactionId,
       expiresDate,
+      renewalOpts,
     );
     const finalSub = synced ?? subscription;
 
-    // 8. Record the payment. Prefer Apple's actual charged amount (App Store
-    //    Connect prices differ from our Stripe/DB prices), falling back to the
-    //    plan price if Apple didn't include one.
-    const { amount, currency } = this.resolveTxAmount(tx, plan.price);
-    try {
-      await this.subscriptionsService.recordPayment({
-        subscription_id: finalSub.subscription_id,
-        user_id: userId,
-        amount,
-        currency,
-        status: 'succeeded',
-        payment_provider: 'apple',
-        external_payment_id: tx.transactionId || dto.transactionId,
-        payment_method: 'apple_iap',
-        invoice_url: null,
-        receipt_url: null,
-        failure_reason: null,
-      });
-    } catch (err: any) {
-      this.logger.error(`Failed to record Apple payment for user ${userId}: ${err?.message}`);
+    // 8. Record the payment, unless this is a free trial (nothing was charged).
+    //    Prefer Apple's actual charged amount (App Store Connect prices differ
+    //    from our DB prices), falling back to the plan price only when Apple
+    //    omitted the price entirely.
+    if (!freeTrial) {
+      const { amount, currency } = this.resolveTxAmount(tx, plan.price);
+      if (amount > 0) {
+        try {
+          await this.subscriptionsService.recordPayment({
+            subscription_id: finalSub.subscription_id,
+            user_id: userId,
+            amount,
+            currency,
+            status: 'succeeded',
+            payment_provider: 'apple',
+            external_payment_id: tx.transactionId || dto.transactionId,
+            payment_method: 'apple_iap',
+            invoice_url: null,
+            receipt_url: null,
+            failure_reason: null,
+          });
+        } catch (err: any) {
+          this.logger.error(`Failed to record Apple payment for user ${userId}: ${err?.message}`);
+        }
+      }
     }
 
-    // 9. Award QHQ tokens (parity with the Stripe flow). Non-blocking.
-    if (!isRestore) {
+    // 9. Award QHQ tokens (parity with the Stripe flow). Never for a free trial.
+    if (!isRestore && !freeTrial) {
       await this.awardQhqTokens(userId, finalSub.tier, finalSub.billing_period, tx.transactionId);
     }
 
     // 10. Notify the user (parity with Stripe).
+    const title = freeTrial ? 'Your 7-day Premium trial has started' : 'Premium is active';
+    const message = freeTrial
+      ? `Every Premium feature is unlocked. Your App Store subscription renews on ${expiresDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })} unless you cancel before then.`
+      : 'Your Premium subscription is active and every feature is unlocked.';
     try {
       const notification = await this.notificationsService.createNotification({
         user_id: userId,
-        type: 'subscription_active',
-        title: 'Subscription Active',
-        message: `Your ${finalSub.tier} subscription is now active`,
+        type: freeTrial ? 'subscription_trial_started' : 'subscription_active',
+        title,
+        message,
         read: false,
         metadata: null,
       });
-      this.notificationsService.sendNotification(
-        userId,
-        'Subscription Active',
-        `Your ${finalSub.tier} subscription is now active`,
-      );
+      this.notificationsService.sendNotification(userId, title, message);
       this.appGateway.emitNotificationCount(userId, 1, notification);
     } catch (err: any) {
       this.logger.warn(`Apple purchase notification failed for user ${userId}: ${err?.message}`);
@@ -240,7 +265,22 @@ export class AppleIapController {
     return this.buildResponse(finalSub, false);
   }
 
+  /**
+   * Apple marks introductory offers with offerType 1 and (StoreKit 2) an
+   * offerDiscountType of FREE_TRIAL / PAY_AS_YOU_GO / PAY_UP_FRONT. Only a free
+   * trial is treated as "nothing charged"; a discounted intro price is a payment.
+   */
+  private isFreeTrialTransaction(tx: any): boolean {
+    if (!tx) return false;
+    if (tx.offerDiscountType === 'FREE_TRIAL') return true;
+    if (tx.offerType === 1 && (tx.price === 0 || tx.price === undefined || tx.price === null)) {
+      return true;
+    }
+    return false;
+  }
+
   private buildResponse(sub: any, restored: boolean) {
+    const trialEnd = sub.trial_end ? new Date(sub.trial_end) : null;
     return {
       success: true,
       restored,
@@ -248,6 +288,8 @@ export class AppleIapController {
       billing_period: sub.billing_period,
       expires_at: sub.expires_at ?? sub.current_period_end ?? null,
       auto_renew: sub.auto_renew,
+      is_trialing: !!trialEnd && trialEnd.getTime() > Date.now(),
+      trial_end: trialEnd,
     };
   }
 
@@ -258,9 +300,16 @@ export class AppleIapController {
     reference?: string,
   ): Promise<void> {
     try {
-      const ruleKey =
-        tier === PlanTier.ELITE ? 'MONTHLY_ELITE' : tier === PlanTier.PRO ? 'MONTHLY_PRO' : null;
+      const ruleKey = subscriptionQhqRuleKey(tier);
       if (!ruleKey) return;
+      // Idempotent on the Apple transactionId: renewal notifications can be replayed.
+      if (reference) {
+        const already = await this.prisma.qhq_transactions.findFirst({
+          where: { user_id: userId, type: QhqTransactionType.EARN_SUBSCRIPTION, reference_id: reference },
+          select: { id: true },
+        });
+        if (already) return;
+      }
       const monthlyAmount = await this.qhqService.getRuleAmount(ruleKey);
       if (monthlyAmount <= 0) return;
       const multiplier = billingPeriod === 'YEARLY' ? 12 : billingPeriod === 'QUARTERLY' ? 3 : 1;
@@ -306,12 +355,40 @@ export class AppleIapController {
       return { received: true };
     }
 
+    // Event-level idempotency on Apple's notificationUUID (Apple retries on non-2xx).
+    const eventId: string | undefined = notification?.notificationUUID;
+    if (eventId) {
+      try {
+        await this.prisma.billing_webhook_events.create({
+          data: {
+            event_id: `apple:${eventId}`,
+            provider: 'apple',
+            type: String(notification?.notificationType ?? 'UNKNOWN'),
+          },
+        });
+      } catch (err: any) {
+        if (err?.code === 'P2002') {
+          this.logger.log(`Apple notification ${eventId} already processed; skipping`);
+          return { received: true, duplicate: true };
+        }
+        throw err;
+      }
+    }
+
+    let error: string | null = null;
     try {
       await this.dispatchNotification(notification);
     } catch (err: any) {
+      error = err?.message ?? String(err);
       this.logger.error(
-        `Failed to process Apple notification ${notification?.notificationType}: ${err?.message}`,
+        `Failed to process Apple notification ${notification?.notificationType}: ${error}`,
       );
+    }
+
+    if (eventId) {
+      await this.prisma.billing_webhook_events
+        .update({ where: { event_id: `apple:${eventId}` }, data: { processed_at: new Date(), error } })
+        .catch(() => undefined);
     }
 
     return { received: true };
@@ -342,15 +419,31 @@ export class AppleIapController {
       case NotificationTypeV2.SUBSCRIBED:
       case NotificationTypeV2.DID_RENEW: {
         if (expiresDate) {
+          const freeTrial = this.isFreeTrialTransaction(tx);
           const updated = await this.subscriptionsService.applyAppleRenewal(
             originalTransactionId,
             expiresDate,
+            {
+              trial: freeTrial
+                ? { start: tx.purchaseDate ? new Date(tx.purchaseDate) : null, end: expiresDate }
+                : null,
+              paid: !freeTrial,
+              providerStatus: freeTrial ? 'trialing' : 'active',
+            },
           );
-          // Record renewal payments (not the initial SUBSCRIBED — that is
-          // recorded by /verify). external_payment_id = transactionId keeps
-          // replays from double-billing affiliate commissions.
-          if (updated && type === NotificationTypeV2.DID_RENEW) {
+          // Record renewal payments (not the initial SUBSCRIBED, which is
+          // recorded by /verify, and never a free-trial period). The first
+          // DID_RENEW after a trial is the first real charge.
+          // external_payment_id = transactionId keeps replays from
+          // double-billing affiliate commissions.
+          if (updated && type === NotificationTypeV2.DID_RENEW && !freeTrial) {
             await this.recordRenewalPayment(updated, tx);
+            await this.awardQhqTokens(
+              updated.user_id,
+              updated.tier,
+              updated.billing_period,
+              tx.transactionId,
+            );
           }
         }
         break;
@@ -401,8 +494,9 @@ export class AppleIapController {
    * Falls back to the plan price (USD) when Apple omits it.
    */
   private resolveTxAmount(tx: any, planPrice: any): { amount: number; currency: string } {
-    if (typeof tx?.price === 'number' && tx.price > 0) {
-      return { amount: tx.price / 1000, currency: tx.currency || 'USD' };
+    if (typeof tx?.price === 'number') {
+      // Apple told us the amount; 0 means nothing was charged (trial), not "unknown".
+      return { amount: tx.price > 0 ? tx.price / 1000 : 0, currency: tx.currency || 'USD' };
     }
     return { amount: Number(planPrice) || 0, currency: 'USD' };
   }
@@ -413,6 +507,11 @@ export class AppleIapController {
     });
     const { amount, currency } = this.resolveTxAmount(tx, plan?.price);
     if (amount <= 0) return;
+    const already = await this.prisma.payment_history.findFirst({
+      where: { payment_provider: 'apple', external_payment_id: tx.transactionId, status: 'succeeded' },
+      select: { payment_id: true },
+    });
+    if (already) return;
     try {
       await this.subscriptionsService.recordPayment({
         subscription_id: sub.subscription_id,
@@ -436,19 +535,16 @@ export class AppleIapController {
     try {
       const sub = await this.subscriptionsService.findAppleSubscription(originalTransactionId);
       if (!sub) return;
+      const message = 'Your Premium subscription has ended and your account is now on the Free plan.';
       const notification = await this.notificationsService.createNotification({
         user_id: sub.user_id,
-        type: 'subscription_cancelled',
-        title: 'Subscription Ended',
-        message: 'Your subscription has ended and your account is now on the FREE tier',
+        type: 'subscription_ended',
+        title: 'Subscription ended',
+        message,
         read: false,
         metadata: null,
       });
-      this.notificationsService.sendNotification(
-        sub.user_id,
-        'Subscription Ended',
-        'Your subscription has ended and your account is now on the FREE tier',
-      );
+      this.notificationsService.sendNotification(sub.user_id, 'Subscription ended', message);
       this.appGateway.emitNotificationCount(sub.user_id, 1, notification);
     } catch (err: any) {
       this.logger.warn(`Apple cancellation notification failed: ${err?.message}`);

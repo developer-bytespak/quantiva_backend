@@ -14,6 +14,15 @@ export interface AppleProductMapping {
 }
 
 export const APPLE_PRODUCT_MAP: Readonly<Record<string, AppleProductMapping>> = {
+  // The single purchasable plan. Configure a 7-day free introductory offer in
+  // App Store Connect; the backend detects it via offerDiscountType FREE_TRIAL.
+  quantiva_premium_monthly: { tier: PlanTier.PREMIUM, billingPeriod: BillingPeriod.MONTHLY },
+  quantiva_premium_quarterly: { tier: PlanTier.PREMIUM, billingPeriod: BillingPeriod.QUARTERLY },
+  quantiva_premium_yearly: { tier: PlanTier.PREMIUM, billingPeriod: BillingPeriod.YEARLY },
+
+  // Legacy products (removed from sale). Kept so renewals and restores of
+  // grandfathered subscriptions keep resolving; new purchases are rejected
+  // because their subscription_plans rows are inactive.
   quantiva_pro_monthly: { tier: PlanTier.PRO, billingPeriod: BillingPeriod.MONTHLY },
   quantiva_pro_quarterly: { tier: PlanTier.PRO, billingPeriod: BillingPeriod.QUARTERLY },
   quantiva_pro_yearly: { tier: PlanTier.PRO, billingPeriod: BillingPeriod.YEARLY },

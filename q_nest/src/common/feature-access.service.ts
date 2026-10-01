@@ -1,19 +1,16 @@
 // src/common/feature-access.service.ts
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-// import { FeatureType, PlanTier } from '@prisma/client';
+import { PlanTier } from '.prisma/client';
+import { rankOf } from './tiers';
+
+export { PlanTier };
 
 export enum FeatureType {
   CUSTOM_STRATEGIES = 'CUSTOM_STRATEGIES',
   VC_POOL_ACCESS = 'VC_POOL_ACCESS',
   EARLY_ACCESS = 'EARLY_ACCESS',
   // Add more features as needed
-}
-
-export enum PlanTier {
-  FREE = 'FREE',
-  PRO = 'PRO',
-  ELITE = 'ELITE',
 }
 
 interface FeatureCheckResult {
@@ -55,7 +52,7 @@ export class FeatureAccessService {
         allowed: false,
         remaining: 0,
         limit: 0,
-        message: `Upgrade to PRO or ELITE to access ${featureType}`,
+        message: `Upgrade to Premium to access ${featureType}`,
       };
     }
 
@@ -261,14 +258,8 @@ export class FeatureAccessService {
     userId: string,
     requiredTier: PlanTier,
   ): Promise<boolean> {
-    const tierHierarchy = {
-      [PlanTier.FREE]: 0,
-      [PlanTier.PRO]: 1,
-      [PlanTier.ELITE]: 2,
-    };
-
     const userTier = await this.getUserTier(userId);
-    return tierHierarchy[userTier] >= tierHierarchy[requiredTier];
+    return rankOf(userTier) >= rankOf(requiredTier);
   }
 
   /**

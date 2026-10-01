@@ -9,8 +9,8 @@ export class SuperAdminUsersGrowthDto {
   year?: number;
 
   @IsOptional()
-  @IsIn(['FREE', 'PRO', 'ELITE', 'ELITE_PLUS'])
-  subscription_plan?: 'FREE' | 'PRO' | 'ELITE' | 'ELITE_PLUS';
+  @IsIn(['FREE', 'PREMIUM', 'PRO', 'ELITE', 'ELITE_PLUS'])
+  subscription_plan?: 'FREE' | 'PREMIUM' | 'PRO' | 'ELITE' | 'ELITE_PLUS';
 
   @IsOptional()
   @Transform(({ value }) => value === 'true' || value === true)
