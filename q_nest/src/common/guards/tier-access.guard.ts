@@ -9,6 +9,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { FeatureAccessService } from '../feature-access.service';
 import { ALLOWED_TIERS_KEY } from '../decorators/allow-tier.decorator';
+import { tierSatisfies, tierLabel } from '../tiers';
 
 @Injectable()
 export class TierAccessGuard implements CanActivate {
@@ -47,34 +48,16 @@ export class TierAccessGuard implements CanActivate {
       `Tier check: User ${userId} has ${userTier}, allowed: ${allowedTiers}`,
     );
 
-    // ELITE_PLUS is a superset of ELITE — if ELITE is allowed, ELITE_PLUS is too
-    const effectiveAllowed = allowedTiers.includes('ELITE')
-      ? [...allowedTiers, 'ELITE_PLUS']
-      : allowedTiers;
+    // A higher-ranked tier always satisfies a lower-ranked requirement
+    // (PREMIUM > ELITE_PLUS > ELITE > PRO > FREE). See src/common/tiers.ts.
+    const allowed = allowedTiers.some((required) => tierSatisfies(userTier, required));
 
-    if (!effectiveAllowed.includes(userTier)) {
-      const requiredPlans = allowedTiers.map(formatPlanName);
-      const requiredText =
-        requiredPlans.length === 1
-          ? `the ${requiredPlans[0]} subscription plan`
-          : `one of these subscription plans: ${requiredPlans.join(', ')}`;
-
+    if (!allowed) {
       throw new ForbiddenException(
-        `This feature requires ${requiredText}. You're currently on the ${formatPlanName(userTier)} subscription plan. Please upgrade to continue.`,
+        `This feature requires the Premium plan. You're currently on the ${tierLabel(userTier)} plan. Please upgrade to continue.`,
       );
     }
 
     return true;
   }
-}
-
-/**
- * Converts a raw tier identifier (e.g. "ELITE_PLUS") into a human-friendly
- * subscription plan name (e.g. "Elite Plus").
- */
-function formatPlanName(tier: string): string {
-  return tier
-    .split('_')
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-    .join(' ');
 }

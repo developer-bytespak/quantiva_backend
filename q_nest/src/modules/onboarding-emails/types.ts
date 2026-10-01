@@ -30,5 +30,6 @@ export const PlanTier = {
   PRO: 'PRO',
   ELITE: 'ELITE',
   ELITE_PLUS: 'ELITE_PLUS',
+  PREMIUM: 'PREMIUM',
 } as const;
 export type PlanTier = (typeof PlanTier)[keyof typeof PlanTier];

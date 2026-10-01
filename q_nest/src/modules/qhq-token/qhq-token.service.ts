@@ -512,47 +512,9 @@ export class QhqTokenService {
     return Number(rule.amount);
   }
 
-  // ─── Monthly Allocation (BullMQ Job) ─────────────────────────────────────
-
-  /**
-   * Award monthly QHQ to all active PRO and ELITE subscribers.
-   * Called by the monthly BullMQ cron job.
-   */
-  async processMonthlyAllocations() {
-    this.logger.log('Processing monthly QHQ allocations...');
-
-    const [proAmount, eliteAmount] = await Promise.all([
-      this.getRuleAmount('MONTHLY_PRO'),
-      this.getRuleAmount('MONTHLY_ELITE'),
-    ]);
-
-    const activeSubscriptions = await this.prisma.user_subscriptions.findMany({
-      where: {
-        status: 'active',
-        tier: { in: ['PRO', 'ELITE'] },
-      },
-    });
-
-    let awarded = 0;
-    for (const sub of activeSubscriptions) {
-      const amount = sub.tier === 'ELITE' ? eliteAmount : proAmount;
-      if (amount <= 0) continue;
-      try {
-        await this.earnTokens(
-          sub.user_id,
-          QhqTransactionType.EARN_SUBSCRIPTION,
-          amount,
-          `Monthly ${sub.tier} subscription reward`,
-        );
-        awarded++;
-      } catch (err) {
-        this.logger.error(`Failed to award monthly tokens to ${sub.user_id}: ${err.message}`);
-      }
-    }
-
-    this.logger.log(`Monthly allocation complete. Awarded ${awarded} users.`);
-    return awarded;
-  }
+  // Subscription QHQ is awarded per successful payment by the Stripe and Apple
+  // webhook handlers (see src/common/tiers.ts subscriptionQhqRuleKey). The old
+  // unscheduled processMonthlyAllocations() job was removed with the Premium plan.
 
   /**
    * Check and award 12-month loyalty bonuses.

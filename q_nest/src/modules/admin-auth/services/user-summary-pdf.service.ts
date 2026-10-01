@@ -47,7 +47,7 @@ interface SummaryData {
   generated_at: string;
   window_label: string;
   total_users: number;
-  plans: { free: number; pro: number; elite: number; elite_plus: number };
+  plans: { free: number; premium: number; pro: number; elite: number; elite_plus: number };
   subscription_tiers: SummaryRow[];
   onboarding_funnel: SummaryRow[];
   kyc_status: { status: string; users: number }[];
@@ -212,9 +212,10 @@ export class UserSummaryPdfService implements OnModuleDestroy {
         : Promise.resolve(null),
     ]);
 
-    const plans = { free: 0, pro: 0, elite: 0, elite_plus: 0 };
+    const plans = { free: 0, premium: 0, pro: 0, elite: 0, elite_plus: 0 };
     for (const row of planGroups) {
       if (row.current_tier === 'FREE') plans.free = row._count.current_tier;
+      if (row.current_tier === 'PREMIUM') plans.premium = row._count.current_tier;
       if (row.current_tier === 'PRO') plans.pro = row._count.current_tier;
       if (row.current_tier === 'ELITE') plans.elite = row._count.current_tier;
       if (row.current_tier === 'ELITE_PLUS') plans.elite_plus = row._count.current_tier;
@@ -244,6 +245,7 @@ export class UserSummaryPdfService implements OnModuleDestroy {
 
     const subscription_tiers: SummaryRow[] = [
       { label: 'Free', users: plans.free, share: share(plans.free) },
+      { label: 'Premium', users: plans.premium, share: share(plans.premium) },
       { label: 'Pro', users: plans.pro, share: share(plans.pro) },
       { label: 'Elite', users: plans.elite, share: share(plans.elite) },
       { label: 'Elite+', users: plans.elite_plus, share: share(plans.elite_plus) },

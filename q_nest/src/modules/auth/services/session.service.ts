@@ -4,13 +4,14 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { TokenService } from './token.service';
 
-type UserTier = 'FREE' | 'PRO' | 'ELITE' | 'ELITE_PLUS';
+type UserTier = 'FREE' | 'PRO' | 'ELITE' | 'ELITE_PLUS' | 'PREMIUM';
 
 const TIER_SESSION_LIMITS: Record<UserTier, number> = {
   FREE: 5,
   PRO: 10,
   ELITE: 15,
   ELITE_PLUS: 20,
+  PREMIUM: 20,
 };
 
 @Injectable()

@@ -295,6 +295,7 @@ export class SuperAdminManagementService {
 
     const distributionMap: Record<string, number> = {
       FREE: 0,
+      PREMIUM: 0,
       PRO: 0,
       ELITE: 0,
       ELITE_PLUS: 0,
@@ -812,10 +813,12 @@ export class SuperAdminManagementService {
       refunded: 0,
       cancelled: 0,
     };
-    const subscriptionPlanCount = {
+    const subscriptionPlanCount: Record<string, number> = {
       FREE: 0,
+      PREMIUM: 0,
       PRO: 0,
       ELITE: 0,
+      ELITE_PLUS: 0,
     };
 
     const monthlyTradeFeesRevenue = monthStarts.map((d) => ({
@@ -1434,6 +1437,17 @@ export class SuperAdminManagementService {
     const existingActive = await this.prisma.user_subscriptions.findMany({
       where: { user_id: user.user_id, status: 'active' },
     });
+
+    // A comp must never silently shadow a live Stripe/Apple subscription: the
+    // local row would be cancelled while the provider keeps billing the user.
+    const providerBilled = existingActive.find(
+      (s) => s.tier !== 'FREE' && (s.billing_provider === 'stripe' || s.billing_provider === 'apple'),
+    );
+    if (providerBilled) {
+      throw new BadRequestException(
+        `User has an active ${providerBilled.billing_provider} subscription. Cancel it first, then grant the comp.`,
+      );
+    }
 
     if (existingActive.length > 0) {
       await this.prisma.user_subscriptions.updateMany({

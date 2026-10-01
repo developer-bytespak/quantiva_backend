@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -21,6 +21,7 @@ import { SuperAdminGuard } from './guards/super-admin.guard';
 import { SuperAdminManagementService } from './services/super-admin-management.service';
 import { UserSummaryPdfService } from './services/user-summary-pdf.service';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
+import { StripeModule } from '../stripe/stripe.module';
 
 @Module({
   imports: [
@@ -28,6 +29,9 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
     ExchangesModule,
     BinanceModule,
     SubscriptionsModule,
+    // Needed only by the Premium migration endpoint (switches legacy Stripe prices).
+    // StripeModule reaches back to this module through TradeFeesModule, hence forwardRef.
+    forwardRef(() => StripeModule),
     PassportModule,
     ConfigModule,
     ScheduleModule,

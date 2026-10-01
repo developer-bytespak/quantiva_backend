@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import sgMail from '@sendgrid/mail';
+import { rankOf } from '../../../common/tiers';
 
 @Injectable()
 export class AuthEmailService {
@@ -163,11 +164,7 @@ export class AuthEmailService {
       const changedAt = data.changedAt ? new Date(data.changedAt).toLocaleString() : new Date().toLocaleString();
       const oldPriceInfo = data.oldPrice ? `${data.currency || 'USD'} ${data.oldPrice}` : 'N/A';
       const newPriceInfo = data.newPrice ? `${data.currency || 'USD'} ${data.newPrice}` : 'N/A';
-      const isUpgrade = (
-        data.newTier === 'ELITE_PLUS' ||
-        (data.newTier === 'ELITE' && data.oldTier !== 'ELITE_PLUS') ||
-        (data.newTier === 'PRO' && data.oldTier === 'FREE')
-      );
+      const isUpgrade = rankOf(data.newTier) > rankOf(data.oldTier);
       const changeType = isUpgrade ? '⬆️ Upgrade' : '⬇️ Downgrade';
 
       await sgMail.send({
