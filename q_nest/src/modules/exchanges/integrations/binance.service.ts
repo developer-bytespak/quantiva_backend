@@ -29,6 +29,23 @@ interface BinanceAccountInfo {
   }>;
 }
 
+/**
+ * Subset of GET /sapi/v1/account/apiRestrictions. These describe the API KEY
+ * itself (what the user ticked when creating it), as opposed to
+ * BinanceAccountInfo.permissions which describe the ACCOUNT. A read-only key
+ * passes /api/v3/account just fine and only fails at order time with -2015.
+ */
+interface BinanceApiRestrictions {
+  ipRestrict: boolean;
+  enableReading: boolean;
+  enableSpotAndMarginTrading: boolean;
+  enableMargin?: boolean;
+  enableFutures?: boolean;
+  enableWithdrawals?: boolean;
+  permitsUniversalTransfer?: boolean;
+  createTime?: number;
+}
+
 interface BinanceOrder {
   orderId: number;
   symbol: string;
@@ -419,18 +436,37 @@ export class BinanceService {
   /**
    * Verifies API key by fetching account information
    */
-  async verifyApiKey(apiKey: string, apiSecret: string): Promise<{
+  async verifyApiKey(
+    apiKey: string,
+    apiSecret: string,
+    options: { requireTrading?: boolean } = {},
+  ): Promise<{
     valid: boolean;
     permissions: string[];
     accountType: string;
+    restrictions?: BinanceApiRestrictions;
   }> {
     try {
       const accountInfo = await this.makeSignedRequest('/api/v3/account', apiKey, apiSecret) as BinanceAccountInfo;
-      
+
+      // /api/v3/account only needs "Enable Reading", so a key that cannot
+      // trade still verifies here and then fails every order with -2015
+      // ("Invalid API-key, IP, or permissions for action"). When the user is
+      // linking the key for trading, also check the key's own restrictions
+      // so they get a clear message now instead of at their first trade.
+      let restrictions: BinanceApiRestrictions | undefined;
+      if (options.requireTrading) {
+        restrictions = await this.getApiRestrictions(apiKey, apiSecret);
+        if (restrictions) {
+          this.assertKeyCanTrade(restrictions);
+        }
+      }
+
       return {
         valid: true,
         permissions: accountInfo.permissions || [],
         accountType: accountInfo.accountType || 'SPOT',
+        restrictions,
       };
     } catch (error: any) {
       if (
@@ -441,6 +477,47 @@ export class BinanceService {
         throw error;
       }
       throw new InvalidApiKeyException('Failed to verify API key');
+    }
+  }
+
+  /**
+   * Fetches the restrictions configured on the API key itself.
+   * Best-effort: returns undefined if Binance does not answer, so a transient
+   * sapi outage never blocks linking. Auth errors still propagate.
+   */
+  async getApiRestrictions(apiKey: string, apiSecret: string): Promise<BinanceApiRestrictions | undefined> {
+    try {
+      const data = await this.makeSignedRequest('/sapi/v1/account/apiRestrictions', apiKey, apiSecret);
+      if (!data || typeof data.enableSpotAndMarginTrading !== 'boolean') {
+        this.logger.warn('apiRestrictions returned an unexpected payload; skipping key restriction check');
+        return undefined;
+      }
+      return data as BinanceApiRestrictions;
+    } catch (error: any) {
+      if (error instanceof InvalidApiKeyException || error instanceof BinanceRateLimitException) {
+        throw error;
+      }
+      this.logger.warn(`Could not read API key restrictions, skipping check: ${error?.message}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Throws a user-facing InvalidApiKeyException when the key cannot place
+   * spot orders from our servers. Message wording matters: the onboarding
+   * page keeps backend messages that mention "IP" and are over 60 chars,
+   * and maps anything containing "permission" to its trading-permission hint.
+   */
+  private assertKeyCanTrade(restrictions: BinanceApiRestrictions): void {
+    if (!restrictions.enableSpotAndMarginTrading) {
+      throw new InvalidApiKeyException(
+        'This Binance API key does not have trading permission. In Binance, open API Management, edit this key, tick "Enable Spot & Margin Trading", save, then link it again.',
+      );
+    }
+    if (restrictions.ipRestrict) {
+      throw new InvalidApiKeyException(
+        'This Binance API key is restricted to specific IP addresses, so orders sent from our servers will be rejected. In Binance, open API Management, edit this key, set IP access restriction to "Unrestricted", save, then link it again.',
+      );
     }
   }
 
