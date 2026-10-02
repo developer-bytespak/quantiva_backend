@@ -507,8 +507,15 @@ export class ExchangesService {
       // Get the appropriate exchange service
       const exchangeService = this.getExchangeService(connection.exchange.name);
 
-      // Verify with the exchange
-      const verification = await exchangeService.verifyApiKey(apiKey, apiSecret);
+      // Verify with the exchange. For Binance.com also confirm the key itself
+      // can trade when the connection was linked for trading, so a re-verify
+      // surfaces the same clear message as the initial link.
+      const requireTrading =
+        ((connection.connection_metadata as any) || {}).enable_trading === true;
+      const verification =
+        connection.exchange.name.toLowerCase() === 'binance'
+          ? await this.binanceService.verifyApiKey(apiKey, apiSecret, { requireTrading })
+          : await exchangeService.verifyApiKey(apiKey, apiSecret);
 
       // Update connection status and metadata
       await this.prisma.user_exchange_connections.update({
@@ -2597,6 +2604,7 @@ export class ExchangesService {
     api_key: string,
     api_secret: string,
     passphrase?: string, // Required for some exchanges like Bybit
+    requireTrading: boolean = false,
   ): Promise<{
     valid: boolean;
     accountType?: string;
@@ -2605,9 +2613,9 @@ export class ExchangesService {
   }> {
     try {
       const normalizedExchange = exchange_name.toLowerCase();
-      
+
       if (normalizedExchange === 'binance') {
-        const verification = await this.binanceService.verifyApiKey(api_key, api_secret);
+        const verification = await this.binanceService.verifyApiKey(api_key, api_secret, { requireTrading });
         return {
           valid: verification.valid,
           accountType: verification.accountType,
@@ -2690,12 +2698,16 @@ export class ExchangesService {
       }
     }
 
-    // Step 3: Verify the new credentials with the exchange
+    // Step 3: Verify the new credentials with the exchange (and, for a
+    // trading-enabled Binance connection, that the new key can actually trade)
+    const requireTrading =
+      ((connection.connection_metadata as any) || {}).enable_trading === true;
     const verification = await this.verifyExchangeAccountOwnership(
       connection.exchange.name,
       api_key,
       api_secret,
       passphrase,
+      requireTrading,
     );
 
     if (!verification.valid) {

@@ -233,6 +233,7 @@ export class ExchangesController {
         verification = await this.binanceService.verifyApiKey(
           createConnectionDto.api_key,
           createConnectionDto.api_secret,
+          { requireTrading: createConnectionDto.enable_trading === true },
         );
       } else if (exchangeName.includes('bybit')) {
         verification = await this.bybitService.verifyApiKey(
